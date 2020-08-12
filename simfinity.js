@@ -15,7 +15,7 @@ const operations = {
   STATE_CHANGED: 'state_changed'
 }
 
-class GNXError extends Error {
+class SimfinityError extends Error {
   constructor (message, code, status) {
     super(message)
     this.extensions = {
@@ -29,7 +29,7 @@ class GNXError extends Error {
   }
 }
 
-class InternalServerError extends GNXError {
+class InternalServerError extends SimfinityError {
   constructor (message, cause) {
     super(message, 'INTERNAL_SERVER_ERROR')
     this.cause = cause
@@ -40,7 +40,7 @@ class InternalServerError extends GNXError {
 const buildErrorFormatter = (callback) => {
   const formatError = function (err) {
     let result = null
-    if (err instanceof GNXError) {
+    if (err instanceof SimfinityError) {
       result = err
     } else {
       result = new InternalServerError(err.message, err)
@@ -57,7 +57,7 @@ const buildErrorFormatter = (callback) => {
 
 module.exports.buildErrorFormatter = buildErrorFormatter
 
-module.exports.GNXError = GNXError
+module.exports.SimfinityError = SimfinityError
 
 module.exports.InternalServerError = InternalServerError
 
@@ -609,7 +609,7 @@ const onDeleteObject = async function (Model, gqltype, controller, args, session
 const onStateChanged = async function (Model, gqltype, controller, args, session, actionField) {
   const storedModel = await Model.findById(args.id)
   if (!storedModel) {
-    throw new GNXError(`${gqltype.name} ${args.id} is not valid`, 'NOT_VALID_ID', 404)
+    throw new SimfinityError(`${gqltype.name} ${args.id} is not valid`, 'NOT_VALID_ID', 404)
   }
   if (storedModel.state === actionField.from.name) {
     if (actionField.action) {
@@ -622,7 +622,7 @@ const onStateChanged = async function (Model, gqltype, controller, args, session
     result.state = actionField.to.value
     return result
   } else {
-    throw new GNXError('Action is not allowed from state ' + storedModel.state, 'BAD_REQUEST', 400)
+    throw new SimfinityError('Action is not allowed from state ' + storedModel.state, 'BAD_REQUEST', 400)
   }
 }
 

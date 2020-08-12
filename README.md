@@ -1,9 +1,9 @@
-[![npm version](https://badge.fury.io/js/%40simtlix%2Fgnx.svg)](https://badge.fury.io/js/%40simtlix%2Fgnx)
+[![npm version](https://badge.fury.io/js/%40simtlix%2Fsimfinity-js.svg)](https://badge.fury.io/js/%40simtlix%2Fsimfinity-js)
 
 # How to
 ## Install
 ```bash
-npm install @simtlix/gnx --save
+npm install @simtlix/simfinity-js --save
 ```
 
 To use this lib:
@@ -17,12 +17,10 @@ On this project root directory
 `npm link`
 
 On the test project root directory
-`npm link @simtlix/gnx`
+`npm link @simtlix/simfinity-js`
 
 Run test project with *preserve-symlinks* flag. E.g.:
 `node --preserve-symlinks app.js`
 
 # Example
-There is a sample of an app using this lib at [gnx-sample](https://github.com/simtlix/gnx-sample)
-
-
+There is a sample of an app using this lib at [simfinity-sample](https://github.com/simtlix/simfinity-sample)
