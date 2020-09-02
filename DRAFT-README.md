@@ -29,13 +29,6 @@ Simfinityjs provides a powerful semantic for querying and modifying a complex ob
 npm install @simtlix/simfinity-js --save
 ```
 
-## Dependencies required ( todo : ask about this )
-* express	4.17.1
-* express-graphql	0.7.1
-* graphql	14.5.8
-* mongoose	5.9.28
-
-
 ## To use this lib:
 * [Import simfinity-js](#Import-simfinity)
 * [Define your mongoose models](#define-your-mongoose-models)
@@ -45,16 +38,10 @@ npm install @simtlix/simfinity-js --save
 
 # Table of contents 
   ## TODO: Relations examples
-
-
-  ## TODO : do a tree example
   ## TODO : explain connect()
   ## TODO : explain saveObject()
   ## TODO : explain addNoEndpointType()
-  ## TODO : explain connect()
-  ## TODO : explain buildErrorFormatter()
-  ## TODO : explain validations
-  ## TODO : explain state machine
+
 
 ## Test
 On this project root directory
