@@ -18,7 +18,11 @@ In pure GraphQL, you have to define every query and mutation. With SimfinityJS y
 As a result, developers can focus on model structure and object relationships. 
 
 ## Features
-
+- Translation between GrapQL and MongoDB and viceversa
+- Implement business logic in a declarative way
+- Implement domain validations in a declarative way. 
+- Support state machines
+...
 
 
 
