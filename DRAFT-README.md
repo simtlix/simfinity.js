@@ -10,16 +10,18 @@ https://github.com/graphql/graphql-js
 
 [![npm version](https://badge.fury.io/js/%40simtlix%2Fsimfinity-js.svg)](https://badge.fury.io/js/%40simtlix%2Fsimfinity-js)
 
-# About Simfinity-js
-It´s a complete framework that helps the developers to think only on the strucures,
-models and relations between them in order to resolve an specific problem.
+# About SimfinityJS
+SimfinityJS is a Node.js framework that allows bringing all the power and flexibility of MongoDB query language to GrapQL interfaces. 
 
-Following technologies are used in this solution
-    * NodeJs
-	* GraphQL
-    * MongoDb
+In pure GraphQL, you have to define every query and mutation. With SimfinityJS you define the object model, and the framework itself interprets all queries and mutations. SimfinityJS acts as a glue. It translates GraphQL to MongoDB and viceversa. 
 
-Simfinityjs provides a powerful semantic for querying and modifying a complex object model
+As a result, developers can focus on model structure and object relationships. 
+
+## Features
+
+
+
+
 
 ##### *** TODO : un conciso video sería mas representativo para mostrar como funciona graphql ***
 
