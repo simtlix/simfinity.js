@@ -27,7 +27,6 @@ As a result, developers can focus on model structure and object relationships.
 
 
 
-##### *** TODO : un conciso video sería mas representativo para mostrar como funciona graphql ***
 
 # How to
 ## Install
@@ -42,12 +41,6 @@ npm install @simtlix/simfinity-js --save
 *  Register models and types using [connect()](#connect-function) function for **non embedded** types and `addNoEndpointType` function for **embedded** ones
 * Create the GraphQL schema using `createSchema` function
 
-# Table of contents 
-  ## TODO: Relations examples
-  ## TODO : explain connect()
-  ## TODO : explain saveObject()
-  ## TODO : explain addNoEndpointType()
-
 
 ## Test
 On this project root directory
@@ -60,7 +53,7 @@ Run test project with *preserve-symlinks* flag. E.g.:
 `node --preserve-symlinks app.js`
 
 # Example
-There is a sample of an app using this lib at [simfinity-sample](https://github.com/simtlix/simfinity-sample)
+There is a sample of an app using this lib at [simfinity-sample](https://github.com/simtlix/simfinity.js-samples)
 
 # Import Simfinity
 
@@ -123,8 +116,7 @@ app.listen(3000, () => {
 })
 ```
 
-# TODO : Add more types
-# TODO : 
+
 ### Define your mongoose model
 
 |  Example table |          |   
@@ -179,7 +171,6 @@ simfinity.connect(Example, ExampleType, 'example', 'examples')
 module.exports = ExampleType
 ```
 
-### connect function
+### TODO  : Add queries
 
-Connect function is used to add our definition to simfinity run
 
