@@ -1,11 +1,3 @@
-Extensión para editar MARK DOWN
-https://chrome.google.com/webstore/detail/markdown-viewer/ckkdlimhmcjmikdlpkmbgfkaikojcbjk?hl=es
-
-
-Referencias :
-https://github.com/koush/electron-chrome
-https://github.com/graphql/graphql-js
-
 
 
 [![npm version](https://badge.fury.io/js/%40simtlix%2Fsimfinity-js.svg)](https://badge.fury.io/js/%40simtlix%2Fsimfinity-js)
@@ -36,7 +28,7 @@ npm install @simtlix/simfinity-js --save
 
 ## To use this lib:
 * [Import simfinity-js](#Import-simfinity)
-* [Define your mongoose models](#define-your-mongoose-models)
+* [Define your model](#define-your-model)
 * [Define your GraphQL types](#define-your-graphql-types)
 *  Register models and types using [connect()](#connect-function) function for **non embedded** types and `addNoEndpointType` function for **embedded** ones
 * Create the GraphQL schema using `createSchema` function
@@ -52,19 +44,19 @@ On the test project root directory
 Run test project with *preserve-symlinks* flag. E.g.:
 `node --preserve-symlinks app.js`
 
-# Example
-There is a sample of an app using this lib at [simfinity-sample](https://github.com/simtlix/simfinity.js-samples)
 
-# Import Simfinity
 
-Here we have a node mongoose application
+## Import Simfinity
 
-```const express = require('express')
+Node mongoose application
+
+```javascript
+const express = require('express')
 const {graphqlHTTP} = require('express-graphql')
 const app = express()
 const mongoose = require('mongoose')
 
-mongoose.connect('mongodb://localhost:27017/example') // put your mongodb connection string
+mongoose.connect('mongodb://localhost:27017/example') // replace with your mongodb connection string
 
 mongoose.connection.once('open', () => {
   console.log('connected to database')
@@ -87,7 +79,7 @@ const simfinity = require('@simtlix/simfinity-js')
 const app = express()
 const mongoose = require('mongoose')
 
-mongoose.connect('mongodb://localhost:27017/example') // put your mongodb connection string
+mongoose.connect('mongodb://localhost:27017/example') // replace with your mongodb connection string
 
 mongoose.connection.once('open', () => {
   console.log('connected to database')
@@ -117,43 +109,23 @@ app.listen(3000, () => {
 ```
 
 
-### Define your mongoose model
+### Define your model
 
 |  Example table |          |   
 | ------------- |:-------------:|
 | name          | String! 	    |
 | description   | String        |
 | amount        | Number        |
-| date	        | Date          |
 | flag          | Boolean       |
-| names         | [String]      |
 
-```javascript
-const mongoose = require('mongoose')
-const Schema = mongoose.Schema
-
-const exampleSchema = new Schema({
-  name: String,
-  description: String,
-  date : Date,
-  flag : Boolean,
-  names : [String]
-})
-
-const Example = mongoose.model('Example', exampleSchema, 'example')
-Example.createCollection()
-
-module.exports = Example
-```
 
 ### Define your Graphql types 
 
 ```javascript
 const graphql = require('graphql')
 const simfinity = require('@simtlix/simfinity-js')
-const Example = require('../models/example')
 
-const {GraphQLObjectType, GraphQLString, GraphQLID, GraphQLDateTime, GraphQLBoolean} = graphql
+const {GraphQLObjectType, GraphQLString, GraphQLID, GraphQLInt, GraphQLBoolean, GraphQLNonNull} = graphql
 
 const ExampleType = new GraphQLObjectType({
   name: 'Example',
@@ -161,16 +133,94 @@ const ExampleType = new GraphQLObjectType({
     id: { type: GraphQLID },
     name: { type: new GraphQLNonNull(GraphQLString) },
     description: { type: GraphQLString },
-    date : { type : GraphQLDateTime },
+    amount : { type : GraphQLInt },
     flag : { type : GraphQLBoolean },
-    names: { type : GraphQLList },
   })
 })
 
-simfinity.connect(Example, ExampleType, 'example', 'examples')
+simfinity.connect(null, ExampleType, 'example', 'examples')
 module.exports = ExampleType
 ```
 
-### TODO  : Add queries
+
+### Queries
+
+Open http://localhost:3000/graphql endpoint defined on app.js
+
+
+Create a document
+```graphql
+mutation{
+  addexample(
+    input:{
+      name: "Bar"
+      description: "lorem ipsum"
+      amount: 1
+      flag : true
+  }) {
+    # fields you want to recover
+    id
+    name
+    amount
+    description
+    flag
+  }
+}
+```
+
+Update a document
+```graphql
+mutation{
+  updateexample(
+    input:{
+      id: "5f5d0c713464882aec659ab2" # put your mongo id
+      description: "updated lorem ipsum" 
+  }) {
+    # fields you want recover
+    id
+    description
+  }
+}
+```
+
+Find a document
+```graphql
+query{
+  example(id:"5f5d0c713464882aec659ab2") # put your mongo id
+  {
+    # fields you want to recover
+    id
+    name
+  }
+}
+```
+
+Find all 'example' documents
+```graphql
+query{
+  examples{
+    # fields you want to recover
+    id
+    name
+    description
+    amount
+    flag
+  }
+}
+````
+
+Delete a document
+```graphql
+mutation{
+  deleteexample(id:"5f5d0c713464882aec659ab2")
+  {
+    id
+    name
+    description
+  }
+}
+```
+
+
 
 
