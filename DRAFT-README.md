@@ -13,9 +13,8 @@ As a result, developers can focus on model structure and object relationships.
 - Translation between GrapQL and MongoDB and viceversa
 - Implement business logic in a declarative way
 - Implement domain validations in a declarative way. 
-- Support state machines
-...
-
+- Supports declarative state machine. Business logic can be included in each state transition. 
+- Powerful semantic API. Basically, any query that can be executed in mongocli can be executed in GraphQL, thanks to SimfinityJS.
 
 
 
