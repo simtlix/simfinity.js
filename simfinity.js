@@ -17,6 +17,7 @@ const {
 const typesDict = { types: {} };
 const waitingInputType = {};
 const typesDictForUpdate = { types: {} };
+const registeredMutations = {};
 
 const operations = {
   SAVE: 'save',
@@ -114,135 +115,6 @@ const isNonNullOfTypeForNotScalar = (fieldEntryType, graphQLType) => {
   return isOfType;
 };
 
-const buildInputType = (gqltype) => {
-  const argTypes = gqltype.getFields();
-
-  const fieldsArgs = {};
-  const fieldsArgForUpdate = {};
-
-  const selfReferenceCollections = {};
-
-  for (const fieldEntryName in argTypes) {
-    const fieldEntry = argTypes[fieldEntryName];
-    const fieldArg = {};
-    const fieldArgForUpdate = {};
-
-    if (fieldEntry.extensions && fieldEntry.extensions.readOnly) {
-      continue;
-    }
-
-    const hasStateMachine = !!typesDict.types[gqltype.name].stateMachine;
-    const doesEstateFieldExistButIsManagedByStateMachine = !!(fieldEntryName === 'state' && hasStateMachine);
-    if (doesEstateFieldExistButIsManagedByStateMachine) {
-      // state field should not be controlled by the insert or update
-      continue;
-    }
-
-    if (fieldEntry.type instanceof GraphQLScalarType
-      || fieldEntry.type instanceof GraphQLEnumType
-      || isNonNullOfType(fieldEntry.type, GraphQLScalarType)
-      || isNonNullOfType(fieldEntry.type, GraphQLEnumType)
-    ) {
-      if (fieldEntryName !== 'id') {
-        fieldArg.type = fieldEntry.type;
-      }
-      fieldArgForUpdate.type = fieldEntry.type instanceof GraphQLNonNull
-        ? fieldEntry.type.ofType : fieldEntry.type;
-      if (fieldEntry.type === GraphQLID) {
-        fieldArgForUpdate.type = new GraphQLNonNull(GraphQLID);
-      }
-    } else if (fieldEntry.type instanceof GraphQLObjectType
-      || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
-      if (fieldEntry.extensions && fieldEntry.extensions.relation) {
-        const fieldEntryName = fieldEntry.type instanceof GraphQLNonNull
-          ? fieldEntry.type.ofType.name : fieldEntry.type.name;
-        if (!fieldEntry.extensions.relation.embedded) {
-          fieldArg.type = fieldEntry.type instanceof GraphQLNonNull
-            ? new GraphQLNonNull(IdInputType) : IdInputType;
-          fieldArgForUpdate.type = IdInputType;
-        } else if (typesDict.types[fieldEntryName].inputType
-          && typesDictForUpdate.types[fieldEntryName].inputType) {
-          fieldArg.type = typesDict.types[fieldEntryName].inputType;
-          fieldArgForUpdate.type = typesDictForUpdate.types[fieldEntryName].inputType;
-        } else {
-          return null;
-        }
-      } else {
-        console.warn(`Configuration issue: Field ${fieldEntryName} does not define extensions.relation`);
-      }
-    } else if (fieldEntry.type instanceof GraphQLList) {
-      if (fieldEntry.type.ofType === gqltype) {
-        selfReferenceCollections[fieldEntryName] = fieldEntry;
-      } else {
-        const listInputTypeForAdd = graphQLListInputType(typesDict, fieldEntry, fieldEntryName, 'A');
-        const listInputTypeForUpdate = graphQLListInputType(typesDictForUpdate, fieldEntry, fieldEntryName, 'U');
-        if (listInputTypeForAdd && listInputTypeForUpdate) {
-          fieldArg.type = listInputTypeForAdd;
-          fieldArgForUpdate.type = listInputTypeForUpdate;
-        } else {
-          return null;
-        }
-      }
-    }
-
-    fieldArg.description = fieldEntry.description;
-    fieldArgForUpdate.description = fieldEntry.description;
-
-    if (fieldArg.type) {
-      fieldsArgs[fieldEntryName] = fieldArg;
-    }
-
-    if (fieldArgForUpdate.type) {
-      fieldsArgForUpdate[fieldEntryName] = fieldArgForUpdate;
-    }
-  }
-
-  const inputTypeBody = {
-    name: `${gqltype.name}Input`,
-    fields: fieldsArgs,
-  };
-
-  const inputTypeBodyForUpdate = {
-    name: `${gqltype.name}InputForUpdate`,
-    fields: fieldsArgForUpdate,
-  };
-
-  const inputTypeForAdd = new GraphQLInputObjectType(inputTypeBody);
-  const inputTypeForUpdate = new GraphQLInputObjectType(inputTypeBodyForUpdate);
-
-  const inputTypeForAddFields = inputTypeForAdd._fields();
-
-  for (const fieldEntryName in selfReferenceCollections) {
-    if (Object.prototype.hasOwnProperty.call(selfReferenceCollections, fieldEntryName)) {
-      inputTypeForAddFields[fieldEntryName] = {
-        type: createOneToManyInputType('A', fieldEntryName, inputTypeForAdd, inputTypeForUpdate),
-        name: fieldEntryName,
-      };
-    }
-  }
-
-  inputTypeForAdd._fields = () => inputTypeForAddFields;
-
-  const inputTypeForUpdateFields = inputTypeForUpdate._fields();
-
-  for (const fieldEntryName in selfReferenceCollections) {
-    if (Object.prototype.hasOwnProperty.call(selfReferenceCollections, fieldEntryName)) {
-      inputTypeForUpdateFields[fieldEntryName] = {
-        type: createOneToManyInputType('U', fieldEntryName, inputTypeForAdd, inputTypeForUpdate),
-        name: fieldEntryName,
-      };
-    }
-  }
-
-  inputTypeForUpdate._fields = () => inputTypeForUpdateFields;
-
-  return { inputTypeBody: inputTypeForAdd, inputTypeBodyForUpdate: inputTypeForUpdate };
-};
-
-const getInputType = (type) => typesDict.types[type.name].inputType;
-
-module.exports.getInputType = getInputType;
-
 const createOneToManyInputType = (inputNamePrefix, fieldEntryName,
   inputType, updateInputType) => new GraphQLInputObjectType({
   name: `OneToMany${inputNamePrefix}${fieldEntryName}`,
@@ -273,6 +145,129 @@ const graphQLListInputType = (dict, fieldEntry, fieldEntryName, inputNamePrefix)
   return null;
 };
 
+const buildInputType = (gqltype) => {
+  const argTypes = gqltype.getFields();
+
+  const fieldsArgs = {};
+  const fieldsArgForUpdate = {};
+
+  const selfReferenceCollections = {};
+
+  for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
+    const fieldArg = {};
+    const fieldArgForUpdate = {};
+
+    if (!fieldEntry.extensions || !fieldEntry.extensions.readOnly) {
+      const hasStateMachine = !!typesDict.types[gqltype.name].stateMachine;
+      const doesEstateFieldExistButIsManagedByStateMachine = !!(fieldEntryName === 'state' && hasStateMachine);
+
+      if (!doesEstateFieldExistButIsManagedByStateMachine) {
+        if (fieldEntry.type instanceof GraphQLScalarType
+          || fieldEntry.type instanceof GraphQLEnumType
+          || isNonNullOfType(fieldEntry.type, GraphQLScalarType)
+          || isNonNullOfType(fieldEntry.type, GraphQLEnumType)
+        ) {
+          if (fieldEntryName !== 'id') {
+            fieldArg.type = fieldEntry.type;
+          }
+          fieldArgForUpdate.type = fieldEntry.type instanceof GraphQLNonNull
+            ? fieldEntry.type.ofType : fieldEntry.type;
+          if (fieldEntry.type === GraphQLID) {
+            fieldArgForUpdate.type = new GraphQLNonNull(GraphQLID);
+          }
+        } else if (fieldEntry.type instanceof GraphQLObjectType
+          || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
+          if (fieldEntry.extensions && fieldEntry.extensions.relation) {
+            const fieldEntryNameValue = fieldEntry.type instanceof GraphQLNonNull
+              ? fieldEntry.type.ofType.name : fieldEntry.type.name;
+            if (!fieldEntry.extensions.relation.embedded) {
+              fieldArg.type = fieldEntry.type instanceof GraphQLNonNull
+                ? new GraphQLNonNull(IdInputType) : IdInputType;
+              fieldArgForUpdate.type = IdInputType;
+            } else if (typesDict.types[fieldEntryNameValue].inputType
+              && typesDictForUpdate.types[fieldEntryNameValue].inputType) {
+              fieldArg.type = typesDict.types[fieldEntryNameValue].inputType;
+              fieldArgForUpdate.type = typesDictForUpdate.types[fieldEntryNameValue].inputType;
+            } else {
+              return null;
+            }
+          } else {
+            console.warn(`Configuration issue: Field ${fieldEntryName} does not define extensions.relation`);
+          }
+        } else if (fieldEntry.type instanceof GraphQLList) {
+          if (fieldEntry.type.ofType === gqltype) {
+            selfReferenceCollections[fieldEntryName] = fieldEntry;
+          } else {
+            const listInputTypeForAdd = graphQLListInputType(typesDict, fieldEntry, fieldEntryName, 'A');
+            const listInputTypeForUpdate = graphQLListInputType(typesDictForUpdate, fieldEntry, fieldEntryName, 'U');
+            if (listInputTypeForAdd && listInputTypeForUpdate) {
+              fieldArg.type = listInputTypeForAdd;
+              fieldArgForUpdate.type = listInputTypeForUpdate;
+            } else {
+              return null;
+            }
+          }
+        }
+        fieldArg.description = fieldEntry.description;
+        fieldArgForUpdate.description = fieldEntry.description;
+
+        if (fieldArg.type) {
+          fieldsArgs[fieldEntryName] = fieldArg;
+        }
+
+        if (fieldArgForUpdate.type) {
+          fieldsArgForUpdate[fieldEntryName] = fieldArgForUpdate;
+        }
+      }
+    }
+  }
+
+  const inputTypeBody = {
+    name: `${gqltype.name}Input`,
+    fields: fieldsArgs,
+  };
+
+  const inputTypeBodyForUpdate = {
+    name: `${gqltype.name}InputForUpdate`,
+    fields: fieldsArgForUpdate,
+  };
+
+  const inputTypeForAdd = new GraphQLInputObjectType(inputTypeBody);
+  const inputTypeForUpdate = new GraphQLInputObjectType(inputTypeBodyForUpdate);
+
+  const inputTypeForAddFields = inputTypeForAdd._fields();
+
+  Object.keys(selfReferenceCollections).forEach((fieldEntryName) => {
+    if (Object.prototype.hasOwnProperty.call(selfReferenceCollections, fieldEntryName)) {
+      inputTypeForAddFields[fieldEntryName] = {
+        type: createOneToManyInputType('A', fieldEntryName, inputTypeForAdd, inputTypeForUpdate),
+        name: fieldEntryName,
+      };
+    }
+  });
+
+  inputTypeForAdd._fields = () => inputTypeForAddFields;
+
+  const inputTypeForUpdateFields = inputTypeForUpdate._fields();
+
+  Object.keys(selfReferenceCollections).forEach((fieldEntryName) => {
+    if (Object.prototype.hasOwnProperty.call(selfReferenceCollections, fieldEntryName)) {
+      inputTypeForUpdateFields[fieldEntryName] = {
+        type: createOneToManyInputType('U', fieldEntryName, inputTypeForAdd, inputTypeForUpdate),
+        name: fieldEntryName,
+      };
+    }
+  });
+
+  inputTypeForUpdate._fields = () => inputTypeForUpdateFields;
+
+  return { inputTypeBody: inputTypeForAdd, inputTypeBodyForUpdate: inputTypeForUpdate };
+};
+
+const getInputType = (type) => typesDict.types[type.name].inputType;
+
+module.exports.getInputType = getInputType;
+
 const buildPendingInputTypes = (waitingForInputType) => {
   const stillWaitingInputType = {};
   let isThereAtLeastOneWaiting = false;
@@ -300,84 +295,6 @@ const buildPendingInputTypes = (waitingForInputType) => {
   }
 };
 
-const buildRootQuery = (name, includedTypes) => {
-  const rootQueryArgs = {};
-  rootQueryArgs.name = name;
-  rootQueryArgs.fields = {};
-
-  for (const entry in typesDict.types) {
-    const type = typesDict.types[entry];
-
-    if (shouldNotBeIncludedInSchema(includedTypes, type.gqltype)) {
-      continue;
-    }
-
-    const wasAddedAsNoEnpointType = !type.simpleEntityEndpointName;
-    if (wasAddedAsNoEnpointType) {
-      continue;
-    }
-
-    // Fixing resolve method in order to be compliant with Mongo _id field
-    if (type.gqltype.getFields().id && !type.gqltype.getFields().id.resolve) {
-      type.gqltype.getFields().id.resolve = (parent) => parent._id;
-    }
-
-    rootQueryArgs.fields[type.simpleEntityEndpointName] = {
-      type: type.gqltype,
-      args: { id: { type: GraphQLID } },
-      resolve(parent, args) {
-        /* Here we define how to get data from database source
-        this will return the type with id passed in argument
-        by the user */
-        return type.model.findById(args.id);
-      },
-    };
-
-    const argTypes = type.gqltype.getFields();
-
-    const argsObject = {};
-
-    for (const fieldEntryName in argTypes) {
-      const fieldEntry = argTypes[fieldEntryName];
-      argsObject[fieldEntryName] = {};
-
-      if (fieldEntry.type instanceof GraphQLScalarType
-        || isNonNullOfType(fieldEntry.type, GraphQLScalarType)
-        || fieldEntry.type instanceof GraphQLEnumType
-        || isNonNullOfType(fieldEntry.type, GraphQLEnumType)) {
-        argsObject[fieldEntryName].type = QLFilter;
-      } else if (fieldEntry.type instanceof GraphQLObjectType
-        || fieldEntry.type instanceof GraphQLList
-        || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
-        argsObject[fieldEntryName].type = QLTypeFilterExpression;
-      }
-    }
-
-    argsObject.pagination = {};
-    argsObject.pagination.type = QLPagination;
-
-    argsObject.sort = {};
-    argsObject.sort.type = QLSortExpression;
-
-    rootQueryArgs.fields[type.listEntitiesEndpointName] = {
-      type: new GraphQLList(type.gqltype),
-      args: argsObject,
-      async resolve(parent, args) {
-        const aggregateClauses = await buildQuery(args, type.gqltype);
-        let result;
-        if (aggregateClauses.length === 0) {
-          result = type.model.find({});
-        } else {
-          result = type.model.aggregate(aggregateClauses);
-        }
-        return result;
-      },
-    };
-  }
-
-  return new GraphQLObjectType(rootQueryArgs);
-};
-
 const isEmpty = (value) => !value && value !== false && value !== 0;
 
 const materializeModel = async (args, gqltype, linkToParent, operation, session) => {
@@ -390,9 +307,7 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
   const modelArgs = {};
   const collectionFields = {};
 
-  for (const fieldEntryName in argTypes) {
-    const fieldEntry = argTypes[fieldEntryName];
-
+  for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
     if (fieldEntry.extensions && fieldEntry.extensions.validations
       && fieldEntry.extensions.validations[operation]) {
       for (const validator of fieldEntry.extensions.validations[operation]) {
@@ -400,52 +315,52 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
       }
     }
 
-    if (isEmpty(args[fieldEntryName])) {
-      continue;
-    }
-
-    if (fieldEntry.type instanceof GraphQLScalarType
-      || fieldEntry.type instanceof GraphQLEnumType
-      || isNonNullOfType(fieldEntry.type, GraphQLScalarType)
-      || isNonNullOfType(fieldEntry.type, GraphQLEnumType)) {
-      modelArgs[fieldEntryName] = args[fieldEntryName];
-    } else if (fieldEntry.type instanceof GraphQLObjectType
-      || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
-      if (fieldEntry.extensions && fieldEntry.extensions.relation) {
-        if (!fieldEntry.extensions.relation.embedded) {
-          modelArgs[fieldEntry.extensions.relation.connectionField] = new mongoose.Types.ObjectId(args[fieldEntryName].id);
-        } else {
-          const fieldType = fieldEntry.type instanceof GraphQLNonNull
-            ? fieldEntry.type.ofType : fieldEntry.type;
-          modelArgs[fieldEntryName] = (await materializeModel(args[fieldEntryName], fieldType,
-            null, operation, session)).modelArgs;
-        }
-      } else {
-        console.warn(`Configuration issue: Field ${fieldEntryName} does not define extensions.relation`);
-      }
-    } else if (fieldEntry.type instanceof GraphQLList) {
-      const { ofType } = fieldEntry.type;
-      if (ofType instanceof GraphQLObjectType && fieldEntry.extensions
-        && fieldEntry.extensions.relation) {
-        if (!fieldEntry.extensions.relation.embedded) {
-          collectionFields[fieldEntryName] = args[fieldEntryName];
-        } else if (fieldEntry.extensions.relation.embedded) {
-          const collectionEntries = [];
-
-          for (const element of args[fieldEntryName]) {
-            const collectionEntry = (await materializeModel(element, ofType,
-              null, operation, session)).modelArgs;
-            if (collectionEntry) {
-              collectionEntries.push(collectionEntry);
-            }
-          }
-          modelArgs[fieldEntryName] = collectionEntries;
-        }
-      } else if (ofType instanceof GraphQLScalarType || ofType instanceof GraphQLEnumType) {
+    if (!isEmpty(args[fieldEntryName])) {
+      if (fieldEntry.type instanceof GraphQLScalarType
+        || fieldEntry.type instanceof GraphQLEnumType
+        || isNonNullOfType(fieldEntry.type, GraphQLScalarType)
+        || isNonNullOfType(fieldEntry.type, GraphQLEnumType)) {
         modelArgs[fieldEntryName] = args[fieldEntryName];
+      } else if (fieldEntry.type instanceof GraphQLObjectType
+        || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
+        if (fieldEntry.extensions && fieldEntry.extensions.relation) {
+          if (!fieldEntry.extensions.relation.embedded) {
+            modelArgs[fieldEntry.extensions.relation.connectionField] = new mongoose.Types
+              .ObjectId(args[fieldEntryName].id);
+          } else {
+            const fieldType = fieldEntry.type instanceof GraphQLNonNull
+              ? fieldEntry.type.ofType : fieldEntry.type;
+            modelArgs[fieldEntryName] = (await materializeModel(args[fieldEntryName], fieldType,
+              null, operation, session)).modelArgs;
+          }
+        } else {
+          console.warn(`Configuration issue: Field ${fieldEntryName} does not define extensions.relation`);
+        }
+      } else if (fieldEntry.type instanceof GraphQLList) {
+        const { ofType } = fieldEntry.type;
+        if (ofType instanceof GraphQLObjectType && fieldEntry.extensions
+          && fieldEntry.extensions.relation) {
+          if (!fieldEntry.extensions.relation.embedded) {
+            collectionFields[fieldEntryName] = args[fieldEntryName];
+          } else if (fieldEntry.extensions.relation.embedded) {
+            const collectionEntries = [];
+
+            for (const element of args[fieldEntryName]) {
+              const collectionEntry = (await materializeModel(element, ofType,
+                null, operation, session)).modelArgs;
+              if (collectionEntry) {
+                collectionEntries.push(collectionEntry);
+              }
+            }
+            modelArgs[fieldEntryName] = collectionEntries;
+          }
+        } else if (ofType instanceof GraphQLScalarType || ofType instanceof GraphQLEnumType) {
+          modelArgs[fieldEntryName] = args[fieldEntryName];
+        }
       }
     }
   }
+
   if (linkToParent) {
     linkToParent(modelArgs);
   }
@@ -479,18 +394,22 @@ const executeRegisteredMutation = async (args, callback, session) => {
 };
 
 const iterateonCollectionFields = async (materializedModel, gqltype, objectId, session) => {
-  for (const collectionField in materializedModel.collectionFields) {
-    if (materializedModel.collectionFields[collectionField].added) {
-      await executeItemFunction(gqltype, collectionField, objectId, session,
-        materializedModel.collectionFields[collectionField].added, operations.SAVE);
+  for (const [collectionFieldKey, collectionField] of
+    Object.entries(materializedModel.collectionFields)) {
+    if (collectionField.added) {
+      // eslint-disable-next-line no-use-before-define
+      await executeItemFunction(gqltype, collectionFieldKey, objectId, session,
+        collectionField.added, operations.SAVE);
     }
-    if (materializedModel.collectionFields[collectionField].updated) {
-      await executeItemFunction(gqltype, collectionField, objectId, session,
-        materializedModel.collectionFields[collectionField].updated, operations.UPDATE);
+    if (collectionField.updated) {
+      // eslint-disable-next-line no-use-before-define
+      await executeItemFunction(gqltype, collectionFieldKey, objectId, session,
+        collectionField.updated, operations.UPDATE);
     }
-    if (materializedModel.collectionFields[collectionField].deleted) {
-      await executeItemFunction(gqltype, collectionField, objectId, session,
-        materializedModel.collectionFields[collectionField].deleted, operations.DELETE);
+    if (collectionField.deleted) {
+      // eslint-disable-next-line no-use-before-define
+      await executeItemFunction(gqltype, collectionFieldKey, objectId, session,
+        collectionField.deleted, operations.DELETE);
     }
   }
 };
@@ -519,8 +438,7 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
 
   const argTypes = gqltype.getFields();
 
-  for (const fieldEntryName in argTypes) {
-    const fieldEntry = argTypes[fieldEntryName];
+  Object.entries(argTypes).forEach(([fieldEntryName, fieldEntry]) => {
     if (fieldEntry.extensions && fieldEntry.extensions.relation
       && fieldEntry.extensions.relation.embedded) {
       const oldObjectData = currentObject[fieldEntryName];
@@ -535,10 +453,10 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
     }
 
     if (args[fieldEntryName] === null
-      && !(argTypes[fieldEntryName].type instanceof GraphQLNonNull)) {
+      && !(fieldEntry.type instanceof GraphQLNonNull)) {
       modifiedObject = { ...modifiedObject, $unset: { [fieldEntryName]: '' } };
     }
-  }
+  });
 
   if (controller && controller.onUpdating) {
     await controller.onUpdating(objectId, modifiedObject, args, session);
@@ -676,6 +594,9 @@ const executeItemFunction = async (gqltype, collectionField, objectId, session,
   }
 };
 
+const shouldNotBeIncludedInSchema = (includedTypes,
+  type) => includedTypes && !includedTypes.includes(type);
+
 const buildMutation = (name, includedMutationTypes, includedCustomMutations) => {
   const rootQueryArgs = {};
   rootQueryArgs.name = name;
@@ -683,83 +604,75 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
 
   buildPendingInputTypes(waitingInputType);
 
-  for (const entry in typesDict.types) {
-    const type = typesDict.types[entry];
+  for (const type of Object.values(typesDict.types)) {
+    if (!shouldNotBeIncludedInSchema(includedMutationTypes, type.gqltype)) {
+      if (type.endpoint) {
+        const argsObject = { input: { type: new GraphQLNonNull(type.inputType) } };
 
-    if (shouldNotBeIncludedInSchema(includedMutationTypes, type.gqltype)) {
-      continue;
-    }
-
-    if (type.endpoint) {
-      const argsObject = { input: { type: new GraphQLNonNull(type.inputType) } };
-
-      rootQueryArgs.fields[`add${type.simpleEntityEndpointName}`] = {
-        type: type.gqltype,
-        args: argsObject,
-        async resolve(parent, args) {
-          return executeOperation(type.model, type.gqltype, type.controller, args.input, operations.SAVE);
-        },
-      };
-      rootQueryArgs.fields[`delete${type.simpleEntityEndpointName}`] = {
-        type: type.gqltype,
-        args: { id: { type: new GraphQLNonNull(GraphQLID) } },
-        async resolve(parent, args) {
-          return executeOperation(type.model, type.gqltype, type.controller, args.id, operations.DELETE);
-        },
-      };
+        rootQueryArgs.fields[`add${type.simpleEntityEndpointName}`] = {
+          type: type.gqltype,
+          args: argsObject,
+          async resolve(parent, args) {
+            return executeOperation(type.model, type.gqltype, type.controller,
+              args.input, operations.SAVE);
+          },
+        };
+        rootQueryArgs.fields[`delete${type.simpleEntityEndpointName}`] = {
+          type: type.gqltype,
+          args: { id: { type: new GraphQLNonNull(GraphQLID) } },
+          async resolve(parent, args) {
+            return executeOperation(type.model, type.gqltype, type.controller,
+              args.id, operations.DELETE);
+          },
+        };
+      }
     }
   }
 
-  for (const entry in typesDictForUpdate.types) {
-    const type = typesDictForUpdate.types[entry];
-
-    if (shouldNotBeIncludedInSchema(includedMutationTypes, type.gqltype)) {
-      continue;
-    }
-
-    if (type.endpoint) {
-      const argsObject = { input: { type: new GraphQLNonNull(type.inputType) } };
-      rootQueryArgs.fields[`update${type.simpleEntityEndpointName}`] = {
-        type: type.gqltype,
-        args: argsObject,
-        async resolve(parent, args) {
-          return executeOperation(type.model, type.gqltype, type.controller, args.input, operations.UPDATE);
-        },
-      };
-      if (type.stateMachine) {
-        for (const actionName in type.stateMachine.actions) {
-          if ({}.hasOwnProperty.call(type.stateMachine.actions, actionName)) {
-            const actionField = type.stateMachine.actions[actionName];
-            rootQueryArgs.fields[`${actionName}_${type.simpleEntityEndpointName}`] = {
-              type: type.gqltype,
-              description: actionField.description,
-              args: argsObject,
-              async resolve(parent, args) {
-                return executeOperation(type.model, type.gqltype, type.controller, args.input, operations.STATE_CHANGED, actionField);
-              },
-            };
+  for (const type of Object.values(typesDictForUpdate.types)) {
+    if (!shouldNotBeIncludedInSchema(includedMutationTypes, type.gqltype)) {
+      if (type.endpoint) {
+        const argsObject = { input: { type: new GraphQLNonNull(type.inputType) } };
+        rootQueryArgs.fields[`update${type.simpleEntityEndpointName}`] = {
+          type: type.gqltype,
+          args: argsObject,
+          async resolve(parent, args) {
+            return executeOperation(type.model, type.gqltype, type.controller,
+              args.input, operations.UPDATE);
+          },
+        };
+        if (type.stateMachine) {
+          for (const [actionName, actionField] of Object.values(type.stateMachine.actions)) {
+            if ({}.hasOwnProperty.call(type.stateMachine.actions, actionName)) {
+              rootQueryArgs.fields[`${actionName}_${type.simpleEntityEndpointName}`] = {
+                type: type.gqltype,
+                description: actionField.description,
+                args: argsObject,
+                async resolve(parent, args) {
+                  return executeOperation(type.model, type.gqltype, type.controller,
+                    args.input, operations.STATE_CHANGED, actionField);
+                },
+              };
+            }
           }
         }
       }
     }
   }
 
-  for (const entry in registeredMutations) {
-    if (shouldNotBeIncludedInSchema(includedCustomMutations, entry)) {
-      continue;
+  for (const [entry, registeredMutation] of Object.entries(registeredMutations)) {
+    if (!shouldNotBeIncludedInSchema(includedCustomMutations, entry)) {
+      const argsObject = registeredMutation.inputModel
+        ? { input: { type: new GraphQLNonNull(registeredMutation.inputModel) } } : null;
+      rootQueryArgs.fields[entry] = {
+        type: registeredMutation.outputModel,
+        description: registeredMutation.description,
+        args: argsObject,
+        async resolve(parent, args) {
+          return executeRegisteredMutation(args.input, registeredMutation.callback);
+        },
+      };
     }
-
-    const registeredMutation = registeredMutations[entry];
-
-    const argsObject = registeredMutation.inputModel ? { input: { type: new GraphQLNonNull(registeredMutation.inputModel) } } : null;
-    rootQueryArgs.fields[entry] = {
-      type: registeredMutation.outputModel,
-      description: registeredMutation.description,
-      args: argsObject,
-      async resolve(parent, args) {
-        return executeRegisteredMutation(args.input, registeredMutation.callback);
-      },
-    };
   }
 
   return new GraphQLObjectType(rootQueryArgs);
@@ -770,9 +683,7 @@ const generateSchemaDefinition = (gqlType) => {
 
   const schemaArg = {};
 
-  for (const fieldEntryName in argTypes) {
-    const fieldEntry = argTypes[fieldEntryName];
-
+  for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
     if (fieldEntry.type === GraphQLID || isNonNullOfTypeForNotScalar(fieldEntry.type, GraphQLID)) {
       schemaArg[fieldEntryName] = mongoose.Schema.Types.ObjectId;
     } else if (fieldEntry.type === GraphQLString
@@ -794,7 +705,8 @@ const generateSchemaDefinition = (gqlType) => {
       || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
       if (fieldEntry.extensions && fieldEntry.extensions.relation) {
         if (!fieldEntry.extensions.relation.embedded) {
-          schemaArg[fieldEntry.extensions.relation.connectionField] = mongoose.Schema.Types.ObjectId;
+          schemaArg[fieldEntry.extensions.relation.connectionField] = mongoose
+            .Schema.Types.ObjectId;
         } else {
           let entryType = fieldEntry.type;
           if (entryType instanceof GraphQLNonNull) {
@@ -833,130 +745,6 @@ const generateModel = (gqlType, onModelCreated) => {
   return model;
 };
 
-/* Creating a new GraphQL Schema, with options query which defines query
-we will allow users to use when they are making request. */
-module.exports.createSchema = (includedQueryTypes,
-  includedMutationTypes, includedCustomMutations) => new GraphQLSchema({
-  query: buildRootQuery('RootQueryType', includedQueryTypes),
-  mutation: buildMutation('Mutation', includedMutationTypes, includedCustomMutations),
-});
-
-module.exports.getModel = (gqltype) => typesDict.types[gqltype.name].model;
-
-const registeredMutations = {};
-module.exports.registerMutation = (name, description, inputModel, outputModel, callback) => {
-  registeredMutations[name] = {
-    description,
-    inputModel,
-    outputModel,
-    callback,
-  };
-};
-
-module.exports.connect = (model, gqltype, simpleEntityEndpointName,
-  listEntitiesEndpointName, controller, onModelCreated, stateMachine) => {
-  waitingInputType[gqltype.name] = {
-    model,
-    gqltype,
-  };
-  typesDict.types[gqltype.name] = {
-    model: model || generateModel(gqltype, onModelCreated),
-    gqltype,
-    simpleEntityEndpointName,
-    listEntitiesEndpointName,
-    endpoint: true,
-    controller,
-    stateMachine,
-  };
-
-  typesDictForUpdate.types[gqltype.name] = { ...typesDict.types[gqltype.name] };
-};
-
-module.exports.addNoEndpointType = (gqltype) => {
-  waitingInputType[gqltype.name] = {
-    gqltype,
-  };
-
-  typesDict.types[gqltype.name] = {
-    gqltype,
-    endpoint: false,
-  };
-
-  typesDictForUpdate.types[gqltype.name] = { ...typesDict.types[gqltype.name] };
-};
-
-const buildQuery = async (input, gqltype) => {
-  console.log('Building Query');
-  const aggregateClauses = [];
-  const matchesClauses = { $match: {} };
-  let addMatch = false;
-  let limitClause = {};
-  let skipClause = {};
-  let addPagination = false;
-  let sortClause = {};
-  let addSort = false;
-
-  for (const key in input) {
-    if (Object.prototype.hasOwnProperty.call(input, key) && key !== 'pagination' && key !== 'sort') {
-      const filterField = input[key];
-      const qlField = gqltype.getFields()[key];
-
-      const result = await buildQueryTerms(filterField, qlField, key);
-
-      if (result) {
-        for (const aggregate in result.aggregateClauses) {
-          aggregateClauses.push(result.aggregateClauses[aggregate].lookup);
-          aggregateClauses.push(result.aggregateClauses[aggregate].unwind);
-        }
-
-        for (const match in result.matchesClauses) {
-          if (Object.prototype.hasOwnProperty.call(result.matchesClauses, match)) {
-            const matchClause = result.matchesClauses[match];
-            for (const key in matchClause) {
-              if (Object.prototype.hasOwnProperty.call(matchClause, key)) {
-                const value = matchClause[key];
-                matchesClauses.$match[key] = value;
-                addMatch = true;
-              }
-            }
-          }
-        }
-      }
-    } else if (key === 'pagination') {
-      if (input[key].page && input[key].size) {
-        const skip = input[key].size * (input[key].page - 1);
-        limitClause = { $limit: input[key].size + skip };
-        skipClause = { $skip: skip };
-        addPagination = true;
-      }
-    } else if (key === 'sort') {
-      const sortExpressions = {};
-      input[key].terms.forEach((sort) => {
-        console.log(sort);
-        sort.order === 'ASC' ? sort.order = 1 : sort.order = -1;
-        sortExpressions[sort.field] = sort.order;
-      });
-      sortClause = { $sort: sortExpressions };
-      addSort = true;
-    }
-  }
-
-  if (addMatch) {
-    aggregateClauses.push(matchesClauses);
-  }
-
-  if (addSort) {
-    aggregateClauses.push(sortClause);
-  }
-
-  if (addPagination) {
-    aggregateClauses.push(limitClause);
-    aggregateClauses.push(skipClause);
-  }
-
-  console.log(JSON.stringify(aggregateClauses));
-  return aggregateClauses;
-};
 const buildMatchesClause = (fieldname, operator, value) => {
   const matches = {};
   if (operator === QLOperator.getValue('EQ').value || !operator) {
@@ -981,18 +769,18 @@ const buildMatchesClause = (fieldname, operator, value) => {
     let fixedArray = value;
     if (value && fieldname.endsWith('_id')) {
       fixedArray = [];
-      for (const element of value) {
+      value.forEach((element) => {
         fixedArray.push(new mongoose.Types.ObjectId(element));
-      }
+      });
     }
     matches[fieldname] = { $in: fixedArray };
   } else if (operator === QLOperator.getValue('NIN').value) {
     let fixedArray = value;
     if (value && fieldname.endsWith('_id')) {
       fixedArray = [];
-      for (const element of value) {
+      value.forEach((element) => {
         fixedArray.push(new mongoose.Types.ObjectId(element));
-      }
+      });
     }
     matches[fieldname] = { $nin: fixedArray };
   } else if (operator === QLOperator.getValue('LIKE').value) {
@@ -1117,7 +905,7 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
                     $lookup: {
                       from: fieldPathCollectionName,
                       foreignField: pathLocalFieldName,
-                      localField: `${currentPath}.` + '_id',
+                      localField: `${currentPath}._id`,
                       as: aliasPath,
                     },
                   };
@@ -1149,5 +937,194 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
   }
   return { aggregateClauses, matchesClauses };
 };
-const shouldNotBeIncludedInSchema = (includedTypes,
-  type) => includedTypes && !includedTypes.includes(type);
+
+const buildQuery = async (input, gqltype) => {
+  console.log('Building Query');
+  const aggregateClauses = [];
+  const matchesClauses = { $match: {} };
+  let addMatch = false;
+  let limitClause = {};
+  let skipClause = {};
+  let addPagination = false;
+  let sortClause = {};
+  let addSort = false;
+
+  for (const [key, filterField] of Object.entries(input)) {
+    if (Object.prototype.hasOwnProperty.call(input, key) && key !== 'pagination' && key !== 'sort') {
+      const qlField = gqltype.getFields()[key];
+
+      const result = await buildQueryTerms(filterField, qlField, key);
+
+      if (result) {
+        Object.values(result.aggregateClauses).forEach((aggregate) => {
+          aggregateClauses.push(aggregate.lookup);
+          aggregateClauses.push(aggregate.unwind);
+        });
+
+        for (const [matchClauseKey, matchClause] of Object.entries(result.matchesClauses)) {
+          if (Object.prototype.hasOwnProperty.call(result.matchesClauses, matchClauseKey)) {
+            for (const [matchKey, match] of Object.entries(matchClause)) {
+              if (Object.prototype.hasOwnProperty.call(matchClause, matchKey)) {
+                matchesClauses.$match[matchKey] = match;
+                addMatch = true;
+              }
+            }
+          }
+        }
+      }
+    } else if (key === 'pagination') {
+      if (filterField.page && filterField.size) {
+        const skip = filterField.size * (filterField.page - 1);
+        limitClause = { $limit: filterField.size + skip };
+        skipClause = { $skip: skip };
+        addPagination = true;
+      }
+    } else if (key === 'sort') {
+      const sortExpressions = {};
+      filterField.terms.forEach((sort) => {
+        console.log(sort);
+        sortExpressions[sort.field] = sort.order === 'ASC' ? 1 : -1;
+      });
+      sortClause = { $sort: sortExpressions };
+      addSort = true;
+    }
+  }
+
+  if (addMatch) {
+    aggregateClauses.push(matchesClauses);
+  }
+
+  if (addSort) {
+    aggregateClauses.push(sortClause);
+  }
+
+  if (addPagination) {
+    aggregateClauses.push(limitClause);
+    aggregateClauses.push(skipClause);
+  }
+
+  console.log(JSON.stringify(aggregateClauses));
+  return aggregateClauses;
+};
+
+const buildRootQuery = (name, includedTypes) => {
+  const rootQueryArgs = {};
+  rootQueryArgs.name = name;
+  rootQueryArgs.fields = {};
+
+  for (const type of Object.values(typesDict.types)) {
+    if (!shouldNotBeIncludedInSchema(includedTypes, type.gqltype)) {
+      const wasAddedAsNoEnpointType = !type.simpleEntityEndpointName;
+      if (!wasAddedAsNoEnpointType) {
+        // Fixing resolve method in order to be compliant with Mongo _id field
+        if (type.gqltype.getFields().id && !type.gqltype.getFields().id.resolve) {
+          type.gqltype.getFields().id.resolve = (parent) => parent._id;
+        }
+
+        rootQueryArgs.fields[type.simpleEntityEndpointName] = {
+          type: type.gqltype,
+          args: { id: { type: GraphQLID } },
+          resolve(parent, args) {
+            /* Here we define how to get data from database source
+            this will return the type with id passed in argument
+            by the user */
+            return type.model.findById(args.id);
+          },
+        };
+
+        const argTypes = type.gqltype.getFields();
+
+        const argsObject = {};
+
+        for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
+          argsObject[fieldEntryName] = {};
+
+          if (fieldEntry.type instanceof GraphQLScalarType
+            || isNonNullOfType(fieldEntry.type, GraphQLScalarType)
+            || fieldEntry.type instanceof GraphQLEnumType
+            || isNonNullOfType(fieldEntry.type, GraphQLEnumType)) {
+            argsObject[fieldEntryName].type = QLFilter;
+          } else if (fieldEntry.type instanceof GraphQLObjectType
+            || fieldEntry.type instanceof GraphQLList
+            || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
+            argsObject[fieldEntryName].type = QLTypeFilterExpression;
+          }
+        }
+
+        argsObject.pagination = {};
+        argsObject.pagination.type = QLPagination;
+
+        argsObject.sort = {};
+        argsObject.sort.type = QLSortExpression;
+
+        rootQueryArgs.fields[type.listEntitiesEndpointName] = {
+          type: new GraphQLList(type.gqltype),
+          args: argsObject,
+          async resolve(parent, args) {
+            const aggregateClauses = await buildQuery(args, type.gqltype);
+            let result;
+            if (aggregateClauses.length === 0) {
+              result = type.model.find({});
+            } else {
+              result = type.model.aggregate(aggregateClauses);
+            }
+            return result;
+          },
+        };
+      }
+    }
+  }
+
+  return new GraphQLObjectType(rootQueryArgs);
+};
+
+/* Creating a new GraphQL Schema, with options query which defines query
+we will allow users to use when they are making request. */
+module.exports.createSchema = (includedQueryTypes,
+  includedMutationTypes, includedCustomMutations) => new GraphQLSchema({
+  query: buildRootQuery('RootQueryType', includedQueryTypes),
+  mutation: buildMutation('Mutation', includedMutationTypes, includedCustomMutations),
+});
+
+module.exports.getModel = (gqltype) => typesDict.types[gqltype.name].model;
+
+module.exports.registerMutation = (name, description, inputModel, outputModel, callback) => {
+  registeredMutations[name] = {
+    description,
+    inputModel,
+    outputModel,
+    callback,
+  };
+};
+
+module.exports.connect = (model, gqltype, simpleEntityEndpointName,
+  listEntitiesEndpointName, controller, onModelCreated, stateMachine) => {
+  waitingInputType[gqltype.name] = {
+    model,
+    gqltype,
+  };
+  typesDict.types[gqltype.name] = {
+    model: model || generateModel(gqltype, onModelCreated),
+    gqltype,
+    simpleEntityEndpointName,
+    listEntitiesEndpointName,
+    endpoint: true,
+    controller,
+    stateMachine,
+  };
+
+  typesDictForUpdate.types[gqltype.name] = { ...typesDict.types[gqltype.name] };
+};
+
+module.exports.addNoEndpointType = (gqltype) => {
+  waitingInputType[gqltype.name] = {
+    gqltype,
+  };
+
+  typesDict.types[gqltype.name] = {
+    gqltype,
+    endpoint: false,
+  };
+
+  typesDictForUpdate.types[gqltype.name] = { ...typesDict.types[gqltype.name] };
+};
