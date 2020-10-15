@@ -5,7 +5,7 @@
 # About SimfinityJS
 SimfinityJS is a Node.js framework that allows bringing all the power and flexibility of MongoDB query language to GrapQL interfaces. 
 
-In pure GraphQL, you have to define every query and mutation. With SimfinityJS you define the object model, and the framework itself interprets all queries and mutations. SimfinityJS acts as a glue. It translates GraphQL to MongoDB and viceversa. 
+In pure GraphQL, you have to define every query and mutation. With SimfinityJS you define the object model, and the framework itself interprets all ees and mutations. SimfinityJS acts as a glue. It translates GraphQL to MongoDB and viceversa. 
 
 As a result, developers can focus on model structure and object relationships. 
 
@@ -18,32 +18,11 @@ As a result, developers can focus on model structure and object relationships.
 
 
 
-
-# How to
+# Quick Start
 ## Install
 ```bash
 npm install @simtlix/simfinity-js --save
 ```
-
-## To use this lib:
-* [Import simfinity-js](#Import-simfinity)
-* [Define your model](#define-your-model)
-* [Define your GraphQL types](#define-your-graphql-types)
-*  Register models and types using [connect()](#connect-function) function for **non embedded** types and `addNoEndpointType` function for **embedded** ones
-* Create the GraphQL schema using `createSchema` function
-
-
-## Test
-On this project root directory
-`npm link`
-
-On the test project root directory
-`npm link @simtlix/simfinity-js`
-
-Run test project with *preserve-symlinks* flag. E.g.:
-`node --preserve-symlinks app.js`
-
-
 
 ## Import Simfinity
 
@@ -141,8 +120,26 @@ simfinity.connect(null, ExampleType, 'example', 'examples')
 module.exports = ExampleType
 ```
 
+## Register models and types using [connect()](#connect-function) function for **non embedded** types and `addNoEndpointType` function for **embedded** ones
+## Create the GraphQL schema using `createSchema` function
 
-### Queries
+
+# Test
+On this project root directory
+`npm link`
+
+On the test project root directory
+`npm link @simtlix/simfinity-js`
+
+Run test project with *preserve-symlinks* flag. E.g.:
+`node --preserve-symlinks app.js`
+
+
+
+
+
+
+# Example queries
 
 Open http://localhost:3000/graphql endpoint defined on app.js
 
