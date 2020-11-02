@@ -645,7 +645,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
           },
         };
         if (type.stateMachine) {
-          for (const [actionName, actionField] of Object.values(type.stateMachine.actions)) {
+          for (const [actionName, actionField] of Object.entries(type.stateMachine.actions)) {
             if ({}.hasOwnProperty.call(type.stateMachine.actions, actionName)) {
               rootQueryArgs.fields[`${actionName}_${type.simpleEntityEndpointName}`] = {
                 type: type.gqltype,
