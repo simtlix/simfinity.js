@@ -23,4 +23,4 @@ Run test project with *preserve-symlinks* flag. E.g.:
 `node --preserve-symlinks app.js`
 
 # Example
-There is a sample of an app using this lib at [simfinity-sample](https://github.com/simtlix/simfinity-sample)
+There is a sample of an app using this lib at [simfinity.js-samples](https://github.com/simtlix/simfinity.js-samples)

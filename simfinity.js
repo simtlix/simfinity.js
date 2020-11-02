@@ -1,5 +1,8 @@
+// eslint-disable-next-line import/no-unresolved
 const graphql = require('graphql');
+// eslint-disable-next-line import/no-unresolved
 const mongoose = require('mongoose');
+
 const SimfinityError = require('./errors/simfinity.error');
 const InternalServerError = require('./errors/internal-server.error');
 const QLOperator = require('./const/QLOperator');
