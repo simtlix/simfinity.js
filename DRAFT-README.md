@@ -5,7 +5,7 @@
 # About SimfinityJS
 SimfinityJS is a Node.js framework that allows bringing all the power and flexibility of MongoDB query language to GrapQL interfaces. 
 
-In pure GraphQL, you have to define every query and mutation. With SimfinityJS you define the object model, and the framework itself interprets all ees and mutations. SimfinityJS acts as a glue. It translates GraphQL to MongoDB and viceversa. 
+In pure GraphQL, you have to define every query and mutation. With SimfinityJS you define the object model, and the framework itself interprets all queries and mutations. SimfinityJS acts as a glue. It translates GraphQL to MongoDB and viceversa. 
 
 As a result, developers can focus on model structure and object relationships. 
 
@@ -24,32 +24,8 @@ As a result, developers can focus on model structure and object relationships.
 npm install @simtlix/simfinity-js --save
 ```
 
-## Import Simfinity
+## Adding Simfinity to your application
 
-Node mongoose application
-
-```javascript
-const express = require('express')
-const {graphqlHTTP} = require('express-graphql')
-const app = express()
-const mongoose = require('mongoose')
-
-mongoose.connect('mongodb://localhost:27017/example') // replace with your mongodb connection string
-
-mongoose.connection.once('open', () => {
-  console.log('connected to database')
-})
-
-
-
-app.listen(3000, () => {
-  console.log('Listening on port 3000')
-})
-```
-
-
-
-You can add simfinity like this
 ```javascript
 const express = require('express')
 const {graphqlHTTP} = require('express-graphql')
