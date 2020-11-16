@@ -28,21 +28,24 @@ npm install @simtlix/simfinity-js --save
 
 ```javascript
 const express = require('express')
-const {graphqlHTTP} = require('express-graphql')
+const graphqlHTTP = require('express-graphql')
 const simfinity = require('@simtlix/simfinity-js')
 const app = express()
 const mongoose = require('mongoose')
 
-mongoose.connect('mongodb://localhost:27017/example') // replace with your mongodb connection string
+//Replace with your Mongo DB connection string
+mongoose.connect('mongodb://localhost:27017,localhost:27018,localhost:27019/example2', { replicaSet: 'rs', useNewUrlParser: true, useUnifiedTopology: true })
 
 mongoose.connection.once('open', () => {
   console.log('connected to database')
 })
 
-/* This route will be used as an endpoint to interact with Graphql,
-All queries will go through this route. */
-const example = require('./types/example')
-const schema = simfinity.createSchema([example])
+mongoose.set('debug', true);
+
+const type = require('./types')
+const includedTypes = [type.Book]
+
+const schema = simfinity.createSchema(includedTypes)
 
 app.use('/graphql', graphqlHTTP({
   // Directing express-graphql to use this schema to map out the graph
@@ -53,9 +56,8 @@ app.use('/graphql', graphqlHTTP({
   formatError: simfinity.buildErrorFormatter((err) => {
     console.log(err)
   })
-  
-}))
 
+}))
 
 app.listen(3000, () => {
   console.log('Listening on port 3000')
@@ -63,132 +65,67 @@ app.listen(3000, () => {
 ```
 
 
-### Define your model
-
-|  Example table |          |   
-| ------------- |:-------------:|
-| name          | String! 	    |
-| description   | String        |
-| amount        | Number        |
-| flag          | Boolean       |
-
-
-### Define your Graphql types 
+### Defining the model
 
 ```javascript
 const graphql = require('graphql')
 const simfinity = require('@simtlix/simfinity-js')
 
-const {GraphQLObjectType, GraphQLString, GraphQLID, GraphQLInt, GraphQLBoolean, GraphQLNonNull} = graphql
+const {
+  GraphQLObjectType,GraphQLString,
+  GraphQLID, GraphQLInt
+} = graphql
 
-const ExampleType = new GraphQLObjectType({
-  name: 'Example',
+
+const BookType = new GraphQLObjectType({
+  name: 'Book',
   fields: () => ({
-    id: { type: GraphQLID },
-    name: { type: new GraphQLNonNull(GraphQLString) },
-    description: { type: GraphQLString },
-    amount : { type : GraphQLInt },
-    flag : { type : GraphQLBoolean },
+    id: {
+      type: GraphQLID
+    },
+    name: { type: GraphQLString },
+    pages: { type: GraphQLInt }
   })
 })
 
-simfinity.connect(null, ExampleType, 'example', 'examples')
-module.exports = ExampleType
+module.exports = BookType
+
+simfinity.connect(null, BookType, 'book', 'books', null, null, null)
 ```
 
-## Register models and types using [connect()](#connect-function) function for **non embedded** types and `addNoEndpointType` function for **embedded** ones
-## Create the GraphQL schema using `createSchema` function
 
+# Run 
+Start replica set
+`run-rs`
 
-# Test
-On this project root directory
-`npm link`
-
-On the test project root directory
-`npm link @simtlix/simfinity-js`
-
-Run test project with *preserve-symlinks* flag. E.g.:
-`node --preserve-symlinks app.js`
+Run the application
+`node app.js`
 
 
 
-
-
-
-# Example queries
+# Try it
 
 Open http://localhost:3000/graphql endpoint defined on app.js
 
 
-Create a document
+Create a book
 ```graphql
-mutation{
-  addexample(
+mutation {
+  addbook (	
     input:{
-      name: "Bar"
-      description: "lorem ipsum"
-      amount: 1
-      flag : true
-  }) {
-    # fields you want to recover
-    id
-    name
-    amount
-    description
-    flag
-  }
+      name: "Hello World Book",
+      pages: 333
+    }
+  ) 
 }
 ```
 
-Update a document
-```graphql
-mutation{
-  updateexample(
-    input:{
-      id: "5f5d0c713464882aec659ab2" # put your mongo id
-      description: "updated lorem ipsum" 
-  }) {
-    # fields you want recover
-    id
-    description
-  }
-}
-```
 
-Find a document
+List all books
 ```graphql
-query{
-  example(id:"5f5d0c713464882aec659ab2") # put your mongo id
-  {
-    # fields you want to recover
-    id
-    name
-  }
-}
-```
-
-Find all 'example' documents
-```graphql
-query{
-  examples{
-    # fields you want to recover
-    id
-    name
-    description
-    amount
-    flag
-  }
-}
-````
-
-Delete a document
-```graphql
-mutation{
-  deleteexample(id:"5f5d0c713464882aec659ab2")
-  {
-    id
-    name
-    description
+query {
+  books {
+    id, name, pages
   }
 }
 ```
