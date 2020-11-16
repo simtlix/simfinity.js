@@ -133,5 +133,7 @@ query {
 ```
 
 
+# Want to know more! 
+Visit the [samples site](https://github.com/simtlix/simfinity.js-samples) and learn about SimfinityJS through different use cases
 
 
