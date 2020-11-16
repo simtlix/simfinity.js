@@ -96,9 +96,11 @@ simfinity.connect(null, BookType, 'book', 'books', null, null, null)
 
 # Run 
 Start replica set
+
 `run-rs`
 
 Run the application
+
 `node app.js`
 
 
