@@ -1,6 +1,6 @@
 {
-  "name": "@simtlix/simfinity-js",
-  "version": "1.0.0",
+  "name": "@gmatheu/simfinity-js",
+  "version": "1.0.0-alpha.1",
   "description": "",
   "main": "src/index.js",
   "scripts": {
@@ -28,6 +28,6 @@
     "ghooks": {
       "pre-commit": "npm run lint || npm run lint-fix"
     },
-    "owner": "simfinity"
+    "owner": "gmatheu"
   }
 }
