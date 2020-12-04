@@ -5,8 +5,8 @@
   "main": "src/index.js",
   "scripts": {
     "test": "echo \"No test specified\"",
-    "lint": "eslint *.js",
-    "lint-fix": "eslint --fix *.js"
+    "lint": "eslint '**/*.js'",
+    "lint-fix": "eslint --fix '**/*.js'"
   },
   "author": "Simtlix",
   "license": "Apache-2.0",
