@@ -13,7 +13,7 @@ jobs:
         with:
           node-version: 14
       - run: npm ci
-      - run: json -f package.json peerDependencies | json -ka | xargs -i{} bash -c 'echo $0@$(json -f package.json peerDependencies.$0)' {} | xargs -i{}  npm install --no-save {}
+      - run: npx json -f package.json peerDependencies | npx json -ka | xargs -i{} bash -c 'echo $0@$(npx json -f package.json peerDependencies.$0)' {} | xargs -i{}  npm install --save-optional {}
       - run: npm run lint
       - run: npm test
 
