@@ -1,6 +1,6 @@
 {
   "name": "@simtlix/simfinity-js",
-  "version": "1.0.0-alpha.1",
+  "version": "1.0.0",
   "description": "",
   "main": "src/index.js",
   "scripts": {
@@ -29,5 +29,9 @@
       "pre-commit": "npm run lint || npm run lint-fix"
     },
     "owner": "simtlix"
+  },
+  "optionalDependencies": {
+    "graphql": "^14.7.0",
+    "mongoose": "^5.11.10"
   }
 }
