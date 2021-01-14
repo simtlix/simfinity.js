@@ -733,8 +733,9 @@ const generateSchemaDefinition = (gqlType) => {
           }
         }
       }
-    } else if (fieldEntry.type.name === 'DateTime'
-      || (fieldEntry.type instanceof GraphQLNonNull && fieldEntry.type.ofType.name === 'DateTime')) {
+    } else if (fieldEntry.type.name === 'DateTime' || fieldEntry.type.name === 'Date' || fieldEntry.type.name === 'Time'
+      || (fieldEntry.type instanceof GraphQLNonNull && (fieldEntry.type.ofType.name === 'DateTime'
+      || fieldEntry.type.ofType.name === 'Date' || fieldEntry.type.ofType.name === 'Time'))) {
       schemaArg[fieldEntryName] = Date;
     }
   }
