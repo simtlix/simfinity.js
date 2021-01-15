@@ -1,6 +1,4 @@
-// eslint-disable-next-line import/no-unresolved
 const graphql = require('graphql');
-// eslint-disable-next-line import/no-unresolved
 const mongoose = require('mongoose');
 
 const SimfinityError = require('./errors/simfinity.error');
@@ -732,6 +730,15 @@ const generateSchemaDefinition = (gqlType) => {
             throw new Error('A type cannot have a field of its same type and embedded');
           }
         }
+      } else if (fieldEntry.type.ofType === GraphQLString
+        || fieldEntry.type.ofType instanceof GraphQLEnumType) {
+        schemaArg[fieldEntryName] = [String];
+      } else if (fieldEntry.type.ofType === GraphQLBoolean) {
+        schemaArg[fieldEntryName] = [Boolean];
+      } else if (fieldEntry.type.ofType === GraphQLInt || fieldEntry.type.ofType === GraphQLFloat) {
+        schemaArg[fieldEntryName] = [Number];
+      } else if (fieldEntry.type.ofType.name === 'DateTime' || fieldEntry.type.ofType.name === 'Date' || fieldEntry.type.ofType.name === 'Time') {
+        schemaArg[fieldEntryName] = [Date];
       }
     } else if (fieldEntry.type.name === 'DateTime' || fieldEntry.type.name === 'Date' || fieldEntry.type.name === 'Time'
       || (fieldEntry.type instanceof GraphQLNonNull && (fieldEntry.type.ofType.name === 'DateTime'
