@@ -689,16 +689,32 @@ const generateSchemaDefinition = (gqlType) => {
       schemaArg[fieldEntryName] = mongoose.Schema.Types.ObjectId;
     } else if (fieldEntry.type === GraphQLString
       || isNonNullOfTypeForNotScalar(fieldEntry.type, GraphQLString)) {
-      schemaArg[fieldEntryName] = String;
+      if (fieldEntry.extensions && fieldEntry.extensions.unique) {
+        schemaArg[fieldEntryName] = { type: String, unique: true };
+      } else {
+        schemaArg[fieldEntryName] = String;
+      }
     } else if (fieldEntry.type instanceof GraphQLEnumType
       || isNonNullOfType(fieldEntry.type, GraphQLEnumType)) {
-      schemaArg[fieldEntryName] = String;
+      if (fieldEntry.extensions && fieldEntry.extensions.unique) {
+        schemaArg[fieldEntryName] = { type: String, unique: true };
+      } else {
+        schemaArg[fieldEntryName] = String;
+      }
     } else if (fieldEntry.type === GraphQLInt
       || isNonNullOfTypeForNotScalar(fieldEntry.type, GraphQLInt)) {
-      schemaArg[fieldEntryName] = Number;
+      if (fieldEntry.extensions && fieldEntry.extensions.unique) {
+        schemaArg[fieldEntryName] = { type: Number, unique: true };
+      } else {
+        schemaArg[fieldEntryName] = Number;
+      }
     } else if (fieldEntry.type === GraphQLFloat
       || isNonNullOfTypeForNotScalar(fieldEntry.type, GraphQLFloat)) {
-      schemaArg[fieldEntryName] = Number;
+      if (fieldEntry.extensions && fieldEntry.extensions.unique) {
+        schemaArg[fieldEntryName] = { type: Number, unique: true };
+      } else {
+        schemaArg[fieldEntryName] = Number;
+      }
     } else if (fieldEntry.type === GraphQLBoolean
       || isNonNullOfTypeForNotScalar(fieldEntry.type, GraphQLBoolean)) {
       schemaArg[fieldEntryName] = Boolean;
