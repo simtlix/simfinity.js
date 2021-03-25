@@ -11,9 +11,40 @@ mongoose.set('useFindAndModify', false);
 
 const {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
-  GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
+  GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType, __Field,
   GraphQLInt, GraphQLEnumType, GraphQLBoolean, GraphQLFloat,
 } = graphql;
+
+// Adding 'extensions' field into instronspection query
+const RelationType = new GraphQLObjectType({
+  name: 'RelationType',
+  fields: () => ({
+    embedded: { type: GraphQLBoolean },
+    connectionField: { type: GraphQLString },
+  }),
+});
+
+const FieldExtensionsType = new GraphQLObjectType({
+  name: 'FieldExtensionsType',
+  fields: () => ({ relation: { type: RelationType } }),
+});
+
+const fieldTypeDefinitions = __Field._fields;
+
+const fixedFieldsWithExtensions = () => {
+  const originalFields = fieldTypeDefinitions();
+  originalFields.extensions = {
+    type: FieldExtensionsType,
+    name: 'extensions',
+    resolve: (obj) => obj.extensions,
+    args: [],
+    isDeprecated: false,
+  };
+  return originalFields;
+};
+
+__Field._fields = fixedFieldsWithExtensions;
+// End of adding 'extensions' field to instrospection query
 
 const typesDict = { types: {} };
 const waitingInputType = {};
