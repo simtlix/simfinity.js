@@ -21,6 +21,7 @@ const RelationType = new GraphQLObjectType({
   fields: () => ({
     embedded: { type: GraphQLBoolean },
     connectionField: { type: GraphQLString },
+    displayField: { type: GraphQLString },
   }),
 });
 
