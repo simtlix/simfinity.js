@@ -644,6 +644,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
 
         rootQueryArgs.fields[`add${type.simpleEntityEndpointName}`] = {
           type: type.gqltype,
+          description: 'add',
           args: argsObject,
           async resolve(parent, args) {
             return executeOperation(type.model, type.gqltype, type.controller,
@@ -652,6 +653,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
         };
         rootQueryArgs.fields[`delete${type.simpleEntityEndpointName}`] = {
           type: type.gqltype,
+          description: 'delete',
           args: { id: { type: new GraphQLNonNull(GraphQLID) } },
           async resolve(parent, args) {
             return executeOperation(type.model, type.gqltype, type.controller,
@@ -668,6 +670,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
         const argsObject = { input: { type: new GraphQLNonNull(type.inputType) } };
         rootQueryArgs.fields[`update${type.simpleEntityEndpointName}`] = {
           type: type.gqltype,
+          description: 'update',
           args: argsObject,
           async resolve(parent, args) {
             return executeOperation(type.model, type.gqltype, type.controller,
