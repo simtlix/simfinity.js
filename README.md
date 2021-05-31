@@ -3,14 +3,14 @@
 [![npm version](https://badge.fury.io/js/%40simtlix%2Fsimfinity-js.svg)](https://badge.fury.io/js/%40simtlix%2Fsimfinity-js)
 
 # About SimfinityJS
-SimfinityJS is a Node.js framework that allows bringing all the power and flexibility of MongoDB query language to GrapQL interfaces. 
+SimfinityJS is a Node.js framework that allows bringing all the power and flexibility of MongoDB query language to GraphQL interfaces. 
 
 In pure GraphQL, you have to define every query and mutation. With SimfinityJS you define the object model, and the framework itself interprets all queries and mutations. SimfinityJS acts as a glue. It translates GraphQL to MongoDB and viceversa. 
 
 As a result, developers can focus on model structure and object relationships. 
 
 ## Features
-- Translation between GrapQL and MongoDB and viceversa
+- Translation between GraphQL and MongoDB and viceversa
 - Implement business logic in a declarative way
 - Implement domain validations in a declarative way. 
 - Supports declarative state machine. Business logic can be included in each state transition. 
