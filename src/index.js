@@ -859,11 +859,15 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
   const aggregateClauses = {};
   const matchesClauses = {};
 
-  if (qlField.type instanceof GraphQLScalarType
-    || isNonNullOfType(qlField.type, GraphQLScalarType)
-    || qlField.type instanceof GraphQLEnumType
-    || isNonNullOfType(qlField.type, GraphQLEnumType)) {
-    if (qlField.type.name === 'DateTime') {
+  let fieldType = qlField.type;
+  if (qlField.type instanceof GraphQLList) {
+    fieldType = qlField.type.ofType;
+  }
+  if (fieldType instanceof GraphQLScalarType
+    || isNonNullOfType(fieldType, GraphQLScalarType)
+    || fieldType instanceof GraphQLEnumType
+    || isNonNullOfType(fieldType, GraphQLEnumType)) {
+    if (fieldType.name === 'DateTime') {
       if (Array.isArray(filterField.value)) {
         filterField.value = filterField.value.map((value) => value && new Date(value));
       } else {
@@ -871,11 +875,9 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
       }
     }
     matchesClauses[fieldName] = buildMatchesClause(fieldName === 'id' ? '_id' : fieldName, filterField.operator, filterField.value);
-  } else if (qlField.type instanceof GraphQLObjectType || qlField.type instanceof GraphQLList
-    || isNonNullOfType(qlField.type, GraphQLObjectType)) {
-    let fieldType = qlField.type;
-
-    if (fieldType instanceof GraphQLList || fieldType instanceof GraphQLNonNull) {
+  } else if (fieldType instanceof GraphQLObjectType
+    || isNonNullOfType(fieldType, GraphQLObjectType)) {
+    if (fieldType instanceof GraphQLNonNull) {
       fieldType = qlField.type.ofType;
     }
 
@@ -1112,9 +1114,18 @@ const buildRootQuery = (name, includedTypes) => {
             || isNonNullOfType(fieldEntry.type, GraphQLEnumType)) {
             argsObject[fieldEntryName].type = QLFilter;
           } else if (fieldEntry.type instanceof GraphQLObjectType
-            || fieldEntry.type instanceof GraphQLList
             || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
             argsObject[fieldEntryName].type = QLTypeFilterExpression;
+          } else if (fieldEntry.type instanceof GraphQLList) {
+            const listOfType = fieldEntry.type.ofType;
+            if (listOfType instanceof GraphQLScalarType
+              || isNonNullOfType(listOfType, GraphQLScalarType)
+              || listOfType instanceof GraphQLEnumType
+              || isNonNullOfType(listOfType, GraphQLEnumType)) {
+              argsObject[fieldEntryName].type = QLFilter;
+            } else {
+              argsObject[fieldEntryName].type = QLTypeFilterExpression;
+            }
           }
         }
 
