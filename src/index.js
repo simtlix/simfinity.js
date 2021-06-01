@@ -864,7 +864,9 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
     fieldType = qlField.type.ofType;
   }
   if (fieldType instanceof GraphQLScalarType
-    || isNonNullOfType(fieldType, GraphQLScalarType)) {
+    || isNonNullOfType(fieldType, GraphQLScalarType)
+    || fieldType instanceof GraphQLEnumType
+    || isNonNullOfType(fieldType, GraphQLEnumType)) {
     if (fieldType.name === 'DateTime') {
       if (Array.isArray(filterField.value)) {
         filterField.value = filterField.value.map((value) => value && new Date(value));
