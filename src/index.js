@@ -794,8 +794,7 @@ const generateSchemaDefinition = (gqlType) => {
         schemaArg[fieldEntryName] = [Date];
       }
     } else if (isGraphQLisoDate(fieldEntry.type.name)
-    || (fieldEntry.type instanceof GraphQLNonNull 
-      && isGraphQLisoDate(fieldEntry.type.ofType.name))) {
+    || (fieldEntry.type instanceof GraphQLNonNull && isGraphQLisoDate(fieldEntry.type.ofType.name))) {
       schemaArg[fieldEntryName] = Date;
     }
   }
@@ -869,8 +868,7 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
     || isNonNullOfType(fieldType, GraphQLScalarType)
     || fieldType instanceof GraphQLEnumType
     || isNonNullOfType(fieldType, GraphQLEnumType)) {
-    const fieldTypeName = fieldType instanceof GraphQLNonNull
-      ? fieldType.ofType.name : fieldType.name;
+    const fieldTypeName = fieldType instanceof GraphQLNonNull ? fieldType.ofType.name : fieldType.name;
     if (isGraphQLisoDate(fieldTypeName)) {
       if (Array.isArray(filterField.value)) {
         filterField.value = filterField.value.map((value) => value && new Date(value));
@@ -945,8 +943,7 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
           const pathField = currentGQLPathFieldType.getFields()[pathFieldName];
           if (pathField.type instanceof GraphQLScalarType
             || isNonNullOfType(pathField.type, GraphQLScalarType)) {
-            const typeName = pathField.type instanceof GraphQLNonNull
-              ? pathField.type.ofType.name : pathField.type.name;
+            const typeName = pathField.type instanceof GraphQLNonNull ? pathField.type.ofType.name : pathField.type.name;
             if (isGraphQLisoDate(typeName)) {
               if (Array.isArray(term.value)) {
                 term.value = term.value.map((value) => value && new Date(value));
