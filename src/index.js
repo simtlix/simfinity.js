@@ -27,7 +27,10 @@ const RelationType = new GraphQLObjectType({
 
 const FieldExtensionsType = new GraphQLObjectType({
   name: 'FieldExtensionsType',
-  fields: () => ({ relation: { type: RelationType } }),
+  fields: () => ({ 
+    relation: { type: RelationType }, 
+    stateMachine: { type: GraphQLBoolean } 
+  }),
 });
 
 const fieldTypeDefinitions = __Field._fields;
@@ -251,6 +254,8 @@ const buildInputType = (gqltype) => {
         if (fieldArgForUpdate.type) {
           fieldsArgForUpdate[fieldEntryName] = fieldArgForUpdate;
         }
+      } else {
+        fieldEntry.extensions = { ...fieldEntry.extensions, stateMachine: true  };
       }
     }
   }
