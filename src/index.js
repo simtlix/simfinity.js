@@ -60,6 +60,7 @@ const operations = {
   UPDATE: 'update',
   DELETE: 'delete',
   STATE_CHANGED: 'state_changed',
+  CUSTOM_MUTATION: 'custom_mutation',
 };
 
 const buildErrorFormatter = (callback) => {
@@ -78,6 +79,12 @@ const buildErrorFormatter = (callback) => {
     return result;
   };
   return formatError;
+};
+
+const middlewares = [];
+
+module.exports.use = (middleware) => {
+  middlewares.push(middleware);
 };
 
 module.exports.buildErrorFormatter = buildErrorFormatter;
@@ -635,6 +642,24 @@ const executeItemFunction = async (gqltype, collectionField, objectId, session,
 const shouldNotBeIncludedInSchema = (includedTypes,
   type) => includedTypes && !includedTypes.includes(type);
 
+const excecuteMiddleware = (context) => {
+  const buildNext = (middlewaresParam) => {
+    if (!middlewaresParam) {
+      return () => {};
+    }
+    const next = () => {
+      const middleware = middlewaresParam[0];
+      if (middleware) {
+        middleware(context, buildNext(middlewaresParam.slice(1)));
+      }
+    };
+    return next;
+  };
+
+  const middleware = buildNext(middlewares);
+  middleware();
+};
+
 const buildMutation = (name, includedMutationTypes, includedCustomMutations) => {
   const rootQueryArgs = {};
   rootQueryArgs.name = name;
@@ -652,6 +677,13 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
           description: 'add',
           args: argsObject,
           async resolve(parent, args) {
+            const context = {
+              type,
+              args,
+              operation: operations.SAVE,
+            };
+
+            excecuteMiddleware(context);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.input, operations.SAVE);
           },
@@ -661,6 +693,13 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
           description: 'delete',
           args: { id: { type: new GraphQLNonNull(GraphQLID) } },
           async resolve(parent, args) {
+            const context = {
+              type,
+              args,
+              operation: operations.DELETE,
+            };
+
+            excecuteMiddleware(context);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.id, operations.DELETE);
           },
@@ -678,6 +717,13 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
           description: 'update',
           args: argsObject,
           async resolve(parent, args) {
+            const context = {
+              type,
+              args,
+              operation: operations.UPDATE,
+            };
+
+            excecuteMiddleware(context);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.input, operations.UPDATE);
           },
@@ -690,6 +736,15 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
                 description: actionField.description,
                 args: argsObject,
                 async resolve(parent, args) {
+                  const context = {
+                    type,
+                    args,
+                    operation: operations.STATE_CHANGED,
+                    actionName,
+                    actionField,
+                  };
+
+                  excecuteMiddleware(context);
                   return executeOperation(type.model, type.gqltype, type.controller,
                     args.input, operations.STATE_CHANGED, actionField);
                 },
@@ -710,6 +765,12 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
         description: registeredMutation.description,
         args: argsObject,
         async resolve(parent, args) {
+          const context = {
+            args,
+            operation: operations.CUSTOM_MUTATION,
+            entry,
+          };
+          excecuteMiddleware(context);
           return executeRegisteredMutation(args.input, registeredMutation.callback);
         },
       };
@@ -1102,6 +1163,12 @@ const buildRootQuery = (name, includedTypes) => {
             /* Here we define how to get data from database source
             this will return the type with id passed in argument
             by the user */
+            const context = {
+              type,
+              args,
+              operation: 'get_by_id',
+            };
+            excecuteMiddleware(context);
             return type.model.findById(args.id);
           },
         };
@@ -1144,6 +1211,12 @@ const buildRootQuery = (name, includedTypes) => {
           type: new GraphQLList(type.gqltype),
           args: argsObject,
           async resolve(parent, args) {
+            const context = {
+              type,
+              args,
+              operation: 'find',
+            };
+            excecuteMiddleware(context);
             const aggregateClauses = await buildQuery(args, type.gqltype);
             let result;
             if (aggregateClauses.length === 0) {
