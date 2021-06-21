@@ -1083,9 +1083,8 @@ const buildQuery = async (input, gqltype) => {
   const aggregateClauses = [];
   const matchesClauses = { $match: {} };
   let addMatch = false;
-  let limitClause = {};
-  let skipClause = {};
-  let addPagination = false;
+  let limitClause = { $limit: 100 };
+  let skipClause = { $skip: 0 };
   let sortClause = {};
   let addSort = false;
 
@@ -1117,7 +1116,6 @@ const buildQuery = async (input, gqltype) => {
         const skip = filterField.size * (filterField.page - 1);
         limitClause = { $limit: filterField.size + skip };
         skipClause = { $skip: skip };
-        addPagination = true;
       }
     } else if (key === 'sort') {
       const sortExpressions = {};
@@ -1138,12 +1136,9 @@ const buildQuery = async (input, gqltype) => {
     aggregateClauses.push(sortClause);
   }
 
-  if (addPagination) {
-    aggregateClauses.push(limitClause);
-    aggregateClauses.push(skipClause);
-  }
+  aggregateClauses.push(limitClause);
+  aggregateClauses.push(skipClause);
 
-  console.log(JSON.stringify(aggregateClauses));
   return aggregateClauses;
 };
 
