@@ -676,14 +676,15 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
           type: type.gqltype,
           description: 'add',
           args: argsObject,
-          async resolve(parent, args) {
-            const context = {
+          async resolve(parent, args, context) {
+            const params = {
               type,
               args,
               operation: operations.SAVE,
+              context,
             };
 
-            excecuteMiddleware(context);
+            excecuteMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.input, operations.SAVE);
           },
@@ -692,14 +693,15 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
           type: type.gqltype,
           description: 'delete',
           args: { id: { type: new GraphQLNonNull(GraphQLID) } },
-          async resolve(parent, args) {
-            const context = {
+          async resolve(parent, args, context) {
+            const params = {
               type,
               args,
               operation: operations.DELETE,
+              context,
             };
 
-            excecuteMiddleware(context);
+            excecuteMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.id, operations.DELETE);
           },
@@ -716,14 +718,15 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
           type: type.gqltype,
           description: 'update',
           args: argsObject,
-          async resolve(parent, args) {
-            const context = {
+          async resolve(parent, args, context) {
+            const params = {
               type,
               args,
               operation: operations.UPDATE,
+              context,
             };
 
-            excecuteMiddleware(context);
+            excecuteMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.input, operations.UPDATE);
           },
@@ -735,16 +738,17 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
                 type: type.gqltype,
                 description: actionField.description,
                 args: argsObject,
-                async resolve(parent, args) {
-                  const context = {
+                async resolve(parent, args, context) {
+                  const params = {
                     type,
                     args,
                     operation: operations.STATE_CHANGED,
                     actionName,
                     actionField,
+                    context,
                   };
 
-                  excecuteMiddleware(context);
+                  excecuteMiddleware(params);
                   return executeOperation(type.model, type.gqltype, type.controller,
                     args.input, operations.STATE_CHANGED, actionField);
                 },
@@ -764,13 +768,14 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
         type: registeredMutation.outputModel,
         description: registeredMutation.description,
         args: argsObject,
-        async resolve(parent, args) {
-          const context = {
+        async resolve(parent, args, context) {
+          const params = {
             args,
             operation: operations.CUSTOM_MUTATION,
             entry,
+            context,
           };
-          excecuteMiddleware(context);
+          excecuteMiddleware(params);
           return executeRegisteredMutation(args.input, registeredMutation.callback);
         },
       };
@@ -1159,16 +1164,17 @@ const buildRootQuery = (name, includedTypes) => {
         rootQueryArgs.fields[type.simpleEntityEndpointName] = {
           type: type.gqltype,
           args: { id: { type: GraphQLID } },
-          resolve(parent, args) {
+          resolve(parent, args, context) {
             /* Here we define how to get data from database source
             this will return the type with id passed in argument
             by the user */
-            const context = {
+            const params = {
               type,
               args,
               operation: 'get_by_id',
+              context,
             };
-            excecuteMiddleware(context);
+            excecuteMiddleware(params);
             return type.model.findById(args.id);
           },
         };
@@ -1210,13 +1216,14 @@ const buildRootQuery = (name, includedTypes) => {
         rootQueryArgs.fields[type.listEntitiesEndpointName] = {
           type: new GraphQLList(type.gqltype),
           args: argsObject,
-          async resolve(parent, args) {
-            const context = {
+          async resolve(parent, args, context) {
+            const params = {
               type,
               args,
               operation: 'find',
+              context,
             };
-            excecuteMiddleware(context);
+            excecuteMiddleware(params);
             const aggregateClauses = await buildQuery(args, type.gqltype);
             let result;
             if (aggregateClauses.length === 0) {
