@@ -132,6 +132,7 @@ const QLPagination = new GraphQLInputObjectType({
   fields: () => ({
     page: { type: new GraphQLNonNull(GraphQLInt) },
     size: { type: new GraphQLNonNull(GraphQLInt) },
+    count: { type: GraphQLBoolean },
   }),
 });
 
@@ -1078,7 +1079,7 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
   return { aggregateClauses, matchesClauses };
 };
 
-const buildQuery = async (input, gqltype) => {
+const buildQuery = async (input, gqltype, isCount) => {
   console.log('Building Query');
   const aggregateClauses = [];
   const matchesClauses = { $match: {} };
@@ -1132,12 +1133,18 @@ const buildQuery = async (input, gqltype) => {
     aggregateClauses.push(matchesClauses);
   }
 
-  if (addSort) {
+  if (addSort && !isCount) {
     aggregateClauses.push(sortClause);
   }
 
-  aggregateClauses.push(limitClause);
-  aggregateClauses.push(skipClause);
+  if (!isCount) {
+    aggregateClauses.push(limitClause);
+    aggregateClauses.push(skipClause);
+  }
+
+  if (isCount) {
+    aggregateClauses.push({ $count: 'size' });
+  }
 
   return aggregateClauses;
 };
@@ -1220,6 +1227,13 @@ const buildRootQuery = (name, includedTypes) => {
             };
             excecuteMiddleware(params);
             const aggregateClauses = await buildQuery(args, type.gqltype);
+
+            if (args.pagination && args.pagination.count) {
+              const aggregateClausesForCount = await buildQuery(args, type.gqltype, true);
+              const resultCount = type.model.aggregate(aggregateClausesForCount);
+              context.count = resultCount.size;
+            }
+
             let result;
             if (aggregateClauses.length === 0) {
               result = type.model.find({});
