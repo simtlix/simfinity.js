@@ -159,6 +159,8 @@ const isNonNullOfTypeForNotScalar = (fieldEntryType, graphQLType) => {
   return isOfType;
 };
 
+const isGraphQLisoDate = (typeName) => typeName === 'DateTime' || typeName === 'Date' || typeName === 'Time';
+
 const createOneToManyInputType = (inputNamePrefix, fieldEntryName,
   inputType, updateInputType) => new GraphQLInputObjectType({
   name: `OneToMany${inputNamePrefix}${fieldEntryName}`,
@@ -860,12 +862,11 @@ const generateSchemaDefinition = (gqlType) => {
         schemaArg[fieldEntryName] = [Boolean];
       } else if (fieldEntry.type.ofType === GraphQLInt || fieldEntry.type.ofType === GraphQLFloat) {
         schemaArg[fieldEntryName] = [Number];
-      } else if (fieldEntry.type.ofType.name === 'DateTime' || fieldEntry.type.ofType.name === 'Date' || fieldEntry.type.ofType.name === 'Time') {
+      } else if (isGraphQLisoDate(fieldEntry.type.ofType.name)) {
         schemaArg[fieldEntryName] = [Date];
       }
-    } else if (fieldEntry.type.name === 'DateTime' || fieldEntry.type.name === 'Date' || fieldEntry.type.name === 'Time'
-      || (fieldEntry.type instanceof GraphQLNonNull && (fieldEntry.type.ofType.name === 'DateTime'
-      || fieldEntry.type.ofType.name === 'Date' || fieldEntry.type.ofType.name === 'Time'))) {
+    } else if (isGraphQLisoDate(fieldEntry.type.name)
+    || (fieldEntry.type instanceof GraphQLNonNull && isGraphQLisoDate(fieldEntry.type.ofType.name))) {
       schemaArg[fieldEntryName] = Date;
     }
   }
@@ -939,7 +940,8 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
     || isNonNullOfType(fieldType, GraphQLScalarType)
     || fieldType instanceof GraphQLEnumType
     || isNonNullOfType(fieldType, GraphQLEnumType)) {
-    if (fieldType.name === 'DateTime') {
+    const fieldTypeName = fieldType instanceof GraphQLNonNull ? fieldType.ofType.name : fieldType.name;
+    if (isGraphQLisoDate(fieldTypeName)) {
       if (Array.isArray(filterField.value)) {
         filterField.value = filterField.value.map((value) => value && new Date(value));
       } else {
@@ -990,7 +992,9 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
       }
 
       if (term.path.indexOf('.') < 0) {
-        if (fieldType.getFields()[term.path].type.name === 'DateTime') {
+        const { type } = fieldType.getFields()[term.path];
+        const typeName = type instanceof GraphQLNonNull ? type.ofType.name : type.name;
+        if (isGraphQLisoDate(typeName)) {
           if (Array.isArray(term.value)) {
             term.value = term.value.map((value) => value && new Date(value));
           } else {
@@ -1011,7 +1015,8 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
           const pathField = currentGQLPathFieldType.getFields()[pathFieldName];
           if (pathField.type instanceof GraphQLScalarType
             || isNonNullOfType(pathField.type, GraphQLScalarType)) {
-            if (pathField.type.name === 'DateTime') {
+            const typeName = pathField.type instanceof GraphQLNonNull ? pathField.type.ofType.name : pathField.type.name;
+            if (isGraphQLisoDate(typeName)) {
               if (Array.isArray(term.value)) {
                 term.value = term.value.map((value) => value && new Date(value));
               } else {
