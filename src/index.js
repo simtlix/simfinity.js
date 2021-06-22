@@ -60,6 +60,7 @@ const operations = {
   UPDATE: 'update',
   DELETE: 'delete',
   STATE_CHANGED: 'state_changed',
+  CUSTOM_MUTATION: 'custom_mutation',
 };
 
 const buildErrorFormatter = (callback) => {
@@ -78,6 +79,12 @@ const buildErrorFormatter = (callback) => {
     return result;
   };
   return formatError;
+};
+
+const middlewares = [];
+
+module.exports.use = (middleware) => {
+  middlewares.push(middleware);
 };
 
 module.exports.buildErrorFormatter = buildErrorFormatter;
@@ -125,6 +132,7 @@ const QLPagination = new GraphQLInputObjectType({
   fields: () => ({
     page: { type: new GraphQLNonNull(GraphQLInt) },
     size: { type: new GraphQLNonNull(GraphQLInt) },
+    count: { type: GraphQLBoolean },
   }),
 });
 
@@ -635,6 +643,24 @@ const executeItemFunction = async (gqltype, collectionField, objectId, session,
 const shouldNotBeIncludedInSchema = (includedTypes,
   type) => includedTypes && !includedTypes.includes(type);
 
+const excecuteMiddleware = (context) => {
+  const buildNext = (middlewaresParam) => {
+    if (!middlewaresParam) {
+      return () => {};
+    }
+    const next = () => {
+      const middleware = middlewaresParam[0];
+      if (middleware) {
+        middleware(context, buildNext(middlewaresParam.slice(1)));
+      }
+    };
+    return next;
+  };
+
+  const middleware = buildNext(middlewares);
+  middleware();
+};
+
 const buildMutation = (name, includedMutationTypes, includedCustomMutations) => {
   const rootQueryArgs = {};
   rootQueryArgs.name = name;
@@ -651,7 +677,15 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
           type: type.gqltype,
           description: 'add',
           args: argsObject,
-          async resolve(parent, args) {
+          async resolve(parent, args, context) {
+            const params = {
+              type,
+              args,
+              operation: operations.SAVE,
+              context,
+            };
+
+            excecuteMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.input, operations.SAVE);
           },
@@ -660,7 +694,15 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
           type: type.gqltype,
           description: 'delete',
           args: { id: { type: new GraphQLNonNull(GraphQLID) } },
-          async resolve(parent, args) {
+          async resolve(parent, args, context) {
+            const params = {
+              type,
+              args,
+              operation: operations.DELETE,
+              context,
+            };
+
+            excecuteMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.id, operations.DELETE);
           },
@@ -677,7 +719,15 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
           type: type.gqltype,
           description: 'update',
           args: argsObject,
-          async resolve(parent, args) {
+          async resolve(parent, args, context) {
+            const params = {
+              type,
+              args,
+              operation: operations.UPDATE,
+              context,
+            };
+
+            excecuteMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.input, operations.UPDATE);
           },
@@ -689,7 +739,17 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
                 type: type.gqltype,
                 description: actionField.description,
                 args: argsObject,
-                async resolve(parent, args) {
+                async resolve(parent, args, context) {
+                  const params = {
+                    type,
+                    args,
+                    operation: operations.STATE_CHANGED,
+                    actionName,
+                    actionField,
+                    context,
+                  };
+
+                  excecuteMiddleware(params);
                   return executeOperation(type.model, type.gqltype, type.controller,
                     args.input, operations.STATE_CHANGED, actionField);
                 },
@@ -709,7 +769,14 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
         type: registeredMutation.outputModel,
         description: registeredMutation.description,
         args: argsObject,
-        async resolve(parent, args) {
+        async resolve(parent, args, context) {
+          const params = {
+            args,
+            operation: operations.CUSTOM_MUTATION,
+            entry,
+            context,
+          };
+          excecuteMiddleware(params);
           return executeRegisteredMutation(args.input, registeredMutation.callback);
         },
       };
@@ -1012,14 +1079,13 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
   return { aggregateClauses, matchesClauses };
 };
 
-const buildQuery = async (input, gqltype) => {
+const buildQuery = async (input, gqltype, isCount) => {
   console.log('Building Query');
   const aggregateClauses = [];
   const matchesClauses = { $match: {} };
   let addMatch = false;
-  let limitClause = {};
-  let skipClause = {};
-  let addPagination = false;
+  let limitClause = { $limit: 100 };
+  let skipClause = { $skip: 0 };
   let sortClause = {};
   let addSort = false;
 
@@ -1051,7 +1117,6 @@ const buildQuery = async (input, gqltype) => {
         const skip = filterField.size * (filterField.page - 1);
         limitClause = { $limit: filterField.size + skip };
         skipClause = { $skip: skip };
-        addPagination = true;
       }
     } else if (key === 'sort') {
       const sortExpressions = {};
@@ -1068,16 +1133,19 @@ const buildQuery = async (input, gqltype) => {
     aggregateClauses.push(matchesClauses);
   }
 
-  if (addSort) {
+  if (addSort && !isCount) {
     aggregateClauses.push(sortClause);
   }
 
-  if (addPagination) {
+  if (!isCount) {
     aggregateClauses.push(limitClause);
     aggregateClauses.push(skipClause);
   }
 
-  console.log(JSON.stringify(aggregateClauses));
+  if (isCount) {
+    aggregateClauses.push({ $count: 'size' });
+  }
+
   return aggregateClauses;
 };
 
@@ -1098,10 +1166,17 @@ const buildRootQuery = (name, includedTypes) => {
         rootQueryArgs.fields[type.simpleEntityEndpointName] = {
           type: type.gqltype,
           args: { id: { type: GraphQLID } },
-          resolve(parent, args) {
+          resolve(parent, args, context) {
             /* Here we define how to get data from database source
             this will return the type with id passed in argument
             by the user */
+            const params = {
+              type,
+              args,
+              operation: 'get_by_id',
+              context,
+            };
+            excecuteMiddleware(params);
             return type.model.findById(args.id);
           },
         };
@@ -1143,8 +1218,22 @@ const buildRootQuery = (name, includedTypes) => {
         rootQueryArgs.fields[type.listEntitiesEndpointName] = {
           type: new GraphQLList(type.gqltype),
           args: argsObject,
-          async resolve(parent, args) {
+          async resolve(parent, args, context) {
+            const params = {
+              type,
+              args,
+              operation: 'find',
+              context,
+            };
+            excecuteMiddleware(params);
             const aggregateClauses = await buildQuery(args, type.gqltype);
+
+            if (args.pagination && args.pagination.count) {
+              const aggregateClausesForCount = await buildQuery(args, type.gqltype, true);
+              const resultCount = await type.model.aggregate(aggregateClausesForCount);
+              context.count = resultCount[0] ? resultCount[0].size : 0;
+            }
+
             let result;
             if (aggregateClauses.length === 0) {
               result = type.model.find({});
