@@ -1231,7 +1231,7 @@ const buildRootQuery = (name, includedTypes) => {
             if (args.pagination && args.pagination.count) {
               const aggregateClausesForCount = await buildQuery(args, type.gqltype, true);
               const resultCount = await type.model.aggregate(aggregateClausesForCount);
-              context.count = resultCount[0].size;
+              context.count = resultCount[0] ? resultCount[0].size : 0;
             }
 
             let result;
