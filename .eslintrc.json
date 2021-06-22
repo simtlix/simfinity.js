@@ -12,6 +12,7 @@
     },
     "rules": {
         "default-case": "off",
+        "max-len": 0,
         "no-console":"off",
         "no-underscore-dangle": "off",
         "no-await-in-loop": "off",
