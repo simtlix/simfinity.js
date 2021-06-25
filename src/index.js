@@ -548,7 +548,6 @@ const onSaveObject = async (Model, gqltype, controller, args, session, linkToPar
   }
 
   const newObject = new Model(materializedModel.modelArgs);
-  console.log(JSON.stringify(newObject));
   newObject.$session(session);
 
   if (controller && controller.onSaving) {
@@ -929,8 +928,6 @@ const buildMatchesClause = (fieldname, operator, value) => {
 };
 
 const buildAggregationsForSort = (filterField, qlField, fieldName) => {
-  console.log(filterField);
-  console.log(fieldName);
   const aggregateClauses = {};
 
   let fieldType = qlField.type;
@@ -1044,13 +1041,10 @@ const buildAggregationsForSort = (filterField, qlField, fieldName) => {
       });
     });
   }
-  console.log({ aggregateClauses });
   return aggregateClauses;
 };
 
 const buildQueryTerms = async (filterField, qlField, fieldName) => {
-  console.log(filterField);
-  console.log(fieldName);
   const aggregateClauses = {};
   const matchesClauses = {};
 
@@ -1203,12 +1197,10 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
       }
     });
   }
-  console.log({ aggregateClauses, matchesClauses });
   return { aggregateClauses, matchesClauses };
 };
 
 const buildQuery = async (input, gqltype, isCount) => {
-  console.log('Building Query');
   const aggregateClauses = [];
   const matchesClauses = { $match: {} };
   let addMatch = false;
@@ -1265,9 +1257,6 @@ const buildQuery = async (input, gqltype, isCount) => {
           const qlField = gqltype.getFields()[sortParts[0]];
           const path = sort.field.slice(sort.field.indexOf('.') + 1);
           const aggreagtionsForSort = buildAggregationsForSort({ terms: [{ path }] }, qlField, sortParts[0]);
-          console.log('aggreagtionsForSort');
-          console.log(aggreagtionsForSort);
-          console.log('aggreagtionsForSort');
           for (const [prop, aggregate] of Object.entries(aggreagtionsForSort)) {
             if (!aggregationsIncluded[prop]) {
               aggregateClauses.push(aggregate.lookup);
@@ -1277,8 +1266,6 @@ const buildQuery = async (input, gqltype, isCount) => {
         }
 
         sortExpressions[fixedSortField] = sort.order === 'ASC' ? 1 : -1;
-
-        console.log(sort);
       });
       sortClause = { $sort: sortExpressions };
       addSort = true;
@@ -1383,7 +1370,6 @@ const buildRootQuery = (name, includedTypes) => {
             };
             excecuteMiddleware(params);
             const aggregateClauses = await buildQuery(args, type.gqltype);
-            console.log(aggregateClauses);
             if (args.pagination && args.pagination.count) {
               const aggregateClausesForCount = await buildQuery(args, type.gqltype, true);
               const resultCount = await type.model.aggregate(aggregateClausesForCount);
