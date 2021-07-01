@@ -548,7 +548,6 @@ const onSaveObject = async (Model, gqltype, controller, args, session, linkToPar
   }
 
   const newObject = new Model(materializedModel.modelArgs);
-  console.log(JSON.stringify(newObject));
   newObject.$session(session);
 
   if (controller && controller.onSaving) {
@@ -928,6 +927,123 @@ const buildMatchesClause = (fieldname, operator, value) => {
   return matches;
 };
 
+const buildAggregationsForSort = (filterField, qlField, fieldName) => {
+  const aggregateClauses = {};
+
+  let fieldType = qlField.type;
+  if (qlField.type instanceof GraphQLList) {
+    fieldType = qlField.type.ofType;
+  }
+  if (fieldType instanceof GraphQLObjectType
+    || isNonNullOfType(fieldType, GraphQLObjectType)) {
+    if (fieldType instanceof GraphQLNonNull) {
+      fieldType = qlField.type.ofType;
+    }
+
+    filterField.terms.forEach((term) => {
+      if (qlField.extensions && qlField.extensions.relation
+        && !qlField.extensions.relation.embedded) {
+        const { model } = typesDict.types[fieldType.name];
+        const { collectionName } = model.collection;
+        const localFieldName = qlField.extensions.relation.connectionField;
+        if (!aggregateClauses[fieldName]) {
+          let lookup = {};
+
+          if (qlField.type instanceof GraphQLList) {
+            lookup = {
+              $lookup: {
+                from: collectionName,
+                foreignField: localFieldName,
+                localField: '_id',
+                as: fieldName,
+              },
+            };
+          } else {
+            lookup = {
+              $lookup: {
+                from: collectionName,
+                foreignField: '_id',
+                localField: localFieldName,
+                as: fieldName,
+              },
+            };
+          }
+
+          aggregateClauses[fieldName] = {
+            lookup,
+            unwind: { $unwind: { path: `$${fieldName}`, preserveNullAndEmptyArrays: true } },
+          };
+        }
+      }
+
+      let currentGQLPathFieldType = qlField.type;
+      if (currentGQLPathFieldType instanceof GraphQLList
+        || currentGQLPathFieldType instanceof GraphQLNonNull) {
+        currentGQLPathFieldType = currentGQLPathFieldType.ofType;
+      }
+      let aliasPath = fieldName;
+      let embeddedPath = '';
+
+      term.path.split('.').forEach((pathFieldName) => {
+        const pathField = currentGQLPathFieldType.getFields()[pathFieldName];
+        if (pathField.type instanceof GraphQLObjectType
+          || pathField.type instanceof GraphQLList
+          || isNonNullOfType(pathField.type, GraphQLObjectType)) {
+          let pathFieldType = pathField.type;
+          if (pathField.type instanceof GraphQLList || pathField.type instanceof GraphQLNonNull) {
+            pathFieldType = pathField.type.ofType;
+          }
+          currentGQLPathFieldType = pathFieldType;
+          if (pathField.extensions && pathField.extensions.relation
+            && !pathField.extensions.relation.embedded) {
+            const currentPath = aliasPath + (embeddedPath !== '' ? `.${embeddedPath}` : '');
+            aliasPath += (embeddedPath !== '' ? `_${embeddedPath}_` : '_') + pathFieldName;
+
+            embeddedPath = '';
+
+            const pathModel = typesDict.types[pathFieldType.name].model;
+            const fieldPathCollectionName = pathModel.collection.collectionName;
+            const pathLocalFieldName = pathField.extensions.relation.connectionField;
+
+            if (!aggregateClauses[aliasPath]) {
+              let lookup = {};
+              if (pathField.type instanceof GraphQLList) {
+                lookup = {
+                  $lookup: {
+                    from: fieldPathCollectionName,
+                    foreignField: pathLocalFieldName,
+                    localField: `${currentPath}._id`,
+                    as: aliasPath,
+                  },
+                };
+              } else {
+                lookup = {
+                  $lookup: {
+                    from: fieldPathCollectionName,
+                    foreignField: '_id',
+                    localField: `${currentPath}.${pathLocalFieldName}`,
+                    as: aliasPath,
+                  },
+                };
+              }
+
+              aggregateClauses[aliasPath] = {
+                lookup,
+                unwind: { $unwind: { path: `$${aliasPath}`, preserveNullAndEmptyArrays: true } },
+              };
+            }
+          } else if (embeddedPath === '') {
+            embeddedPath += pathFieldName;
+          } else {
+            embeddedPath += `.${pathFieldName}`;
+          }
+        }
+      });
+    });
+  }
+  return aggregateClauses;
+};
+
 const buildQueryTerms = async (filterField, qlField, fieldName) => {
   const aggregateClauses = {};
   const matchesClauses = {};
@@ -1085,7 +1201,6 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
 };
 
 const buildQuery = async (input, gqltype, isCount) => {
-  console.log('Building Query');
   const aggregateClauses = [];
   const matchesClauses = { $match: {} };
   let addMatch = false;
@@ -1093,6 +1208,7 @@ const buildQuery = async (input, gqltype, isCount) => {
   let skipClause = { $skip: 0 };
   let sortClause = {};
   let addSort = false;
+  const aggregationsIncluded = {};
 
   for (const [key, filterField] of Object.entries(input)) {
     if (Object.prototype.hasOwnProperty.call(input, key) && key !== 'pagination' && key !== 'sort') {
@@ -1101,10 +1217,11 @@ const buildQuery = async (input, gqltype, isCount) => {
       const result = await buildQueryTerms(filterField, qlField, key);
 
       if (result) {
-        Object.values(result.aggregateClauses).forEach((aggregate) => {
+        for (const [prop, aggregate] of Object.entries(result.aggregateClauses)) {
           aggregateClauses.push(aggregate.lookup);
           aggregateClauses.push(aggregate.unwind);
-        });
+          aggregationsIncluded[prop] = true;
+        }
 
         for (const [matchClauseKey, matchClause] of Object.entries(result.matchesClauses)) {
           if (Object.prototype.hasOwnProperty.call(result.matchesClauses, matchClauseKey)) {
@@ -1126,8 +1243,29 @@ const buildQuery = async (input, gqltype, isCount) => {
     } else if (key === 'sort') {
       const sortExpressions = {};
       filterField.terms.forEach((sort) => {
-        console.log(sort);
-        sortExpressions[sort.field] = sort.order === 'ASC' ? 1 : -1;
+        let fixedSortField = sort.field;
+
+        if (sort.field.indexOf('.') >= 0) {
+          const sortParts = sort.field.split('.');
+          // eslint-disable-next-line prefer-destructuring
+          fixedSortField = sortParts[0];
+          // eslint-disable-next-line no-plusplus
+          for (let i = 1; i < sortParts.length - 1; i++) {
+            fixedSortField += `_${sortParts[i]}`;
+          }
+          fixedSortField += `.${sortParts[sortParts.length - 1]}`;
+          const qlField = gqltype.getFields()[sortParts[0]];
+          const path = sort.field.slice(sort.field.indexOf('.') + 1);
+          const aggreagtionsForSort = buildAggregationsForSort({ terms: [{ path }] }, qlField, sortParts[0]);
+          for (const [prop, aggregate] of Object.entries(aggreagtionsForSort)) {
+            if (!aggregationsIncluded[prop]) {
+              aggregateClauses.push(aggregate.lookup);
+              aggregateClauses.push(aggregate.unwind);
+            }
+          }
+        }
+
+        sortExpressions[fixedSortField] = sort.order === 'ASC' ? 1 : -1;
       });
       sortClause = { $sort: sortExpressions };
       addSort = true;
@@ -1232,7 +1370,6 @@ const buildRootQuery = (name, includedTypes) => {
             };
             excecuteMiddleware(params);
             const aggregateClauses = await buildQuery(args, type.gqltype);
-
             if (args.pagination && args.pagination.count) {
               const aggregateClausesForCount = await buildQuery(args, type.gqltype, true);
               const resultCount = await type.model.aggregate(aggregateClausesForCount);
