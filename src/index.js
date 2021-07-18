@@ -473,6 +473,16 @@ const onDeleteObject = async (Model, gqltype, controller, args, session, linkToP
   return Model.findByIdAndDelete(args, deletedObject.modelArgs).session(session);
 };
 
+const onDeleteSubject = async (Model, controller, id, session) => {
+  const currentObject = await Model.findById({ _id: id }).lean();
+
+  if (controller && controller.onDelete) {
+    await controller.onDelete(currentObject, session);
+  }
+
+  return Model.findByIdAndDelete(id, { session });
+};
+
 const onUpdateSubject = async (Model, gqltype, controller, args, session, linkToParent) => {
   const materializedModel = await materializeModel(args, gqltype, linkToParent, 'UPDATE', session);
   const objectId = args.id;
@@ -510,9 +520,7 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
     await controller.onUpdating(objectId, modifiedObject, args, session);
   }
 
-  const result = Model.findByIdAndUpdate(
-    objectId, modifiedObject, { new: true },
-  );
+  const result = Model.findByIdAndUpdate(objectId, modifiedObject, { session, new: true });
 
   if (controller && controller.onUpdated) {
     await controller.onUpdated(result, args, session);
@@ -633,7 +641,10 @@ const executeItemFunction = async (gqltype, collectionField, objectId, session,
       };
       break;
     case operations.DELETE:
-    // TODO: implement
+      operationFunction = async (collectionItem) => {
+        await onDeleteSubject(typesDict.types[collectionGQLType.name].model,
+          typesDict.types[collectionGQLType.name].controller, collectionItem, session);
+      };
   }
 
   for (const element of collectionFieldsList) {
