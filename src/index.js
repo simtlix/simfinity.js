@@ -7,7 +7,7 @@ const QLOperator = require('./const/QLOperator');
 const QLValue = require('./const/QLValue');
 const QLSort = require('./const/QLSort');
 
-mongoose.set('useFindAndModify', false);
+mongoose.set('strictQuery', false);
 
 const {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
@@ -470,7 +470,7 @@ const onDeleteObject = async (Model, gqltype, controller, args, session, linkToP
     await controller.onDelete(deletedObject, session);
   }
 
-  return Model.findByIdAndDelete(args, deletedObject.modelArgs).session(session);
+  return Model.findByIdAndDelete({ _id: args.id }).session(session);
 };
 
 const onUpdateSubject = async (Model, gqltype, controller, args, session, linkToParent) => {
@@ -481,7 +481,6 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
     await iterateonCollectionFields(materializedModel, gqltype, objectId, session);
   }
 
-  let modifiedObject = materializedModel.modelArgs;
   const currentObject = await Model.findById({ _id: objectId }).lean();
 
   const argTypes = gqltype.getFields();
@@ -490,32 +489,32 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
     if (fieldEntry.extensions && fieldEntry.extensions.relation
       && fieldEntry.extensions.relation.embedded) {
       const oldObjectData = currentObject[fieldEntryName];
-      const newObjectData = modifiedObject[fieldEntryName];
+      const newObjectData = materializedModel.modelArgs[fieldEntryName];
       if (newObjectData) {
         if (Array.isArray(oldObjectData) && Array.isArray(newObjectData)) {
-          modifiedObject[fieldEntryName] = newObjectData;
+          materializedModel.modelArgs[fieldEntryName] = newObjectData;
         } else {
-          modifiedObject[fieldEntryName] = { ...oldObjectData, ...newObjectData };
+          materializedModel.modelArgs[fieldEntryName] = { ...oldObjectData, ...newObjectData };
         }
       }
     }
 
     if (args[fieldEntryName] === null
       && !(fieldEntry.type instanceof GraphQLNonNull)) {
-      modifiedObject = { ...modifiedObject, $unset: { [fieldEntryName]: '' } };
+      materializedModel.modelArgs = { ...materializedModel.modelArgs, $unset: { [fieldEntryName]: '' } };
     }
   });
 
   if (controller && controller.onUpdating) {
-    await controller.onUpdating(objectId, modifiedObject, args, session);
+    await controller.onUpdating(objectId, materializedModel.modelArgs, session);
   }
 
   const result = Model.findByIdAndUpdate(
-    objectId, modifiedObject, { new: true },
-  );
+    objectId, materializedModel.modelArgs, { new: true },
+  ).session(session);
 
   if (controller && controller.onUpdated) {
-    await controller.onUpdated(result, args, session);
+    await controller.onUpdated(result, session);
   }
 
   return result;
