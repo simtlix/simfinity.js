@@ -1,6 +1,6 @@
 {
   "name": "@simtlix/simfinity-js",
-  "version": "1.0.9",
+  "version": "1.2.0",
   "description": "",
   "main": "src/index.js",
   "scripts": {
@@ -16,7 +16,7 @@
   },
   "peerDependencies": {
     "graphql": "^14.7.0",
-    "mongoose": "^5.12.1"
+    "mongoose": "^8.15.1"
   },
   "devDependencies": {
     "eslint": "^7.7.0",
