@@ -349,6 +349,124 @@ mutation {
 
 This will create a new book and set its `authorId` field to the provided author ID.
 
+### Adding an Embedded Object in a Mutation
+
+To add an embedded object within a mutation, you can include the embedded object directly in the input. For example, if a `Book` has an embedded `Publisher` object, you can add it like this:
+
+```graphql
+mutation {
+  addBook(input: {
+    title: "The Hitchhiker's Guide to the Galaxy",
+    publisher: {
+      name: "Pan Books",
+      location: "London"
+    }
+  }) {
+    id
+    title
+    publisher {
+      name
+      location
+    }
+  }
+}
+```
+
+This will create a new book with an embedded `Publisher` object containing the specified `name` and `location`.
+
+### Working with Collection Fields
+
+If your type has a field that is a collection (e.g., an array of objects), you can add, modify, and delete items within that collection. Simfinity.js uses a special input type for these operations, which is defined by the `createOneToManyInputType` function. This input type includes fields for adding, updating, and deleting items within a collection.
+
+#### Adding Items to a Collection
+
+To add items to a collection field, you can include them directly in the input. For example, if a `Book` has a collection of `Reviews`, you can add them like this:
+
+```graphql
+mutation {
+  addBook(input: {
+    title: "The Hitchhiker's Guide to the Galaxy",
+    reviews: {
+      added: [
+        {
+          rating: 5,
+          comment: "A fantastic read!"
+        },
+        {
+          rating: 4,
+          comment: "Very enjoyable."
+        }
+      ]
+    }
+  }) {
+    id
+    title
+    reviews {
+      rating
+      comment
+    }
+  }
+}
+```
+
+This will create a new book with a collection of `Reviews`.
+
+#### Modifying Items in a Collection
+
+To modify items in a collection, you can use the `update` mutation and specify the changes you want to make. For example, to update a specific review:
+
+```graphql
+mutation {
+  updateBook(input: {
+    id: "book_id_here",
+    reviews: {
+      updated: [
+        {
+          id: "review_id_here",
+          rating: 5,
+          comment: "Updated comment."
+        }
+      ]
+    }
+  }) {
+    id
+    title
+    reviews {
+      id
+      rating
+      comment
+    }
+  }
+}
+```
+
+This will update the specified review within the book's collection.
+
+#### Deleting Items from a Collection
+
+To delete items from a collection, you can use the `update` mutation and specify the IDs of the items you want to remove. For example, to delete a specific review:
+
+```graphql
+mutation {
+  updateBook(input: {
+    id: "book_id_here",
+    reviews: {
+      deleted: ["review_id_to_delete"]
+    }
+  }) {
+    id
+    title
+    reviews {
+      id
+      rating
+      comment
+    }
+  }
+}
+```
+
+This will remove the review with the specified ID from the book's collection.
+
 ---
 
 ## Querying Data
