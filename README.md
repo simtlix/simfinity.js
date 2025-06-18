@@ -209,8 +209,12 @@ const AuthorType = new GraphQLObjectType({
       extensions: {
         relation: {
           connectionField: 'authorId',
+          displayField: 'title'
         },
       },
+      resolve(parent) {
+        return simfinity.getModel(BookType).find({ authorId: parent.id });
+      }
     },
   }),
 });
@@ -225,8 +229,12 @@ const BookType = new GraphQLObjectType({
       extensions: {
         relation: {
           connectionField: 'authorId',
+          displayField: 'name'
         },
       },
+      resolve(parent) {
+        return simfinity.getModel(AuthorType).findById(parent.authorId);
+      }
     },
   }),
 });
@@ -248,8 +256,8 @@ const GraphQLDateTime = require('graphql-iso-date').GraphQLDateTime;
 const simfinity = require('@simtlix/simfinity-js');
 const seasonType = require('./season'); // Assuming seasonType is defined elsewhere
 
-const episodeType = new GraphQLObjectType({
-  name: 'episode',
+const EpisodeType = new GraphQLObjectType({
+  name: 'Episode',
   fields: () => ({
     id: { type: GraphQLID },
     number: { type: GraphQLInt },
@@ -259,22 +267,21 @@ const episodeType = new GraphQLObjectType({
       type: seasonType,
       extensions: {
         relation: {
-          connectionField: 'seasonID',
+          connectionField: 'seasonId',
           displayField: 'number'
-        }
+        },
       },
       resolve(parent) {
-        // Use simfinity.getModel() to get the Mongoose model for a GraphQL type
-        return simfinity.getModel(seasonType).findById(parent.seasonID);
+        return simfinity.getModel(seasonType).findById(parent.seasonId);
       }
     },
-  })
+  }),
 });
 ```
 
 In this example:
 - The `season` field on `episodeType` is linked to `seasonType`.
-- `connectionField: 'seasonID'` tells Simfinity that the `seasonID` field in the episode document holds the ID of the related season.
+- `connectionField: 'seasonId'` tells Simfinity that the `seasonId` field in the episode document holds the ID of the related season.
 - `displayField: 'number'` suggests that the `number` field of a season (e.g., season 1, season 2) should be used to represent it.
 - The `resolve` function manually fetches the season document using its ID from the parent episode. This is useful for custom logic, but often not necessary, as Simfinity can resolve it automatically.
 
@@ -824,5 +831,393 @@ mutation {
 ```
 
 This will change the season's state from `SCHEDULED` to `ACTIVE` and execute the `action` function defined for the `activate` transition.
+
+## Nested Collections Example
+
+Simfinity.js supports nested collections, allowing you to create complex data structures in a single request. Here's an example of how to create a TV series with seasons and episodes:
+
+```graphql
+mutation {
+  addserie(input: {
+    name: "Breaking Bad"
+    categories: ["crime", "drama", "thriller"]
+    director: { 
+      name: "Vince Gilligan" 
+      country: "United States" 
+    }
+    stars: {
+      added: [
+        { star: { id: "611511b07153a6000a2da7cb" } },
+        { star: { id: "6851a567e9089de526badd34" } }
+      ]
+    }
+    seasons: { 
+      added: [
+        {
+          number: 1
+          year: 2008
+          episodes: { 
+            added: [
+              {
+                number: 1
+                name: "Pilot"
+                date: "2008-01-20T02:00:00.000Z"
+              },
+              {
+                number: 2
+                name: "Cat's in the Bag..."
+                date: "2008-01-27T02:00:00.000Z"
+              }
+            ]
+          }
+        },
+        {
+          number: 2
+          year: 2009
+          episodes: { 
+            added: [
+              {
+                number: 1
+                name: "Seven Thirty-Seven"
+                date: "2009-03-08T02:00:00.000Z"
+              },
+              {
+                number: 2
+                name: "Grilled"
+                date: "2009-03-15T03:00:00.000Z"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }) {
+    id
+    name
+    director { 
+      name 
+      country 
+    }
+    categories
+    seasons {
+      number
+      year
+      episodes {
+        number
+        name
+        date
+      }
+    }
+  }
+}
+```
+
+This example demonstrates:
+1. Creating a series with basic information (name, categories, director)
+2. Adding stars using their IDs
+3. Creating multiple seasons with their respective years
+4. Adding episodes to each season with their details (number, name, date)
+5. The response structure showing the created data
+
+The nested structure allows you to create complex relationships in a single request, making it efficient to set up your data model.
+
+## Complex Relationship Example
+
+Here's an example of a more complex relationship structure that connects multiple types:
+
+```javascript
+const AssignedStarAndSerieType = new GraphQLObjectType({
+  name: 'AssignedStarAndSerie',
+  fields: () => ({
+    id: { type: GraphQLID },
+    serie: {
+      type: SerieType,
+      extensions: {
+        relation: {
+          embedded: false,
+          connectionField: 'serieId',
+          displayField: 'name'
+        }
+      },
+      resolve(parent) {
+        return simfinity.getModel(SerieType).findById(parent.serieId);
+      }
+    },
+    star: {
+      type: StarType,
+      extensions: {
+        relation: {
+          embedded: false,
+          connectionField: 'starId',
+          displayField: 'name'
+        }
+      },
+      resolve(parent) {
+        return simfinity.getModel(StarType).findById(parent.starId);
+      }
+    },
+  })
+});
+```
+
+This example demonstrates:
+1. Multiple relations in a single type
+2. Using `embedded: false` to indicate these are separate collections
+3. Using `displayField` to specify which field should be used to represent the related entity
+4. Custom `resolve` functions for each relation
+5. Proper naming conventions for ID fields (camelCase)
+
+## Extensions Usage
+
+Simfinity.js uses extensions at both field and type levels to provide additional functionality and configuration. Here are the different ways you can use extensions:
+
+### Field Level Extensions
+
+1. **Relations**
+```javascript
+{
+  extensions: {
+    relation: {
+      connectionField: 'authorId',  // Required: The field storing the related ID
+      displayField: 'name',         // Optional: Field to use for display
+      embedded: false              // Optional: Whether the relation is embedded
+    }
+  }
+}
+```
+
+2. **Unique Fields**
+```javascript
+{
+  extensions: {
+    unique: true  // Makes the field unique in the database
+  }
+}
+```
+
+3. **Read Only Fields**
+```javascript
+{
+  extensions: {
+    readOnly: true  // Prevents the field from being included in input types for mutations
+  }
+}
+```
+
+4. **Validations**
+```javascript
+{
+  extensions: {
+    validations: {
+      save: [/* array of validators */],
+      update: [/* array of validators */],
+      delete: [/* array of validators */]
+    }
+  }
+}
+```
+
+### Field Validations Example
+
+Here's an example of how to implement field-level validations:
+
+```javascript
+const { SimfinityError } = require('@simtlix/simfinity-js');
+
+// Custom validation error
+class ValidationError extends SimfinityError {
+  constructor(message) {
+    super(message, 'VALIDATION_ERROR', 400);
+  }
+}
+
+// Custom validator
+const validateAge = async (typeName, fieldName, value, session) => {
+  if (value < 0 || value > 120) {
+    throw new ValidationError(`Invalid age: ${value}. Age must be between 0 and 120.`);
+  }
+};
+
+const PersonType = new GraphQLObjectType({
+  name: 'Person',
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: { 
+      type: GraphQLString,
+      extensions: {
+        validations: {
+          save: [
+            async (typeName, fieldName, value, session) => {
+              if (!value || value.length < 2) {
+                throw new ValidationError('Name must be at least 2 characters long');
+              }
+            }
+          ],
+          update: [
+            async (typeName, fieldName, value, session) => {
+              if (value && value.length < 2) {
+                throw new ValidationError('Name must be at least 2 characters long');
+              }
+            }
+          ]
+        }
+      }
+    },
+    age: {
+      type: GraphQLInt,
+      extensions: {
+        validations: {
+          save: [validateAge],
+          update: [validateAge]
+        }
+      }
+    }
+  })
+});
+```
+
+### Custom Errors
+
+You can create custom errors by extending `SimfinityError`. This is useful for creating domain-specific errors with proper error codes and status codes:
+
+```javascript
+const { SimfinityError } = require('@simtlix/simfinity-js');
+
+// Business logic error
+class BusinessError extends SimfinityError {
+  constructor(message) {
+    super(message, 'BUSINESS_ERROR', 400);
+  }
+}
+
+// Authorization error
+class AuthorizationError extends SimfinityError {
+  constructor(message) {
+    super(message, 'UNAUTHORIZED', 401);
+  }
+}
+
+// Not found error
+class NotFoundError extends SimfinityError {
+  constructor(message) {
+    super(message, 'NOT_FOUND', 404);
+  }
+}
+
+// Usage in validators or business logic
+const validateOrder = async (typeName, fieldName, value, session) => {
+  if (!value.items || value.items.length === 0) {
+    throw new BusinessError('Order must contain at least one item');
+  }
+  
+  if (!value.customerId) {
+    throw new AuthorizationError('Customer ID is required');
+  }
+  
+  const customer = await CustomerModel.findById(value.customerId);
+  if (!customer) {
+    throw new NotFoundError(`Customer with ID ${value.customerId} not found`);
+  }
+};
+```
+
+### Type Level Extensions
+
+1. **Validations**
+```javascript
+const BookType = new GraphQLObjectType({
+  name: 'Book',
+  extensions: {
+    validations: {
+      save: [/* array of validators */],
+      update: [/* array of validators */],
+      delete: [/* array of validators */]
+    }
+  },
+  fields: () => ({
+    // ... fields
+  })
+});
+```
+
+### State Machine
+
+When a type is configured with a state machine, the `state` field is automatically managed by the state machine. This means:
+- The `state` field cannot be directly modified through mutations
+- State transitions are handled through dedicated state machine mutations
+- The state field is automatically read-only and managed by the system
+
+Example of a type with state machine:
+```javascript
+const OrderType = new GraphQLObjectType({
+  name: 'Order',
+  fields: () => ({
+    id: { type: GraphQLID },
+    state: { type: GraphQLString },  // This field is managed by the state machine
+    // ... other fields
+  })
+});
+
+// Connect with state machine
+simfinity.connect(null, OrderType, 'order', 'orders', null, null, {
+  states: ['PENDING', 'PROCESSING', 'COMPLETED'],
+  transitions: {
+    process: {
+      from: ['PENDING'],
+      to: 'PROCESSING'
+    },
+    complete: {
+      from: ['PROCESSING'],
+      to: 'COMPLETED'
+    }
+  }
+});
+```
+
+### Example Usage
+
+Here's a complete example showing multiple extension usages:
+
+```javascript
+const BookType = new GraphQLObjectType({
+  name: 'Book',
+  extensions: {
+    validations: {
+      save: [
+        async (typeName, fieldName, value, session) => {
+          // Custom validation logic
+        }
+      ]
+    }
+  },
+  fields: () => ({
+    id: { type: GraphQLID },
+    title: { 
+      type: GraphQLString,
+      extensions: {
+        unique: true
+      }
+    },
+    author: {
+      type: AuthorType,
+      extensions: {
+        relation: {
+          connectionField: 'authorId',
+          displayField: 'name',
+          embedded: false
+        }
+      },
+      resolve(parent) {
+        return simfinity.getModel(AuthorType).findById(parent.authorId);
+      }
+    }
+  })
+});
+```
+
+This example demonstrates:
+1. Type-level validations for save operations
+2. Field-level unique constraint
+3. Field-level relation configuration
 
 
