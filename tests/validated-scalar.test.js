@@ -11,6 +11,7 @@ describe('Custom Validated Scalar Types', () => {
   let UserType;
 
   beforeAll(() => {
+    simfinity.preventCreatingCollection(true);
     // Create custom validated scalar types
     EmailScalar = createValidatedScalar(
       'Email',

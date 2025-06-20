@@ -93,6 +93,12 @@ module.exports.SimfinityError = SimfinityError;
 
 module.exports.InternalServerError = InternalServerError;
 
+let preventCollectionCreation = false;
+
+module.exports.preventCreatingCollection = (prevent) => {
+  preventCollectionCreation = !!prevent;
+};
+
 /* Schema defines data on the Graph like object types(book type), relation between
 these object types and describes how it can reach into the graph to interact with
 the data to retrieve or mutate the data */
@@ -960,7 +966,9 @@ const generateModel = (gqlType, onModelCreated) => {
   if (onModelCreated) {
     onModelCreated(model);
   }
-  model.createCollection();
+  if (!preventCollectionCreation) {
+    model.createCollection();
+  }
   return model;
 };
 
