@@ -521,9 +521,8 @@ const iterateonCollectionFields = async (materializedModel, gqltype, objectId, s
   }
 };
 
-const onDeleteObject = async (Model, gqltype, controller, args, session, linkToParent) => {
-  const result = await materializeModel(args, gqltype, linkToParent, 'DELETE', session);
-  const deletedObject = new Model(result.modelArgs);
+const onDeleteObject = async (Model, gqltype, controller, args, session) => {
+  const deletedObject = await Model.findById({ _id: args }).lean();
 
   if (controller && controller.onDelete) {
     await controller.onDelete(deletedObject, session);
