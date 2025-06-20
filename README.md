@@ -1121,6 +1121,101 @@ const validateOrder = async (typeName, fieldName, value, session) => {
 };
 ```
 
+### Custom Validated Scalar Types
+
+Simfinity.js provides a utility function to create custom GraphQL scalar types with built-in validation. This is useful for creating domain-specific scalar types that enforce business rules.
+
+#### Using `createValidatedScalar`
+
+The `createValidatedScalar` function allows you to create custom scalar types that extend existing GraphQL scalar types and add custom validation logic.
+
+```javascript
+const { GraphQLString, GraphQLInt } = require('graphql');
+const { createValidatedScalar } = require('@simtlix/simfinity-js');
+
+// Email scalar with validation
+const EmailScalar = createValidatedScalar(
+  'Email',
+  'A valid email address',
+  GraphQLString,
+  (value) => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(value)) {
+      throw new Error('Invalid email format');
+    }
+  }
+);
+
+// Positive integer scalar
+const PositiveIntScalar = createValidatedScalar(
+  'PositiveInt',
+  'A positive integer',
+  GraphQLInt,
+  (value) => {
+    if (value <= 0) {
+      throw new Error('Value must be positive');
+    }
+  }
+);
+
+// Phone number scalar
+const PhoneScalar = createValidatedScalar(
+  'Phone',
+  'A valid phone number',
+  GraphQLString,
+  (value) => {
+    const phoneRegex = /^\+?[\d\s\-()]+$/;
+    if (!phoneRegex.test(value)) {
+      throw new Error('Invalid phone number format');
+    }
+  }
+);
+```
+
+#### Using Custom Scalars in Your Types
+
+Once you've created your custom scalar types, you can use them in your GraphQL object types:
+
+```javascript
+const UserType = new GraphQLObjectType({
+  name: 'User',
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: { type: GraphQLString },
+    email: { type: EmailScalar },        // Custom email validation
+    age: { type: PositiveIntScalar },    // Custom positive integer validation
+    phone: { type: PhoneScalar },        // Custom phone validation
+  }),
+});
+```
+
+#### Supported Base Scalar Types
+
+The `createValidatedScalar` function supports all standard GraphQL scalar types as base types:
+
+- `GraphQLString` - For string-based custom scalars
+- `GraphQLInt` - For integer-based custom scalars  
+- `GraphQLFloat` - For float-based custom scalars
+- `GraphQLBoolean` - For boolean-based custom scalars
+- `GraphQLID` - For ID-based custom scalars
+
+#### Validation Features
+
+- **Type Safety**: The function validates that the provided `baseScalarType` is a valid GraphQL scalar type
+- **AST Kind Validation**: Automatically uses the correct AST kind for the base scalar type
+- **Base Type Parsing**: Leverages the base scalar's parsing logic before applying custom validation
+- **Error Handling**: Throws descriptive errors for invalid inputs
+
+#### Error Examples
+
+```javascript
+// This will throw an error: baseScalarType is required
+createValidatedScalar('Invalid', 'Invalid', null, () => {});
+
+// This will throw an error: baseScalarType must be a valid GraphQL scalar type
+createValidatedScalar('Invalid', 'Invalid', 'not a scalar', () => {});
+```
+
 ### Type Level Extensions
 
 1. **Validations**

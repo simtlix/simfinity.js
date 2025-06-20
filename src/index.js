@@ -12,7 +12,7 @@ mongoose.set('strictQuery', false);
 const {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType, __Field,
-  GraphQLInt, GraphQLEnumType, GraphQLBoolean, GraphQLFloat,
+  GraphQLInt, GraphQLEnumType, GraphQLBoolean, GraphQLFloat, Kind,
 } = graphql;
 
 // Adding 'extensions' field into instronspection query
@@ -161,6 +161,60 @@ const isNonNullOfTypeForNotScalar = (fieldEntryType, graphQLType) => {
 
 const isGraphQLisoDate = (typeName) => typeName === 'DateTime' || typeName === 'Date' || typeName === 'Time';
 
+function createValidatedScalar(name, description, baseScalarType, validate) {
+  if (!baseScalarType) {
+    throw new Error('baseScalarType is required');
+  }
+
+  // Validate that baseScalarType is a valid GraphQL scalar type
+  if (!(baseScalarType instanceof GraphQLScalarType)) {
+    throw new Error('baseScalarType must be a valid GraphQL scalar type');
+  }
+
+  // Check if it's one of the standard GraphQL scalar types
+  const validScalarTypes = [GraphQLString, GraphQLInt, GraphQLFloat, GraphQLBoolean, GraphQLID];
+  const isValidStandardType = validScalarTypes.some((type) => baseScalarType === type);
+
+  if (!isValidStandardType && !baseScalarType.name) {
+    throw new Error('baseScalarType must be a standard GraphQL scalar type or a custom scalar with a valid name');
+  }
+
+  const kindMap = {
+    String: Kind.STRING,
+    Int: Kind.INT,
+    Float: Kind.FLOAT,
+    Boolean: Kind.BOOLEAN,
+    ID: Kind.STRING, // IDs are represented as strings in AST
+  };
+
+  // Try to infer the kind from the baseScalarType name
+  const baseKind = kindMap[baseScalarType.name] || Kind.STRING;
+
+  const scalar = new GraphQLScalarType({
+    name,
+    description,
+    serialize(value) {
+      validate(value);
+      return baseScalarType.serialize(value);
+    },
+    parseValue(value) {
+      validate(value);
+      return baseScalarType.parseValue(value);
+    },
+    parseLiteral(ast, variables) {
+      if (ast.kind !== baseKind) {
+        throw new Error(`${name} must be a ${baseScalarType.name}`);
+      }
+      const value = baseScalarType.parseLiteral(ast, variables);
+      validate(value);
+      return value;
+    },
+  });
+
+  scalar.baseScalarType = baseScalarType;
+  return scalar;
+}
+
 const createOneToManyInputType = (inputNamePrefix, fieldEntryName,
   inputType, updateInputType) => new GraphQLInputObjectType({
   name: `OneToMany${inputNamePrefix}${fieldEntryName}`,
@@ -211,8 +265,7 @@ const buildInputType = (gqltype) => {
         if (fieldEntry.type instanceof GraphQLScalarType
           || fieldEntry.type instanceof GraphQLEnumType
           || isNonNullOfType(fieldEntry.type, GraphQLScalarType)
-          || isNonNullOfType(fieldEntry.type, GraphQLEnumType)
-        ) {
+          || isNonNullOfType(fieldEntry.type, GraphQLEnumType)) {
           if (fieldEntryName !== 'id') {
             fieldArg.type = fieldEntry.type;
           }
@@ -805,10 +858,18 @@ const generateSchemaDefinition = (gqlType) => {
   const schemaArg = {};
 
   for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
+    // Helper function to get the base scalar type for custom validated scalars
+    const getBaseScalarType = (scalarType) => scalarType.baseScalarType || scalarType;
+
+    // Helper function to check if a type is a custom validated scalar
+    const isCustomValidatedScalar = (type) => type instanceof GraphQLScalarType && type.baseScalarType;
+
     if (fieldEntry.type === GraphQLID || isNonNullOfTypeForNotScalar(fieldEntry.type, GraphQLID)) {
       schemaArg[fieldEntryName] = mongoose.Schema.Types.ObjectId;
     } else if (fieldEntry.type === GraphQLString
-      || isNonNullOfTypeForNotScalar(fieldEntry.type, GraphQLString)) {
+      || isNonNullOfTypeForNotScalar(fieldEntry.type, GraphQLString)
+      || (isCustomValidatedScalar(fieldEntry.type) && getBaseScalarType(fieldEntry.type) === GraphQLString)
+      || (isNonNullOfType(fieldEntry.type, GraphQLScalarType) && isCustomValidatedScalar(fieldEntry.type.ofType) && getBaseScalarType(fieldEntry.type.ofType) === GraphQLString)) {
       if (fieldEntry.extensions && fieldEntry.extensions.unique) {
         schemaArg[fieldEntryName] = { type: String, unique: true };
       } else {
@@ -822,21 +883,27 @@ const generateSchemaDefinition = (gqlType) => {
         schemaArg[fieldEntryName] = String;
       }
     } else if (fieldEntry.type === GraphQLInt
-      || isNonNullOfTypeForNotScalar(fieldEntry.type, GraphQLInt)) {
+      || isNonNullOfTypeForNotScalar(fieldEntry.type, GraphQLInt)
+      || (isCustomValidatedScalar(fieldEntry.type) && getBaseScalarType(fieldEntry.type) === GraphQLInt)
+      || (isNonNullOfType(fieldEntry.type, GraphQLScalarType) && isCustomValidatedScalar(fieldEntry.type.ofType) && getBaseScalarType(fieldEntry.type.ofType) === GraphQLInt)) {
       if (fieldEntry.extensions && fieldEntry.extensions.unique) {
         schemaArg[fieldEntryName] = { type: Number, unique: true };
       } else {
         schemaArg[fieldEntryName] = Number;
       }
     } else if (fieldEntry.type === GraphQLFloat
-      || isNonNullOfTypeForNotScalar(fieldEntry.type, GraphQLFloat)) {
+      || isNonNullOfTypeForNotScalar(fieldEntry.type, GraphQLFloat)
+      || (isCustomValidatedScalar(fieldEntry.type) && getBaseScalarType(fieldEntry.type) === GraphQLFloat)
+      || (isNonNullOfType(fieldEntry.type, GraphQLScalarType) && isCustomValidatedScalar(fieldEntry.type.ofType) && getBaseScalarType(fieldEntry.type.ofType) === GraphQLFloat)) {
       if (fieldEntry.extensions && fieldEntry.extensions.unique) {
         schemaArg[fieldEntryName] = { type: Number, unique: true };
       } else {
         schemaArg[fieldEntryName] = Number;
       }
     } else if (fieldEntry.type === GraphQLBoolean
-      || isNonNullOfTypeForNotScalar(fieldEntry.type, GraphQLBoolean)) {
+      || isNonNullOfTypeForNotScalar(fieldEntry.type, GraphQLBoolean)
+      || (isCustomValidatedScalar(fieldEntry.type) && getBaseScalarType(fieldEntry.type) === GraphQLBoolean)
+      || (isNonNullOfType(fieldEntry.type, GraphQLScalarType) && isCustomValidatedScalar(fieldEntry.type.ofType) && getBaseScalarType(fieldEntry.type.ofType) === GraphQLBoolean)) {
       schemaArg[fieldEntryName] = Boolean;
     } else if (fieldEntry.type instanceof GraphQLObjectType
       || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
@@ -867,11 +934,14 @@ const generateSchemaDefinition = (gqlType) => {
           }
         }
       } else if (fieldEntry.type.ofType === GraphQLString
-        || fieldEntry.type.ofType instanceof GraphQLEnumType) {
+        || fieldEntry.type.ofType instanceof GraphQLEnumType
+        || (isCustomValidatedScalar(fieldEntry.type.ofType) && getBaseScalarType(fieldEntry.type.ofType) === GraphQLString)) {
         schemaArg[fieldEntryName] = [String];
-      } else if (fieldEntry.type.ofType === GraphQLBoolean) {
+      } else if (fieldEntry.type.ofType === GraphQLBoolean
+        || (isCustomValidatedScalar(fieldEntry.type.ofType) && getBaseScalarType(fieldEntry.type.ofType) === GraphQLBoolean)) {
         schemaArg[fieldEntryName] = [Boolean];
-      } else if (fieldEntry.type.ofType === GraphQLInt || fieldEntry.type.ofType === GraphQLFloat) {
+      } else if (fieldEntry.type.ofType === GraphQLInt || fieldEntry.type.ofType === GraphQLFloat
+        || (isCustomValidatedScalar(fieldEntry.type.ofType) && (getBaseScalarType(fieldEntry.type.ofType) === GraphQLInt || getBaseScalarType(fieldEntry.type.ofType) === GraphQLFloat))) {
         schemaArg[fieldEntryName] = [Number];
       } else if (isGraphQLisoDate(fieldEntry.type.ofType.name)) {
         schemaArg[fieldEntryName] = [Date];
@@ -1454,3 +1524,5 @@ module.exports.addNoEndpointType = (gqltype) => {
 
   typesDictForUpdate.types[gqltype.name] = { ...typesDict.types[gqltype.name] };
 };
+
+module.exports.createValidatedScalar = createValidatedScalar;
