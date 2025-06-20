@@ -44,6 +44,28 @@ Once you've connected your types, you can generate a GraphQL schema using `simfi
 const schema = simfinity.createSchema();
 ```
 
+## Global Options
+
+Simfinity.js provides global options that allow you to configure its behavior across your entire application.
+
+### Preventing Automatic Collection Creation
+
+By default, Simfinity.js automatically creates MongoDB collections for your types when they are connected. In some cases, such as in test environments or when you want to manage collection creation manually, you can disable this behavior.
+
+The `preventCreatingCollection` function allows you to control this feature globally.
+
+```javascript
+const simfinity = require('@simtlix/simfinity-js');
+
+// Disable automatic collection creation
+simfinity.preventCreatingCollection(true);
+
+// You can re-enable it by calling it with false
+// simfinity.preventCreatingCollection(false);
+```
+
+This is particularly useful in test files to avoid `mongoose` connection errors when you are not running against a live database.
+
 ---
 
 # About SimfinityJS
