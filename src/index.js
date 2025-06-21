@@ -522,23 +522,23 @@ const iterateonCollectionFields = async (materializedModel, gqltype, objectId, s
 };
 
 const onDeleteObject = async (Model, gqltype, controller, args, session) => {
-  const deletedObject = await Model.findById({ _id: args }).lean();
+  const deletedObject = await Model.findById({ _id: args }).session(session).lean();
 
   if (controller && controller.onDelete) {
     await controller.onDelete(deletedObject, session);
   }
 
-  return Model.findByIdAndDelete({ _id: args.id }).session(session);
+  return Model.findByIdAndDelete({ _id: args }).session(session);
 };
 
 const onDeleteSubject = async (Model, controller, id, session) => {
-  const currentObject = await Model.findById({ _id: id }).lean();
+  const currentObject = await Model.findById({ _id: id }).session(session).lean();
 
   if (controller && controller.onDelete) {
     await controller.onDelete(currentObject, session);
   }
 
-  return Model.findByIdAndDelete(id, { session });
+  return Model.findByIdAndDelete({ _id: id }).session(session);
 };
 
 const onUpdateSubject = async (Model, gqltype, controller, args, session, linkToParent) => {

@@ -711,9 +711,38 @@ The controller is passed as the fifth argument to the `simfinity.connect()` meth
 
 ### Controller Methods
 
-*   `onCreating({ doc })`: Executed just before a new document is created. You can modify the `doc` or throw an error to prevent creation.
-*   `onUpdating({ doc, originalDoc })`: Executed before a document is updated. It receives the new `doc` with the pending changes and the `originalDoc` as it exists in the database.
-*   `onDeleting({ doc })`: Executed before a document is deleted. It receives the document that is about to be removed.
+*   `onSaving(doc, args, session)`: Executed just before a new document is saved. It receives the mongoose document instance (`doc`), the original mutation arguments (`args`), and the mongoose session (`session`). You can modify the `doc` or throw an error to prevent creation.
+*   `onSaved(doc, args, session)`: Executed after a new document has been saved. It receives the saved document as a plain object (`doc`), the original mutation arguments (`args`), and the mongoose session (`session`).
+*   `onUpdating(id, doc, session)`: Executed before a document is updated. It receives the document's `id`, the object with the pending changes (`doc`), and the mongoose session (`session`).
+*   `onUpdated(doc, session)`: Executed after a document has been updated. It receives the updated document (`doc`) and the mongoose session (`session`).
+*   `onDelete(doc, session)`: Executed before a document is deleted. It receives the document that is about to be removed (`doc`) and the mongoose session (`session`).
+
+### Parameter Details
+
+Here is a detailed breakdown of the parameters for each hook:
+
+#### `onSaving(doc, args, session)`
+*   `doc`: A **Mongoose Document instance**. It has been created from the mutation arguments but has not yet been saved. You can modify this object directly before it's persisted.
+*   `args`: The raw **plain JavaScript object** that was passed as the `input` to the GraphQL `add` mutation.
+*   `session`: The **Mongoose `ClientSession`** object for the current database transaction.
+
+#### `onSaved(doc, args, session)`
+*   `doc`: A **plain JavaScript object** representing the document that was just saved, including its `_id`.
+*   `args`: The raw `input` **plain JavaScript object** from the GraphQL mutation.
+*   `session`: The **Mongoose `ClientSession`** object.
+
+#### `onUpdating(id, doc, session)`
+*   `id`: The **ID** of the document that is about to be updated.
+*   `doc`: A **plain JavaScript object** containing only the fields that are being changed.
+*   `session`: The **Mongoose `ClientSession`** object.
+
+#### `onUpdated(doc, session)`
+*   `doc`: The full **Mongoose Document instance** of the document *after* the update has been applied.
+*   `session`: The **Mongoose `ClientSession`** object.
+
+#### `onDelete(doc, session)`
+*   `doc`: A **plain JavaScript object** representing the full document right before it's deleted.
+*   `session`: The **Mongoose `ClientSession`** object.
 
 ### Example
 
@@ -721,7 +750,7 @@ Here's how you can define a controller for our `Book` type to add custom validat
 
 ```javascript
 const bookController = {
-  onCreating: async ({ doc }) => {
+  onSaving: async (doc, args, session) => {
     // Validate that a book has a title before saving.
     if (!doc.title || doc.title.trim().length === 0) {
       throw new Error('Book title cannot be empty.');
@@ -730,13 +759,22 @@ const bookController = {
     // You can also modify the document before it's saved, e.g., to add a timestamp.
   },
 
-  onUpdating: async ({ doc, originalDoc }) => {
-    // Log the update operation.
-    console.log(`The book "${originalDoc.title}" is being updated.`);
-    // 'doc' contains the new values, while 'originalDoc' has the old ones.
+  onSaved: async (doc, args, session) => {
+    console.log(`Book "${doc.title}" was successfully saved with id ${doc._id}.`);
+    // 'doc' is the saved document, 'args' are the original input arguments.
   },
 
-  onDeleting: async ({ doc }) => {
+  onUpdating: async (id, doc, session) => {
+    // Log the update operation.
+    console.log(`The book with id "${id}" is being updated.`);
+    // 'doc' contains the new values.
+  },
+
+  onUpdated: async (doc, session) => {
+    console.log(`The book "${doc.title}" was successfully updated.`);
+  },
+
+  onDelete: async (doc, session) => {
     // Perform a final check or logging before deletion.
     console.log(`The book "${doc.title}" is being deleted.`);
     // This is a good place to perform related cleanup operations.
