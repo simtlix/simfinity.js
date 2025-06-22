@@ -1375,4 +1375,263 @@ This example demonstrates:
 2. Field-level unique constraint
 3. Field-level relation configuration
 
+### Field-Level Validations
+
+You can attach validation logic directly to a field for `save`, `update`, and `delete` operations.
+
+#### Validator Function Signature
+
+A field validator is an `async` function with the following signature: `async (typeName, fieldName, value, session) => {}`
+
+*   `typeName` (String): The name of the GraphQLObjectType (e.g., "Person").
+*   `fieldName` (String): The name of the field being validated (e.g., "age").
+*   `value` (any): The value of the field to be validated.
+*   `session` (ClientSession): The Mongoose session for the current transaction.
+
+#### Example
+
+Here's an example of how to implement field-level validations:
+
+```javascript
+const { SimfinityError } = require('@simtlix/simfinity-js');
+
+// Custom validation error
+class ValidationError extends SimfinityError {
+  constructor(message) {
+    super(message, 'VALIDATION_ERROR', 400);
+  }
+}
+
+// Custom validator for age
+const validateAge = {
+  validate: async (typeName, fieldName, value, session) => {
+    if (value < 0 || value > 120) {
+      throw new ValidationError(`Invalid age: ${value}. Age must be between 0 and 120.`);
+    }
+  }
+};
+
+const PersonType = new GraphQLObjectType({
+  name: 'Person',
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: { 
+      type: GraphQLString,
+      extensions: {
+        validations: {
+          save: [{
+            validate: async (typeName, fieldName, value, session) => {
+              if (!value || value.length < 2) {
+                throw new ValidationError('Name must be at least 2 characters long');
+              }
+            }
+          }],
+          update: [{
+            validate: async (typeName, fieldName, value, session) => {
+              if (value && value.length < 2) {
+                throw new ValidationError('Name must be at least 2 characters long');
+              }
+            }
+          }]
+        }
+      }
+    },
+    age: {
+      type: GraphQLInt,
+      extensions: {
+        validations: {
+          save: [validateAge],
+          update: [validateAge]
+        }
+      }
+    }
+  })
+});
+```
+
+### Custom Errors
+
+You can create custom errors by extending `SimfinityError`. This is useful for creating domain-specific errors with proper error codes and status codes:
+
+```javascript
+const { SimfinityError } = require('@simtlix/simfinity-js');
+
+// Business logic error
+class BusinessError extends SimfinityError {
+  constructor(message) {
+    super(message, 'BUSINESS_ERROR', 400);
+  }
+}
+
+// Authorization error
+class AuthorizationError extends SimfinityError {
+  constructor(message) {
+    super(message, 'UNAUTHORIZED', 401);
+  }
+}
+
+// Not found error
+class NotFoundError extends SimfinityError {
+  constructor(message) {
+    super(message, 'NOT_FOUND', 404);
+  }
+}
+
+// Usage in validators or business logic
+const validateOrder = async (typeName, fieldName, value, session) => {
+  if (!value.items || value.items.length === 0) {
+    throw new BusinessError('Order must contain at least one item');
+  }
+  
+  if (!value.customerId) {
+    throw new AuthorizationError('Customer ID is required');
+  }
+  
+  const customer = await CustomerModel.findById(value.customerId);
+  if (!customer) {
+    throw new NotFoundError(`Customer with ID ${value.customerId} not found`);
+  }
+};
+```
+
+### Type-Level Validations
+
+You can also define validations at the type level. These are useful for validating the object as a whole, for example, to check for consistency between multiple fields.
+
+```javascript
+const BookType = new GraphQLObjectType({
+  name: 'Book',
+  extensions: {
+    validations: {
+      save: [/* array of validators */],
+      update: [/* array of validators */],
+      delete: [/* array of validators */]
+    }
+  },
+  fields: () => ({
+    // ... fields
+  })
+});
+```
+
+#### Validator Function Signature
+
+A type validator is an `async` function with the following signature: `async (typeName, args, modelArgs, session) => {}`
+
+*   `typeName` (String): The name of the GraphQLObjectType being validated.
+*   `args` (Object): The raw, plain JavaScript object of arguments passed to the mutation.
+*   `modelArgs` (Object): The materialized object that is ready to be persisted to the database. This object's structure maps to your Mongoose schema.
+*   `session` (ClientSession): The Mongoose session for the current transaction.
+
+#### Example
+
+```javascript
+const { SimfinityError } = require('@simtlix/simfinity-js');
+
+const releaseDateValidator = {
+  validate: async (typeName, args, modelArgs, session) => {
+    // Example: A book's publication date cannot be before its manuscript completion date
+    if (modelArgs.publicationDate < modelArgs.manuscriptDate) {
+      throw new SimfinityError('Publication date cannot be before the manuscript completion date.', 'VALIDATION_ERROR', 400);
+    }
+  }
+};
+
+const BookType = new GraphQLObjectType({
+  name: 'Book',
+  extensions: {
+    validations: {
+      save: [releaseDateValidator],
+      update: [releaseDateValidator]
+    }
+  },
+  fields: () => ({
+    id: { type: GraphQLID },
+    title: { type: GraphQLString },
+    manuscriptDate: { type: GraphQLDateTime },
+    publicationDate: { type: GraphQLDateTime }
+  })
+});
+```
+
+### State Machine
+
+When a type is configured with a state machine, the `state` field is automatically managed by the state machine. This means:
+- The `state` field cannot be directly modified through mutations
+- State transitions are handled through dedicated state machine mutations
+- The state field is automatically read-only and managed by the system
+
+Example of a type with state machine:
+```javascript
+const OrderType = new GraphQLObjectType({
+  name: 'Order',
+  fields: () => ({
+    id: { type: GraphQLID },
+    state: { type: GraphQLString },  // This field is managed by the state machine
+    // ... other fields
+  })
+});
+
+// Connect with state machine
+simfinity.connect(null, OrderType, 'order', 'orders', null, null, {
+  states: ['PENDING', 'PROCESSING', 'COMPLETED'],
+  transitions: {
+    process: {
+      from: ['PENDING'],
+      to: 'PROCESSING'
+    },
+    complete: {
+      from: ['PROCESSING'],
+      to: 'COMPLETED'
+    }
+  }
+});
+```
+
+### Example Usage
+
+Here's a complete example showing multiple extension usages:
+
+```javascript
+const BookType = new GraphQLObjectType({
+  name: 'Book',
+  extensions: {
+    validations: {
+      save: [
+        async (typeName, fieldName, value, session) => {
+          // Custom validation logic
+        }
+      ]
+    }
+  },
+  fields: () => ({
+    id: { type: GraphQLID },
+    title: { 
+      type: GraphQLString,
+      extensions: {
+        unique: true
+      }
+    },
+    author: {
+      type: AuthorType,
+      extensions: {
+        relation: {
+          connectionField: 'authorId',
+          displayField: 'name',
+          embedded: false
+        }
+      },
+      resolve(parent) {
+        return simfinity.getModel(AuthorType).findById(parent.authorId);
+      }
+    }
+  })
+});
+```
+
+This example demonstrates:
+1. Type-level validations for save operations
+2. Field-level unique constraint
+3. Field-level relation configuration
+
 
