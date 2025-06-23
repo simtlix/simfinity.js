@@ -221,24 +221,59 @@ function createValidatedScalar(name, description, baseScalarType, validate) {
   return scalar;
 }
 
-const createOneToManyInputType = (inputNamePrefix, fieldEntryName,
-  inputType, updateInputType) => new GraphQLInputObjectType({
-  name: `OneToMany${inputNamePrefix}${fieldEntryName}`,
-  fields: () => ({
-    added: { type: new GraphQLList(inputType) },
-    updated: { type: new GraphQLList(updateInputType) },
-    deleted: { type: new GraphQLList(GraphQLID) },
-  }),
-});
+/**
+ * Creates a new GraphQLInputObjectType with a field excluded.
+ * @param {GraphQLInputObjectType} originalType - The original input type.
+ * @param {string} fieldToExclude - The name of the field to exclude.
+ * @returns {GraphQLInputObjectType} A new input type without the specified field.
+ */
+const createTypeWithExcludedField = (originalType, fieldToExclude) => {
+  const originalFields = originalType.getFields();
+  const newFields = Object.fromEntries(
+    Object.entries(originalFields).filter(([fieldName]) => fieldName !== fieldToExclude),
+  );
 
-const graphQLListInputType = (dict, fieldEntry, fieldEntryName, inputNamePrefix) => {
+  return new GraphQLInputObjectType({
+    name: `${originalType.name}For${fieldToExclude.charAt(0).toUpperCase() + fieldToExclude.slice(1)}`,
+    fields: newFields,
+  });
+};
+
+const createOneToManyInputType = (inputNamePrefix, fieldEntryName,
+  inputType, updateInputType, connectionField) => {
+  let inputTypeForAdd = inputType;
+
+  // If a gqltype is provided, create a new input type for 'added'
+  // that excludes the field named after the gqltype.
+  if (connectionField) {
+    const fieldToExclude = connectionField;
+    inputTypeForAdd = createTypeWithExcludedField(inputType, fieldToExclude);
+  }
+
+  return new GraphQLInputObjectType({
+    name: `OneToMany${inputNamePrefix}${fieldEntryName}`,
+    fields: () => ({
+      added: {
+        type: new GraphQLList(inputTypeForAdd),
+      },
+      updated: {
+        type: new GraphQLList(updateInputType),
+      },
+      deleted: {
+        type: new GraphQLList(GraphQLID),
+      },
+    }),
+  });
+};
+
+const graphQLListInputType = (dict, fieldEntry, fieldEntryName, inputNamePrefix, connectionField) => {
   const { ofType } = fieldEntry.type;
 
   if (ofType instanceof GraphQLObjectType && dict.types[ofType.name].inputType) {
     if (!fieldEntry.extensions || !fieldEntry.extensions.relation
       || !fieldEntry.extensions.relation.embedded) {
       const oneToMany = createOneToManyInputType(inputNamePrefix, fieldEntryName,
-        typesDict.types[ofType.name].inputType, typesDictForUpdate.types[ofType.name].inputType);
+        typesDict.types[ofType.name].inputType, typesDictForUpdate.types[ofType.name].inputType, connectionField);
       return oneToMany;
     }
     if (fieldEntry.extensions && fieldEntry.extensions.relation
@@ -303,8 +338,8 @@ const buildInputType = (gqltype) => {
           if (fieldEntry.type.ofType === gqltype) {
             selfReferenceCollections[fieldEntryName] = fieldEntry;
           } else {
-            const listInputTypeForAdd = graphQLListInputType(typesDict, fieldEntry, fieldEntryName, 'A');
-            const listInputTypeForUpdate = graphQLListInputType(typesDictForUpdate, fieldEntry, fieldEntryName, 'U');
+            const listInputTypeForAdd = graphQLListInputType(typesDict, fieldEntry, fieldEntryName, 'A', fieldEntry.extensions.relation.connectionField);
+            const listInputTypeForUpdate = graphQLListInputType(typesDictForUpdate, fieldEntry, fieldEntryName, 'U', fieldEntry.extensions.relation.connectionField);
             if (listInputTypeForAdd && listInputTypeForUpdate) {
               fieldArg.type = listInputTypeForAdd;
               fieldArgForUpdate.type = listInputTypeForUpdate;
@@ -347,7 +382,7 @@ const buildInputType = (gqltype) => {
   Object.keys(selfReferenceCollections).forEach((fieldEntryName) => {
     if (Object.prototype.hasOwnProperty.call(selfReferenceCollections, fieldEntryName)) {
       inputTypeForAddFields[fieldEntryName] = {
-        type: createOneToManyInputType('A', fieldEntryName, inputTypeForAdd, inputTypeForUpdate),
+        type: createOneToManyInputType('A', fieldEntryName, inputTypeForAdd, inputTypeForUpdate, selfReferenceCollections[fieldEntryName].extensions.relation.connectionField),
         name: fieldEntryName,
       };
     }
@@ -360,7 +395,7 @@ const buildInputType = (gqltype) => {
   Object.keys(selfReferenceCollections).forEach((fieldEntryName) => {
     if (Object.prototype.hasOwnProperty.call(selfReferenceCollections, fieldEntryName)) {
       inputTypeForUpdateFields[fieldEntryName] = {
-        type: createOneToManyInputType('U', fieldEntryName, inputTypeForAdd, inputTypeForUpdate),
+        type: createOneToManyInputType('U', fieldEntryName, inputTypeForAdd, inputTypeForUpdate, selfReferenceCollections[fieldEntryName].extensions.relation.connectionField),
         name: fieldEntryName,
       };
     }
@@ -441,6 +476,8 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
               null, operation, session)).modelArgs;
           }
         } else {
+          modelArgs[fieldEntry.name] = new mongoose.Types
+            .ObjectId(args[fieldEntryName].id);
           console.warn(`Configuration issue: Field ${fieldEntryName} does not define extensions.relation`);
         }
       } else if (fieldEntry.type instanceof GraphQLList) {
@@ -914,7 +951,7 @@ const generateSchemaDefinition = (gqlType) => {
       || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
       if (fieldEntry.extensions && fieldEntry.extensions.relation) {
         if (!fieldEntry.extensions.relation.embedded) {
-          schemaArg[fieldEntry.extensions.relation.connectionField] = mongoose
+          schemaArg[fieldEntry.extensions.relation.connectionField ? fieldEntry.extensions.relation.connectionField : fieldEntry.name] = mongoose
             .Schema.Types.ObjectId;
         } else {
           let entryType = fieldEntry.type;
@@ -1028,7 +1065,7 @@ const buildAggregationsForSort = (filterField, qlField, fieldName) => {
     if (fieldType instanceof GraphQLNonNull) {
       fieldType = qlField.type.ofType;
     }
-
+    // TODO: Add support for default relations without connectionField, this condition must be the same as the one in generateSchemaDefinition
     filterField.terms.forEach((term) => {
       if (qlField.extensions && qlField.extensions.relation
         && !qlField.extensions.relation.embedded) {
@@ -1083,6 +1120,7 @@ const buildAggregationsForSort = (filterField, qlField, fieldName) => {
             pathFieldType = pathField.type.ofType;
           }
           currentGQLPathFieldType = pathFieldType;
+          // TODO: Add support for default relations without connectionField, this condition must be the same as the one in generateSchemaDefinition
           if (pathField.extensions && pathField.extensions.relation
             && !pathField.extensions.relation.embedded) {
             const currentPath = aliasPath + (embeddedPath !== '' ? `.${embeddedPath}` : '');
@@ -1110,7 +1148,7 @@ const buildAggregationsForSort = (filterField, qlField, fieldName) => {
                   $lookup: {
                     from: fieldPathCollectionName,
                     foreignField: '_id',
-                    localField: `${currentPath}.${pathLocalFieldName}`,
+                    localField: `${currentPath}.${pathLocalFieldName}`, // TODO: Add support for default relations without connectionField, here could be the field name instead of the connectionField if the relation.connectionField is not defined
                     as: aliasPath,
                   },
                 };
@@ -1165,7 +1203,7 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
         && !qlField.extensions.relation.embedded) {
         const { model } = typesDict.types[fieldType.name];
         const { collectionName } = model.collection;
-        const localFieldName = qlField.extensions.relation.connectionField;
+        const localFieldName = qlField.extensions.relation.connectionField;// TODO: Add support for default relations without connectionField, here could be the field name instead of the connectionField if the relation.connectionField is not defined
         if (!aggregateClauses[fieldName]) {
           let lookup = {};
 
@@ -1183,7 +1221,7 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
               $lookup: {
                 from: collectionName,
                 foreignField: '_id',
-                localField: localFieldName,
+                localField: localFieldName, // TODO: Add support for default relations without connectionField, here could be the field name instead of the connectionField if the relation.connectionField is not defined
                 as: fieldName,
               },
             };
@@ -1247,7 +1285,7 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
 
               const pathModel = typesDict.types[pathFieldType.name].model;
               const fieldPathCollectionName = pathModel.collection.collectionName;
-              const pathLocalFieldName = pathField.extensions.relation.connectionField;
+              const pathLocalFieldName = pathField.extensions.relation.connectionField;// TODO: Add support for default relations without connectionField, here could be the field name instead of the connectionField if the relation.connectionField is not defined
 
               if (!aggregateClauses[aliasPath]) {
                 let lookup = {};
