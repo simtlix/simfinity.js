@@ -20,8 +20,8 @@
     "url": "https://github.com/simtlix/simfinity.git"
   },
   "peerDependencies": {
-    "graphql": "^14.7.0",
-    "mongoose": "^8.15.1"
+    "graphql": "^16.11.0",
+    "mongoose": "^8.16.2"
   },
   "devDependencies": {
     "@eslint/compat": "^1.2.0",
@@ -32,7 +32,7 @@
     "eslint-plugin-import": "^2.32.0",
     "ghooks": "^2.0.4",
     "globals": "^16.3.0",
-    "jest": "^29.0.0"
+    "jest": "^30.0.4"
   },
   "config": {
     "ghooks": {
@@ -41,8 +41,8 @@
     "owner": "simtlix"
   },
   "optionalDependencies": {
-    "graphql": "^14.7.0",
-    "mongoose": "^8.15.1"
+    "graphql": "^16.11.0",
+    "mongoose": "^8.16.2"
   },
   "jest": {
     "testEnvironment": "node",
