@@ -1563,36 +1563,39 @@ const autoGenerateResolvers = (gqltype) => {
       if (fieldEntry.extensions && fieldEntry.extensions.relation) {
         const { relation } = fieldEntry.extensions;
 
-        if (fieldEntry.type instanceof GraphQLList) {
-          // Collection field - generate resolve for one-to-many relationship
-          const relatedType = fieldEntry.type.ofType;
-          const connectionField = relation.connectionField || fieldName;
+        // Only generate resolvers for non-embedded relationships
+        if (!relation.embedded) {
+          if (fieldEntry.type instanceof GraphQLList) {
+            // Collection field - generate resolve for one-to-many relationship
+            const relatedType = fieldEntry.type.ofType;
+            const connectionField = relation.connectionField || fieldName;
 
-          fieldEntry.resolve = (parent) => {
-            // Lazy lookup of the related model
-            const relatedTypeInfo = typesDict.types[relatedType.name];
-            if (!relatedTypeInfo || !relatedTypeInfo.model) {
-              throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
-            }
-            const query = {};
-            query[connectionField] = parent.id || parent._id;
-            return relatedTypeInfo.model.find(query);
-          };
-        } else if (fieldEntry.type instanceof GraphQLObjectType
-                   || (fieldEntry.type instanceof GraphQLNonNull && fieldEntry.type.ofType instanceof GraphQLObjectType)) {
-          // Single object field - generate resolve for one-to-one relationship
-          const relatedType = fieldEntry.type instanceof GraphQLNonNull ? fieldEntry.type.ofType : fieldEntry.type;
-          const connectionField = relation.connectionField || fieldName;
+            fieldEntry.resolve = (parent) => {
+              // Lazy lookup of the related model
+              const relatedTypeInfo = typesDict.types[relatedType.name];
+              if (!relatedTypeInfo || !relatedTypeInfo.model) {
+                throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
+              }
+              const query = {};
+              query[connectionField] = parent.id || parent._id;
+              return relatedTypeInfo.model.find(query);
+            };
+          } else if (fieldEntry.type instanceof GraphQLObjectType
+                     || (fieldEntry.type instanceof GraphQLNonNull && fieldEntry.type.ofType instanceof GraphQLObjectType)) {
+            // Single object field - generate resolve for one-to-one relationship
+            const relatedType = fieldEntry.type instanceof GraphQLNonNull ? fieldEntry.type.ofType : fieldEntry.type;
+            const connectionField = relation.connectionField || fieldName;
 
-          fieldEntry.resolve = (parent) => {
-            // Lazy lookup of the related model
-            const relatedTypeInfo = typesDict.types[relatedType.name];
-            if (!relatedTypeInfo || !relatedTypeInfo.model) {
-              throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
-            }
-            const relatedId = parent[connectionField] || parent[fieldName];
-            return relatedId ? relatedTypeInfo.model.findById(relatedId) : null;
-          };
+            fieldEntry.resolve = (parent) => {
+              // Lazy lookup of the related model
+              const relatedTypeInfo = typesDict.types[relatedType.name];
+              if (!relatedTypeInfo || !relatedTypeInfo.model) {
+                throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
+              }
+              const relatedId = parent[connectionField] || parent[fieldName];
+              return relatedId ? relatedTypeInfo.model.findById(relatedId) : null;
+            };
+          }
         }
       }
     }
