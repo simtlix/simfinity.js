@@ -1,226 +1,221 @@
 # Simfinity.js
 
-Simfinity.js is a powerful library that automatically generates a GraphQL schema from your Mongoose models. It simplifies the process of creating a GraphQL API for your Node.js application by providing a set of conventions and helpers to handle common CRUD operations, filtering, pagination, and sorting.
+A powerful Node.js framework that automatically generates GraphQL schemas from your data models, bringing all the power and flexibility of MongoDB query language to GraphQL interfaces.
 
-## Installation
+## ✨ Features
 
-To use Simfinity.js in your project, you'll need to have `mongoose` and `graphql` installed as peer dependencies.
+- **Automatic Schema Generation**: Define your object model, and Simfinity.js generates all queries and mutations
+- **MongoDB Integration**: Seamless translation between GraphQL and MongoDB
+- **Powerful Querying**: Any query that can be executed in MongoDB can be executed in GraphQL
+- **Business Logic**: Implement business logic and domain validations declaratively
+- **State Machines**: Built-in support for declarative state machine workflows
+- **Lifecycle Hooks**: Controller methods for granular control over operations
+- **Custom Validation**: Field-level and type-level custom validations
+- **Relationship Management**: Support for embedded and referenced relationships
+
+## 📦 Installation
 
 ```bash
 npm install mongoose graphql @simtlix/simfinity-js
 ```
 
-## Core Concepts
+**Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies.
 
-The core of Simfinity.js revolves around two main concepts: connecting your Mongoose models to GraphQL types and creating a schema.
+## 🚀 Quick Start
 
-### Connecting Models
-
-The `simfinity.connect()` method is used to link a Mongoose model to a GraphQLObjectType. This tells Simfinity how to handle the data for that type.
+### 1. Basic Setup
 
 ```javascript
+const express = require('express');
+const { graphqlHTTP } = require('express-graphql');
 const mongoose = require('mongoose');
-const { GraphQLObjectType, GraphQLString, GraphQLNonNull } = require('graphql');
 const simfinity = require('@simtlix/simfinity-js');
 
-// 1. Define your GraphQL Type
+// Connect to MongoDB
+mongoose.connect('mongodb://localhost:27017/bookstore', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+});
+
+const app = express();
+```
+
+### 2. Define Your GraphQL Type
+
+```javascript
+const { GraphQLObjectType, GraphQLString, GraphQLNonNull, GraphQLID } = require('graphql');
+
 const BookType = new GraphQLObjectType({
   name: 'Book',
   fields: () => ({
     id: { type: new GraphQLNonNull(GraphQLID) },
     title: { type: new GraphQLNonNull(GraphQLString) },
+    author: { type: GraphQLString },
   }),
 });
-
-// 2. Connect the type to Simfinity
-simfinity.connect(null, BookType, 'book', 'books');
 ```
 
-### Creating a Schema
-
-Once you've connected your types, you can generate a GraphQL schema using `simfinity.createSchema()`. This will automatically create the queries and mutations for your connected types.
+### 3. Connect to Simfinity
 
 ```javascript
+// Connect the type to Simfinity
+simfinity.connect(null, BookType, 'book', 'books');
+
+// Create the GraphQL schema
 const schema = simfinity.createSchema();
 ```
 
-## Global Options
-
-Simfinity.js provides global options that allow you to configure its behavior across your entire application.
-
-### Preventing Automatic Collection Creation
-
-By default, Simfinity.js automatically creates MongoDB collections for your types when they are connected. In some cases, such as in test environments or when you want to manage collection creation manually, you can disable this behavior.
-
-The `preventCreatingCollection` function allows you to control this feature globally.
+### 4. Setup GraphQL Endpoint
 
 ```javascript
-const simfinity = require('@simtlix/simfinity-js');
-
-// Disable automatic collection creation
-simfinity.preventCreatingCollection(true);
-
-// You can re-enable it by calling it with false
-// simfinity.preventCreatingCollection(false);
-```
-
-This is particularly useful in test files to avoid `mongoose` connection errors when you are not running against a live database.
-
----
-
-# About SimfinityJS
-SimfinityJS is a Node.js framework that allows bringing all the power and flexibility of MongoDB query language to GraphQL interfaces. 
-
-In pure GraphQL, you have to define every query and mutation. With SimfinityJS you define the object model, and the framework itself interprets all queries and mutations. SimfinityJS acts as a glue. It translates GraphQL to MongoDB and viceversa. 
-
-As a result, developers can focus on model structure and object relationships. 
-
-## Features
-- Translation between GraphQL and MongoDB and viceversa
-- Implement business logic in a declarative way
-- Implement domain validations in a declarative way. 
-- Supports declarative state machine. Business logic can be included in each state transition. 
-- Powerful semantic API. Basically, any query that can be executed in mongocli can be executed in GraphQL, thanks to SimfinityJS.
-
-
-
-# Quick Start
-## Install
-```bash
-npm install @simtlix/simfinity-js --save
-```
-
-## Adding Simfinity to your application
-
-```javascript
-const express = require('express')
-const graphqlHTTP = require('express-graphql')
-const simfinity = require('@simtlix/simfinity-js')
-const app = express()
-const mongoose = require('mongoose')
-
-//Replace with your Mongo DB connection string
-mongoose.connect('mongodb://localhost:27017,localhost:27018,localhost:27019/example2', { replicaSet: 'rs', useNewUrlParser: true, useUnifiedTopology: true })
-
-mongoose.connection.once('open', () => {
-  console.log('connected to database')
-})
-
-mongoose.set('debug', true);
-
-const type = require('./types')
-const includedTypes = [type.Book]
-
-const schema = simfinity.createSchema(includedTypes)
-
 app.use('/graphql', graphqlHTTP({
-  // Directing express-graphql to use this schema to map out the graph
   schema,
-  /* Directing express-graphql to use graphiql when goto '/graphql' address in the browser
-  which provides an interface to make GraphQl queries */
   graphiql: true,
   formatError: simfinity.buildErrorFormatter((err) => {
-    console.log(err)
+    console.log(err);
   })
+}));
 
-}))
-
-app.listen(3000, () => {
-  console.log('Listening on port 3000')
-})
+app.listen(4000, () => {
+  console.log('Server is running on port 4000');
+});
 ```
 
+### 5. Try It Out
 
-### Defining the model
+Open [http://localhost:4000/graphql](http://localhost:4000/graphql) and try these queries:
 
-```javascript
-const graphql = require('graphql')
-const simfinity = require('@simtlix/simfinity-js')
-
-const {
-  GraphQLObjectType,GraphQLString,
-  GraphQLID, GraphQLInt
-} = graphql
-
-
-const BookType = new GraphQLObjectType({
-  name: 'Book',
-  fields: () => ({
-    id: {
-      type: GraphQLID
-    },
-    name: { type: GraphQLString },
-    pages: { type: GraphQLInt }
-  })
-})
-
-module.exports = BookType
-
-simfinity.connect(null, BookType, 'book', 'books', null, null, null)
-```
-
-
-# Run 
-Start replica set
-
-`run-rs`
-
-Run the application
-
-`node app.js`
-
-
-
-# Try it
-
-Open http://localhost:3000/graphql endpoint defined on app.js
-
-
-Create a book
+**Create a book:**
 ```graphql
 mutation {
-  addbook (	
-    input:{
-      name: "Hello World Book",
-      pages: 333
-    }
-  ) 
-}
-```
-
-
-List all books
-```graphql
-query {
-  books {
-    id, name, pages
+  addBook(input: {
+    title: "The Hitchhiker's Guide to the Galaxy"
+    author: "Douglas Adams"
+  }) {
+    id
+    title
+    author
   }
 }
 ```
 
+**List all books:**
+```graphql
+query {
+  books {
+    id
+    title
+    author
+  }
+}
+```
 
-# Want to know more! 
-Visit the [samples site](https://github.com/simtlix/simfinity.js-samples) and learn about SimfinityJS through different use cases
+## 🔧 Core Concepts
 
+### Connecting Models
 
-
-## Bookstore Example
-
-Let's explore how to use Simfinity.js with a simple bookstore example. We'll have two main types: `Author` and `Book`.
-
-### 1. Define Your GraphQL Types
-
-First, we'll define the `GraphQLObjectType` for our `Author` and `Book` models. Notice the `extensions` field on the `author` field of the `BookType`. This is how you define relationships in Simfinity.
+The `simfinity.connect()` method links your GraphQL types to Simfinity's automatic schema generation:
 
 ```javascript
-const {
-  GraphQLObjectType,
-  GraphQLString,
-  GraphQLNonNull,
-  GraphQLID,
-  GraphQLList,
-} = require('graphql');
+simfinity.connect(
+  mongooseModel,           // Optional: Custom Mongoose model (null for auto-generation)
+  graphQLType,            // Required: Your GraphQLObjectType
+  singularEndpointName,   // Required: Singular name for mutations (e.g., 'book')
+  pluralEndpointName,     // Required: Plural name for queries (e.g., 'books')
+  controller,             // Optional: Controller with lifecycle hooks
+  onModelCreated,         // Optional: Callback when Mongoose model is created
+  stateMachine            // Optional: State machine configuration
+);
+```
 
+### Creating Schemas
+
+Generate your complete GraphQL schema with optional type filtering:
+
+```javascript
+const schema = simfinity.createSchema(
+  includedQueryTypes,     // Optional: Array of types to include in queries
+  includedMutationTypes,  // Optional: Array of types to include in mutations
+  includedCustomMutations // Optional: Array of custom mutations to include
+);
+```
+
+### Global Configuration
+
+```javascript
+// Prevent automatic MongoDB collection creation (useful for testing)
+simfinity.preventCreatingCollection(true);
+
+// Add middleware for all operations
+simfinity.use((params, next) => {
+  // params contains: type, args, operation, context
+  console.log(`Executing ${params.operation} on ${params.type.name}`);
+  next();
+});
+```
+
+## 📋 Basic Usage
+
+### Automatic Query Generation
+
+Simfinity automatically generates queries for each connected type:
+
+```javascript
+// For a BookType, you get:
+// - book(id: ID): Book          - Get single book by ID
+// - books(...filters): [Book]   - Get filtered list of books
+```
+
+### Automatic Mutation Generation
+
+Simfinity automatically generates mutations for each connected type:
+
+```javascript
+// For a BookType, you get:
+// - addBook(input: BookInput): Book
+// - updateBook(input: BookInputForUpdate): Book  
+// - deleteBook(id: ID): Book
+```
+
+### Filtering and Querying
+
+Query with powerful filtering options:
+
+```graphql
+query {
+  books(
+    title: { operator: LIKE, value: "Galaxy" }
+    author: { operator: EQ, value: "Douglas Adams" }
+    pagination: { page: 1, size: 10, count: true }
+    sort: { terms: [{ field: "title", order: ASC }] }
+  ) {
+    id
+    title
+    author
+  }
+}
+```
+
+#### Available Operators
+
+- `EQ` - Equal
+- `NE` - Not equal
+- `GT` - Greater than
+- `LT` - Less than
+- `GTE` - Greater than or equal
+- `LTE` - Less than or equal
+- `LIKE` - Pattern matching
+- `IN` - In array
+- `NIN` - Not in array
+- `BTW` - Between two values
+
+## 🔗 Relationships
+
+### Defining Relationships
+
+Use the `extensions.relation` field to define relationships between types:
+
+```javascript
 const AuthorType = new GraphQLObjectType({
   name: 'Author',
   fields: () => ({
@@ -230,12 +225,12 @@ const AuthorType = new GraphQLObjectType({
       type: new GraphQLList(BookType),
       extensions: {
         relation: {
-          connectionField: 'authorId',
+          connectionField: 'author',
           displayField: 'title'
         },
       },
       resolve(parent) {
-        return simfinity.getModel(BookType).find({ authorId: parent.id });
+        return simfinity.getModel(BookType).find({ author: parent.id });
       }
     },
   }),
@@ -250,351 +245,55 @@ const BookType = new GraphQLObjectType({
       type: AuthorType,
       extensions: {
         relation: {
-          connectionField: 'authorId',
           displayField: 'name'
         },
       },
       resolve(parent) {
-        return simfinity.getModel(AuthorType).findById(parent.authorId);
+        return simfinity.getModel(AuthorType).findById(parent.author);
       }
     },
   }),
 });
 ```
 
-### Advanced Relationship Definition
+### Relationship Configuration
 
-For more control over your relationships, you can provide additional options in the `extensions.relation` object and add a custom `resolve` function.
+- `connectionField`: **(Required for collections)** The field storing the related object's ID - only needed for one-to-many relationships (GraphQLList). For single object relationships, the field name is automatically inferred from the GraphQL field name.
+- `displayField`: **(Optional)** Field to use for display in UI components
+- `embedded`: **(Optional)** Whether the relation is embedded (default: false)
 
-*   `connectionField`: (Required) The name of the field on the current model that stores the ID of the related object (e.g., `authorId` on the `Book` model).
-*   `displayField`: (Optional) The name of the field on the related object that should be used as its display value. This can be useful for auto-generated UI components.
-*   `resolve`: (Optional) A custom resolver function to fetch the related data. This gives you full control over how the relationship is resolved. If not provided, Simfinity.js will handle it automatically based on the `connectionField`.
+### Embedded vs Referenced Relationships
 
-Here's an example of an `Episode` type with a relationship to a `Season` type, using these advanced options. This demonstrates how to define which field to display from the related object and how to write a custom resolver.
-
+**Referenced Relationships** (default):
 ```javascript
-const { GraphQLID, GraphQLObjectType, GraphQLString, GraphQLInt } = require('graphql');
-const GraphQLDateTime = require('graphql-iso-date').GraphQLDateTime;
-const simfinity = require('@simtlix/simfinity-js');
-const seasonType = require('./season'); // Assuming seasonType is defined elsewhere
-
-const EpisodeType = new GraphQLObjectType({
-  name: 'Episode',
-  fields: () => ({
-    id: { type: GraphQLID },
-    number: { type: GraphQLInt },
-    name: { type: GraphQLString },
-    date: { type: GraphQLDateTime },
-    season: {
-      type: seasonType,
-      extensions: {
-        relation: {
-          connectionField: 'seasonId',
-          displayField: 'number'
-        },
-      },
-      resolve(parent) {
-        return simfinity.getModel(seasonType).findById(parent.seasonId);
-      }
-    },
-  }),
-});
+// Stores author ID in the book document
+author: {
+  type: AuthorType,
+  extensions: {
+    relation: {
+      // connectionField not needed for single object relationships
+      embedded: false  // This is the default
+    }
+  }
+}
 ```
 
-In this example:
-- The `season` field on `episodeType` is linked to `seasonType`.
-- `connectionField: 'seasonId'` tells Simfinity that the `seasonId` field in the episode document holds the ID of the related season.
-- `displayField: 'number'` suggests that the `number` field of a season (e.g., season 1, season 2) should be used to represent it.
-- The `resolve` function manually fetches the season document using its ID from the parent episode. This is useful for custom logic, but often not necessary, as Simfinity can resolve it automatically.
-
-### 2. Connect Your Types
-
-Next, we'll connect these types to Simfinity. This will automatically generate the Mongoose models and the necessary queries and mutations.
-
+**Embedded Relationships**:
 ```javascript
-const simfinity = require('@simtlix/simfinity-js');
-
-simfinity.connect(null, AuthorType, 'author', 'authors');
-simfinity.connect(null, BookType, 'book', 'books');
-```
-
-### 3. Create the Server
-
-Finally, we'll create a simple Express server with `express-graphql` to serve our schema.
-
-```javascript
-const express = require('express');
-const { graphqlHTTP } = require('express-graphql');
-const mongoose = require('mongoose');
-const simfinity = require('@simtlix/simfinity-js');
-
-// ... (AuthorType and BookType definitions)
-
-// Connect to MongoDB
-mongoose.connect('mongodb://localhost/bookstore', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
-
-const app = express();
-
-app.use('/graphql', graphqlHTTP({
-  schema: simfinity.createSchema(),
-  graphiql: true,
-}));
-
-app.listen(4000, () => {
-  console.log('Server is running on port 4000');
-});
-```
-
-## Creating Complex Objects
-
-Simfinity.js makes it easy to create and connect objects in a single mutation. When you define a relationship, the input type for the parent object will automatically include a field for the child's ID.
-
-For our bookstore example, the `addBook` mutation will accept an `author` field, which is an object containing the `id` of the author.
-
-### Creating a Book for an Existing Author
-
-To create a new book and link it to an author that already exists, you can use the `addBook` mutation and provide the author's ID.
-
-```graphql
-mutation {
-  addBook(input: {
-    title: "The Hitchhiker's Guide to the Galaxy",
-    author: {
-      id: "author_id_here"
-    }
-  }) {
-    id
-    title
-    author {
-      id
-      name
+// Stores the full publisher object in the book document
+publisher: {
+  type: PublisherType,
+  extensions: {
+    relation: {
+      embedded: true
     }
   }
 }
 ```
 
-This will create a new book and set its `authorId` field to the provided author ID.
+### Querying Relationships
 
-### Adding an Embedded Object in a Mutation
-
-To add an embedded object within a mutation, you can include the embedded object directly in the input. For example, if a `Book` has an embedded `Publisher` object, you can add it like this:
-
-```graphql
-mutation {
-  addBook(input: {
-    title: "The Hitchhiker's Guide to the Galaxy",
-    publisher: {
-      name: "Pan Books",
-      location: "London"
-    }
-  }) {
-    id
-    title
-    publisher {
-      name
-      location
-    }
-  }
-}
-```
-
-This will create a new book with an embedded `Publisher` object containing the specified `name` and `location`.
-
-### Working with Collection Fields
-
-If your type has a field that is a collection (e.g., an array of objects), you can add, modify, and delete items within that collection. Simfinity.js uses a special input type for these operations, which is defined by the `createOneToManyInputType` function. This input type includes fields for adding, updating, and deleting items within a collection.
-
-#### Adding Items to a Collection
-
-To add items to a collection field, you can include them directly in the input. For example, if a `Book` has a collection of `Reviews`, you can add them like this:
-
-```graphql
-mutation {
-  addBook(input: {
-    title: "The Hitchhiker's Guide to the Galaxy",
-    reviews: {
-      added: [
-        {
-          rating: 5,
-          comment: "A fantastic read!"
-        },
-        {
-          rating: 4,
-          comment: "Very enjoyable."
-        }
-      ]
-    }
-  }) {
-    id
-    title
-    reviews {
-      rating
-      comment
-    }
-  }
-}
-```
-
-This will create a new book with a collection of `Reviews`.
-
-#### Modifying Items in a Collection
-
-To modify items in a collection, you can use the `update` mutation and specify the changes you want to make. For example, to update a specific review:
-
-```graphql
-mutation {
-  updateBook(input: {
-    id: "book_id_here",
-    reviews: {
-      updated: [
-        {
-          id: "review_id_here",
-          rating: 5,
-          comment: "Updated comment."
-        }
-      ]
-    }
-  }) {
-    id
-    title
-    reviews {
-      id
-      rating
-      comment
-    }
-  }
-}
-```
-
-This will update the specified review within the book's collection.
-
-#### Deleting Items from a Collection
-
-To delete items from a collection, you can use the `update` mutation and specify the IDs of the items you want to remove. For example, to delete a specific review:
-
-```graphql
-mutation {
-  updateBook(input: {
-    id: "book_id_here",
-    reviews: {
-      deleted: ["review_id_to_delete"]
-    }
-  }) {
-    id
-    title
-    reviews {
-      id
-      rating
-      comment
-    }
-  }
-}
-```
-
-This will remove the review with the specified ID from the book's collection.
-
----
-
-## Querying Data
-
-Simfinity.js provides a rich set of querying capabilities that are automatically added to your schema. You can filter, paginate, and sort your data with ease.
-
-### Basic Queries
-
-To get a list of all books, you can use the `books` query:
-
-```graphql
-query {
-  books {
-    id
-    title
-  }
-}
-```
-
-To get a single book by its ID, you can use the `book` query:
-
-```graphql
-query {
-  book(id: "book_id_here") {
-    id
-    title
-    author {
-      id
-      name
-    }
-  }
-}
-```
-
-### Filtering
-
-You can filter your queries using the `filter` argument. The filter object takes an `operator` and a `value`.
-
-#### Simple Equality Filter
-
-To find all books with a specific title:
-
-```graphql
-query {
-  books(title: {
-    operator: EQ,
-    value: "The Hitchhiker's Guide to the Galaxy"
-  }) {
-    id
-    title
-  }
-}
-```
-
-#### Using Other Operators
-
-Simfinity.js supports a variety of operators: `EQ`, `NE`, `GT`, `GTE`, `LT`, `LTE`, `LIKE`, `IN`, `NIN`, and `BTW`.
-
-To find all books with "Guide" in the title:
-
-```graphql
-query {
-  books(title: {
-    operator: LIKE,
-    value: "Guide"
-  }) {
-    id
-    title
-  }
-}
-```
-
-### Filtering on Nested Objects
-
-You can also filter based on the fields of a related object. To do this, you provide a `terms` array to the filter argument, where each term specifies a `path` to the nested field.
-
-To find all books by a specific author:
-
-```graphql
-query {
-  books(author: {
-    terms: [
-      {
-        path: "name",
-        operator: EQ,
-        value: "Douglas Adams"
-      }
-    ]
-  }) {
-    id
-    title
-    author {
-      name
-    }
-  }
-}
-```
-
-You can also use a deeper path to filter on nested relations. For example, if our `Author` type had a `country` relation, we could find all books by authors from a specific country:
+Query nested relationships with dot notation:
 
 ```graphql
 query {
@@ -619,482 +318,254 @@ query {
 }
 ```
 
-### Pagination
+### Creating Objects with Relationships
 
-To paginate your results, you can use the `pagination` argument. You can also get a `count` of the total number of documents that match the query.
-
+**Link to existing objects:**
 ```graphql
-query {
-  books(pagination: {
-    page: 1,
-    size: 10,
-    count: true
+mutation {
+  addBook(input: {
+    title: "New Book"
+    author: {
+      id: "existing_author_id"
+    }
   }) {
     id
     title
+    author {
+      name
+    }
   }
 }
 ```
 
-### Sorting
-
-To sort your results, you can use the `sort` argument.
-
+**Create embedded objects:**
 ```graphql
-query {
-  books(sort: {
-    terms: [
-      {
-        field: "title",
-        order: ASC
-      }
-    ]
+mutation {
+  addBook(input: {
+    title: "New Book"
+    publisher: {
+      name: "Penguin Books"
+      location: "London"
+    }
   }) {
     id
     title
+    publisher {
+      name
+      location
+    }
   }
 }
 ```
 
-## Mutations
+### Collection Fields
 
-Simfinity.js automatically generates `add`, `update`, and `delete` mutations for each type you connect.
-
-### Add Mutation
-
-To create a new author:
+Work with arrays of related objects:
 
 ```graphql
 mutation {
-  addAuthor(input: {
-    name: "J.R.R. Tolkien"
+  updateBook(input: {
+    id: "book_id"
+    reviews: {
+      added: [
+        { rating: 5, comment: "Amazing!" }
+        { rating: 4, comment: "Good read" }
+      ]
+      updated: [
+        { id: "review_id", rating: 3 }
+      ]
+      deleted: ["review_id_to_delete"]
+    }
   }) {
     id
-    name
+    title
+    reviews {
+      rating
+      comment
+    }
   }
 }
 ```
 
-### Update Mutation
+## 🎛️ Controllers & Lifecycle Hooks
 
-To update an existing author's name:
-
-```graphql
-mutation {
-  updateAuthor(input: {
-    id: "author_id_here",
-    name: "John Ronald Reuel Tolkien"
-  }) {
-    id
-    name
-  }
-}
-```
-
-### Delete Mutation
-
-To delete an author:
-
-```graphql
-mutation {
-  deleteAuthor(id: "author_id_here") {
-    id
-  }
-}
-```
-
-## Lifecycle Hooks with Controllers
-
-For more granular control over the automatically generated mutations (`add`, `update`, `delete`), you can provide a controller object to Simfinity.js. This controller can contain methods that are executed as lifecycle hooks during these operations, allowing you to run validation, perform modifications, or trigger side effects.
-
-The controller is passed as the fifth argument to the `simfinity.connect()` method.
-
-### Controller Methods
-
-*   `onSaving(doc, args, session)`: Executed just before a new document is saved. It receives the mongoose document instance (`doc`), the original mutation arguments (`args`), and the mongoose session (`session`). You can modify the `doc` or throw an error to prevent creation.
-*   `onSaved(doc, args, session)`: Executed after a new document has been saved. It receives the saved document as a plain object (`doc`), the original mutation arguments (`args`), and the mongoose session (`session`).
-*   `onUpdating(id, doc, session)`: Executed before a document is updated. It receives the document's `id`, the object with the pending changes (`doc`), and the mongoose session (`session`).
-*   `onUpdated(doc, session)`: Executed after a document has been updated. It receives the updated document (`doc`) and the mongoose session (`session`).
-*   `onDelete(doc, session)`: Executed before a document is deleted. It receives the document that is about to be removed (`doc`) and the mongoose session (`session`).
-
-### Parameter Details
-
-Here is a detailed breakdown of the parameters for each hook:
-
-#### `onSaving(doc, args, session)`
-*   `doc`: A **Mongoose Document instance**. It has been created from the mutation arguments but has not yet been saved. You can modify this object directly before it's persisted.
-*   `args`: The raw **plain JavaScript object** that was passed as the `input` to the GraphQL `add` mutation.
-*   `session`: The **Mongoose `ClientSession`** object for the current database transaction.
-
-#### `onSaved(doc, args, session)`
-*   `doc`: A **plain JavaScript object** representing the document that was just saved, including its `_id`.
-*   `args`: The raw `input` **plain JavaScript object** from the GraphQL mutation.
-*   `session`: The **Mongoose `ClientSession`** object.
-
-#### `onUpdating(id, doc, session)`
-*   `id`: The **ID** of the document that is about to be updated.
-*   `doc`: A **plain JavaScript object** containing only the fields that are being changed.
-*   `session`: The **Mongoose `ClientSession`** object.
-
-#### `onUpdated(doc, session)`
-*   `doc`: The full **Mongoose Document instance** of the document *after* the update has been applied.
-*   `session`: The **Mongoose `ClientSession`** object.
-
-#### `onDelete(doc, session)`
-*   `doc`: A **plain JavaScript object** representing the full document right before it's deleted.
-*   `session`: The **Mongoose `ClientSession`** object.
-
-### Example
-
-Here's how you can define a controller for our `Book` type to add custom validation and logging:
+Controllers provide fine-grained control over operations with lifecycle hooks:
 
 ```javascript
 const bookController = {
   onSaving: async (doc, args, session) => {
-    // Validate that a book has a title before saving.
+    // Before saving - doc is a Mongoose document
     if (!doc.title || doc.title.trim().length === 0) {
-      throw new Error('Book title cannot be empty.');
+      throw new Error('Book title cannot be empty');
     }
-    console.log(`A new book titled "${doc.title}" is being created.`);
-    // You can also modify the document before it's saved, e.g., to add a timestamp.
+    console.log(`Creating book: ${doc.title}`);
   },
 
   onSaved: async (doc, args, session) => {
-    console.log(`Book "${doc.title}" was successfully saved with id ${doc._id}.`);
-    // 'doc' is the saved document, 'args' are the original input arguments.
+    // After saving - doc is a plain object
+    console.log(`Book saved: ${doc._id}`);
   },
 
   onUpdating: async (id, doc, session) => {
-    // Log the update operation.
-    console.log(`The book with id "${id}" is being updated.`);
-    // 'doc' contains the new values.
+    // Before updating - doc contains only changed fields
+    console.log(`Updating book ${id}`);
   },
 
   onUpdated: async (doc, session) => {
-    console.log(`The book "${doc.title}" was successfully updated.`);
+    // After updating - doc is the updated document
+    console.log(`Book updated: ${doc.title}`);
   },
 
   onDelete: async (doc, session) => {
-    // Perform a final check or logging before deletion.
-    console.log(`The book "${doc.title}" is being deleted.`);
-    // This is a good place to perform related cleanup operations.
+    // Before deleting - doc is the document to be deleted
+    console.log(`Deleting book: ${doc.title}`);
   }
 };
 
-// Connect the BookType with its controller
-simfinity.connect(
-  null,          // mongooseModel
-  BookType,      // graphQLType
-  'book',        // singularName
-  'books',       // pluralName
-  bookController // controller
-);
+// Connect with controller
+simfinity.connect(null, BookType, 'book', 'books', bookController);
 ```
 
-When you now use the `addBook`, `updateBook`, or `deleteBook` mutations, the corresponding controller methods will be executed. For example, trying to create a book with an empty title would now fail with the custom error message.
+### Hook Parameters
 
-## State Machines
+**`onSaving(doc, args, session)`**:
+- `doc`: Mongoose Document instance (not yet saved)
+- `args`: Raw GraphQL mutation input
+- `session`: Mongoose session for transaction
 
-Simfinity.js has built-in support for state machines, allowing you to manage the lifecycle of your objects in a declarative way. You can define states and actions that transition an object from one state to another. For each action, you can also specify business logic that gets executed during the transition.
+**`onSaved(doc, args, session)`**:
+- `doc`: Plain object of saved document
+- `args`: Raw GraphQL mutation input
+- `session`: Mongoose session for transaction
 
-### Defining a State Machine
+**`onUpdating(id, doc, session)`**:
+- `id`: Document ID being updated
+- `doc`: Plain object with only changed fields
+- `session`: Mongoose session for transaction
 
-Let's look at an example of a `Season` type that has a lifecycle managed by a state machine. The process involves four main steps:
+**`onUpdated(doc, session)`**:
+- `doc`: Full updated Mongoose document
+- `session`: Mongoose session for transaction
 
-1.  **Define States**: Create a `GraphQLEnumType` to represent the possible states.
-2.  **Define Type**: Create the `GraphQLObjectType` that will have a state field.
-3.  **Configure State Machine**: Define an object with the `initialState` and the `actions` that govern transitions.
-4.  **Connect**: Use `simfinity.connect()` to link the type with its state machine.
+**`onDelete(doc, session)`**:
+- `doc`: Plain object of document to be deleted
+- `session`: Mongoose session for transaction
 
-Here is the complete example:
+## 🔄 State Machines
+
+Implement declarative state machine workflows:
+
+### 1. Define States
 
 ```javascript
-const graphql = require('graphql');
-const simfinity = require('@simtlix/simfinity-js');
+const { GraphQLEnumType } = require('graphql');
 
-const { GraphQLObjectType, GraphQLID, GraphQLInt, GraphQLEnumType } = graphql;
-
-// 1. Define the states using a GraphQLEnumType
-const seasonState = new GraphQLEnumType({
-  name: 'seasonState',
+const OrderState = new GraphQLEnumType({
+  name: 'OrderState',
   values: {
-    SCHEDULED: { value: 'SCHEDULED' },
-    ACTIVE: { value: 'ACTIVE' },
-    FINISHED: { value: 'FINISHED' }
+    PENDING: { value: 'PENDING' },
+    PROCESSING: { value: 'PROCESSING' },
+    SHIPPED: { value: 'SHIPPED' },
+    DELIVERED: { value: 'DELIVERED' },
+    CANCELLED: { value: 'CANCELLED' }
   }
 });
+```
 
-// 2. Define the GraphQLObjectType
-const seasonType = new GraphQLObjectType({
-  name: 'season',
+### 2. Define Type with State Field
+
+```javascript
+const OrderType = new GraphQLObjectType({
+  name: 'Order',
   fields: () => ({
     id: { type: GraphQLID },
-    number: { type: GraphQLInt },
-    year: { type: GraphQLInt },
-    state: { type: seasonState }
+    customer: { type: GraphQLString },
+    state: { type: OrderState }
   })
 });
+```
 
-// 3. Define the state machine configuration
+### 3. Configure State Machine
+
+```javascript
 const stateMachine = {
-  initialState: 'SCHEDULED', // The value of the initial state
+  initialState: { name: 'PENDING', value: 'PENDING' },
   actions: {
-    activate: {
-      from: 'SCHEDULED',
-      to: 'ACTIVE',
-      action: async ({ doc }) => {
-        // Business logic to run on activation
-        // The 'doc' parameter contains the document being transitioned
-        console.log(`Activating season ${doc._id} of year ${doc.year}`);
+    process: {
+      from: { name: 'PENDING', value: 'PENDING' },
+      to: { name: 'PROCESSING', value: 'PROCESSING' },
+      description: 'Process the order',
+      action: async (args, session) => {
+        // Business logic for processing
+        console.log(`Processing order ${args.id}`);
+        // You can perform additional operations here
       }
     },
-    finalize: {
-      from: 'ACTIVE',
-      to: 'FINISHED',
-      action: async ({ doc }) => {
-        // Business logic to run on finalization
-        console.log(`Finalizing season ${doc._id} of year ${doc.year}`);
+    ship: {
+      from: { name: 'PROCESSING', value: 'PROCESSING' },
+      to: { name: 'SHIPPED', value: 'SHIPPED' },
+      description: 'Ship the order',
+      action: async (args, session) => {
+        // Business logic for shipping
+        console.log(`Shipping order ${args.id}`);
       }
+    },
+    deliver: {
+      from: { name: 'SHIPPED', value: 'SHIPPED' },
+      to: { name: 'DELIVERED', value: 'DELIVERED' },
+      description: 'Mark as delivered'
+    },
+    cancel: {
+      from: { name: 'PENDING', value: 'PENDING' },
+      to: { name: 'CANCELLED', value: 'CANCELLED' },
+      description: 'Cancel the order'
     }
   }
 };
-
-// 4. Connect the type and its state machine to Simfinity
-simfinity.connect(
-  null,
-  seasonType,
-  'season',
-  'seasons',
-  null,
-  null,
-  stateMachine
-);
 ```
 
-When a new `season` is created, its `state` field will automatically be set to `SCHEDULED`.
+### 4. Connect with State Machine
 
-### Triggering State Transitions
+```javascript
+simfinity.connect(null, OrderType, 'order', 'orders', null, null, stateMachine);
+```
 
-When you connect a type with a state machine, Simfinity.js automatically creates a GraphQL mutation for each action. The mutation name is a combination of the action name and the type name (e.g., `actionName` + `TypeName`).
+### 5. Use State Machine Mutations
 
-For our `season` example, Simfinity.js will generate `activateSeason` and `finalizeSeason` mutations.
-
-To activate a season, you would call the `activateSeason` mutation with the ID of the season:
+The state machine automatically generates mutations for each action:
 
 ```graphql
 mutation {
-  activateSeason(id: "season_id_here") {
-    id
-    state
-  }
-}
-```
-
-This will change the season's state from `SCHEDULED` to `ACTIVE` and execute the `action` function defined for the `activate` transition.
-
-## Nested Collections Example
-
-Simfinity.js supports nested collections, allowing you to create complex data structures in a single request. Here's an example of how to create a TV series with seasons and episodes:
-
-```graphql
-mutation {
-  addserie(input: {
-    name: "Breaking Bad"
-    categories: ["crime", "drama", "thriller"]
-    director: { 
-      name: "Vince Gilligan" 
-      country: "United States" 
-    }
-    stars: {
-      added: [
-        { star: { id: "611511b07153a6000a2da7cb" } },
-        { star: { id: "6851a567e9089de526badd34" } }
-      ]
-    }
-    seasons: { 
-      added: [
-        {
-          number: 1
-          year: 2008
-          episodes: { 
-            added: [
-              {
-                number: 1
-                name: "Pilot"
-                date: "2008-01-20T02:00:00.000Z"
-              },
-              {
-                number: 2
-                name: "Cat's in the Bag..."
-                date: "2008-01-27T02:00:00.000Z"
-              }
-            ]
-          }
-        },
-        {
-          number: 2
-          year: 2009
-          episodes: { 
-            added: [
-              {
-                number: 1
-                name: "Seven Thirty-Seven"
-                date: "2009-03-08T02:00:00.000Z"
-              },
-              {
-                number: 2
-                name: "Grilled"
-                date: "2009-03-15T03:00:00.000Z"
-              }
-            ]
-          }
-        }
-      ]
-    }
+  process_order(input: {
+    id: "order_id"
   }) {
     id
-    name
-    director { 
-      name 
-      country 
-    }
-    categories
-    seasons {
-      number
-      year
-      episodes {
-        number
-        name
-        date
-      }
-    }
+    state
+    customer
   }
 }
 ```
 
-This example demonstrates:
-1. Creating a series with basic information (name, categories, director)
-2. Adding stars using their IDs
-3. Creating multiple seasons with their respective years
-4. Adding episodes to each season with their details (number, name, date)
-5. The response structure showing the created data
+**Important Notes**:
+- The `state` field is automatically read-only and managed by the state machine
+- State transitions are only allowed based on the defined actions
+- Business logic in the `action` function is executed during transitions
+- Invalid transitions throw errors automatically
 
-The nested structure allows you to create complex relationships in a single request, making it efficient to set up your data model.
+## ✅ Validations
 
-## Complex Relationship Example
+### Field-Level Validations
 
-Here's an example of a more complex relationship structure that connects multiple types:
-
-```javascript
-const AssignedStarAndSerieType = new GraphQLObjectType({
-  name: 'AssignedStarAndSerie',
-  fields: () => ({
-    id: { type: GraphQLID },
-    serie: {
-      type: SerieType,
-      extensions: {
-        relation: {
-          embedded: false,
-          connectionField: 'serieId',
-          displayField: 'name'
-        }
-      },
-      resolve(parent) {
-        return simfinity.getModel(SerieType).findById(parent.serieId);
-      }
-    },
-    star: {
-      type: StarType,
-      extensions: {
-        relation: {
-          embedded: false,
-          connectionField: 'starId',
-          displayField: 'name'
-        }
-      },
-      resolve(parent) {
-        return simfinity.getModel(StarType).findById(parent.starId);
-      }
-    },
-  })
-});
-```
-
-This example demonstrates:
-1. Multiple relations in a single type
-2. Using `embedded: false` to indicate these are separate collections
-3. Using `displayField` to specify which field should be used to represent the related entity
-4. Custom `resolve` functions for each relation
-5. Proper naming conventions for ID fields (camelCase)
-
-## Extensions Usage
-
-Simfinity.js uses extensions at both field and type levels to provide additional functionality and configuration. Here are the different ways you can use extensions:
-
-### Field Level Extensions
-
-1. **Relations**
-```javascript
-{
-  extensions: {
-    relation: {
-      connectionField: 'authorId',  // Required: The field storing the related ID
-      displayField: 'name',         // Optional: Field to use for display
-      embedded: false              // Optional: Whether the relation is embedded
-    }
-  }
-}
-```
-
-2. **Unique Fields**
-```javascript
-{
-  extensions: {
-    unique: true  // Makes the field unique in the database
-  }
-}
-```
-
-3. **Read Only Fields**
-```javascript
-{
-  extensions: {
-    readOnly: true  // Prevents the field from being included in input types for mutations
-  }
-}
-```
-
-4. **Validations**
-```javascript
-{
-  extensions: {
-    validations: {
-      save: [/* array of validators */],
-      update: [/* array of validators */],
-      delete: [/* array of validators */]
-    }
-  }
-}
-```
-
-### Field Validations Example
-
-Here's an example of how to implement field-level validations:
+Add validation logic directly to fields:
 
 ```javascript
 const { SimfinityError } = require('@simtlix/simfinity-js');
 
-// Custom validation error
-class ValidationError extends SimfinityError {
-  constructor(message) {
-    super(message, 'VALIDATION_ERROR', 400);
-  }
-}
-
-// Custom validator
-const validateAge = async (typeName, fieldName, value, session) => {
-  if (value < 0 || value > 120) {
-    throw new ValidationError(`Invalid age: ${value}. Age must be between 0 and 120.`);
+const validateAge = {
+  validate: async (typeName, fieldName, value, session) => {
+    if (value < 0 || value > 120) {
+      throw new SimfinityError(`Invalid age: ${value}`, 'VALIDATION_ERROR', 400);
+    }
   }
 };
 
@@ -1106,20 +577,20 @@ const PersonType = new GraphQLObjectType({
       type: GraphQLString,
       extensions: {
         validations: {
-          save: [
-            async (typeName, fieldName, value, session) => {
+          save: [{
+            validate: async (typeName, fieldName, value, session) => {
               if (!value || value.length < 2) {
-                throw new ValidationError('Name must be at least 2 characters long');
+                throw new SimfinityError('Name must be at least 2 characters', 'VALIDATION_ERROR', 400);
               }
             }
-          ],
-          update: [
-            async (typeName, fieldName, value, session) => {
+          }],
+          update: [{
+            validate: async (typeName, fieldName, value, session) => {
               if (value && value.length < 2) {
-                throw new ValidationError('Name must be at least 2 characters long');
+                throw new SimfinityError('Name must be at least 2 characters', 'VALIDATION_ERROR', 400);
               }
             }
-          ]
+          }]
         }
       }
     },
@@ -1136,58 +607,42 @@ const PersonType = new GraphQLObjectType({
 });
 ```
 
-### Custom Errors
+### Type-Level Validations
 
-You can create custom errors by extending `SimfinityError`. This is useful for creating domain-specific errors with proper error codes and status codes:
+Validate objects as a whole:
 
 ```javascript
-const { SimfinityError } = require('@simtlix/simfinity-js');
-
-// Business logic error
-class BusinessError extends SimfinityError {
-  constructor(message) {
-    super(message, 'BUSINESS_ERROR', 400);
-  }
-}
-
-// Authorization error
-class AuthorizationError extends SimfinityError {
-  constructor(message) {
-    super(message, 'UNAUTHORIZED', 401);
-  }
-}
-
-// Not found error
-class NotFoundError extends SimfinityError {
-  constructor(message) {
-    super(message, 'NOT_FOUND', 404);
-  }
-}
-
-// Usage in validators or business logic
-const validateOrder = async (typeName, fieldName, value, session) => {
-  if (!value.items || value.items.length === 0) {
-    throw new BusinessError('Order must contain at least one item');
-  }
-  
-  if (!value.customerId) {
-    throw new AuthorizationError('Customer ID is required');
-  }
-  
-  const customer = await CustomerModel.findById(value.customerId);
-  if (!customer) {
-    throw new NotFoundError(`Customer with ID ${value.customerId} not found`);
+const orderValidator = {
+  validate: async (typeName, args, modelArgs, session) => {
+    // Cross-field validation
+    if (modelArgs.deliveryDate < modelArgs.orderDate) {
+      throw new SimfinityError('Delivery date cannot be before order date', 'VALIDATION_ERROR', 400);
+    }
+    
+    // Business rule validation
+    if (modelArgs.items.length === 0) {
+      throw new SimfinityError('Order must contain at least one item', 'BUSINESS_ERROR', 400);
+    }
   }
 };
+
+const OrderType = new GraphQLObjectType({
+  name: 'Order',
+  extensions: {
+    validations: {
+      save: [orderValidator],
+      update: [orderValidator]
+    }
+  },
+  fields: () => ({
+    // ... fields
+  })
+});
 ```
 
 ### Custom Validated Scalar Types
 
-Simfinity.js provides a utility function to create custom GraphQL scalar types with built-in validation. This is useful for creating domain-specific scalar types that enforce business rules.
-
-#### Using `createValidatedScalar`
-
-The `createValidatedScalar` function allows you to create custom scalar types that extend existing GraphQL scalar types and add custom validation logic.
+Create custom scalar types with built-in validation:
 
 ```javascript
 const { GraphQLString, GraphQLInt } = require('graphql');
@@ -1218,240 +673,20 @@ const PositiveIntScalar = createValidatedScalar(
   }
 );
 
-// Phone number scalar
-const PhoneScalar = createValidatedScalar(
-  'Phone',
-  'A valid phone number',
-  GraphQLString,
-  (value) => {
-    const phoneRegex = /^\+?[\d\s\-()]+$/;
-    if (!phoneRegex.test(value)) {
-      throw new Error('Invalid phone number format');
-    }
-  }
-);
-```
-
-#### Using Custom Scalars in Your Types
-
-Once you've created your custom scalar types, you can use them in your GraphQL object types:
-
-```javascript
+// Use in your types
 const UserType = new GraphQLObjectType({
   name: 'User',
   fields: () => ({
     id: { type: GraphQLID },
-    name: { type: GraphQLString },
-    email: { type: EmailScalar },        // Custom email validation
-    age: { type: PositiveIntScalar },    // Custom positive integer validation
-    phone: { type: PhoneScalar },        // Custom phone validation
+    email: { type: EmailScalar },
+    age: { type: PositiveIntScalar },
   }),
 });
 ```
 
-#### Supported Base Scalar Types
+### Custom Error Classes
 
-The `createValidatedScalar` function supports all standard GraphQL scalar types as base types:
-
-- `GraphQLString` - For string-based custom scalars
-- `GraphQLInt` - For integer-based custom scalars  
-- `GraphQLFloat` - For float-based custom scalars
-- `GraphQLBoolean` - For boolean-based custom scalars
-- `GraphQLID` - For ID-based custom scalars
-
-#### Validation Features
-
-- **Type Safety**: The function validates that the provided `baseScalarType` is a valid GraphQL scalar type
-- **AST Kind Validation**: Automatically uses the correct AST kind for the base scalar type
-- **Base Type Parsing**: Leverages the base scalar's parsing logic before applying custom validation
-- **Error Handling**: Throws descriptive errors for invalid inputs
-
-#### Error Examples
-
-```javascript
-// This will throw an error: baseScalarType is required
-createValidatedScalar('Invalid', 'Invalid', null, () => {});
-
-// This will throw an error: baseScalarType must be a valid GraphQL scalar type
-createValidatedScalar('Invalid', 'Invalid', 'not a scalar', () => {});
-```
-
-### Type Level Extensions
-
-1. **Validations**
-```javascript
-const BookType = new GraphQLObjectType({
-  name: 'Book',
-  extensions: {
-    validations: {
-      save: [/* array of validators */],
-      update: [/* array of validators */],
-      delete: [/* array of validators */]
-    }
-  },
-  fields: () => ({
-    // ... fields
-  })
-});
-```
-
-### State Machine
-
-When a type is configured with a state machine, the `state` field is automatically managed by the state machine. This means:
-- The `state` field cannot be directly modified through mutations
-- State transitions are handled through dedicated state machine mutations
-- The state field is automatically read-only and managed by the system
-
-Example of a type with state machine:
-```javascript
-const OrderType = new GraphQLObjectType({
-  name: 'Order',
-  fields: () => ({
-    id: { type: GraphQLID },
-    state: { type: GraphQLString },  // This field is managed by the state machine
-    // ... other fields
-  })
-});
-
-// Connect with state machine
-simfinity.connect(null, OrderType, 'order', 'orders', null, null, {
-  states: ['PENDING', 'PROCESSING', 'COMPLETED'],
-  transitions: {
-    process: {
-      from: ['PENDING'],
-      to: 'PROCESSING'
-    },
-    complete: {
-      from: ['PROCESSING'],
-      to: 'COMPLETED'
-    }
-  }
-});
-```
-
-### Example Usage
-
-Here's a complete example showing multiple extension usages:
-
-```javascript
-const BookType = new GraphQLObjectType({
-  name: 'Book',
-  extensions: {
-    validations: {
-      save: [
-        async (typeName, fieldName, value, session) => {
-          // Custom validation logic
-        }
-      ]
-    }
-  },
-  fields: () => ({
-    id: { type: GraphQLID },
-    title: { 
-      type: GraphQLString,
-      extensions: {
-        unique: true
-      }
-    },
-    author: {
-      type: AuthorType,
-      extensions: {
-        relation: {
-          connectionField: 'authorId',
-          displayField: 'name',
-          embedded: false
-        }
-      },
-      resolve(parent) {
-        return simfinity.getModel(AuthorType).findById(parent.authorId);
-      }
-    }
-  })
-});
-```
-
-This example demonstrates:
-1. Type-level validations for save operations
-2. Field-level unique constraint
-3. Field-level relation configuration
-
-### Field-Level Validations
-
-You can attach validation logic directly to a field for `save`, `update`, and `delete` operations.
-
-#### Validator Function Signature
-
-A field validator is an `async` function with the following signature: `async (typeName, fieldName, value, session) => {}`
-
-*   `typeName` (String): The name of the GraphQLObjectType (e.g., "Person").
-*   `fieldName` (String): The name of the field being validated (e.g., "age").
-*   `value` (any): The value of the field to be validated.
-*   `session` (ClientSession): The Mongoose session for the current transaction.
-
-#### Example
-
-Here's an example of how to implement field-level validations:
-
-```javascript
-const { SimfinityError } = require('@simtlix/simfinity-js');
-
-// Custom validation error
-class ValidationError extends SimfinityError {
-  constructor(message) {
-    super(message, 'VALIDATION_ERROR', 400);
-  }
-}
-
-// Custom validator for age
-const validateAge = {
-  validate: async (typeName, fieldName, value, session) => {
-    if (value < 0 || value > 120) {
-      throw new ValidationError(`Invalid age: ${value}. Age must be between 0 and 120.`);
-    }
-  }
-};
-
-const PersonType = new GraphQLObjectType({
-  name: 'Person',
-  fields: () => ({
-    id: { type: GraphQLID },
-    name: { 
-      type: GraphQLString,
-      extensions: {
-        validations: {
-          save: [{
-            validate: async (typeName, fieldName, value, session) => {
-              if (!value || value.length < 2) {
-                throw new ValidationError('Name must be at least 2 characters long');
-              }
-            }
-          }],
-          update: [{
-            validate: async (typeName, fieldName, value, session) => {
-              if (value && value.length < 2) {
-                throw new ValidationError('Name must be at least 2 characters long');
-              }
-            }
-          }]
-        }
-      }
-    },
-    age: {
-      type: GraphQLInt,
-      extensions: {
-        validations: {
-          save: [validateAge],
-          update: [validateAge]
-        }
-      }
-    }
-  })
-});
-```
-
-### Custom Errors
-
-You can create custom errors by extending `SimfinityError`. This is useful for creating domain-specific errors with proper error codes and status codes:
+Create domain-specific error classes:
 
 ```javascript
 const { SimfinityError } = require('@simtlix/simfinity-js');
@@ -1476,162 +711,232 @@ class NotFoundError extends SimfinityError {
     super(message, 'NOT_FOUND', 404);
   }
 }
-
-// Usage in validators or business logic
-const validateOrder = async (typeName, fieldName, value, session) => {
-  if (!value.items || value.items.length === 0) {
-    throw new BusinessError('Order must contain at least one item');
-  }
-  
-  if (!value.customerId) {
-    throw new AuthorizationError('Customer ID is required');
-  }
-  
-  const customer = await CustomerModel.findById(value.customerId);
-  if (!customer) {
-    throw new NotFoundError(`Customer with ID ${value.customerId} not found`);
-  }
-};
 ```
 
-### Type-Level Validations
+## 🔧 Advanced Features
 
-You can also define validations at the type level. These are useful for validating the object as a whole, for example, to check for consistency between multiple fields.
+### Field Extensions
+
+Control field behavior with extensions:
 
 ```javascript
 const BookType = new GraphQLObjectType({
   name: 'Book',
-  extensions: {
-    validations: {
-      save: [/* array of validators */],
-      update: [/* array of validators */],
-      delete: [/* array of validators */]
-    }
-  },
-  fields: () => ({
-    // ... fields
-  })
-});
-```
-
-#### Validator Function Signature
-
-A type validator is an `async` function with the following signature: `async (typeName, args, modelArgs, session) => {}`
-
-*   `typeName` (String): The name of the GraphQLObjectType being validated.
-*   `args` (Object): The raw, plain JavaScript object of arguments passed to the mutation.
-*   `modelArgs` (Object): The materialized object that is ready to be persisted to the database. This object's structure maps to your Mongoose schema.
-*   `session` (ClientSession): The Mongoose session for the current transaction.
-
-#### Example
-
-```javascript
-const { SimfinityError } = require('@simtlix/simfinity-js');
-
-const releaseDateValidator = {
-  validate: async (typeName, args, modelArgs, session) => {
-    // Example: A book's publication date cannot be before its manuscript completion date
-    if (modelArgs.publicationDate < modelArgs.manuscriptDate) {
-      throw new SimfinityError('Publication date cannot be before the manuscript completion date.', 'VALIDATION_ERROR', 400);
-    }
-  }
-};
-
-const BookType = new GraphQLObjectType({
-  name: 'Book',
-  extensions: {
-    validations: {
-      save: [releaseDateValidator],
-      update: [releaseDateValidator]
-    }
-  },
-  fields: () => ({
-    id: { type: GraphQLID },
-    title: { type: GraphQLString },
-    manuscriptDate: { type: GraphQLDateTime },
-    publicationDate: { type: GraphQLDateTime }
-  })
-});
-```
-
-### State Machine
-
-When a type is configured with a state machine, the `state` field is automatically managed by the state machine. This means:
-- The `state` field cannot be directly modified through mutations
-- State transitions are handled through dedicated state machine mutations
-- The state field is automatically read-only and managed by the system
-
-Example of a type with state machine:
-```javascript
-const OrderType = new GraphQLObjectType({
-  name: 'Order',
-  fields: () => ({
-    id: { type: GraphQLID },
-    state: { type: GraphQLString },  // This field is managed by the state machine
-    // ... other fields
-  })
-});
-
-// Connect with state machine
-simfinity.connect(null, OrderType, 'order', 'orders', null, null, {
-  states: ['PENDING', 'PROCESSING', 'COMPLETED'],
-  transitions: {
-    process: {
-      from: ['PENDING'],
-      to: 'PROCESSING'
-    },
-    complete: {
-      from: ['PROCESSING'],
-      to: 'COMPLETED'
-    }
-  }
-});
-```
-
-### Example Usage
-
-Here's a complete example showing multiple extension usages:
-
-```javascript
-const BookType = new GraphQLObjectType({
-  name: 'Book',
-  extensions: {
-    validations: {
-      save: [
-        async (typeName, fieldName, value, session) => {
-          // Custom validation logic
-        }
-      ]
-    }
-  },
   fields: () => ({
     id: { type: GraphQLID },
     title: { 
       type: GraphQLString,
       extensions: {
-        unique: true
+        unique: true,        // Creates unique index in MongoDB
+        readOnly: true       // Excludes from input types
       }
     },
-    author: {
-      type: AuthorType,
+    isbn: {
+      type: GraphQLString,
       extensions: {
-        relation: {
-          connectionField: 'authorId',
-          displayField: 'name',
-          embedded: false
-        }
-      },
-      resolve(parent) {
-        return simfinity.getModel(AuthorType).findById(parent.authorId);
+        unique: true
       }
     }
   })
 });
 ```
 
-This example demonstrates:
-1. Type-level validations for save operations
-2. Field-level unique constraint
-3. Field-level relation configuration
+### Custom Mutations
+
+Register custom mutations beyond the automatic CRUD operations:
+
+```javascript
+simfinity.registerMutation(
+  'sendBookNotification',
+  'Send notification about a book',
+  BookNotificationInput,    // Input type
+  NotificationResult,       // Output type
+  async (args, session) => {
+    // Custom business logic
+    const book = await BookModel.findById(args.bookId);
+    // Send notification logic here
+    return { success: true, message: 'Notification sent' };
+  }
+);
+```
+
+### Adding Types Without Endpoints
+
+Include types in the schema without generating endpoints:
+
+```javascript
+// This type can be used in relationships but won't have queries/mutations
+simfinity.addNoEndpointType(AddressType);
+```
+
+### Working with Existing Mongoose Models
+
+Use your existing Mongoose models:
+
+```javascript
+const mongoose = require('mongoose');
+
+const BookSchema = new mongoose.Schema({
+  title: String,
+  author: String,
+  publishedDate: Date
+});
+
+const BookModel = mongoose.model('Book', BookSchema);
+
+// Use existing model
+simfinity.connect(BookModel, BookType, 'book', 'books');
+```
+
+### Programmatic Data Access
+
+Access data programmatically outside of GraphQL:
+
+```javascript
+// Save an object programmatically
+const newBook = await simfinity.saveObject('Book', {
+  title: 'New Book',
+  author: 'Author Name'
+}, session);
+
+// Get the Mongoose model for a type
+const BookModel = simfinity.getModel(BookType);
+const books = await BookModel.find({ author: 'Douglas Adams' });
+
+// Get the input type for a GraphQL type
+const BookInput = simfinity.getInputType(BookType);
+```
+
+## 📚 Complete Example
+
+Here's a complete bookstore example with relationships, validations, and state machines:
+
+```javascript
+const express = require('express');
+const { graphqlHTTP } = require('express-graphql');
+const mongoose = require('mongoose');
+const { 
+  GraphQLObjectType, 
+  GraphQLString, 
+  GraphQLNonNull, 
+  GraphQLID, 
+  GraphQLList,
+  GraphQLInt,
+  GraphQLEnumType
+} = require('graphql');
+const simfinity = require('@simtlix/simfinity-js');
+
+// Connect to MongoDB
+mongoose.connect('mongodb://localhost:27017/bookstore', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+});
+
+// Define Types
+const AuthorType = new GraphQLObjectType({
+  name: 'Author',
+  fields: () => ({
+    id: { type: new GraphQLNonNull(GraphQLID) },
+    name: { type: new GraphQLNonNull(GraphQLString) },
+    email: { type: GraphQLString },
+    books: {
+      type: new GraphQLList(BookType),
+      extensions: {
+        relation: {
+          connectionField: 'author',
+          displayField: 'title'
+        },
+      },
+      resolve(parent) {
+        return simfinity.getModel(BookType).find({ author: parent.id });
+      }
+    },
+  }),
+});
+
+const BookType = new GraphQLObjectType({
+  name: 'Book',
+  fields: () => ({
+    id: { type: new GraphQLNonNull(GraphQLID) },
+    title: { 
+      type: new GraphQLNonNull(GraphQLString),
+      extensions: {
+        validations: {
+          save: [{
+            validate: async (typeName, fieldName, value, session) => {
+              if (!value || value.length < 2) {
+                throw new simfinity.SimfinityError('Title must be at least 2 characters', 'VALIDATION_ERROR', 400);
+              }
+            }
+          }]
+        }
+      }
+    },
+    pages: { type: GraphQLInt },
+    author: {
+      type: AuthorType,
+      extensions: {
+        relation: {
+          displayField: 'name'
+        },
+      },
+      resolve(parent) {
+        return simfinity.getModel(AuthorType).findById(parent.author);
+      }
+    },
+  }),
+});
+
+// Define Controllers
+const bookController = {
+  onSaving: async (doc, args, session) => {
+    console.log(`Creating book: ${doc.title}`);
+  },
+  
+  onSaved: async (doc, args, session) => {
+    console.log(`Book saved: ${doc.title}`);
+  }
+};
+
+// Connect Types
+simfinity.connect(null, AuthorType, 'author', 'authors');
+simfinity.connect(null, BookType, 'book', 'books', bookController);
+
+// Create Schema
+const schema = simfinity.createSchema();
+
+// Setup Express Server
+const app = express();
+
+app.use('/graphql', graphqlHTTP({
+  schema,
+  graphiql: true,
+  formatError: simfinity.buildErrorFormatter((err) => {
+    console.log(err);
+  })
+}));
+
+app.listen(4000, () => {
+  console.log('Bookstore API running on http://localhost:4000/graphql');
+});
+```
+
+## 🔗 Resources
+
+- **[Samples Repository](https://github.com/simtlix/simfinity.js-samples)** - Complete examples and use cases
+- **[MongoDB Query Language](https://docs.mongodb.com/manual/tutorial/query-documents/)** - Learn about MongoDB querying
+- **[GraphQL Documentation](https://graphql.org/learn/)** - Learn about GraphQL
+
+## 📄 License
+
+Apache-2.0 License - see the [LICENSE](LICENSE) file for details.
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+---
+
+*Built with ❤️ by [Simtlix](https://github.com/simtlix)*
 
 
