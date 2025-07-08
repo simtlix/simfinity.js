@@ -7,6 +7,7 @@ A powerful Node.js framework that automatically generates GraphQL schemas from y
 - **Automatic Schema Generation**: Define your object model, and Simfinity.js generates all queries and mutations
 - **MongoDB Integration**: Seamless translation between GraphQL and MongoDB
 - **Powerful Querying**: Any query that can be executed in MongoDB can be executed in GraphQL
+- **Auto-Generated Resolvers**: Automatically generates resolve methods for relationship fields
 - **Business Logic**: Implement business logic and domain validations declaratively
 - **State Machines**: Built-in support for declarative state machine workflows
 - **Lifecycle Hooks**: Controller methods for granular control over operations
@@ -229,9 +230,7 @@ const AuthorType = new GraphQLObjectType({
           displayField: 'title'
         },
       },
-      resolve(parent) {
-        return simfinity.getModel(BookType).find({ author: parent.id });
-      }
+      // resolve method automatically generated! 🎉
     },
   }),
 });
@@ -248,9 +247,7 @@ const BookType = new GraphQLObjectType({
           displayField: 'name'
         },
       },
-      resolve(parent) {
-        return simfinity.getModel(AuthorType).findById(parent.author);
-      }
+      // resolve method automatically generated! 🎉
     },
   }),
 });
@@ -261,6 +258,100 @@ const BookType = new GraphQLObjectType({
 - `connectionField`: **(Required for collections)** The field storing the related object's ID - only needed for one-to-many relationships (GraphQLList). For single object relationships, the field name is automatically inferred from the GraphQL field name.
 - `displayField`: **(Optional)** Field to use for display in UI components
 - `embedded`: **(Optional)** Whether the relation is embedded (default: false)
+
+### Auto-Generated Resolve Methods
+
+🎉 **NEW**: Simfinity.js automatically generates resolve methods for relationship fields when types are connected, eliminating the need for manual resolver boilerplate.
+
+#### Before (Manual Resolvers)
+
+```javascript
+const BookType = new GraphQLObjectType({
+  name: 'Book',
+  fields: () => ({
+    id: { type: new GraphQLNonNull(GraphQLID) },
+    title: { type: new GraphQLNonNull(GraphQLString) },
+    author: {
+      type: AuthorType,
+      extensions: {
+        relation: {
+          displayField: 'name'
+        },
+      },
+      // You had to manually write this
+      resolve(parent) {
+        return simfinity.getModel(AuthorType).findById(parent.author);
+      }
+    },
+    comments: {
+      type: new GraphQLList(CommentType),
+      extensions: {
+        relation: {
+          connectionField: 'bookId',
+          displayField: 'text'
+        },
+      },
+      // You had to manually write this too
+      resolve(parent) {
+        return simfinity.getModel(CommentType).find({ bookId: parent.id });
+      }
+    }
+  }),
+});
+```
+
+#### After (Auto-Generated Resolvers)
+
+```javascript
+const BookType = new GraphQLObjectType({
+  name: 'Book',
+  fields: () => ({
+    id: { type: new GraphQLNonNull(GraphQLID) },
+    title: { type: new GraphQLNonNull(GraphQLString) },
+    author: {
+      type: AuthorType,
+      extensions: {
+        relation: {
+          displayField: 'name'
+        },
+      },
+      // resolve method automatically generated! 🎉
+    },
+    comments: {
+      type: new GraphQLList(CommentType),
+      extensions: {
+        relation: {
+          connectionField: 'bookId',
+          displayField: 'text'
+        },
+      },
+      // resolve method automatically generated! 🎉
+    }
+  }),
+});
+```
+
+#### How It Works
+
+- **Single Object Relationships**: Automatically generates `findById()` resolvers using the field name or `connectionField`
+- **Collection Relationships**: Automatically generates `find()` resolvers using the `connectionField` to query related objects
+- **Lazy Loading**: Models are looked up at runtime, so types can be connected in any order
+- **Backwards Compatible**: Existing manual resolve methods are preserved and not overwritten
+- **Type Safety**: Clear error messages if related types aren't properly connected
+
+#### Connect Your Types
+
+```javascript
+// Connect all your types to Simfinity
+simfinity.connect(null, AuthorType, 'author', 'authors');
+simfinity.connect(null, BookType, 'book', 'books');
+simfinity.connect(null, CommentType, 'comment', 'comments');
+
+// Or use addNoEndpointType for types that don't need direct queries/mutations
+simfinity.addNoEndpointType(AuthorType);
+```
+
+That's it! All relationship resolvers are automatically generated when you connect your types.
 
 ### Embedded vs Referenced Relationships
 

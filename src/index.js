@@ -1016,6 +1016,15 @@ const generateModel = (gqlType, onModelCreated) => {
   return model;
 };
 
+const generateModelWithoutCollection = (gqlType, onModelCreated) => {
+  const model = mongoose.model(gqlType.name, generateSchemaDefinition(gqlType), gqlType.name);
+  if (onModelCreated) {
+    onModelCreated(model);
+  }
+  // Never create collection for no-endpoint types
+  return model;
+};
+
 const buildMatchesClause = (fieldname, operator, value) => {
   const matches = {};
   if (operator === QLOperator.getValue('EQ').value || !operator) {
@@ -1544,6 +1553,52 @@ module.exports.registerMutation = (name, description, inputModel, outputModel, c
   };
 };
 
+const autoGenerateResolvers = (gqltype) => {
+  const fields = gqltype.getFields();
+
+  for (const [fieldName, fieldEntry] of Object.entries(fields)) {
+    // Skip if resolve method already exists
+    if (!fieldEntry.resolve) {
+      // Check if field has relation extension
+      if (fieldEntry.extensions && fieldEntry.extensions.relation) {
+        const { relation } = fieldEntry.extensions;
+
+        if (fieldEntry.type instanceof GraphQLList) {
+          // Collection field - generate resolve for one-to-many relationship
+          const relatedType = fieldEntry.type.ofType;
+          const connectionField = relation.connectionField || fieldName;
+
+          fieldEntry.resolve = (parent) => {
+            // Lazy lookup of the related model
+            const relatedTypeInfo = typesDict.types[relatedType.name];
+            if (!relatedTypeInfo || !relatedTypeInfo.model) {
+              throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
+            }
+            const query = {};
+            query[connectionField] = parent.id || parent._id;
+            return relatedTypeInfo.model.find(query);
+          };
+        } else if (fieldEntry.type instanceof GraphQLObjectType
+                   || (fieldEntry.type instanceof GraphQLNonNull && fieldEntry.type.ofType instanceof GraphQLObjectType)) {
+          // Single object field - generate resolve for one-to-one relationship
+          const relatedType = fieldEntry.type instanceof GraphQLNonNull ? fieldEntry.type.ofType : fieldEntry.type;
+          const connectionField = relation.connectionField || fieldName;
+
+          fieldEntry.resolve = (parent) => {
+            // Lazy lookup of the related model
+            const relatedTypeInfo = typesDict.types[relatedType.name];
+            if (!relatedTypeInfo || !relatedTypeInfo.model) {
+              throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
+            }
+            const relatedId = parent[connectionField] || parent[fieldName];
+            return relatedId ? relatedTypeInfo.model.findById(relatedId) : null;
+          };
+        }
+      }
+    }
+  }
+};
+
 module.exports.connect = (model, gqltype, simpleEntityEndpointName,
   listEntitiesEndpointName, controller, onModelCreated, stateMachine) => {
   waitingInputType[gqltype.name] = {
@@ -1561,6 +1616,9 @@ module.exports.connect = (model, gqltype, simpleEntityEndpointName,
   };
 
   typesDictForUpdate.types[gqltype.name] = { ...typesDict.types[gqltype.name] };
+
+  // Auto-generate resolve methods for relationship fields if not already defined
+  autoGenerateResolvers(gqltype);
 };
 
 module.exports.addNoEndpointType = (gqltype) => {
@@ -1568,12 +1626,30 @@ module.exports.addNoEndpointType = (gqltype) => {
     gqltype,
   };
 
+  // Check if this type has relationship fields that might need a model
+  const fields = gqltype.getFields();
+  let needsModel = false;
+
+  for (const [, fieldEntry] of Object.entries(fields)) {
+    if (fieldEntry.extensions && fieldEntry.extensions.relation
+        && (fieldEntry.type instanceof GraphQLObjectType || fieldEntry.type instanceof GraphQLList
+            || (fieldEntry.type instanceof GraphQLNonNull && fieldEntry.type.ofType instanceof GraphQLObjectType))) {
+      needsModel = true;
+      break;
+    }
+  }
+
   typesDict.types[gqltype.name] = {
     gqltype,
     endpoint: false,
+    // Generate model if needed for relationships, but don't create collection
+    model: needsModel ? generateModelWithoutCollection(gqltype, null) : null,
   };
 
   typesDictForUpdate.types[gqltype.name] = { ...typesDict.types[gqltype.name] };
+
+  // Auto-generate resolve methods for relationship fields if not already defined
+  autoGenerateResolvers(gqltype);
 };
 
 module.exports.createValidatedScalar = createValidatedScalar;
