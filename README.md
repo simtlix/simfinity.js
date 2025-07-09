@@ -146,13 +146,6 @@ const schema = simfinity.createSchema(
 ```javascript
 // Prevent automatic MongoDB collection creation (useful for testing)
 simfinity.preventCreatingCollection(true);
-
-// Add middleware for all operations
-simfinity.use((params, next) => {
-  // params contains: type, args, operation, context
-  console.log(`Executing ${params.operation} on ${params.type.name}`);
-  next();
-});
 ```
 
 ## 📋 Basic Usage
@@ -209,6 +202,253 @@ query {
 - `IN` - In array
 - `NIN` - Not in array
 - `BTW` - Between two values
+
+## 🔧 Middlewares
+
+Middlewares provide a powerful way to intercept and process all GraphQL operations before they execute. Use them for cross-cutting concerns like authentication, logging, validation, and performance monitoring.
+
+### Adding Middlewares
+
+Register middlewares using `simfinity.use()`. Middlewares execute in the order they're registered:
+
+```javascript
+// Basic logging middleware
+simfinity.use((params, next) => {
+  console.log(`Executing ${params.operation} on ${params.type?.name || 'custom mutation'}`);
+  next();
+});
+```
+
+### Middleware Parameters
+
+Each middleware receives a `params` object containing:
+
+```javascript
+simfinity.use((params, next) => {
+  // params object contains:
+  const {
+    type,        // Type information (model, gqltype, controller, etc.)
+    args,        // GraphQL arguments passed to the operation
+    operation,   // Operation type: 'save', 'update', 'delete', 'get_by_id', 'find', 'state_changed', 'custom_mutation'
+    context,     // GraphQL context object (includes request info, user data, etc.)
+    actionName,  // For state machine actions (only present for state_changed operations)
+    actionField, // State machine action details (only present for state_changed operations)
+    entry        // Custom mutation name (only present for custom_mutation operations)
+  } = params;
+  
+  // Always call next() to continue the middleware chain
+  next();
+});
+```
+
+### Common Use Cases
+
+#### 1. Authentication & Authorization
+
+```javascript
+simfinity.use((params, next) => {
+  const { context, operation, type } = params;
+  
+  // Skip authentication for read operations
+  if (operation === 'get_by_id' || operation === 'find') {
+    return next();
+  }
+  
+  // Check if user is authenticated
+  if (!context.user) {
+    throw new simfinity.SimfinityError('Authentication required', 'UNAUTHORIZED', 401);
+  }
+  
+  // Check permissions for specific types
+  if (type?.name === 'User' && context.user.role !== 'admin') {
+    throw new simfinity.SimfinityError('Admin access required', 'FORBIDDEN', 403);
+  }
+  
+  next();
+});
+```
+
+#### 2. Request Logging & Monitoring
+
+```javascript
+simfinity.use((params, next) => {
+  const { operation, type, args, context } = params;
+  const startTime = Date.now();
+  
+  console.log(`[${new Date().toISOString()}] Starting ${operation}${type ? ` on ${type.name}` : ''}`);
+  
+  // Continue with the operation
+  next();
+  
+  const duration = Date.now() - startTime;
+  console.log(`[${new Date().toISOString()}] Completed ${operation} in ${duration}ms`);
+});
+```
+
+#### 3. Input Validation & Sanitization
+
+```javascript
+simfinity.use((params, next) => {
+  const { operation, args, type } = params;
+  
+  // Validate input for save operations
+  if (operation === 'save' && args.input) {
+    // Trim string fields
+    Object.keys(args.input).forEach(key => {
+      if (typeof args.input[key] === 'string') {
+        args.input[key] = args.input[key].trim();
+      }
+    });
+    
+    // Validate required business rules
+    if (type?.name === 'Book' && args.input.title && args.input.title.length < 3) {
+      throw new simfinity.SimfinityError('Book title must be at least 3 characters', 'VALIDATION_ERROR', 400);
+    }
+  }
+  
+  next();
+});
+```
+
+#### 4. Rate Limiting
+
+```javascript
+const requestCounts = new Map();
+
+simfinity.use((params, next) => {
+  const { context, operation } = params;
+  const userId = context.user?.id || context.ip;
+  const now = Date.now();
+  const windowMs = 60000; // 1 minute
+  const maxRequests = 100;
+  
+  // Only apply rate limiting to mutations
+  if (operation === 'save' || operation === 'update' || operation === 'delete') {
+    const userRequests = requestCounts.get(userId) || [];
+    const recentRequests = userRequests.filter(time => now - time < windowMs);
+    
+    if (recentRequests.length >= maxRequests) {
+      throw new simfinity.SimfinityError('Rate limit exceeded', 'TOO_MANY_REQUESTS', 429);
+    }
+    
+    recentRequests.push(now);
+    requestCounts.set(userId, recentRequests);
+  }
+  
+  next();
+});
+```
+
+#### 5. Audit Trail
+
+```javascript
+simfinity.use((params, next) => {
+  const { operation, type, args, context } = params;
+  
+  // Log all mutations for audit purposes
+  if (operation === 'save' || operation === 'update' || operation === 'delete') {
+    const auditEntry = {
+      timestamp: new Date(),
+      user: context.user?.id,
+      operation,
+      type: type?.name,
+      entityId: args.id || 'new',
+      data: operation === 'delete' ? null : args.input,
+      ip: context.ip,
+      userAgent: context.userAgent
+    };
+    
+    // Save to audit log (could be database, file, or external service)
+    console.log('AUDIT:', JSON.stringify(auditEntry));
+  }
+  
+  next();
+});
+```
+
+### Multiple Middlewares
+
+Middlewares execute in registration order. Each middleware must call `next()` to continue the chain:
+
+```javascript
+// Middleware 1: Authentication
+simfinity.use((params, next) => {
+  console.log('1. Checking authentication...');
+  // Authentication logic here
+  next(); // Continue to next middleware
+});
+
+// Middleware 2: Authorization  
+simfinity.use((params, next) => {
+  console.log('2. Checking permissions...');
+  // Authorization logic here
+  next(); // Continue to next middleware
+});
+
+// Middleware 3: Logging
+simfinity.use((params, next) => {
+  console.log('3. Logging request...');
+  // Logging logic here
+  next(); // Continue to GraphQL operation
+});
+```
+
+### Error Handling in Middlewares
+
+Middlewares can throw errors to stop the operation:
+
+```javascript
+simfinity.use((params, next) => {
+  const { context, operation } = params;
+  
+  try {
+    // Validation logic
+    if (!context.user && operation !== 'find') {
+      throw new simfinity.SimfinityError('Authentication required', 'UNAUTHORIZED', 401);
+    }
+    
+    next(); // Continue only if validation passes
+  } catch (error) {
+    // Error automatically bubbles up to GraphQL error handling
+    throw error;
+  }
+});
+```
+
+### Conditional Middleware Execution
+
+Execute middleware logic conditionally based on operation type or context:
+
+```javascript
+simfinity.use((params, next) => {
+  const { operation, type, context } = params;
+  
+  // Only apply to specific types
+  if (type?.name === 'SensitiveData') {
+    // Special handling for sensitive data
+    if (!context.user?.hasHighSecurity) {
+      throw new simfinity.SimfinityError('High security clearance required', 'FORBIDDEN', 403);
+    }
+  }
+  
+  // Only apply to mutation operations
+  if (['save', 'update', 'delete', 'state_changed'].includes(operation)) {
+    // Mutation-specific logic
+    console.log(`Mutation ${operation} executing...`);
+  }
+  
+  next();
+});
+```
+
+### Best Practices
+
+1. **Always call `next()`**: Failing to call `next()` will hang the request
+2. **Handle errors gracefully**: Use try-catch blocks for error-prone operations
+3. **Keep middlewares focused**: Each middleware should handle one concern
+4. **Order matters**: Register middlewares in logical order (auth → validation → logging)
+5. **Performance consideration**: Middlewares run on every operation, keep them lightweight
+6. **Use context wisely**: Store request-specific data in the GraphQL context object
 
 ## 🔗 Relationships
 
@@ -352,6 +592,104 @@ simfinity.addNoEndpointType(AuthorType);
 ```
 
 That's it! All relationship resolvers are automatically generated when you connect your types.
+
+### Adding Types Without Endpoints
+
+Use `addNoEndpointType()` for types that should be included in the GraphQL schema but don't need their own CRUD operations:
+
+```javascript
+simfinity.addNoEndpointType(TypeName);
+```
+
+**When to use `addNoEndpointType()` vs `connect()`:**
+
+| Method | Use Case | Creates Endpoints | Use Example |
+|--------|----------|-------------------|-------------|
+| `connect()` | Types that need CRUD operations | ✅ Yes | User, Product, Order |
+| `addNoEndpointType()` | Types only used in relationships | ❌ No | Address, Settings, Director |
+
+#### Perfect Example: TV Series with Embedded Director
+
+From the [series-sample](https://github.com/simtlix/series-sample) project:
+
+```javascript
+// Director type - Used only as embedded data, no direct API access needed
+const directorType = new GraphQLObjectType({
+  name: 'director',
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: { type: new GraphQLNonNull(GraphQLString) },
+    country: { type: GraphQLString }
+  })
+});
+
+// Add to schema WITHOUT creating endpoints
+simfinity.addNoEndpointType(directorType);
+
+// Serie type - Has its own endpoints and embeds director data
+const serieType = new GraphQLObjectType({
+  name: 'serie',
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: { type: new GraphQLNonNull(GraphQLString) },
+    categories: { type: new GraphQLList(GraphQLString) },
+    director: {
+      type: new GraphQLNonNull(directorType),
+      extensions: {
+        relation: {
+          embedded: true,  // Director data stored within serie document
+          displayField: 'name'
+        }
+      }
+    }
+  })
+});
+
+// Create full CRUD endpoints for series
+simfinity.connect(null, serieType, 'serie', 'series');
+```
+
+**Result:**
+- ✅ `addserie`, `updateserie`, `deleteserie` mutations available
+- ✅ `serie`, `series` queries available  
+- ❌ No `adddirector`, `director`, `directors` endpoints (director is embedded)
+
+**Usage:**
+```graphql
+mutation {
+  addserie(input: {
+    name: "Breaking Bad"
+    categories: ["crime", "drama", "thriller"]
+    director: { 
+      name: "Vince Gilligan" 
+      country: "United States" 
+    }
+  }) {
+    id
+    name
+    director {
+      name
+      country
+    }
+  }
+}
+```
+
+#### When to Use Each Approach
+
+**Use `addNoEndpointType()` for:**
+- Simple data objects with few fields
+- Data that doesn't need CRUD operations  
+- Objects that belong to a single parent (1:1 relationships)
+- Configuration or settings objects
+- **Examples**: Address, Director info, Product specifications
+
+**Use `connect()` for:**
+- Complex entities that need their own endpoints
+- Data that needs CRUD operations
+- Objects shared between multiple parents (many:many relationships)  
+- Objects with business logic (controllers, state machines)
+- **Examples**: User, Product, Order, Season, Episode
 
 ### Embedded vs Referenced Relationships
 
@@ -853,7 +1191,7 @@ simfinity.registerMutation(
 
 ### Adding Types Without Endpoints
 
-Include types in the schema without generating endpoints:
+Include types in the schema without generating endpoints. See the [detailed guide on addNoEndpointType()](#adding-types-without-endpoints) for when and how to use this pattern:
 
 ```javascript
 // This type can be used in relationships but won't have queries/mutations
