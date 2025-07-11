@@ -1369,3 +1369,674 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 *Built with ❤️ by [Simtlix](https://github.com/simtlix)*
 
 
+## 📚 Query Examples from Series-Sample
+
+Here are some practical GraphQL query examples from the series-sample project, showcasing how to use simfinity.js effectively:
+
+### 1. Series with Directors from a Specific Country
+
+Find all series that have directors from the United States:
+
+```graphql
+query {
+  series(director: {
+    terms: [
+      {
+        path: "country",
+        operator: EQ,
+        value: "United States"
+      }
+    ]
+  }) {
+    id
+    name
+    categories
+    director {
+      name
+      country
+    }
+  }
+}
+```
+
+### 2. Series with a Specific Episode Name
+
+Find series that contain an episode with the name "Pilot":
+
+```graphql
+query {
+  series(
+    seasons: {
+      terms: [
+        {
+          path: "episodes.name",
+          operator: EQ,
+          value: "Pilot"
+        }
+      ]
+    }
+  ) {
+    id
+    name
+    seasons {
+      number
+      episodes {
+        number
+        name
+        date
+      }
+    }
+  }
+}
+```
+
+### 3. Series with a Particular Star
+
+Find series that feature "Bryan Cranston":
+
+```graphql
+query {
+  assignedStarsAndSeries(star: {
+    terms: [
+      {
+        path: "name",
+        operator: EQ,
+        value: "Bryan Cranston"
+      }
+    ]
+  }) {
+    id
+    star {
+      name
+    }
+    serie {
+      id
+      name
+      categories
+      director {
+        name
+        country
+      }
+    }
+  }
+}
+```
+
+### 4. Seasons from Series with Directors from a Given Country
+
+Find all seasons that belong to series directed by someone from the United States:
+
+```graphql
+query {
+  seasons(serie: {
+    terms: [
+      {
+        path: "director.country",
+        operator: EQ,
+        value: "United States"
+      }
+    ]
+  }) {
+    id
+    number
+    year
+    state
+    serie {
+      name
+      categories
+      director {
+        name
+        country
+      }
+    }
+    episodes {
+      number
+      name
+      date
+    }
+  }
+}
+```
+
+### 5. Combining Scalar and ObjectType Filters
+
+Find series named "Breaking Bad" that have at least one season with number 1:
+
+```graphql
+query {
+  series(
+    name: {
+      operator: EQ,
+      value: "Breaking Bad"
+    }
+    seasons: {
+      terms: [
+        {
+          path: "number",
+          operator: EQ,
+          value: 1
+        }
+      ]
+    }
+  ) {
+    id
+    name
+    director {
+      name
+      country
+    }
+    seasons {
+      number
+      episodes {
+        name
+      }
+    }
+  }
+}
+```
+
+### 6. Complex Nested Queries
+
+Get complete information for a specific series:
+
+```graphql
+query {
+  series(name: {
+    operator: EQ,
+    value: "Breaking Bad"
+  }) {
+    id
+    name
+    categories
+    director {
+      name
+      country
+    }
+    seasons {
+      number
+      year
+      state
+      episodes {
+        number
+        name
+        date
+      }
+    }
+  }
+}
+```
+
+### 7. Episodes from a Specific Season and Series
+
+Find all episodes from Season 1 of Breaking Bad:
+
+```graphql
+query {
+  episodes(season: {
+    terms: [
+      {
+        path: "number",
+        operator: EQ,
+        value: 1
+      },
+      {
+        path: "serie.name",
+        operator: EQ,
+        value: "Breaking Bad"
+      }
+    ]
+  }) {
+    id
+    number
+    name
+    date
+    season {
+      number
+      serie {
+        name
+      }
+    }
+  }
+}
+```
+
+### 8. Series by Category
+
+Find all crime series:
+
+```graphql
+query {
+  series(categories: {
+    operator: EQ,
+    value: "Crime"
+  }) {
+    id
+    name
+    categories
+    director {
+      name
+      country
+    }
+  }
+}
+```
+
+### 9. Search by Partial Episode Name
+
+Find episodes containing "Fire" in the name:
+
+```graphql
+query {
+  episodes(name: {
+    operator: LIKE,
+    value: "Fire"
+  }) {
+    id
+    number
+    name
+    date
+    season {
+      number
+      serie {
+        name
+      }
+    }
+  }
+}
+```
+
+### 10. Pagination
+
+Simfinity.js supports built-in pagination with optional total count:
+
+```graphql
+query {
+  series(
+    categories: {
+      operator: EQ,
+      value: "Crime"
+    }
+    pagination: {
+      page: 1,
+      size: 2,
+      count: true
+    }
+  ) {
+    id
+    name
+    categories
+    director {
+      name
+      country
+    }
+  }
+}
+```
+
+#### Pagination Parameters:
+- **page**: Page number (starts at 1, not 0)
+- **size**: Number of items per page
+- **count**: Optional boolean - if `true`, returns total count of matching records
+
+#### Getting Total Count:
+When `count: true` is specified, the total count is available in the response extensions. You need to configure an Envelop plugin to expose it:
+
+```javascript
+// Envelop plugin for count in extensions
+function useCountPlugin() {
+  return {
+    onExecute() {
+      return {
+        onExecuteDone({result, args}) {
+          if (args.contextValue?.count) {
+            result.extensions = {
+              ...result.extensions,
+              count: args.contextValue.count,
+            };
+          }
+        }
+      };
+    }
+  };
+}
+```
+
+#### Example Response:
+```json
+{
+  "data": {
+    "series": [
+      {
+        "id": "1",
+        "name": "Breaking Bad",
+        "categories": ["Crime", "Drama"],
+        "director": {
+          "name": "Vince Gilligan",
+          "country": "United States"
+        }
+      },
+      {
+        "id": "2", 
+        "name": "Better Call Saul",
+        "categories": ["Crime", "Drama"],
+        "director": {
+          "name": "Vince Gilligan",
+          "country": "United States"
+        }
+      }
+    ]
+  },
+  "extensions": {
+    "count": 15
+  }
+}
+```
+
+### 11. Sorting
+
+Simfinity.js supports sorting with multiple fields and sort orders:
+
+```graphql
+query {
+  series(
+    categories: { operator: EQ, value: "Crime" }
+    pagination: { page: 1, size: 5, count: true }
+    sort: {
+      terms: [
+        {
+          field: "name",
+          order: DESC
+        }
+      ]
+    }
+  ) {
+    id
+    name
+    categories
+    director {
+      name
+      country
+    }
+  }
+}
+```
+
+#### Sorting Parameters:
+- **sort**: Contains sorting configuration
+- **terms**: Array of sort criteria (allows multiple sort fields)
+- **field**: The field name to sort by
+- **order**: Sort order - `ASC` (ascending) or `DESC` (descending)
+
+#### Sorting by Nested Fields:
+You can sort by fields from related/nested objects using dot notation:
+
+```graphql
+query {
+  series(
+    categories: { operator: EQ, value: "Drama" }
+    pagination: { page: 1, size: 5, count: true }
+    sort: {
+      terms: [
+        {
+          field: "director.name",
+          order: DESC
+        }
+      ]
+    }
+  ) {
+    id
+    name
+    categories
+    director {
+      name
+      country
+    }
+  }
+}
+```
+
+#### Multiple Sort Fields:
+You can sort by multiple fields with different orders:
+
+```graphql
+query {
+  series(
+    sort: {
+      terms: [
+        { field: "director.country", order: ASC },
+        { field: "name", order: DESC }
+      ]
+    }
+  ) {
+    id
+    name
+    director {
+      name
+      country
+    }
+  }
+}
+```
+
+#### Combining Features:
+The example above demonstrates combining **filtering**, **pagination**, and **sorting** in a single query - a common pattern for data tables and lists with full functionality.
+
+### 12. Series Released in a Specific Year Range
+
+Find series with seasons released between 2010-2015:
+
+```graphql
+query {
+  seasons(year: {
+    operator: BETWEEN,
+    value: [2010, 2015]
+  }) {
+    id
+    number
+    year
+    serie {
+      name
+      director {
+        name
+        country
+      }
+    }
+  }
+}
+```
+
+
+## 🔄 State Machine Example from Series-Sample
+
+Simfinity.js provides built-in state machine support for managing entity lifecycles. Here's an example of how a state machine is implemented in the Season entity from the series-sample project.
+
+### State Machine Configuration
+
+State machines require **GraphQL Enum Types** to define states and proper state references:
+
+**Step 1: Define the GraphQL Enum Type**
+
+```javascript
+const { GraphQLEnumType } = require('graphql');
+
+const seasonState = new GraphQLEnumType({
+  name: 'seasonState',
+  values: {
+    SCHEDULED: { value: 'SCHEDULED' },
+    ACTIVE: { value: 'ACTIVE' },
+    FINISHED: { value: 'FINISHED' }
+  }
+});
+```
+
+**Step 2: Use Enum in GraphQL Object Type**
+
+```javascript
+const seasonType = new GraphQLObjectType({
+  name: 'season',
+  fields: () => ({
+    id: { type: GraphQLID },
+    number: { type: GraphQLInt },
+    year: { type: GraphQLInt },
+    state: { type: seasonState }, // ← Use the enum type
+    // ... other fields
+  })
+});
+```
+
+**Step 3: Define State Machine with Enum Values**
+
+```javascript
+const stateMachine = {
+  initialState: seasonState.getValue('SCHEDULED'),
+  actions: {
+    activate: {
+      from: seasonState.getValue('SCHEDULED'),
+      to: seasonState.getValue('ACTIVE'),
+      action: async (params) => {
+        console.log('Season activated:', JSON.stringify(params));
+      }
+    },
+    finalize: {
+      from: seasonState.getValue('ACTIVE'),
+      to: seasonState.getValue('FINISHED'),
+      action: async (params) => {
+        console.log('Season finalized:', JSON.stringify(params));
+      }
+    }
+  }
+};
+
+// Connect type with state machine
+simfinity.connect(null, seasonType, 'season', 'seasons', null, null, stateMachine);
+```
+
+### Season States
+
+The Season entity has three states:
+
+1. **SCHEDULED** - Initial state when season is created
+2. **ACTIVE** - Season is currently airing
+3. **FINISHED** - Season has completed airing
+
+### State Transitions
+
+**Available transitions:**
+- `activate`: SCHEDULED → ACTIVE
+- `finalize`: ACTIVE → FINISHED
+
+### State Machine Mutations
+
+Simfinity.js automatically generates state transition mutations:
+
+```graphql
+# Activate a scheduled season
+mutation {
+  activateseason(id: "season_id_here") {
+    id
+    number
+    year
+    state
+    serie {
+      name
+    }
+  }
+}
+```
+
+```graphql
+# Finalize an active season
+mutation {
+  finalizeseason(id: "season_id_here") {
+    id
+    number
+    year
+    state
+    serie {
+      name
+    }
+  }
+}
+```
+
+### State Machine Features
+
+**Validation:**
+- Only valid transitions are allowed
+- Attempting invalid transitions returns an error
+- State field is read-only (managed by state machine)
+
+**Custom Actions:**
+- Each transition can execute custom business logic
+- Actions receive parameters including entity data
+- Actions can perform side effects (logging, notifications, etc.)
+
+**Query by State:**
+```graphql
+query {
+  seasons(state: {
+    operator: EQ,
+    value: ACTIVE
+  }) {
+    id
+    number
+    year
+    state
+    serie {
+      name
+    }
+  }
+}
+```
+
+### State Machine Best Practices
+
+1. **GraphQL Enum Types**: Always define states as GraphQL enums for type safety
+2. **getValue() Method**: Use `enumType.getValue('VALUE')` for state machine configuration
+3. **Initial State**: Define clear initial state using enum values
+4. **Linear Flows**: Design logical progression (SCHEDULED → ACTIVE → FINISHED)
+5. **Type Safety**: GraphQL enums provide validation and autocomplete
+6. **Actions**: Implement side effects in transition actions
+7. **Error Handling**: Handle transition failures gracefully
+
+### Key Implementation Points
+
+- **Enum Definition**: States must be defined as `GraphQLEnumType`
+- **Type Reference**: Use the enum type in your GraphQL object: `state: { type: seasonState }`
+- **State Machine Values**: Reference enum values with `seasonState.getValue('STATE_NAME')`
+- **Automatic Validation**: GraphQL validates state values against the enum
+- **IDE Support**: Enum values provide autocomplete and type checking
+
+### Example Workflow
+
+```graphql
+# 1. Create season (automatically SCHEDULED)
+mutation {
+  addseason(input: {
+    number: 6
+    year: 2024
+    serie: "series_id_here"
+  }) {
+    id
+    state  # Will be "SCHEDULED"
+  }
+}
+
+# 2. Activate season when airing begins
+mutation {
+  activateseason(id: "season_id_here") {
+    id
+    state  # Will be "ACTIVE"
+  }
+}
+
+# 3. Finalize season when completed
+mutation {
+  finalizeseason(id: "season_id_here") {
+    id
+    state  # Will be "FINISHED"
+  }
+}
+```
+
+
