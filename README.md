@@ -1687,7 +1687,7 @@ function useCountPlugin() {
   return {
     onExecute() {
       return {
-        onExecuteDone({result, args}) {
+        onExecuteDone({ result, args }) {
           if (args.contextValue?.count) {
             result.extensions = {
               ...result.extensions,
@@ -2038,5 +2038,88 @@ mutation {
   }
 }
 ```
+
+
+## 📦 Envelop Plugin for Count in Extensions
+
+To include the total count in the extensions of your GraphQL response, you can use an Envelop plugin. This is particularly useful for pagination and analytics.
+
+### Envelop Plugin Example
+
+Here's how you can implement the plugin:
+
+```javascript
+// Envelop plugin for count in extensions
+function useCountPlugin() {
+  return {
+    onExecute() {
+      return {
+        onExecuteDone({ result, args }) {
+          if (args.contextValue?.count) {
+            result.extensions = {
+              ...result.extensions,
+              count: args.contextValue.count,
+            };
+          }
+        }
+      };
+    }
+  };
+}
+```
+
+### How to Use
+
+1. **Integrate the Plugin**: Add the plugin to your GraphQL server setup.
+2. **Configure Context**: Ensure that your context includes the count value when executing queries.
+3. **Access Count**: The count will be available in the `extensions` field of the GraphQL response.
+
+### Example Usage
+
+```javascript
+const { envelop, useSchema } = require('@envelop/core');
+const { makeExecutableSchema } = require('@graphql-tools/schema');
+
+const schema = makeExecutableSchema({
+  typeDefs,
+  resolvers,
+});
+
+const getEnveloped = envelop({
+  plugins: [
+    useSchema(schema),
+    useCountPlugin(), // Add the count plugin here
+  ],
+});
+
+// Use getEnveloped in your server setup
+```
+
+### Example Response
+
+When the plugin is correctly set up, your GraphQL response will include the count in the extensions:
+
+```json
+{
+  "data": {
+    "series": [
+      {
+        "id": "1",
+        "name": "Breaking Bad",
+        "categories": ["Crime", "Drama"],
+        "director": {
+          "name": "Vince Gilligan",
+          "country": "United States"
+        }
+      }
+    ]
+  },
+  "extensions": {
+    "count": 15
+  }
+}
+```
+
+This setup allows you to efficiently manage and display pagination information in your GraphQL applications.
 
 
