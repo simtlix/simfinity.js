@@ -16,47 +16,55 @@ export default [
     {
         ignores: ["node_modules/*", "data/*", "eslint.config.mjs"],
     },
-    ...compat.extends("airbnb-base"),
+    js.configs.recommended,
     {
         files: ["**/*.js"],
         languageOptions: {
             globals: {
-                ...globals.commonjs,
                 ...globals.node,
-                ...globals.jest,
+                ...globals.es2024,
             },
-
             ecmaVersion: 2024,
-            sourceType: "commonjs",
+            sourceType: "module",
         },
-
         rules: {
-            "default-case": "off",
-            "max-len": 0,
-            "no-console": "off",
-            "no-underscore-dangle": "off",
+            // Code style and best practices (relaxed to match existing code)
+            "quotes": ["error", "single"],
+            "semi": ["error", "always"],
+            "comma-dangle": ["error", "always-multiline"],
+            "object-curly-spacing": ["error", "always"],
+            "array-bracket-spacing": ["error", "never"],
+            
+            // ES6+ features
+            "prefer-const": "error",
+            "no-var": "error",
+            "prefer-arrow-callback": "off", // Allow function declarations
+            "arrow-spacing": "error",
+            
+            // Best practices
+            "no-console": "off", // Allow console for this project
+            "no-underscore-dangle": "off", // Allow underscore dangle for MongoDB _id
             "no-await-in-loop": "off",
-
-            "no-param-reassign": ["error", {
-                props: false,
-            }],
-
+            "max-len": "off", // Disable max-len for now
+            "indent": "off", // Disable indent for now to match existing style
+            
+            // Parameter reassignment (common in GraphQL resolvers)
+            "no-param-reassign": ["error", { "props": false }],
+            
+            // Function formatting
             "function-paren-newline": "off",
             "function-call-argument-newline": "off",
-
+            
+            // Restricted syntax
             "no-restricted-syntax": ["error", {
                 selector: "ForInStatement",
                 message: "for..in loops iterate over the entire prototype chain, which is virtually never what you want. Use Object.{keys,values,entries}, and iterate over the resulting array.",
             }, {
-                selector: "LabeledStatement",
+                selector: "LabeledStatement", 
                 message: "Labels are a form of GOTO; using them makes code confusing and hard to maintain and understand.",
             }, {
                 selector: "WithStatement",
                 message: "`with` is disallowed in strict mode because it makes code impossible to predict and optimize.",
-            }],
-
-            "import/no-unresolved": ["error", {
-                ignore: ["graphql", "mongoose"],
             }],
         },
     },

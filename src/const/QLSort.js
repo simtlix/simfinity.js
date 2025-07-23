@@ -1,11 +1,9 @@
-const graphql = require('graphql');
-
-const {
+import {
   GraphQLInputObjectType,
   GraphQLNonNull,
   GraphQLEnumType,
   GraphQLString,
-} = graphql;
+} from 'graphql';
 
 const QLSortOrder = new GraphQLEnumType({
   name: 'QLSortOrder',
@@ -27,4 +25,4 @@ const QLSort = new GraphQLInputObjectType({
   }),
 });
 
-module.exports = QLSort;
+export default QLSort;

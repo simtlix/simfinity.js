@@ -1,19 +1,17 @@
-const graphql = require('graphql');
-const mongoose = require('mongoose');
-
-const SimfinityError = require('./errors/simfinity.error');
-const InternalServerError = require('./errors/internal-server.error');
-const QLOperator = require('./const/QLOperator');
-const QLValue = require('./const/QLValue');
-const QLSort = require('./const/QLSort');
-
-mongoose.set('strictQuery', false);
-
-const {
+import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType, __Field,
   GraphQLInt, GraphQLEnumType, GraphQLBoolean, GraphQLFloat, Kind,
-} = graphql;
+} from 'graphql';
+import mongoose from 'mongoose';
+
+import SimfinityError from './errors/simfinity.error.js';
+import InternalServerError from './errors/internal-server.error.js';
+import QLOperator from './const/QLOperator.js';
+import QLValue from './const/QLValue.js';
+import QLSort from './const/QLSort.js';
+
+mongoose.set('strictQuery', false);
 
 // Adding 'extensions' field into instronspection query
 const RelationType = new GraphQLObjectType({
@@ -83,19 +81,19 @@ const buildErrorFormatter = (callback) => {
 
 const middlewares = [];
 
-module.exports.use = (middleware) => {
+export const use = (middleware) => {
   middlewares.push(middleware);
 };
 
-module.exports.buildErrorFormatter = buildErrorFormatter;
+export { buildErrorFormatter };
 
-module.exports.SimfinityError = SimfinityError;
+export { SimfinityError };
 
-module.exports.InternalServerError = InternalServerError;
+export { InternalServerError };
 
 let preventCollectionCreation = false;
 
-module.exports.preventCreatingCollection = (prevent) => {
+export const preventCreatingCollection = (prevent) => {
   preventCollectionCreation = !!prevent;
 };
 
@@ -416,7 +414,7 @@ const buildInputType = (gqltype) => {
 
 const getInputType = (type) => typesDict.types[type.name].inputType;
 
-module.exports.getInputType = getInputType;
+export { getInputType };
 
 const buildPendingInputTypes = (waitingForInputType) => {
   const stillWaitingInputType = {};
@@ -549,17 +547,17 @@ const iterateonCollectionFields = async (materializedModel, gqltype, objectId, s
   for (const [collectionFieldKey, collectionField] of
     Object.entries(materializedModel.collectionFields)) {
     if (collectionField.added) {
-      // eslint-disable-next-line no-use-before-define
+       
       await executeItemFunction(gqltype, collectionFieldKey, objectId, session,
         collectionField.added, operations.SAVE);
     }
     if (collectionField.updated) {
-      // eslint-disable-next-line no-use-before-define
+       
       await executeItemFunction(gqltype, collectionFieldKey, objectId, session,
         collectionField.updated, operations.UPDATE);
     }
     if (collectionField.deleted) {
-      // eslint-disable-next-line no-use-before-define
+       
       await executeItemFunction(gqltype, collectionFieldKey, objectId, session,
         collectionField.deleted, operations.DELETE);
     }
@@ -681,7 +679,7 @@ const onSaveObject = async (Model, gqltype, controller, args, session, linkToPar
   return result;
 };
 
-module.exports.saveObject = async (typeName, args, session) => {
+export const saveObject = async (typeName, args, session) => {
   const type = typesDict.types[typeName];
   return onSaveObject(type.model, type.gqltype, type.controller, args, session);
 };
@@ -1389,9 +1387,9 @@ const buildQuery = async (input, gqltype, isCount) => {
 
         if (sort.field.indexOf('.') >= 0) {
           const sortParts = sort.field.split('.');
-          // eslint-disable-next-line prefer-destructuring
+           
           fixedSortField = sortParts[0];
-          // eslint-disable-next-line no-plusplus
+           
           for (let i = 1; i < sortParts.length - 1; i++) {
             fixedSortField += `_${sortParts[i]}`;
           }
@@ -1536,15 +1534,15 @@ const buildRootQuery = (name, includedTypes) => {
 
 /* Creating a new GraphQL Schema, with options query which defines query
 we will allow users to use when they are making request. */
-module.exports.createSchema = (includedQueryTypes,
+export const createSchema = (includedQueryTypes,
   includedMutationTypes, includedCustomMutations) => new GraphQLSchema({
   query: buildRootQuery('RootQueryType', includedQueryTypes),
   mutation: buildMutation('Mutation', includedMutationTypes, includedCustomMutations),
 });
 
-module.exports.getModel = (gqltype) => typesDict.types[gqltype.name].model;
+export const getModel = (gqltype) => typesDict.types[gqltype.name].model;
 
-module.exports.registerMutation = (name, description, inputModel, outputModel, callback) => {
+export const registerMutation = (name, description, inputModel, outputModel, callback) => {
   registeredMutations[name] = {
     description,
     inputModel,
@@ -1602,7 +1600,7 @@ const autoGenerateResolvers = (gqltype) => {
   }
 };
 
-module.exports.connect = (model, gqltype, simpleEntityEndpointName,
+export const connect = (model, gqltype, simpleEntityEndpointName,
   listEntitiesEndpointName, controller, onModelCreated, stateMachine) => {
   waitingInputType[gqltype.name] = {
     model,
@@ -1624,7 +1622,7 @@ module.exports.connect = (model, gqltype, simpleEntityEndpointName,
   autoGenerateResolvers(gqltype);
 };
 
-module.exports.addNoEndpointType = (gqltype) => {
+export const addNoEndpointType = (gqltype) => {
   waitingInputType[gqltype.name] = {
     gqltype,
   };
@@ -1655,4 +1653,4 @@ module.exports.addNoEndpointType = (gqltype) => {
   autoGenerateResolvers(gqltype);
 };
 
-module.exports.createValidatedScalar = createValidatedScalar;
+export { createValidatedScalar };

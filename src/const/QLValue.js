@@ -1,6 +1,4 @@
-const graphql = require('graphql');
-
-const { GraphQLScalarType, Kind } = graphql;
+import { GraphQLScalarType, Kind } from 'graphql';
 
 function parseQLValue(value) {
   return value;
@@ -38,4 +36,4 @@ const QLValue = new GraphQLScalarType({
   },
 });
 
-module.exports = QLValue;
+export default QLValue;

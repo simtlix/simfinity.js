@@ -1,6 +1,4 @@
-const graphql = require('graphql');
-
-const { GraphQLEnumType } = graphql;
+import { GraphQLEnumType } from 'graphql';
 
 const QLOperator = new GraphQLEnumType({
   name: 'QLOperator',
@@ -38,4 +36,4 @@ const QLOperator = new GraphQLEnumType({
   },
 });
 
-module.exports = QLOperator;
+export default QLOperator;

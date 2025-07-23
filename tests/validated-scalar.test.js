@@ -1,8 +1,11 @@
-const {
+import {
+  describe, test, expect, beforeAll,
+} from 'vitest';
+import {
   GraphQLObjectType, GraphQLString, GraphQLInt, GraphQLID, GraphQLList, GraphQLNonNull,
-} = require('graphql');
-const { createValidatedScalar } = require('../src/index');
-const simfinity = require('../src/index');
+} from 'graphql';
+import { createValidatedScalar } from '../src/index.js';
+import * as simfinity from '../src/index.js';
 
 describe('Custom Validated Scalar Types', () => {
   let EmailScalar;

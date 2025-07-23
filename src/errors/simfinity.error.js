@@ -12,4 +12,4 @@ class SimfinityError extends Error {
   }
 }
 
-module.exports = SimfinityError;
+export default SimfinityError;

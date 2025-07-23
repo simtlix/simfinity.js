@@ -1,15 +1,16 @@
-const mongoose = require('mongoose');
-const { GraphQLObjectType, GraphQLString, GraphQLID } = require('graphql');
-const simfinity = require('../src/index');
+import {
+  describe, test, expect, beforeEach, afterEach, vi,
+} from 'vitest';
+import mongoose from 'mongoose';
+import { GraphQLObjectType, GraphQLString, GraphQLID } from 'graphql';
+import * as simfinity from '../src/index.js';
 
 describe('preventCreatingCollection option', () => {
   let createCollectionSpy;
 
   beforeEach(() => {
-    // Reset modules to have a clean state for each test
-    jest.resetModules();
     // Spy on the createCollection method of the mongoose model prototype
-    createCollectionSpy = jest.spyOn(mongoose.Model, 'createCollection').mockImplementation(() => Promise.resolve());
+    createCollectionSpy = vi.spyOn(mongoose.Model, 'createCollection').mockImplementation(() => Promise.resolve());
   });
 
   afterEach(() => {

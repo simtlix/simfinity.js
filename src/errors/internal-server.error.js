@@ -1,4 +1,4 @@
-const SimfinityError = require('./simfinity.error');
+import SimfinityError from './simfinity.error.js';
 
 class InternalServerError extends SimfinityError {
   constructor(message, cause) {
@@ -8,4 +8,4 @@ class InternalServerError extends SimfinityError {
   }
 }
 
-module.exports = InternalServerError;
+export default InternalServerError;
