@@ -1232,6 +1232,11 @@ const newBook = await simfinity.saveObject('Book', {
 const BookModel = simfinity.getModel(BookType);
 const books = await BookModel.find({ author: 'Douglas Adams' });
 
+// Get the GraphQL type definition by name
+const UserType = simfinity.getType('User');
+console.log(UserType.name); // 'User'
+console.log(UserType.getFields()); // Access GraphQL fields
+
 // Get the input type for a GraphQL type
 const BookInput = simfinity.getInputType(BookType);
 ```
@@ -2121,5 +2126,271 @@ When the plugin is correctly set up, your GraphQL response will include the coun
 ```
 
 This setup allows you to efficiently manage and display pagination information in your GraphQL applications.
+
+## 📖 API Reference
+
+Simfinity.js provides several utility methods for programmatic access to your GraphQL types and data:
+
+### `getType(typeName)`
+
+Retrieves a GraphQL type definition from the internal types registry.
+
+**Parameters:**
+- `typeName` (string | GraphQLObjectType): The name of the type or a GraphQL type object
+
+**Returns:**
+- `GraphQLObjectType | null`: The GraphQL type definition, or null if not found
+
+**Examples:**
+
+```javascript
+import { getType } from '@simtlix/simfinity-js';
+
+// Get type by string name
+const UserType = getType('User');
+if (UserType) {
+  console.log(UserType.name); // 'User'
+  
+  // Access field definitions
+  const fields = UserType.getFields();
+  console.log(Object.keys(fields)); // ['id', 'name', 'email', ...]
+  
+  // Check specific field
+  const nameField = fields.name;
+  console.log(nameField.type); // GraphQLString
+}
+
+// Get type by GraphQL type object
+const BookType = getType(SomeBookType);
+
+// Safe access - returns null if not found
+const nonExistentType = getType('NonExistent');
+console.log(nonExistentType); // null
+```
+
+**Use Cases:**
+- **Type introspection**: Examine type definitions programmatically
+- **Dynamic schema analysis**: Build tools that analyze your GraphQL schema
+- **Runtime type checking**: Validate types exist before operations
+- **Admin interfaces**: Build dynamic forms based on type definitions
+- **Circular reference resolution**: Prevent import cycles when types reference each other
+
+### Preventing Circular References with `getType`
+
+When you have types that reference each other (like User and Group), using `getType` prevents circular import issues:
+
+```javascript
+import { GraphQLObjectType, GraphQLID, GraphQLString, GraphQLList } from 'graphql';
+import { getType } from '@simtlix/simfinity-js';
+
+// User type that references Group
+const UserType = new GraphQLObjectType({
+  name: 'User',
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: { type: GraphQLString },
+    email: { type: GraphQLString },
+    
+    // Reference Group type by name to avoid circular imports
+    groups: {
+      type: new GraphQLList(() => getType('Group')), // Use getType instead of direct import
+      extensions: {
+        relation: {
+          connectionField: 'members',
+          displayField: 'name'
+        }
+      }
+    },
+    
+    // Single group reference
+    primaryGroup: {
+      type: () => getType('Group'), // Lazy evaluation with getType
+      extensions: {
+        relation: {
+          connectionField: 'primaryGroupId',
+          displayField: 'name'
+        }
+      }
+    }
+  })
+});
+
+// Group type that references User
+const GroupType = new GraphQLObjectType({
+  name: 'Group',
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: { type: GraphQLString },
+    description: { type: GraphQLString },
+    
+    // Reference User type by name to avoid circular imports
+    members: {
+      type: new GraphQLList(() => getType('User')), // Use getType instead of direct import
+      extensions: {
+        relation: {
+          connectionField: 'groups',
+          displayField: 'name'
+        }
+      }
+    },
+    
+    // Single user reference (admin)
+    admin: {
+      type: () => getType('User'), // Lazy evaluation with getType
+      extensions: {
+        relation: {
+          connectionField: 'adminId',
+          displayField: 'name'
+        }
+      }
+    }
+  })
+});
+
+// Register types with simfinity
+simfinity.connect(null, UserType, 'user', 'users');
+simfinity.connect(null, GroupType, 'group', 'groups');
+
+// Create schema - resolvers will be auto-generated for all relationships
+const schema = simfinity.createSchema();
+```
+
+**Benefits of this approach:**
+
+1. **🔄 No Circular Imports**: Each file can import `getType` without importing other type definitions
+2. **⚡ Lazy Resolution**: Types are resolved at schema creation time when all types are registered
+3. **🛡️ Type Safety**: Still maintains GraphQL type checking and validation
+4. **🧹 Clean Architecture**: Separates type definitions from type relationships
+5. **📦 Better Modularity**: Each type can be in its own file without import dependencies
+
+**File Structure Example:**
+
+```
+types/
+├── User.js          // Defines UserType using getType('Group')
+├── Group.js         // Defines GroupType using getType('User')
+└── index.js         // Registers all types and creates schema
+```
+
+```javascript
+// types/User.js
+import { GraphQLObjectType, GraphQLID, GraphQLString, GraphQLList } from 'graphql';
+import { getType } from '@simtlix/simfinity-js';
+
+export const UserType = new GraphQLObjectType({
+  name: 'User',
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: { type: GraphQLString },
+    groups: {
+      type: new GraphQLList(() => getType('Group')),
+      extensions: { relation: { connectionField: 'members' } }
+    }
+  })
+});
+
+// types/Group.js  
+import { GraphQLObjectType, GraphQLID, GraphQLString, GraphQLList } from 'graphql';
+import { getType } from '@simtlix/simfinity-js';
+
+export const GroupType = new GraphQLObjectType({
+  name: 'Group', 
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: { type: GraphQLString },
+    members: {
+      type: new GraphQLList(() => getType('User')),
+      extensions: { relation: { connectionField: 'groups' } }
+    }
+  })
+});
+
+// types/index.js
+import { UserType } from './User.js';
+import { GroupType } from './Group.js';
+import simfinity from '@simtlix/simfinity-js';
+
+// Register all types
+simfinity.connect(null, UserType, 'user', 'users');
+simfinity.connect(null, GroupType, 'group', 'groups');
+
+// Create schema with auto-generated resolvers
+export const schema = simfinity.createSchema();
+```
+
+### `getModel(gqltype)`
+
+Retrieves the Mongoose model associated with a GraphQL type.
+
+**Parameters:**
+- `gqltype` (GraphQLObjectType): The GraphQL type object
+
+**Returns:**
+- `MongooseModel`: The associated Mongoose model
+
+**Example:**
+
+```javascript
+const BookModel = simfinity.getModel(BookType);
+const books = await BookModel.find({ author: 'Douglas Adams' });
+```
+
+### `getInputType(type)`
+
+Retrieves the input type for mutations associated with a GraphQL type.
+
+**Parameters:**
+- `type` (GraphQLObjectType): The GraphQL type object
+
+**Returns:**
+- `GraphQLInputObjectType`: The input type for mutations
+
+**Example:**
+
+```javascript
+const BookInput = simfinity.getInputType(BookType);
+console.log(BookInput.getFields()); // Input fields for mutations
+```
+
+### `saveObject(typeName, args, session?)`
+
+Programmatically save an object outside of GraphQL mutations.
+
+**Parameters:**
+- `typeName` (string): The name of the GraphQL type
+- `args` (object): The data to save
+- `session` (MongooseSession, optional): Database session for transactions
+
+**Returns:**
+- `Promise<object>`: The saved object
+
+**Example:**
+
+```javascript
+const newBook = await simfinity.saveObject('Book', {
+  title: 'New Book',
+  author: 'Author Name'
+}, session);
+```
+
+### `createSchema(includedQueryTypes?, includedMutationTypes?, includedCustomMutations?)`
+
+Creates the final GraphQL schema with all connected types.
+
+**Parameters:**
+- `includedQueryTypes` (array, optional): Limit query types to include
+- `includedMutationTypes` (array, optional): Limit mutation types to include  
+- `includedCustomMutations` (array, optional): Limit custom mutations to include
+
+**Returns:**
+- `GraphQLSchema`: The complete GraphQL schema
+
+**Example:**
+
+```javascript
+const schema = simfinity.createSchema();
+```
+
+*Built with ❤️ by [Simtlix](https://github.com/simtlix)*
 
 

@@ -1535,12 +1535,33 @@ const buildRootQuery = (name, includedTypes) => {
 /* Creating a new GraphQL Schema, with options query which defines query
 we will allow users to use when they are making request. */
 export const createSchema = (includedQueryTypes,
-  includedMutationTypes, includedCustomMutations) => new GraphQLSchema({
-  query: buildRootQuery('RootQueryType', includedQueryTypes),
-  mutation: buildMutation('Mutation', includedMutationTypes, includedCustomMutations),
-});
+  includedMutationTypes, includedCustomMutations) => {
+  
+  // Auto-generate resolvers for all registered types now that all types are available
+  Object.values(typesDict.types).forEach(typeInfo => {
+    if (typeInfo.gqltype) {
+      autoGenerateResolvers(typeInfo.gqltype);
+    }
+  });
+
+  return new GraphQLSchema({
+    query: buildRootQuery('RootQueryType', includedQueryTypes),
+    mutation: buildMutation('Mutation', includedMutationTypes, includedCustomMutations),
+  });
+};
 
 export const getModel = (gqltype) => typesDict.types[gqltype.name].model;
+
+export const getType = (typeName) => {
+  if (typeof typeName === 'string') {
+    return typesDict.types[typeName]?.gqltype;
+  }
+  // If it's already a GraphQL type object, get by its name
+  if (typeName && typeName.name) {
+    return typesDict.types[typeName.name]?.gqltype;
+  }
+  return null;
+};
 
 export const registerMutation = (name, description, inputModel, outputModel, callback) => {
   registeredMutations[name] = {
@@ -1617,9 +1638,6 @@ export const connect = (model, gqltype, simpleEntityEndpointName,
   };
 
   typesDictForUpdate.types[gqltype.name] = { ...typesDict.types[gqltype.name] };
-
-  // Auto-generate resolve methods for relationship fields if not already defined
-  autoGenerateResolvers(gqltype);
 };
 
 export const addNoEndpointType = (gqltype) => {
@@ -1648,9 +1666,6 @@ export const addNoEndpointType = (gqltype) => {
   };
 
   typesDictForUpdate.types[gqltype.name] = { ...typesDict.types[gqltype.name] };
-
-  // Auto-generate resolve methods for relationship fields if not already defined
-  autoGenerateResolvers(gqltype);
 };
 
 export { createValidatedScalar };
