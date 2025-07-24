@@ -1537,6 +1537,26 @@ we will allow users to use when they are making request. */
 export const createSchema = (includedQueryTypes,
   includedMutationTypes, includedCustomMutations) => {
   
+  // Generate models for all registered types now that all types are available
+  Object.values(typesDict.types).forEach(typeInfo => {
+    if (typeInfo.gqltype && !typeInfo.model) {
+      if (typeInfo.endpoint) {
+        // Generate model with collection for endpoint types (types registered with connect)
+        typeInfo.model = generateModel(typeInfo.gqltype, typeInfo.onModelCreated);
+      } else if (typeInfo.needsModel) {
+        // Generate model without collection for no-endpoint types that need models (addNoEndpointType)
+        typeInfo.model = generateModelWithoutCollection(typeInfo.gqltype, null);
+      }
+    }
+  });
+
+  // Also update the typesDictForUpdate with the generated models
+  Object.keys(typesDict.types).forEach(typeName => {
+    if (typesDictForUpdate.types[typeName]) {
+      typesDictForUpdate.types[typeName].model = typesDict.types[typeName].model;
+    }
+  });
+
   // Auto-generate resolvers for all registered types now that all types are available
   Object.values(typesDict.types).forEach(typeInfo => {
     if (typeInfo.gqltype) {
@@ -1628,13 +1648,14 @@ export const connect = (model, gqltype, simpleEntityEndpointName,
     gqltype,
   };
   typesDict.types[gqltype.name] = {
-    model: model || generateModel(gqltype, onModelCreated),
+    model: model, // Will be generated later in createSchema if not provided
     gqltype,
     simpleEntityEndpointName,
     listEntitiesEndpointName,
     endpoint: true,
     controller,
     stateMachine,
+    onModelCreated, // Store the callback for later use
   };
 
   typesDictForUpdate.types[gqltype.name] = { ...typesDict.types[gqltype.name] };
@@ -1661,8 +1682,9 @@ export const addNoEndpointType = (gqltype) => {
   typesDict.types[gqltype.name] = {
     gqltype,
     endpoint: false,
-    // Generate model if needed for relationships, but don't create collection
-    model: needsModel ? generateModelWithoutCollection(gqltype, null) : null,
+    // Model will be generated later in createSchema if needed
+    model: null,
+    needsModel, // Store whether this type needs a model
   };
 
   typesDictForUpdate.types[gqltype.name] = { ...typesDict.types[gqltype.name] };

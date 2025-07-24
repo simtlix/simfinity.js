@@ -117,6 +117,7 @@ describe('Custom Validated Scalar Types', () => {
 
     beforeAll(() => {
       simfinity.connect(null, UserType, 'user', 'users');
+      simfinity.createSchema(); // Models are now generated during schema creation
       UserModel = simfinity.getModel(UserType);
     });
 
@@ -150,6 +151,7 @@ describe('Custom Validated Scalar Types', () => {
         }),
       });
       simfinity.connect(null, UserWithUniqueType, 'userWithUnique', 'usersWithUnique');
+      simfinity.createSchema(); // Models are now generated during schema creation
       const UserWithUniqueModel = simfinity.getModel(UserWithUniqueType);
       const schema = UserWithUniqueModel.schema.obj;
 

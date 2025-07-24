@@ -28,6 +28,7 @@ describe('preventCreatingCollection option', () => {
     });
 
     simfinity.connect(null, TestType, 'testTypeDefault', 'testTypesDefault');
+    simfinity.createSchema(); // Models are now generated during schema creation
     expect(createCollectionSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -43,6 +44,7 @@ describe('preventCreatingCollection option', () => {
     });
 
     simfinity.connect(null, TestType, 'testTypePrevent', 'testTypesPrevent');
+    simfinity.createSchema(); // Models are now generated during schema creation
     expect(createCollectionSpy).not.toHaveBeenCalled();
   });
 
@@ -59,6 +61,7 @@ describe('preventCreatingCollection option', () => {
     });
 
     simfinity.connect(null, TestType, 'testTypeAllow', 'testTypesAllow');
+    simfinity.createSchema(); // Models are now generated during schema creation
     expect(createCollectionSpy).toHaveBeenCalledTimes(1);
   });
 });
