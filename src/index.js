@@ -1003,8 +1003,56 @@ const generateSchemaDefinition = (gqlType) => {
   return schemaArg;
 };
 
+const findObjectIdFields = (schemaDefinition, parentPath = '') => {
+  const objectIdFields = [];
+  
+  for (const [fieldName, fieldDefinition] of Object.entries(schemaDefinition)) {
+    const currentPath = parentPath ? `${parentPath}.${fieldName}` : fieldName;
+    
+    if (fieldDefinition === mongoose.Schema.Types.ObjectId) {
+      // Direct ObjectId field
+      objectIdFields.push(currentPath);
+    } else if (typeof fieldDefinition === 'object' && fieldDefinition !== null) {
+      if (Array.isArray(fieldDefinition)) {
+        // Array field - check if it's an array of objects
+        const arrayElement = fieldDefinition[0];
+        if (typeof arrayElement === 'object' && arrayElement !== null) {
+          // Array of embedded objects - recursively check for ObjectId fields
+          const nestedObjectIdFields = findObjectIdFields(arrayElement, currentPath);
+          objectIdFields.push(...nestedObjectIdFields);
+        }
+      } else if (fieldDefinition.type === mongoose.Schema.Types.ObjectId) {
+        // Object with ObjectId type
+        objectIdFields.push(currentPath);
+      } else if (typeof fieldDefinition === 'object' && !fieldDefinition.type) {
+        // Embedded object - recursively check for ObjectId fields
+        const nestedObjectIdFields = findObjectIdFields(fieldDefinition, currentPath);
+        objectIdFields.push(...nestedObjectIdFields);
+      }
+    }
+  }
+  
+  return objectIdFields;
+};
+
+const createSchemaWithIndexes = (schemaDefinition) => {
+  const schema = new mongoose.Schema(schemaDefinition);
+  
+  // Find all ObjectId fields in the schema
+  const objectIdFields = findObjectIdFields(schemaDefinition);
+  
+  // Create indexes for all ObjectId fields
+  objectIdFields.forEach(fieldPath => {
+    schema.index({ [fieldPath]: 1 });
+  });
+  
+  return schema;
+};
+
 const generateModel = (gqlType, onModelCreated) => {
-  const model = mongoose.model(gqlType.name, generateSchemaDefinition(gqlType), gqlType.name);
+  const schemaDefinition = generateSchemaDefinition(gqlType);
+  const schema = createSchemaWithIndexes(schemaDefinition);
+  const model = mongoose.model(gqlType.name, schema, gqlType.name);
   if (onModelCreated) {
     onModelCreated(model);
   }
@@ -1015,7 +1063,9 @@ const generateModel = (gqlType, onModelCreated) => {
 };
 
 const generateModelWithoutCollection = (gqlType, onModelCreated) => {
-  const model = mongoose.model(gqlType.name, generateSchemaDefinition(gqlType), gqlType.name);
+  const schemaDefinition = generateSchemaDefinition(gqlType);
+  const schema = createSchemaWithIndexes(schemaDefinition);
+  const model = mongoose.model(gqlType.name, schema, gqlType.name);
   if (onModelCreated) {
     onModelCreated(model);
   }

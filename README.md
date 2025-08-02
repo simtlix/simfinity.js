@@ -8,6 +8,7 @@ A powerful Node.js framework that automatically generates GraphQL schemas from y
 - **MongoDB Integration**: Seamless translation between GraphQL and MongoDB
 - **Powerful Querying**: Any query that can be executed in MongoDB can be executed in GraphQL
 - **Auto-Generated Resolvers**: Automatically generates resolve methods for relationship fields
+- **Automatic Index Creation**: Automatically creates MongoDB indexes for all ObjectId fields, including nested embedded objects and relationship fields
 - **Business Logic**: Implement business logic and domain validations declaratively
 - **State Machines**: Built-in support for declarative state machine workflows
 - **Lifecycle Hooks**: Controller methods for granular control over operations
