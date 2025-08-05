@@ -202,7 +202,7 @@ function createValidatedScalar(name, description, baseScalarType, validate) {
   const baseKind = kindMap[baseScalarType.name] || Kind.STRING;
 
   const scalar = new GraphQLScalarType({
-    name,
+    name: `${name}_${baseScalarType.name}`,
     description,
     serialize(value) {
       validate(value);
@@ -214,7 +214,7 @@ function createValidatedScalar(name, description, baseScalarType, validate) {
     },
     parseLiteral(ast, variables) {
       if (ast.kind !== baseKind) {
-        throw new Error(`${name} must be a ${baseScalarType.name}`);
+        throw new Error(`${name}_${baseScalarType.name} must be a ${baseScalarType.name}`);
       }
       const value = baseScalarType.parseLiteral(ast, variables);
       validate(value);

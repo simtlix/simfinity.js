@@ -70,7 +70,7 @@ describe('Custom Validated Scalar Types', () => {
   describe('createValidatedScalar function', () => {
     test('should create a valid scalar type with baseScalarType property', () => {
       expect(EmailScalar).toBeDefined();
-      expect(EmailScalar.name).toBe('Email');
+      expect(EmailScalar.name).toBe('Email_String');
       expect(EmailScalar.baseScalarType).toBe(GraphQLString);
       expect(EmailScalar.serialize).toBeDefined();
       expect(EmailScalar.parseValue).toBeDefined();

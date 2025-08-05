@@ -1072,13 +1072,13 @@ const OrderType = new GraphQLObjectType({
 
 ### Custom Validated Scalar Types
 
-Create custom scalar types with built-in validation:
+Create custom scalar types with built-in validation. The generated type names follow the pattern `{name}_{baseScalarTypeName}`:
 
 ```javascript
 const { GraphQLString, GraphQLInt } = require('graphql');
 const { createValidatedScalar } = require('@simtlix/simfinity-js');
 
-// Email scalar with validation
+// Email scalar with validation (generates type name: Email_String)
 const EmailScalar = createValidatedScalar(
   'Email',
   'A valid email address',
@@ -1091,7 +1091,7 @@ const EmailScalar = createValidatedScalar(
   }
 );
 
-// Positive integer scalar
+// Positive integer scalar (generates type name: PositiveInt_Int)
 const PositiveIntScalar = createValidatedScalar(
   'PositiveInt',
   'A positive integer',
@@ -1108,8 +1108,8 @@ const UserType = new GraphQLObjectType({
   name: 'User',
   fields: () => ({
     id: { type: GraphQLID },
-    email: { type: EmailScalar },
-    age: { type: PositiveIntScalar },
+    email: { type: EmailScalar }, // Type name: Email_String
+    age: { type: PositiveIntScalar }, // Type name: PositiveInt_Int
   }),
 });
 ```
