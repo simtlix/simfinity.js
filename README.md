@@ -204,6 +204,122 @@ query {
 - `NIN` - Not in array
 - `BTW` - Between two values
 
+### Collection Field Filtering
+
+Simfinity.js now supports filtering collection fields (one-to-many relationships) using the same powerful query format. This allows you to filter related objects directly within your GraphQL queries.
+
+#### Basic Collection Filtering
+
+Filter collection fields using the same operators and format as main queries:
+
+```graphql
+query {
+  series {
+    seasons(number: { operator: EQ, value: 1 }) {
+      number
+      id
+      year
+    }
+  }
+}
+```
+
+#### Advanced Collection Filtering
+
+You can use complex filtering with nested object properties:
+
+```graphql
+query {
+  series {
+    seasons(
+      year: { operator: GTE, value: 2020 }
+      episodes: {
+        terms: [
+          {
+            path: "name",
+            operator: LIKE,
+            value: "Pilot"
+          }
+        ]
+      }
+    ) {
+      number
+      year
+      episodes {
+        name
+        date
+      }
+    }
+  }
+}
+```
+
+#### Collection Filtering with Multiple Conditions
+
+Combine multiple filter conditions for collection fields:
+
+```graphql
+query {
+  series {
+    seasons(
+      number: { operator: GT, value: 1 }
+      year: { operator: BTW, value: [2015, 2023] }
+    ) {
+      number
+      year
+      state
+    }
+  }
+}
+```
+
+#### Nested Collection Filtering
+
+Filter deeply nested collections using dot notation:
+
+```graphql
+query {
+  series {
+    seasons(
+      episodes: {
+        terms: [
+          {
+            path: "name",
+            operator: LIKE,
+            value: "Final"
+          }
+        ]
+      }
+    ) {
+      number
+      episodes {
+        name
+        date
+      }
+    }
+  }
+}
+```
+
+#### Collection Filtering with Array Operations
+
+Use array operations for collection fields:
+
+```graphql
+query {
+  series {
+    seasons(
+      categories: { operator: IN, value: ["Drama", "Crime"] }
+    ) {
+      number
+      categories
+    }
+  }
+}
+```
+
+**Note**: Collection field filtering uses the exact same format as main query filtering, ensuring consistency across your GraphQL API. All available operators (`EQ`, `NE`, `GT`, `LT`, `GTE`, `LTE`, `LIKE`, `IN`, `NIN`, `BTW`) work with collection fields.
+
 ## 🔧 Middlewares
 
 Middlewares provide a powerful way to intercept and process all GraphQL operations before they execute. Use them for cross-cutting concerns like authentication, logging, validation, and performance monitoring.

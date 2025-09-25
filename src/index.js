@@ -1516,37 +1516,7 @@ const buildRootQuery = (name, includedTypes) => {
 
         const argTypes = type.gqltype.getFields();
 
-        const argsObject = {};
-
-        for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
-          argsObject[fieldEntryName] = {};
-
-          if (fieldEntry.type instanceof GraphQLScalarType
-            || isNonNullOfType(fieldEntry.type, GraphQLScalarType)
-            || fieldEntry.type instanceof GraphQLEnumType
-            || isNonNullOfType(fieldEntry.type, GraphQLEnumType)) {
-            argsObject[fieldEntryName].type = QLFilter;
-          } else if (fieldEntry.type instanceof GraphQLObjectType
-            || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
-            argsObject[fieldEntryName].type = QLTypeFilterExpression;
-          } else if (fieldEntry.type instanceof GraphQLList) {
-            const listOfType = fieldEntry.type.ofType;
-            if (listOfType instanceof GraphQLScalarType
-              || isNonNullOfType(listOfType, GraphQLScalarType)
-              || listOfType instanceof GraphQLEnumType
-              || isNonNullOfType(listOfType, GraphQLEnumType)) {
-              argsObject[fieldEntryName].type = QLFilter;
-            } else {
-              argsObject[fieldEntryName].type = QLTypeFilterExpression;
-            }
-          }
-        }
-
-        argsObject.pagination = {};
-        argsObject.pagination.type = QLPagination;
-
-        argsObject.sort = {};
-        argsObject.sort.type = QLSortExpression;
+        const argsObject = createArgsForQuery(argTypes);
 
         rootQueryArgs.fields[type.listEntitiesEndpointName] = {
           type: new GraphQLList(type.gqltype),
@@ -1656,18 +1626,39 @@ const autoGenerateResolvers = (gqltype) => {
         if (!relation.embedded) {
           if (fieldEntry.type instanceof GraphQLList) {
             // Collection field - generate resolve for one-to-many relationship
+            //This is a one-to-many resolver that will return a list of related objects. Also this one allows to filter the related objects as is in the find endpoint.
             const relatedType = fieldEntry.type.ofType;
             const connectionField = relation.connectionField || fieldName;
+            const relatedTypeInfo = typesDict.types[relatedType.name];
+            const argsObject = createArgsForQuery(relatedTypeInfo.gqltype.getFields());
+            
+            delete argsObject[connectionField];
+            const argsArray = Object.entries(argsObject);
+            
 
-            fieldEntry.resolve = (parent) => {
+            const graphqlArgs = formatArgs(argsArray);
+
+            fieldEntry.args = graphqlArgs;
+
+            fieldEntry.resolve = async (parent, args) => {
               // Lazy lookup of the related model
-              const relatedTypeInfo = typesDict.types[relatedType.name];
+              
               if (!relatedTypeInfo || !relatedTypeInfo.model) {
                 throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
               }
-              const query = {};
-              query[connectionField] = parent.id || parent._id;
-              return relatedTypeInfo.model.find(query);
+              
+              args[connectionField] = {
+                  terms: [{
+                  path: 'id',
+                  operator: 'EQ',
+                  value: parent.id || parent._id,
+                }],
+              };
+            
+
+              const aggregateClauses = await buildQuery(args, relatedTypeInfo.gqltype);
+              
+              return await relatedTypeInfo.model.aggregate(aggregateClauses);
             };
           } else if (fieldEntry.type instanceof GraphQLObjectType
                      || (fieldEntry.type instanceof GraphQLNonNull && fieldEntry.type.ofType instanceof GraphQLObjectType)) {
@@ -1741,3 +1732,50 @@ export const addNoEndpointType = (gqltype) => {
 };
 
 export { createValidatedScalar };
+
+const createArgsForQuery = (argTypes) => {
+    const argsObject = {};
+
+    for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
+      argsObject[fieldEntryName] = {};
+
+      if (fieldEntry.type instanceof GraphQLScalarType
+        || isNonNullOfType(fieldEntry.type, GraphQLScalarType)
+        || fieldEntry.type instanceof GraphQLEnumType
+        || isNonNullOfType(fieldEntry.type, GraphQLEnumType)) {
+        argsObject[fieldEntryName].type = QLFilter;
+      } else if (fieldEntry.type instanceof GraphQLObjectType
+        || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
+        argsObject[fieldEntryName].type = QLTypeFilterExpression;
+      } else if (fieldEntry.type instanceof GraphQLList) {
+        const listOfType = fieldEntry.type.ofType;
+        if (listOfType instanceof GraphQLScalarType
+          || isNonNullOfType(listOfType, GraphQLScalarType)
+          || listOfType instanceof GraphQLEnumType
+          || isNonNullOfType(listOfType, GraphQLEnumType)) {
+          argsObject[fieldEntryName].type = QLFilter;
+        } else {
+          argsObject[fieldEntryName].type = QLTypeFilterExpression;
+        }
+      }
+    }
+
+    argsObject.pagination = {};
+    argsObject.pagination.type = QLPagination;
+
+    argsObject.sort = {};
+    argsObject.sort.type = QLSortExpression;
+    return argsObject;
+};
+
+function formatArgs(argsArray) {
+  const graphqlArgs = [];
+  for (const [key, value] of argsArray) {
+    const item = {
+      name: key,
+      type: value.type,
+    };
+    graphqlArgs.push(item);
+  }
+  return graphqlArgs;
+}
