@@ -1499,7 +1499,7 @@ const buildRootQuery = (name, includedTypes) => {
         rootQueryArgs.fields[type.simpleEntityEndpointName] = {
           type: type.gqltype,
           args: { id: { type: GraphQLID } },
-          resolve(parent, args, context) {
+          async resolve(parent, args, context) {
             /* Here we define how to get data from database source
             this will return the type with id passed in argument
             by the user */
@@ -1510,7 +1510,7 @@ const buildRootQuery = (name, includedTypes) => {
               context,
             };
             excecuteMiddleware(params);
-            return type.model.findById(args.id);
+            return await type.model.findById(args.id);
           },
         };
 
@@ -1538,9 +1538,9 @@ const buildRootQuery = (name, includedTypes) => {
 
             let result;
             if (aggregateClauses.length === 0) {
-              result = type.model.find({});
+              result = await type.model.find({});
             } else {
-              result = type.model.aggregate(aggregateClauses);
+              result = await type.model.aggregate(aggregateClauses);
             }
             return result;
           },
@@ -1666,14 +1666,14 @@ const autoGenerateResolvers = (gqltype) => {
             const relatedType = fieldEntry.type instanceof GraphQLNonNull ? fieldEntry.type.ofType : fieldEntry.type;
             const connectionField = relation.connectionField || fieldName;
 
-            fieldEntry.resolve = (parent) => {
+            fieldEntry.resolve = async (parent) => {
               // Lazy lookup of the related model
               const relatedTypeInfo = typesDict.types[relatedType.name];
               if (!relatedTypeInfo || !relatedTypeInfo.model) {
                 throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
               }
               const relatedId = parent[connectionField] || parent[fieldName];
-              return relatedId ? relatedTypeInfo.model.findById(relatedId) : null;
+              return relatedId ? await relatedTypeInfo.model.findById(relatedId) : null;
             };
           }
         }
