@@ -1,0 +1,26 @@
+# Package files
+*.tgz
+
+# Test files
+tests/
+*.test.js
+
+# Documentation (keep README.md and aggregation docs)
+BACKUP_README.md
+README_INDEX_EXAMPLE.md
+
+# Development files
+.github/
+.idea/
+node_modules/
+data/
+**/config.js
+
+# Git files
+.git/
+.gitignore
+
+# Editor files
+.vscode/
+.DS_Store
+

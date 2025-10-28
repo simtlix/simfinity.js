@@ -13,6 +13,41 @@ import QLSort from './const/QLSort.js';
 
 mongoose.set('strictQuery', false);
 
+// Custom JSON scalar type for aggregation results
+const GraphQLJSON = new GraphQLScalarType({
+  name: 'JSON',
+  description: 'The `JSON` scalar type represents JSON values as specified by ECMA-404',
+  serialize(value) {
+    return value;
+  },
+  parseValue(value) {
+    return value;
+  },
+  parseLiteral(ast) {
+    switch (ast.kind) {
+      case Kind.STRING:
+      case Kind.BOOLEAN:
+        return ast.value;
+      case Kind.INT:
+      case Kind.FLOAT:
+        return parseFloat(ast.value);
+      case Kind.OBJECT: {
+        const value = Object.create(null);
+        ast.fields.forEach((field) => {
+          value[field.name.value] = GraphQLJSON.parseLiteral(field.value);
+        });
+        return value;
+      }
+      case Kind.LIST:
+        return ast.values.map((n) => GraphQLJSON.parseLiteral(n));
+      case Kind.NULL:
+        return null;
+      default:
+        return undefined;
+    }
+  },
+});
+
 // Adding 'extensions' field into instronspection query
 const RelationType = new GraphQLObjectType({
   name: 'RelationType',
@@ -144,6 +179,42 @@ const QLSortExpression = new GraphQLInputObjectType({
   name: 'QLSortExpression',
   fields: () => ({
     terms: { type: new GraphQLList(QLSort) },
+  }),
+});
+
+const QLAggregationOperation = new GraphQLEnumType({
+  name: 'QLAggregationOperation',
+  values: {
+    SUM: { value: 'SUM' },
+    COUNT: { value: 'COUNT' },
+    AVG: { value: 'AVG' },
+    MIN: { value: 'MIN' },
+    MAX: { value: 'MAX' },
+  },
+});
+
+const QLTypeAggregationFact = new GraphQLInputObjectType({
+  name: 'QLTypeAggregationFact',
+  fields: () => ({
+    operation: { type: new GraphQLNonNull(QLAggregationOperation) },
+    factName: { type: new GraphQLNonNull(GraphQLString) },
+    path: { type: new GraphQLNonNull(GraphQLString) },
+  }),
+});
+
+const QLTypeAggregationExpression = new GraphQLInputObjectType({
+  name: 'QLTypeAggregationExpression',
+  fields: () => ({
+    groupId: { type: new GraphQLNonNull(GraphQLString) },
+    facts: { type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(QLTypeAggregationFact))) },
+  }),
+});
+
+const QLTypeAggregationResult = new GraphQLObjectType({
+  name: 'QLTypeAggregationResult',
+  fields: () => ({
+    groupId: { type: GraphQLJSON },
+    facts: { type: GraphQLJSON },
   }),
 });
 
@@ -1482,6 +1553,224 @@ const buildQuery = async (input, gqltype, isCount) => {
   return aggregateClauses;
 };
 
+const buildFieldPath = (gqltype, fieldPath) => {
+  // This function resolves a field path (e.g., "category" or "country.name") 
+  // and returns the MongoDB field path and any necessary lookups
+  const pathParts = fieldPath.split('.');
+  const aggregateClauses = [];
+  let currentPath = '';
+  let currentGQLType = gqltype;
+  
+  for (let i = 0; i < pathParts.length; i++) {
+    const part = pathParts[i];
+    const field = currentGQLType.getFields()[part];
+    
+    if (!field) {
+      throw new Error(`Field ${part} not found in type ${currentGQLType.name}`);
+    }
+    
+    let fieldType = field.type;
+    if (fieldType instanceof GraphQLNonNull || fieldType instanceof GraphQLList) {
+      fieldType = fieldType.ofType;
+    }
+    
+    // If it's an object type with non-embedded relation, we need a lookup
+    if ((fieldType instanceof GraphQLObjectType) && 
+        field.extensions && field.extensions.relation && 
+        !field.extensions.relation.embedded) {
+      
+      const relatedModel = typesDict.types[fieldType.name].model;
+      const collectionName = relatedModel.collection.collectionName;
+      const connectionField = field.extensions.relation.connectionField || part;
+      
+      const lookupAlias = currentPath ? `${currentPath}_${part}` : part;
+      const localField = currentPath ? `${currentPath}.${connectionField}` : connectionField;
+      
+      aggregateClauses.push({
+        $lookup: {
+          from: collectionName,
+          foreignField: '_id',
+          localField,
+          as: lookupAlias,
+        },
+      });
+      
+      aggregateClauses.push({
+        $unwind: { path: `$${lookupAlias}`, preserveNullAndEmptyArrays: true },
+      });
+      
+      currentPath = lookupAlias;
+      currentGQLType = fieldType;
+    } else if (fieldType instanceof GraphQLObjectType && 
+               field.extensions && field.extensions.relation && 
+               field.extensions.relation.embedded) {
+      // Embedded object - just append to path
+      currentPath = currentPath ? `${currentPath}.${part}` : part;
+      currentGQLType = fieldType;
+    } else {
+      // Scalar field - final part of path
+      if (part === 'id') {
+        currentPath = currentPath ? `${currentPath}._id` : '_id';
+      } else {
+        currentPath = currentPath ? `${currentPath}.${part}` : part;
+      }
+    }
+  }
+  
+  return { mongoPath: currentPath, lookups: aggregateClauses };
+};
+
+const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
+  const aggregateClauses = [];
+  const matchesClauses = { $match: {} };
+  let addMatch = false;
+  const aggregationsIncluded = {};
+  let sortDirection = 1; // Default ascending
+  let limitClause = null;
+  let skipClause = null;
+  
+  // Build filter and lookup clauses (similar to buildQuery)
+  for (const [key, filterField] of Object.entries(input)) {
+    if (Object.prototype.hasOwnProperty.call(input, key) && key !== 'pagination' && key !== 'sort' && key !== 'aggregation') {
+      const qlField = gqltype.getFields()[key];
+      
+      const result = await buildQueryTerms(filterField, qlField, key);
+      
+      if (result) {
+        for (const [prop, aggregate] of Object.entries(result.aggregateClauses)) {
+          aggregateClauses.push(aggregate.lookup);
+          aggregateClauses.push(aggregate.unwind);
+          aggregationsIncluded[prop] = true;
+        }
+        
+        for (const [matchClauseKey, matchClause] of Object.entries(result.matchesClauses)) {
+          if (Object.prototype.hasOwnProperty.call(result.matchesClauses, matchClauseKey)) {
+            for (const [matchKey, match] of Object.entries(matchClause)) {
+              if (Object.prototype.hasOwnProperty.call(matchClause, matchKey)) {
+                matchesClauses.$match[matchKey] = match;
+                addMatch = true;
+              }
+            }
+          }
+        }
+      }
+    } else if (key === 'sort' && filterField && filterField.terms && filterField.terms.length > 0) {
+      // Extract sort direction from the first term (apply to groupId)
+      sortDirection = filterField.terms[0].order === 'ASC' ? 1 : -1;
+    } else if (key === 'pagination' && filterField) {
+      // Handle pagination (ignore count parameter)
+      if (filterField.page && filterField.size) {
+        const skip = filterField.size * (filterField.page - 1);
+        limitClause = { $limit: filterField.size + skip };
+        skipClause = { $skip: skip };
+      }
+    }
+  }
+  
+  if (addMatch) {
+    aggregateClauses.push(matchesClauses);
+  }
+  
+  // Now build the aggregation with $group
+  const { groupId, facts } = aggregationExpression;
+  
+  // Resolve the groupId field path
+  const groupIdPath = buildFieldPath(gqltype, groupId);
+  
+  // Add any lookups needed for the groupId field
+  groupIdPath.lookups.forEach(lookup => {
+    const lookupKey = Object.keys(lookup)[0];
+    const lookupAlias = lookup[lookupKey].as;
+    if (!aggregationsIncluded[lookupAlias]) {
+      aggregateClauses.push(lookup);
+      // Check if next item is an unwind for this lookup
+      const unwindItem = groupIdPath.lookups[groupIdPath.lookups.indexOf(lookup) + 1];
+      if (unwindItem && unwindItem.$unwind) {
+        aggregateClauses.push(unwindItem);
+      }
+      aggregationsIncluded[lookupAlias] = true;
+    }
+  });
+  
+  // Build the $group stage
+  const groupStage = {
+    $group: {
+      _id: `$${groupIdPath.mongoPath}`,
+    },
+  };
+  
+  // Add aggregation operations for each fact
+  facts.forEach(fact => {
+    const { operation, factName, path } = fact;
+    const factPath = buildFieldPath(gqltype, path);
+    
+    // Add any lookups needed for the fact field
+    factPath.lookups.forEach(lookup => {
+      const lookupKey = Object.keys(lookup)[0];
+      const lookupAlias = lookup[lookupKey].as;
+      if (!aggregationsIncluded[lookupAlias]) {
+        aggregateClauses.push(lookup);
+        // Check if next item is an unwind for this lookup
+        const unwindItem = factPath.lookups[factPath.lookups.indexOf(lookup) + 1];
+        if (unwindItem && unwindItem.$unwind) {
+          aggregateClauses.push(unwindItem);
+        }
+        aggregationsIncluded[lookupAlias] = true;
+      }
+    });
+    
+    // Map GraphQL operations to MongoDB aggregation operators
+    let mongoOperation;
+    switch (operation) {
+      case 'SUM':
+        mongoOperation = { $sum: `$${factPath.mongoPath}` };
+        break;
+      case 'COUNT':
+        mongoOperation = { $sum: 1 };
+        break;
+      case 'AVG':
+        mongoOperation = { $avg: `$${factPath.mongoPath}` };
+        break;
+      case 'MIN':
+        mongoOperation = { $min: `$${factPath.mongoPath}` };
+        break;
+      case 'MAX':
+        mongoOperation = { $max: `$${factPath.mongoPath}` };
+        break;
+      default:
+        throw new Error(`Unknown aggregation operation: ${operation}`);
+    }
+    
+    groupStage.$group[factName] = mongoOperation;
+  });
+  
+  aggregateClauses.push(groupStage);
+  
+  // Add a final projection stage to format the output
+  aggregateClauses.push({
+    $project: {
+      _id: 0,
+      groupId: '$_id',
+      facts: Object.fromEntries(facts.map(fact => [fact.factName, `$${fact.factName}`])),
+    },
+  });
+  
+  // Add sort by groupId (using the sort direction from parameters)
+  aggregateClauses.push({
+    $sort: { groupId: sortDirection },
+  });
+  
+  // Add pagination if provided
+  if (limitClause) {
+    aggregateClauses.push(limitClause);
+  }
+  if (skipClause) {
+    aggregateClauses.push(skipClause);
+  }
+  
+  return aggregateClauses;
+};
+
 const buildRootQuery = (name, includedTypes) => {
   const rootQueryArgs = {};
   rootQueryArgs.name = name;
@@ -1542,6 +1831,29 @@ const buildRootQuery = (name, includedTypes) => {
             } else {
               result = await type.model.aggregate(aggregateClauses);
             }
+            return result;
+          },
+        };
+
+        // Add aggregate endpoint
+        const aggregateArgsObject = { ...argsObject };
+        aggregateArgsObject.aggregation = {
+          type: new GraphQLNonNull(QLTypeAggregationExpression),
+        };
+
+        rootQueryArgs.fields[`${type.listEntitiesEndpointName}_aggregate`] = {
+          type: new GraphQLList(QLTypeAggregationResult),
+          args: aggregateArgsObject,
+          async resolve(parent, args, context) {
+            const params = {
+              type,
+              args,
+              operation: 'aggregate',
+              context,
+            };
+            excecuteMiddleware(params);
+            const aggregateClauses = await buildAggregationQuery(args, type.gqltype, args.aggregation);
+            const result = await type.model.aggregate(aggregateClauses);
             return result;
           },
         };
