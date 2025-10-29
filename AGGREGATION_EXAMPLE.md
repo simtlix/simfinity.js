@@ -250,7 +250,7 @@ query {
 }
 ```
 
-### Example 5: With Sorting
+### Example 5: Sorting by GroupId
 
 Sort aggregation results by groupId (ascending or descending):
 
@@ -260,8 +260,8 @@ query {
     sort: {
       terms: [
         {
-          field: "category"  # Field is ignored, always sorts by groupId
-          order: "DESC"      # ASC or DESC - this determines sort direction
+          field: "groupId"   # Sort by the groupId
+          order: "DESC"      # ASC or DESC
         }
       ]
     }
@@ -282,7 +282,75 @@ query {
 }
 ```
 
-**Note**: The aggregation query always sorts by the `groupId` field. The `field` parameter in sort terms is ignored, but the `order` (ASC/DESC) is applied to the groupId.
+### Example 5b: Sorting by a Fact
+
+Sort aggregation results by a calculated fact (metric):
+
+```graphql
+query {
+  series_aggregate(
+    sort: {
+      terms: [
+        {
+          field: "avgRating"  # Sort by the avgRating fact
+          order: "DESC"       # Highest rating first
+        }
+      ]
+    }
+    aggregation: {
+      groupId: "category"
+      facts: [
+        {
+          operation: COUNT
+          factName: "total"
+          path: "id"
+        }
+        {
+          operation: AVG
+          factName: "avgRating"
+          path: "rating"
+        }
+      ]
+    }
+  ) {
+    groupId
+    facts
+  }
+}
+```
+
+**Result (sorted by avgRating descending):**
+```json
+{
+  "data": {
+    "series_aggregate": [
+      {
+        "groupId": "SciFi",
+        "facts": {
+          "total": 18,
+          "avgRating": 8.9
+        }
+      },
+      {
+        "groupId": "Drama",
+        "facts": {
+          "total": 15,
+          "avgRating": 7.5
+        }
+      },
+      {
+        "groupId": "Comedy",
+        "facts": {
+          "total": 23,
+          "avgRating": 7.2
+        }
+      }
+    ]
+  }
+}
+```
+
+**Note**: You can sort by either `groupId` or any of the fact names defined in your aggregation. If the field doesn't match any fact name or groupId, it defaults to sorting by groupId.
 
 ### Example 6: With Pagination
 
@@ -312,18 +380,77 @@ query {
 }
 ```
 
-**Note**: The `count` parameter in pagination is ignored for aggregation queries. Results are always sorted by `groupId` in ascending order (or the direction specified in the sort parameter).
+**Note**: The `count` parameter in pagination is ignored for aggregation queries. Results are sorted by `groupId` in ascending order by default (or by the field and direction specified in the sort parameter).
 
-### Example 7: With Sorting and Pagination Combined
+### Example 7: Multiple Sort Fields
 
-Combine sorting and pagination:
+Sort by multiple fields (e.g., by total count descending, then by groupId ascending):
 
 ```graphql
 query {
   series_aggregate(
     sort: {
       terms: [
-        { field: "any", order: "ASC" }
+        { field: "total", order: "DESC" },       # Primary sort: by total count
+        { field: "groupId", order: "ASC" }       # Secondary sort: by groupId
+      ]
+    }
+    aggregation: {
+      groupId: "category"
+      facts: [
+        {
+          operation: COUNT
+          factName: "total"
+          path: "id"
+        }
+        {
+          operation: AVG
+          factName: "avgRating"
+          path: "rating"
+        }
+      ]
+    }
+  ) {
+    groupId
+    facts
+  }
+}
+```
+
+**Result:**
+```json
+{
+  "data": {
+    "series_aggregate": [
+      {
+        "groupId": "Drama",
+        "facts": { "total": 45, "avgRating": 7.8 }
+      },
+      {
+        "groupId": "Comedy",
+        "facts": { "total": 32, "avgRating": 8.1 }
+      },
+      {
+        "groupId": "Action",
+        "facts": { "total": 32, "avgRating": 7.5 }
+      }
+    ]
+  }
+}
+```
+
+This shows how items with the same total count (Comedy and Action both have 32) are then sorted by groupId alphabetically.
+
+### Example 8: With Sorting and Pagination Combined
+
+Combine sorting by a fact with pagination (top 5 categories by total count):
+
+```graphql
+query {
+  series_aggregate(
+    sort: {
+      terms: [
+        { field: "total", order: "DESC" }  # Sort by total count
       ]
     }
     pagination: {
@@ -338,6 +465,11 @@ query {
           factName: "total"
           path: "id"
         }
+        {
+          operation: SUM
+          factName: "totalRevenue"
+          path: "revenue"
+        }
       ]
     }
   ) {
@@ -347,7 +479,9 @@ query {
 }
 ```
 
-### Example 8: Aggregate on Related Entity Field
+This query returns the top 5 categories with the most items, sorted by count in descending order.
+
+### Example 9: Aggregate on Related Entity Field
 
 Sum revenue from episodes (where episodes is a related entity collection):
 
@@ -417,10 +551,14 @@ The aggregation queries are translated to MongoDB aggregation pipelines:
 - Filters are applied **before** grouping
 
 ### Sorting
-- Results are **always sorted by the groupId field**
-- The `field` parameter in sort terms is ignored
-- The `order` parameter (ASC/DESC) determines the sort direction
-- Default sort order is ascending (ASC)
+- You can sort by **groupId** or **any fact name**
+- **Multiple sort fields are supported** - results are sorted by the first field, then by the second field for ties, etc.
+- Set the `field` parameter to:
+  - `"groupId"` to sort by the grouping field
+  - Any fact name (e.g., `"avgRating"`, `"total"`) to sort by that calculated metric
+- The `order` parameter (ASC/DESC) determines the sort direction for each field
+- If a field doesn't match groupId or any fact name, it defaults to groupId
+- If no sort is specified, defaults to sorting by groupId ascending
 
 ### Pagination
 - The `page` and `size` parameters work as expected

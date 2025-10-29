@@ -1625,7 +1625,7 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
   const matchesClauses = { $match: {} };
   let addMatch = false;
   const aggregationsIncluded = {};
-  let sortDirection = 1; // Default ascending
+  const sortTerms = []; // Store multiple sort terms
   let limitClause = null;
   let skipClause = null;
   
@@ -1655,8 +1655,13 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
         }
       }
     } else if (key === 'sort' && filterField && filterField.terms && filterField.terms.length > 0) {
-      // Extract sort direction from the first term (apply to groupId)
-      sortDirection = filterField.terms[0].order === 'ASC' ? 1 : -1;
+      // Extract all sort terms
+      filterField.terms.forEach(sortTerm => {
+        sortTerms.push({
+          field: sortTerm.field || 'groupId',
+          direction: sortTerm.order === 'ASC' ? 1 : -1,
+        });
+      });
     } else if (key === 'pagination' && filterField) {
       // Handle pagination (ignore count parameter)
       if (filterField.page && filterField.size) {
@@ -1755,10 +1760,35 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
     },
   });
   
-  // Add sort by groupId (using the sort direction from parameters)
-  aggregateClauses.push({
-    $sort: { groupId: sortDirection },
-  });
+  // Build sort object from multiple sort terms
+  if (sortTerms.length > 0) {
+    const sortObject = {};
+    const factNames = facts.map(fact => fact.factName);
+    
+    sortTerms.forEach(sortTerm => {
+      let sortFieldPath = 'groupId';
+      
+      if (sortTerm.field !== 'groupId') {
+        // Check if the field is one of the fact names
+        if (factNames.includes(sortTerm.field)) {
+          sortFieldPath = `facts.${sortTerm.field}`;
+        }
+        // If not found, default to groupId (already set)
+      }
+      
+      sortObject[sortFieldPath] = sortTerm.direction;
+    });
+    
+    // Add sort stage with all sort fields
+    aggregateClauses.push({
+      $sort: sortObject,
+    });
+  } else {
+    // Default sort by groupId ascending if no sort terms provided
+    aggregateClauses.push({
+      $sort: { groupId: 1 },
+    });
+  }
   
   // Add pagination if provided
   if (limitClause) {

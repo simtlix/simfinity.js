@@ -7,6 +7,7 @@ A powerful Node.js framework that automatically generates GraphQL schemas from y
 - **Automatic Schema Generation**: Define your object model, and Simfinity.js generates all queries and mutations
 - **MongoDB Integration**: Seamless translation between GraphQL and MongoDB
 - **Powerful Querying**: Any query that can be executed in MongoDB can be executed in GraphQL
+- **Aggregation Queries**: Built-in support for GROUP BY queries with aggregation operations (SUM, COUNT, AVG, MIN, MAX)
 - **Auto-Generated Resolvers**: Automatically generates resolve methods for relationship fields
 - **Automatic Index Creation**: Automatically creates MongoDB indexes for all ObjectId fields, including nested embedded objects and relationship fields
 - **Business Logic**: Implement business logic and domain validations declaratively
@@ -1357,6 +1358,238 @@ console.log(UserType.getFields()); // Access GraphQL fields
 // Get the input type for a GraphQL type
 const BookInput = simfinity.getInputType(BookType);
 ```
+
+## 📊 Aggregation Queries
+
+Simfinity.js now supports powerful GraphQL aggregation queries with GROUP BY functionality, allowing you to perform aggregate operations (SUM, COUNT, AVG, MIN, MAX) on your data.
+
+### Overview
+
+For each entity type registered with `connect()`, an additional aggregation endpoint is automatically generated with the format `{entityname}_aggregate`.
+
+### Features
+
+- **Group By**: Group results by any field (direct or related entity field path)
+- **Aggregation Operations**: SUM, COUNT, AVG, MIN, MAX
+- **Filtering**: Use the same filter parameters as regular queries
+- **Sorting**: Sort by groupId or any calculated fact (metrics), with support for multiple sort fields
+- **Pagination**: Use the same pagination parameters as regular queries
+- **Related Entity Fields**: Group by or aggregate on fields from related entities using dot notation
+
+### GraphQL Types
+
+#### QLAggregationOperation (Enum)
+- `SUM`: Sum of numeric values
+- `COUNT`: Count of records
+- `AVG`: Average of numeric values
+- `MIN`: Minimum value
+- `MAX`: Maximum value
+
+#### QLTypeAggregationFact (Input)
+```graphql
+input QLTypeAggregationFact {
+  operation: QLAggregationOperation!
+  factName: String!
+  path: String!
+}
+```
+
+#### QLTypeAggregationExpression (Input)
+```graphql
+input QLTypeAggregationExpression {
+  groupId: String!
+  facts: [QLTypeAggregationFact!]!
+}
+```
+
+#### QLTypeAggregationResult (Output)
+```graphql
+type QLTypeAggregationResult {
+  groupId: JSON
+  facts: JSON
+}
+```
+
+### Quick Examples
+
+#### Simple Group By
+```graphql
+query {
+  series_aggregate(
+    aggregation: {
+      groupId: "category"
+      facts: [
+        { operation: COUNT, factName: "total", path: "id" }
+      ]
+    }
+  ) {
+    groupId
+    facts
+  }
+}
+```
+
+#### Group By Related Entity
+```graphql
+query {
+  series_aggregate(
+    aggregation: {
+      groupId: "country.name"
+      facts: [
+        { operation: COUNT, factName: "count", path: "id" }
+        { operation: AVG, factName: "avgRating", path: "rating" }
+      ]
+    }
+  ) {
+    groupId
+    facts
+  }
+}
+```
+
+#### Multiple Aggregation Facts
+```graphql
+query {
+  series_aggregate(
+    aggregation: {
+      groupId: "category"
+      facts: [
+        { operation: COUNT, factName: "total", path: "id" }
+        { operation: SUM, factName: "totalEpisodes", path: "episodeCount" }
+        { operation: AVG, factName: "avgRating", path: "rating" }
+        { operation: MIN, factName: "minRating", path: "rating" }
+        { operation: MAX, factName: "maxRating", path: "rating" }
+      ]
+    }
+  ) {
+    groupId
+    facts
+  }
+}
+```
+
+#### With Filtering
+```graphql
+query {
+  series_aggregate(
+    rating: { operator: GTE, value: 8.0 }
+    aggregation: {
+      groupId: "category"
+      facts: [
+        { operation: COUNT, factName: "highRated", path: "id" }
+      ]
+    }
+  ) {
+    groupId
+    facts
+  }
+}
+```
+
+#### Sorting by Multiple Fields
+```graphql
+query {
+  series_aggregate(
+    sort: {
+      terms: [
+        { field: "total", order: "DESC" },       # Sort by count first
+        { field: "groupId", order: "ASC" }       # Then by name
+      ]
+    }
+    aggregation: {
+      groupId: "category"
+      facts: [
+        { operation: COUNT, factName: "total", path: "id" }
+        { operation: AVG, factName: "avgRating", path: "rating" }
+      ]
+    }
+  ) {
+    groupId
+    facts
+  }
+}
+```
+
+#### With Pagination (Top 5)
+```graphql
+query {
+  series_aggregate(
+    sort: {
+      terms: [{ field: "total", order: "DESC" }]
+    }
+    pagination: {
+      page: 1
+      size: 5
+    }
+    aggregation: {
+      groupId: "category"
+      facts: [
+        { operation: COUNT, factName: "total", path: "id" }
+      ]
+    }
+  ) {
+    groupId
+    facts
+  }
+}
+```
+
+### Field Path Resolution
+
+The `groupId` and `path` parameters support:
+
+1. **Direct Fields**: Simple field names from the entity
+   - Example: `"category"`, `"rating"`, `"id"`
+
+2. **Related Entity Fields**: Dot notation for fields in related entities
+   - Example: `"country.name"`, `"studio.foundedYear"`
+   
+3. **Nested Related Entities**: Multiple levels of relationships
+   - Example: `"country.region.name"`
+
+### Sorting Options
+
+- Sort by **groupId** or **any fact name**
+- **Multiple sort fields supported** - results are sorted by the first field, then by the second field for ties, etc.
+- Set the `field` parameter to:
+  - `"groupId"` to sort by the grouping field
+  - Any fact name (e.g., `"avgRating"`, `"total"`) to sort by that calculated metric
+- The `order` parameter (ASC/DESC) determines the sort direction for each field
+- If a field doesn't match groupId or any fact name, it defaults to groupId
+- If no sort is specified, defaults to sorting by groupId ascending
+
+### Pagination Notes
+
+- The `page` and `size` parameters work as expected
+- The `count` parameter is **ignored** for aggregation queries
+- Pagination is applied **after** grouping and sorting
+
+### MongoDB Translation
+
+Aggregation queries are translated to efficient MongoDB aggregation pipelines:
+
+1. **$lookup**: Joins with related entity collections
+2. **$unwind**: Flattens joined arrays
+3. **$match**: Applies filters (before grouping)
+4. **$group**: Groups by the specified field with aggregation operations
+5. **$project**: Formats final output with groupId and facts fields
+6. **$sort**: Sorts results by groupId or facts (with multiple fields support)
+7. **$limit** / **$skip**: Applied for pagination (after sorting)
+
+### Result Structure
+
+Results are returned in a consistent format:
+```json
+{
+  "groupId": <value>,
+  "facts": {
+    "factName1": <calculated_value>,
+    "factName2": <calculated_value>
+  }
+}
+```
+
+For complete documentation with more examples, see [AGGREGATION_EXAMPLE.md](./AGGREGATION_EXAMPLE.md) and [AGGREGATION_CHANGES_SUMMARY.md](./AGGREGATION_CHANGES_SUMMARY.md).
 
 ## 📚 Complete Example
 
