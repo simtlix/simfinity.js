@@ -2,6 +2,53 @@
 
 A powerful Node.js framework that automatically generates GraphQL schemas from your data models, bringing all the power and flexibility of MongoDB query language to GraphQL interfaces.
 
+## 📑 Table of Contents
+
+- [Features](#-features)
+- [Installation](#-installation)
+- [Quick Start](#-quick-start)
+- [Core Concepts](#-core-concepts)
+  - [Connecting Models](#connecting-models)
+  - [Creating Schemas](#creating-schemas)
+  - [Global Configuration](#global-configuration)
+- [Basic Usage](#-basic-usage)
+  - [Automatic Query Generation](#automatic-query-generation)
+  - [Automatic Mutation Generation](#automatic-mutation-generation)
+  - [Filtering and Querying](#filtering-and-querying)
+  - [Collection Field Filtering](#collection-field-filtering)
+- [Middlewares](#-middlewares)
+  - [Adding Middlewares](#adding-middlewares)
+  - [Middleware Parameters](#middleware-parameters)
+  - [Common Use Cases](#common-use-cases)
+- [Relationships](#-relationships)
+  - [Defining Relationships](#defining-relationships)
+  - [Auto-Generated Resolve Methods](#auto-generated-resolve-methods)
+  - [Adding Types Without Endpoints](#adding-types-without-endpoints)
+  - [Embedded vs Referenced Relationships](#embedded-vs-referenced-relationships)
+  - [Querying Relationships](#querying-relationships)
+- [Controllers & Lifecycle Hooks](#️-controllers--lifecycle-hooks)
+  - [Hook Parameters](#hook-parameters)
+- [State Machines](#-state-machines)
+- [Validations](#-validations)
+  - [Field-Level Validations](#field-level-validations)
+  - [Type-Level Validations](#type-level-validations)
+  - [Custom Validated Scalar Types](#custom-validated-scalar-types)
+  - [Custom Error Classes](#custom-error-classes)
+- [Advanced Features](#-advanced-features)
+  - [Field Extensions](#field-extensions)
+  - [Custom Mutations](#custom-mutations)
+  - [Working with Existing Mongoose Models](#working-with-existing-mongoose-models)
+  - [Programmatic Data Access](#programmatic-data-access)
+- [Aggregation Queries](#-aggregation-queries)
+- [Complete Example](#-complete-example)
+- [Resources](#-resources)
+- [License](#-license)
+- [Contributing](#-contributing)
+- [Query Examples from Series-Sample](#-query-examples-from-series-sample)
+- [State Machine Example from Series-Sample](#-state-machine-example-from-series-sample)
+- [Envelop Plugin for Count in Extensions](#-envelop-plugin-for-count-in-extensions)
+- [API Reference](#-api-reference)
+
 ## ✨ Features
 
 - **Automatic Schema Generation**: Define your object model, and Simfinity.js generates all queries and mutations
