@@ -1148,9 +1148,117 @@ mutation {
 
 ## ✅ Validations
 
-### Field-Level Validations
+### Declarative Validation Helpers
 
-Add validation logic directly to fields:
+Simfinity.js provides built-in validation helpers to simplify common validation patterns, eliminating verbose boilerplate code.
+
+#### Using Validators
+
+```javascript
+const { validators } = require('@simtlix/simfinity-js');
+
+const PersonType = new GraphQLObjectType({
+  name: 'Person',
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: {
+      type: GraphQLString,
+      extensions: {
+        validations: validators.stringLength('Name', 2, 100)
+      }
+    },
+    email: {
+      type: GraphQLString,
+      extensions: {
+        validations: validators.email()
+      }
+    },
+    website: {
+      type: GraphQLString,
+      extensions: {
+        validations: validators.url()
+      }
+    },
+    age: {
+      type: GraphQLInt,
+      extensions: {
+        validations: validators.numberRange('Age', 0, 120)
+      }
+    },
+    price: {
+      type: GraphQLFloat,
+      extensions: {
+        validations: validators.positive('Price')
+      }
+    }
+  })
+});
+```
+
+#### Available Validators
+
+**String Validators:**
+- `validators.stringLength(name, min, max)` - Validates string length with min/max bounds (required for CREATE)
+- `validators.maxLength(name, max)` - Validates maximum string length
+- `validators.pattern(name, regex, message)` - Validates against a regex pattern
+- `validators.email()` - Validates email format
+- `validators.url()` - Validates URL format
+
+**Number Validators:**
+- `validators.numberRange(name, min, max)` - Validates number range
+- `validators.positive(name)` - Ensures number is positive
+
+**Array Validators:**
+- `validators.arrayLength(name, maxItems, itemValidator)` - Validates array length and optionally each item
+
+**Date Validators:**
+- `validators.dateFormat(name, format)` - Validates date format
+- `validators.futureDate(name)` - Ensures date is in the future
+
+#### Validator Features
+
+- **Automatic Operation Handling**: Validators work for both `CREATE` (save) and `UPDATE` operations
+- **Smart Validation**: For CREATE operations, values are required. For UPDATE operations, undefined/null values are allowed (field might not be updated)
+- **Consistent Error Messages**: All validators throw `SimfinityError` with appropriate messages
+
+#### Example: Multiple Validators
+
+```javascript
+const ProductType = new GraphQLObjectType({
+  name: 'Product',
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: {
+      type: GraphQLString,
+      extensions: {
+        validations: validators.stringLength('Product Name', 3, 200)
+      }
+    },
+    sku: {
+      type: GraphQLString,
+      extensions: {
+        validations: validators.pattern('SKU', /^[A-Z0-9-]+$/, 'SKU must be uppercase alphanumeric with hyphens')
+      }
+    },
+    price: {
+      type: GraphQLFloat,
+      extensions: {
+        validations: validators.positive('Price')
+      }
+    },
+    tags: {
+      type: new GraphQLList(GraphQLString),
+      extensions: {
+        validations: validators.arrayLength('Tags', 10)
+      }
+    }
+  })
+});
+```
+
+### Field-Level Validations (Manual)
+
+For custom validation logic, you can still write manual validators:
 
 ```javascript
 const { SimfinityError } = require('@simtlix/simfinity-js');
@@ -1236,7 +1344,78 @@ const OrderType = new GraphQLObjectType({
 
 ### Custom Validated Scalar Types
 
-Create custom scalar types with built-in validation. The generated type names follow the pattern `{name}_{baseScalarTypeName}`:
+Create custom scalar types with built-in validation. The generated type names follow the pattern `{name}_{baseScalarTypeName}`.
+
+#### Pre-built Scalars
+
+Simfinity.js provides ready-to-use validated scalars for common patterns:
+
+```javascript
+const { scalars } = require('@simtlix/simfinity-js');
+
+const UserType = new GraphQLObjectType({
+  name: 'User',
+  fields: () => ({
+    id: { type: GraphQLID },
+    email: { type: scalars.EmailScalar },      // Type name: Email_String
+    website: { type: scalars.URLScalar },       // Type name: URL_String
+    age: { type: scalars.PositiveIntScalar },  // Type name: PositiveInt_Int
+    price: { type: scalars.PositiveFloatScalar } // Type name: PositiveFloat_Float
+  }),
+});
+```
+
+**Available Pre-built Scalars:**
+- `scalars.EmailScalar` - Validates email format (`Email_String`)
+- `scalars.URLScalar` - Validates URL format (`URL_String`)
+- `scalars.PositiveIntScalar` - Validates positive integers (`PositiveInt_Int`)
+- `scalars.PositiveFloatScalar` - Validates positive floats (`PositiveFloat_Float`)
+
+#### Factory Functions for Custom Scalars
+
+Create custom validated scalars with parameters:
+
+```javascript
+const { scalars } = require('@simtlix/simfinity-js');
+
+// Create a bounded string scalar (name length between 2-100 characters)
+const NameScalar = scalars.createBoundedStringScalar('Name', 2, 100);
+
+// Create a bounded integer scalar (age between 0-120)
+const AgeScalar = scalars.createBoundedIntScalar('Age', 0, 120);
+
+// Create a bounded float scalar (rating between 0-10)
+const RatingScalar = scalars.createBoundedFloatScalar('Rating', 0, 10);
+
+// Create a pattern-based string scalar (phone number format)
+const PhoneScalar = scalars.createPatternStringScalar(
+  'Phone',
+  /^\+?[\d\s\-()]+$/,
+  'Invalid phone number format'
+);
+
+// Use in your types
+const PersonType = new GraphQLObjectType({
+  name: 'Person',
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: { type: NameScalar },        // Type name: Name_String
+    age: { type: AgeScalar },          // Type name: Age_Int
+    rating: { type: RatingScalar },    // Type name: Rating_Float
+    phone: { type: PhoneScalar }       // Type name: Phone_String
+  }),
+});
+```
+
+**Available Factory Functions:**
+- `scalars.createBoundedStringScalar(name, min, max)` - String with length bounds
+- `scalars.createBoundedIntScalar(name, min, max)` - Integer with range validation
+- `scalars.createBoundedFloatScalar(name, min, max)` - Float with range validation
+- `scalars.createPatternStringScalar(name, pattern, message)` - String with regex pattern validation
+
+#### Creating Custom Scalars Manually
+
+You can also create custom scalars using `createValidatedScalar` directly:
 
 ```javascript
 const { GraphQLString, GraphQLInt } = require('graphql');

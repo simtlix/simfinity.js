@@ -2075,6 +2075,9 @@ export const addNoEndpointType = (gqltype) => {
 
 export { createValidatedScalar };
 
+export { default as validators } from './validators.js';
+export { default as scalars } from './scalars.js';
+
 const createArgsForQuery = (argTypes) => {
     const argsObject = {};
 
