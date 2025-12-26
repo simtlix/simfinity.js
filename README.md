@@ -34,6 +34,13 @@ A powerful Node.js framework that automatically generates GraphQL schemas from y
   - [Type-Level Validations](#type-level-validations)
   - [Custom Validated Scalar Types](#custom-validated-scalar-types)
   - [Custom Error Classes](#custom-error-classes)
+- [Query Scope](#-query-scope)
+  - [Overview](#overview)
+  - [Defining Scope](#defining-scope)
+  - [Scope for Find Operations](#scope-for-find-operations)
+  - [Scope for Aggregate Operations](#scope-for-aggregate-operations)
+  - [Scope for Get By ID Operations](#scope-for-get-by-id-operations)
+  - [Scope Function Parameters](#scope-function-parameters)
 - [Advanced Features](#-advanced-features)
   - [Field Extensions](#field-extensions)
   - [Custom Mutations](#custom-mutations)
@@ -1485,6 +1492,317 @@ class NotFoundError extends SimfinityError {
   }
 }
 ```
+
+## 🔒 Query Scope
+
+### Overview
+
+Query scope allows you to automatically modify query arguments based on context (e.g., user permissions). This enables automatic filtering so that users can only see documents they're authorized to access. Scope functions are executed after middleware and before query execution, allowing you to append filter conditions to queries and aggregations.
+
+### Defining Scope
+
+Define scope in the type extensions, similar to how validations are defined:
+
+```javascript
+const EpisodeType = new GraphQLObjectType({
+  name: 'episode',
+  extensions: {
+    validations: {
+      create: [validateEpisodeFields],
+      update: [validateEpisodeBusinessRules]
+    },
+    scope: {
+      find: async ({ type, args, operation, context }) => {
+        // Modify args in place to add filter conditions
+        args.owner = {
+          terms: [
+            {
+              path: 'id',
+              operator: 'EQ',
+              value: context.user.id
+            }
+          ]
+        };
+      },
+      aggregate: async ({ type, args, operation, context }) => {
+        // Apply same scope to aggregate queries
+        args.owner = {
+          terms: [
+            {
+              path: 'id',
+              operator: 'EQ',
+              value: context.user.id
+            }
+          ]
+        };
+      },
+      get_by_id: async ({ type, args, operation, context }) => {
+        // For get_by_id, scope is automatically merged with id filter
+        args.owner = {
+          terms: [
+            {
+              path: 'id',
+              operator: 'EQ',
+              value: context.user.id
+            }
+          ]
+        };
+      }
+    }
+  },
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: { type: GraphQLString },
+    owner: {
+      type: new GraphQLNonNull(simfinity.getType('user')),
+      extensions: {
+        relation: {
+          connectionField: 'owner',
+          displayField: 'name'
+        }
+      }
+    }
+  })
+});
+```
+
+### Scope for Find Operations
+
+Scope functions for `find` operations modify the query arguments that are passed to `buildQuery`. The modified arguments are automatically used to filter results:
+
+```javascript
+const DocumentType = new GraphQLObjectType({
+  name: 'Document',
+  extensions: {
+    scope: {
+      find: async ({ type, args, operation, context }) => {
+        // Only show documents owned by the current user
+        args.owner = {
+          terms: [
+            {
+              path: 'id',
+              operator: 'EQ',
+              value: context.user.id
+            }
+          ]
+        };
+      }
+    }
+  },
+  fields: () => ({
+    id: { type: GraphQLID },
+    title: { type: GraphQLString },
+    owner: {
+      type: new GraphQLNonNull(simfinity.getType('user')),
+      extensions: {
+        relation: {
+          connectionField: 'owner',
+          displayField: 'name'
+        }
+      }
+    }
+  })
+});
+```
+
+**Result**: All `documents` queries will automatically filter to only return documents where `owner.id` equals `context.user.id`.
+
+### Scope for Aggregate Operations
+
+Scope functions for `aggregate` operations work the same way, ensuring aggregation queries also respect the scope:
+
+```javascript
+const OrderType = new GraphQLObjectType({
+  name: 'Order',
+  extensions: {
+    scope: {
+      aggregate: async ({ type, args, operation, context }) => {
+        // Only aggregate orders for the current user's organization
+        args.organization = {
+          terms: [
+            {
+              path: 'id',
+              operator: 'EQ',
+              value: context.user.organizationId
+            }
+          ]
+        };
+      }
+    }
+  },
+  fields: () => ({
+    // ... fields
+  })
+});
+```
+
+**Result**: All `orders_aggregate` queries will automatically filter to only aggregate orders from the user's organization.
+
+### Scope for Get By ID Operations
+
+For `get_by_id` operations, scope functions modify a temporary query arguments object that includes the id filter. The system automatically combines the id filter with scope filters:
+
+```javascript
+const PrivateDocumentType = new GraphQLObjectType({
+  name: 'PrivateDocument',
+  extensions: {
+    scope: {
+      get_by_id: async ({ type, args, operation, context }) => {
+        // Ensure user can only access their own documents
+        args.owner = {
+          terms: [
+            {
+              path: 'id',
+              operator: 'EQ',
+              value: context.user.id
+            }
+          ]
+        };
+      }
+    }
+  },
+  fields: () => ({
+    // ... fields
+  })
+});
+```
+
+**Result**: When querying `privatedocument(id: "some_id")`, the system will:
+1. Create a query that includes both the id filter and the owner scope filter
+2. Only return the document if it matches both conditions
+3. Return `null` if the document exists but doesn't match the scope
+
+### Scope Function Parameters
+
+Scope functions receive the same parameters as middleware for consistency:
+
+```javascript
+{
+  type,        // Type information (model, gqltype, controller, etc.)
+  args,        // GraphQL arguments passed to the operation (modify this object)
+  operation,   // Operation type: 'find', 'aggregate', or 'get_by_id'
+  context      // GraphQL context object (includes request info, user data, etc.)
+}
+```
+
+### Filter Structure
+
+When modifying `args` in scope functions, use the appropriate filter structure:
+
+**For scalar fields:**
+```javascript
+args.fieldName = {
+  operator: 'EQ',
+  value: 'someValue'
+};
+```
+
+**For object/relation fields (QLTypeFilterExpression):**
+```javascript
+args.relationField = {
+  terms: [
+    {
+      path: 'fieldName',
+      operator: 'EQ',
+      value: 'someValue'
+    }
+  ]
+};
+```
+
+### Complete Example
+
+Here's a complete example showing scope for all query operations:
+
+```javascript
+const EpisodeType = new GraphQLObjectType({
+  name: 'episode',
+  extensions: {
+    validations: {
+      save: [validateEpisodeFields],
+      update: [validateEpisodeBusinessRules]
+    },
+    scope: {
+      find: async ({ type, args, operation, context }) => {
+        // Only show episodes from seasons the user has access to
+        args.season = {
+          terms: [
+            {
+              path: 'owner.id',
+              operator: 'EQ',
+              value: context.user.id
+            }
+          ]
+        };
+      },
+      aggregate: async ({ type, args, operation, context }) => {
+        // Apply same scope to aggregations
+        args.season = {
+          terms: [
+            {
+              path: 'owner.id',
+              operator: 'EQ',
+              value: context.user.id
+            }
+          ]
+        };
+      },
+      get_by_id: async ({ type, args, operation, context }) => {
+        // Ensure user can only access their own episodes
+        args.owner = {
+          terms: [
+            {
+              path: 'id',
+              operator: 'EQ',
+              value: context.user.id
+            }
+          ]
+        };
+      }
+    }
+  },
+  fields: () => ({
+    id: { type: GraphQLID },
+    number: { type: GraphQLInt },
+    name: { type: GraphQLString },
+    season: {
+      type: new GraphQLNonNull(simfinity.getType('season')),
+      extensions: {
+        relation: {
+          connectionField: 'season',
+          displayField: 'number'
+        }
+      }
+    },
+    owner: {
+      type: new GraphQLNonNull(simfinity.getType('user')),
+      extensions: {
+        relation: {
+          connectionField: 'owner',
+          displayField: 'name'
+        }
+      }
+    }
+  })
+});
+```
+
+### Important Notes
+
+- **Execution Order**: Scope functions are executed **after** middleware, so middleware can set up context (e.g., user info) that scope functions can use
+- **Modify Args In Place**: Scope functions should modify the `args` object directly
+- **Filter Structure**: Use the correct filter structure (`QLFilter` for scalars, `QLTypeFilterExpression` for relations)
+- **All Query Operations**: Scope applies to `find`, `aggregate`, and `get_by_id` operations
+- **Automatic Merging**: For `get_by_id`, the id filter is automatically combined with scope filters
+- **Context Access**: Use `context.user`, `context.ip`, or other context properties to determine scope
+
+### Use Cases
+
+- **Multi-tenancy**: Filter documents by organization or tenant
+- **User-specific data**: Only show documents owned by the current user
+- **Role-based access**: Filter based on user roles or permissions
+- **Department/Team scoping**: Show only data relevant to user's department
+- **Geographic scoping**: Filter by user's location or region
 
 ## 🔧 Advanced Features
 
