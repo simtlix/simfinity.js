@@ -846,6 +846,31 @@ const excecuteMiddleware = (context) => {
   middleware();
 };
 
+const executeScope = async (params) => {
+  const { type, args, operation, context } = params;
+  
+  if (!type || !type.gqltype || !type.gqltype.extensions) {
+    return null;
+  }
+
+  const extensions = type.gqltype.extensions;
+  if (!extensions.scope || !extensions.scope[operation]) {
+    return null;
+  }
+
+  const scopeFunction = extensions.scope[operation];
+  if (typeof scopeFunction !== 'function') {
+    return null;
+  }
+
+  // Call the scope function with the same params as middleware
+  const result = await scopeFunction({ type, args, operation, context });
+  
+  // For get_by_id, the scope function returns additional filters to merge
+  // For find and aggregate, it modifies args in place
+  return result;
+};
+
 const buildMutation = (name, includedMutationTypes, includedCustomMutations) => {
   const rootQueryArgs = {};
   rootQueryArgs.name = name;
@@ -1829,7 +1854,44 @@ const buildRootQuery = (name, includedTypes) => {
               context,
             };
             excecuteMiddleware(params);
-            return await type.model.findById(args.id);
+            
+            // Check if scope is defined for get_by_id
+            const hasScope = type.gqltype.extensions && type.gqltype.extensions.scope && type.gqltype.extensions.scope.get_by_id;
+            
+            if (hasScope) {
+              // Build query args with id filter - scope function will modify this
+              const queryArgs = {
+                id: { operator: 'EQ', value: args.id },
+              };
+              
+              // Create temporary params with queryArgs for scope function
+              const scopeParams = {
+                type,
+                args: queryArgs,
+                operation: 'get_by_id',
+                context,
+              };
+              
+              // Execute scope which will modify queryArgs in place
+              await executeScope(scopeParams);
+              
+              // Build aggregation pipeline from the combined filters
+              const aggregateClauses = await buildQuery(queryArgs, type.gqltype);
+              
+              // Execute the query and get the first result
+              let result;
+              if (aggregateClauses.length === 0) {
+                result = await type.model.findOne({ _id: args.id });
+              } else {
+                const results = await type.model.aggregate(aggregateClauses);
+                result = results.length > 0 ? results[0] : null;
+              }
+              
+              return result;
+            } else {
+              // No scope defined, use the original findById
+              return await type.model.findById(args.id);
+            }
           },
         };
 
@@ -1848,6 +1910,7 @@ const buildRootQuery = (name, includedTypes) => {
               context,
             };
             excecuteMiddleware(params);
+            await executeScope(params);
             const aggregateClauses = await buildQuery(args, type.gqltype);
             if (args.pagination && args.pagination.count) {
               const aggregateClausesForCount = await buildQuery(args, type.gqltype, true);
@@ -1882,6 +1945,7 @@ const buildRootQuery = (name, includedTypes) => {
               context,
             };
             excecuteMiddleware(params);
+            await executeScope(params);
             const aggregateClauses = await buildAggregationQuery(args, type.gqltype, args.aggregation);
             const result = await type.model.aggregate(aggregateClauses);
             return result;
