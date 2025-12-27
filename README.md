@@ -994,31 +994,44 @@ Controllers provide fine-grained control over operations with lifecycle hooks:
 
 ```javascript
 const bookController = {
-  onSaving: async (doc, args, session) => {
+  onSaving: async (doc, args, session, context) => {
     // Before saving - doc is a Mongoose document
     if (!doc.title || doc.title.trim().length === 0) {
       throw new Error('Book title cannot be empty');
     }
+    // Access user from context to set owner
+    if (context && context.user) {
+      doc.owner = context.user.id;
+    }
     console.log(`Creating book: ${doc.title}`);
   },
 
-  onSaved: async (doc, args, session) => {
+  onSaved: async (doc, args, session, context) => {
     // After saving - doc is a plain object
     console.log(`Book saved: ${doc._id}`);
+    // Can access context.user for post-save operations like notifications
   },
 
-  onUpdating: async (id, doc, session) => {
+  onUpdating: async (id, doc, session, context) => {
     // Before updating - doc contains only changed fields
+    // Validate user has permission to update
+    if (context && context.user && context.user.role !== 'admin') {
+      throw new simfinity.SimfinityError('Only admins can update books', 'FORBIDDEN', 403);
+    }
     console.log(`Updating book ${id}`);
   },
 
-  onUpdated: async (doc, session) => {
+  onUpdated: async (doc, session, context) => {
     // After updating - doc is the updated document
     console.log(`Book updated: ${doc.title}`);
   },
 
-  onDelete: async (doc, session) => {
+  onDelete: async (doc, session, context) => {
     // Before deleting - doc is the document to be deleted
+    // Validate user has permission to delete
+    if (context && context.user && context.user.role !== 'admin') {
+      throw new simfinity.SimfinityError('Only admins can delete books', 'FORBIDDEN', 403);
+    }
     console.log(`Deleting book: ${doc.title}`);
   }
 };
@@ -1029,28 +1042,75 @@ simfinity.connect(null, BookType, 'book', 'books', bookController);
 
 ### Hook Parameters
 
-**`onSaving(doc, args, session)`**:
+**`onSaving(doc, args, session, context)`**:
 - `doc`: Mongoose Document instance (not yet saved)
 - `args`: Raw GraphQL mutation input
 - `session`: Mongoose session for transaction
+- `context`: GraphQL context object (includes request info, user data, etc.)
 
-**`onSaved(doc, args, session)`**:
+**`onSaved(doc, args, session, context)`**:
 - `doc`: Plain object of saved document
 - `args`: Raw GraphQL mutation input
 - `session`: Mongoose session for transaction
+- `context`: GraphQL context object (includes request info, user data, etc.)
 
-**`onUpdating(id, doc, session)`**:
+**`onUpdating(id, doc, session, context)`**:
 - `id`: Document ID being updated
 - `doc`: Plain object with only changed fields
 - `session`: Mongoose session for transaction
+- `context`: GraphQL context object (includes request info, user data, etc.)
 
-**`onUpdated(doc, session)`**:
+**`onUpdated(doc, session, context)`**:
 - `doc`: Full updated Mongoose document
 - `session`: Mongoose session for transaction
+- `context`: GraphQL context object (includes request info, user data, etc.)
 
-**`onDelete(doc, session)`**:
+**`onDelete(doc, session, context)`**:
 - `doc`: Plain object of document to be deleted
 - `session`: Mongoose session for transaction
+- `context`: GraphQL context object (includes request info, user data, etc.)
+
+### Using Context in Controllers
+
+The `context` parameter provides access to the GraphQL request context, which typically includes user information, request metadata, and other application-specific data. This is particularly useful for:
+
+- **Setting ownership**: Automatically assign the current user as the owner of new entities
+- **Authorization checks**: Validate user permissions before allowing operations
+- **Audit logging**: Track who performed which operations
+- **User-specific business logic**: Apply different logic based on user roles or attributes
+
+**Example: Setting Owner on Creation**
+
+```javascript
+const documentController = {
+  onSaving: async (doc, args, session, context) => {
+    // Automatically set the owner to the current user
+    if (context && context.user) {
+      doc.owner = context.user.id;
+    }
+  }
+};
+```
+
+**Example: Role-Based Authorization**
+
+```javascript
+const adminOnlyController = {
+  onUpdating: async (id, doc, session, context) => {
+    if (!context || !context.user || context.user.role !== 'admin') {
+      throw new simfinity.SimfinityError('Admin access required', 'FORBIDDEN', 403);
+    }
+  },
+  
+  onDelete: async (doc, session, context) => {
+    if (!context || !context.user || context.user.role !== 'admin') {
+      throw new simfinity.SimfinityError('Admin access required', 'FORBIDDEN', 403);
+    }
+  }
+};
+```
+
+**Note**: When using `saveObject` programmatically (outside of GraphQL), the `context` parameter is optional and may be `undefined`. Always check for context existence before accessing its properties.
 
 ## 🔄 State Machines
 
@@ -3246,7 +3306,7 @@ const BookInput = simfinity.getInputType(BookType);
 console.log(BookInput.getFields()); // Input fields for mutations
 ```
 
-### `saveObject(typeName, args, session?)`
+### `saveObject(typeName, args, session?, context?)`
 
 Programmatically save an object outside of GraphQL mutations.
 
@@ -3254,6 +3314,7 @@ Programmatically save an object outside of GraphQL mutations.
 - `typeName` (string): The name of the GraphQL type
 - `args` (object): The data to save
 - `session` (MongooseSession, optional): Database session for transactions
+- `context` (object, optional): GraphQL context object (includes request info, user data, etc.)
 
 **Returns:**
 - `Promise<object>`: The saved object
@@ -3264,8 +3325,16 @@ Programmatically save an object outside of GraphQL mutations.
 const newBook = await simfinity.saveObject('Book', {
   title: 'New Book',
   author: 'Author Name'
+}, session, context);
+
+// Without context (context will be undefined in controller hooks)
+const newBook = await simfinity.saveObject('Book', {
+  title: 'New Book',
+  author: 'Author Name'
 }, session);
 ```
+
+**Note**: When `context` is not provided, it will be `undefined` in controller hooks. This is acceptable for programmatic usage where context may not be available.
 
 ### `createSchema(includedQueryTypes?, includedMutationTypes?, includedCustomMutations?)`
 

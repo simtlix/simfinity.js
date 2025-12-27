@@ -614,53 +614,53 @@ const executeRegisteredMutation = async (args, callback, session) => {
   }
 };
 
-const iterateonCollectionFields = async (materializedModel, gqltype, objectId, session) => {
+const iterateonCollectionFields = async (materializedModel, gqltype, objectId, session, context) => {
   for (const [collectionFieldKey, collectionField] of
     Object.entries(materializedModel.collectionFields)) {
     if (collectionField.added) {
        
       await executeItemFunction(gqltype, collectionFieldKey, objectId, session,
-        collectionField.added, operations.SAVE);
+        collectionField.added, operations.SAVE, context);
     }
     if (collectionField.updated) {
        
       await executeItemFunction(gqltype, collectionFieldKey, objectId, session,
-        collectionField.updated, operations.UPDATE);
+        collectionField.updated, operations.UPDATE, context);
     }
     if (collectionField.deleted) {
        
       await executeItemFunction(gqltype, collectionFieldKey, objectId, session,
-        collectionField.deleted, operations.DELETE);
+        collectionField.deleted, operations.DELETE, context);
     }
   }
 };
 
-const onDeleteObject = async (Model, gqltype, controller, args, session) => {
+const onDeleteObject = async (Model, gqltype, controller, args, session, context) => {
   const deletedObject = await Model.findById({ _id: args }).session(session).lean();
 
   if (controller && controller.onDelete) {
-    await controller.onDelete(deletedObject, session);
+    await controller.onDelete(deletedObject, session, context);
   }
 
   return Model.findByIdAndDelete({ _id: args }).session(session);
 };
 
-const onDeleteSubject = async (Model, controller, id, session) => {
+const onDeleteSubject = async (Model, controller, id, session, context) => {
   const currentObject = await Model.findById({ _id: id }).session(session).lean();
 
   if (controller && controller.onDelete) {
-    await controller.onDelete(currentObject, session);
+    await controller.onDelete(currentObject, session, context);
   }
 
   return Model.findByIdAndDelete({ _id: id }).session(session);
 };
 
-const onUpdateSubject = async (Model, gqltype, controller, args, session, linkToParent) => {
+const onUpdateSubject = async (Model, gqltype, controller, args, session, linkToParent, context) => {
   const materializedModel = await materializeModel(args, gqltype, linkToParent, 'UPDATE', session);
   const objectId = args.id;
 
   if (materializedModel.collectionFields) {
-    await iterateonCollectionFields(materializedModel, gqltype, objectId, session);
+    await iterateonCollectionFields(materializedModel, gqltype, objectId, session, context);
   }
 
   const currentObject = await Model.findById({ _id: objectId }).lean();
@@ -688,7 +688,7 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
   });
 
   if (controller && controller.onUpdating) {
-    await controller.onUpdating(objectId, materializedModel.modelArgs, session);
+    await controller.onUpdating(objectId, materializedModel.modelArgs, session, context);
   }
 
   const result = Model.findByIdAndUpdate(
@@ -696,13 +696,13 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
   ).session(session);
 
   if (controller && controller.onUpdated) {
-    await controller.onUpdated(result, session);
+    await controller.onUpdated(result, session, context);
   }
 
   return result;
 };
 
-const onStateChanged = async (Model, gqltype, controller, args, session, actionField) => {
+const onStateChanged = async (Model, gqltype, controller, args, session, actionField, context) => {
   const storedModel = await Model.findById(args.id);
   if (!storedModel) {
     throw new SimfinityError(`${gqltype.name} ${args.id} is not valid`, 'NOT_VALID_ID', 404);
@@ -713,7 +713,7 @@ const onStateChanged = async (Model, gqltype, controller, args, session, actionF
     }
 
     args.state = actionField.to.name;
-    let result = await onUpdateSubject(Model, gqltype, controller, args, session);
+    let result = await onUpdateSubject(Model, gqltype, controller, args, session, null, context);
     result = result.toObject();
     result.state = actionField.to.value;
     return result;
@@ -721,7 +721,7 @@ const onStateChanged = async (Model, gqltype, controller, args, session, actionF
   throw new SimfinityError(`Action is not allowed from state ${storedModel.state}`, 'BAD_REQUEST', 400);
 };
 
-const onSaveObject = async (Model, gqltype, controller, args, session, linkToParent) => {
+const onSaveObject = async (Model, gqltype, controller, args, session, linkToParent, context) => {
   const materializedModel = await materializeModel(args, gqltype, linkToParent, 'CREATE', session);
   if (typesDict.types[gqltype.name].stateMachine) {
     materializedModel.modelArgs.state = typesDict.types[gqltype.name]
@@ -732,17 +732,17 @@ const onSaveObject = async (Model, gqltype, controller, args, session, linkToPar
   newObject.$session(session);
 
   if (controller && controller.onSaving) {
-    await controller.onSaving(newObject, args, session);
+    await controller.onSaving(newObject, args, session, context);
   }
 
   if (materializedModel.collectionFields) {
-    await iterateonCollectionFields(materializedModel, gqltype, newObject._id, session);
+    await iterateonCollectionFields(materializedModel, gqltype, newObject._id, session, context);
   }
 
   let result = await newObject.save();
   result = result.toObject();
   if (controller && controller.onSaved) {
-    await controller.onSaved(result, args, session);
+    await controller.onSaved(result, args, session, context);
   }
   if (typesDict.types[gqltype.name].stateMachine) {
     result.state = typesDict.types[gqltype.name].stateMachine.initialState.value;
@@ -750,29 +750,29 @@ const onSaveObject = async (Model, gqltype, controller, args, session, linkToPar
   return result;
 };
 
-export const saveObject = async (typeName, args, session) => {
+export const saveObject = async (typeName, args, session, context) => {
   const type = typesDict.types[typeName];
-  return onSaveObject(type.model, type.gqltype, type.controller, args, session);
+  return onSaveObject(type.model, type.gqltype, type.controller, args, session, null, context);
 };
 
 const executeOperation = async (Model, gqltype, controller,
-  args, operation, actionField, session) => {
+  args, operation, actionField, session, context) => {
   const mySession = session || await mongoose.startSession();
   await mySession.startTransaction();
   try {
     let newObject = null;
     switch (operation) {
       case operations.SAVE:
-        newObject = await onSaveObject(Model, gqltype, controller, args, mySession);
+        newObject = await onSaveObject(Model, gqltype, controller, args, mySession, null, context);
         break;
       case operations.UPDATE:
-        newObject = await onUpdateSubject(Model, gqltype, controller, args, mySession);
+        newObject = await onUpdateSubject(Model, gqltype, controller, args, mySession, null, context);
         break;
       case operations.DELETE:
-        newObject = await onDeleteObject(Model, gqltype, controller, args, mySession);
+        newObject = await onDeleteObject(Model, gqltype, controller, args, mySession, context);
         break;
       case operations.STATE_CHANGED:
-        newObject = await onStateChanged(Model, gqltype, controller, args, mySession, actionField);
+        newObject = await onStateChanged(Model, gqltype, controller, args, mySession, actionField, context);
         break;
     }
     await mySession.commitTransaction();
@@ -781,7 +781,7 @@ const executeOperation = async (Model, gqltype, controller,
   } catch (error) {
     await mySession.abortTransaction();
     if (error.errorLabels && error.errorLabels.includes('TransientTransactionError')) {
-      return executeOperation(Model, gqltype, controller, args, operation, actionField, mySession);
+      return executeOperation(Model, gqltype, controller, args, operation, actionField, mySession, context);
     }
     mySession.endSession();
     throw error;
@@ -789,7 +789,7 @@ const executeOperation = async (Model, gqltype, controller,
 };
 
 const executeItemFunction = async (gqltype, collectionField, objectId, session,
-  collectionFieldsList, operationType) => {
+  collectionFieldsList, operationType, context) => {
   const argTypes = gqltype.getFields();
   const collectionGQLType = argTypes[collectionField].type.ofType;
   const { connectionField } = argTypes[collectionField].extensions.relation;
@@ -802,7 +802,7 @@ const executeItemFunction = async (gqltype, collectionField, objectId, session,
         await onSaveObject(typesDict.types[collectionGQLType.name].model, collectionGQLType,
           typesDict.types[collectionGQLType.name].controller, collectionItem, session, (item) => {
             item[connectionField] = objectId;
-          });
+          }, context);
       };
       break;
     case operations.UPDATE:
@@ -810,13 +810,13 @@ const executeItemFunction = async (gqltype, collectionField, objectId, session,
         await onUpdateSubject(typesDict.types[collectionGQLType.name].model, collectionGQLType,
           typesDict.types[collectionGQLType.name].controller, collectionItem, session, (item) => {
             item[connectionField] = objectId;
-          });
+          }, context);
       };
       break;
     case operations.DELETE:
       operationFunction = async (collectionItem) => {
         await onDeleteSubject(typesDict.types[collectionGQLType.name].model,
-          typesDict.types[collectionGQLType.name].controller, collectionItem, session);
+          typesDict.types[collectionGQLType.name].controller, collectionItem, session, context);
       };
   }
 
@@ -897,7 +897,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
 
             excecuteMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
-              args.input, operations.SAVE);
+              args.input, operations.SAVE, null, null, context);
           },
         };
         rootQueryArgs.fields[`delete${type.simpleEntityEndpointName}`] = {
@@ -914,7 +914,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
 
             excecuteMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
-              args.id, operations.DELETE);
+              args.id, operations.DELETE, null, null, context);
           },
         };
       }
@@ -939,7 +939,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
 
             excecuteMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
-              args.input, operations.UPDATE);
+              args.input, operations.UPDATE, null, null, context);
           },
         };
         if (type.stateMachine) {
@@ -961,7 +961,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
 
                   excecuteMiddleware(params);
                   return executeOperation(type.model, type.gqltype, type.controller,
-                    args.input, operations.STATE_CHANGED, actionField);
+                    args.input, operations.STATE_CHANGED, actionField, null, context);
                 },
               };
             }
