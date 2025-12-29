@@ -659,10 +659,6 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
   const materializedModel = await materializeModel(args, gqltype, linkToParent, 'UPDATE', session);
   const objectId = args.id;
 
-  if (materializedModel.collectionFields) {
-    await iterateonCollectionFields(materializedModel, gqltype, objectId, session, context);
-  }
-
   const currentObject = await Model.findById({ _id: objectId }).lean();
 
   const argTypes = gqltype.getFields();
@@ -694,6 +690,10 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
   const result = Model.findByIdAndUpdate(
     objectId, materializedModel.modelArgs, { new: true },
   ).session(session);
+
+  if (materializedModel.collectionFields) {
+    await iterateonCollectionFields(materializedModel, gqltype, objectId, session, context);
+  }
 
   if (controller && controller.onUpdated) {
     await controller.onUpdated(result, session, context);
@@ -735,12 +735,14 @@ const onSaveObject = async (Model, gqltype, controller, args, session, linkToPar
     await controller.onSaving(newObject, args, session, context);
   }
 
+  let result = await newObject.save();
+  result = result.toObject();
+
   if (materializedModel.collectionFields) {
     await iterateonCollectionFields(materializedModel, gqltype, newObject._id, session, context);
   }
 
-  let result = await newObject.save();
-  result = result.toObject();
+  
   if (controller && controller.onSaved) {
     await controller.onSaved(result, args, session, context);
   }
