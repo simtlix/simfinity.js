@@ -53,7 +53,7 @@ A powerful Node.js framework that automatically generates GraphQL schemas from y
 - [Contributing](#-contributing)
 - [Query Examples from Series-Sample](#-query-examples-from-series-sample)
 - [State Machine Example from Series-Sample](#-state-machine-example-from-series-sample)
-- [Envelop Plugin for Count in Extensions](#-envelop-plugin-for-count-in-extensions)
+- [Plugins for Count in Extensions](#-plugins-for-count-in-extensions)
 - [API Reference](#-api-reference)
 
 ## ✨ Features
@@ -2638,27 +2638,29 @@ query {
 - **count**: Optional boolean - if `true`, returns total count of matching records
 
 #### Getting Total Count:
-When `count: true` is specified, the total count is available in the response extensions. You need to configure an Envelop plugin to expose it:
+When `count: true` is specified, the total count is available in the response extensions. You need to configure a plugin to expose it. Simfinity.js provides utility plugins for both Apollo Server and Envelop:
 
 ```javascript
-// Envelop plugin for count in extensions
-function useCountPlugin() {
-  return {
-    onExecute() {
-      return {
-        onExecuteDone({ result, args }) {
-          if (args.contextValue?.count) {
-            result.extensions = {
-              ...result.extensions,
-              count: args.contextValue.count,
-            };
-          }
-        }
-      };
-    }
-  };
-}
+const simfinity = require('@simtlix/simfinity-js');
+
+// For Envelop
+const getEnveloped = envelop({
+  plugins: [
+    useSchema(schema),
+    simfinity.plugins.envelopCountPlugin(),
+  ],
+});
+
+// For Apollo Server
+const server = new ApolloServer({
+  schema,
+  plugins: [
+    simfinity.plugins.apolloCountPlugin(),
+  ],
+});
 ```
+
+See the [Plugins for Count in Extensions](#-plugins-for-count-in-extensions) section for complete examples.
 
 #### Example Response:
 ```json
@@ -2999,45 +3001,18 @@ mutation {
 ```
 
 
-## 📦 Envelop Plugin for Count in Extensions
+## 📦 Plugins for Count in Extensions
 
-To include the total count in the extensions of your GraphQL response, you can use an Envelop plugin. This is particularly useful for pagination and analytics.
+To include the total count in the extensions of your GraphQL response, Simfinity.js provides utility plugins for both Apollo Server and Envelop. This is particularly useful for pagination and analytics.
 
-### Envelop Plugin Example
+### Envelop Plugin
 
-Here's how you can implement the plugin:
-
-```javascript
-// Envelop plugin for count in extensions
-function useCountPlugin() {
-  return {
-    onExecute() {
-      return {
-        onExecuteDone({ result, args }) {
-          if (args.contextValue?.count) {
-            result.extensions = {
-              ...result.extensions,
-              count: args.contextValue.count,
-            };
-          }
-        }
-      };
-    }
-  };
-}
-```
-
-### How to Use
-
-1. **Integrate the Plugin**: Add the plugin to your GraphQL server setup.
-2. **Configure Context**: Ensure that your context includes the count value when executing queries.
-3. **Access Count**: The count will be available in the `extensions` field of the GraphQL response.
-
-### Example Usage
+Use `simfinity.plugins.envelopCountPlugin()` to add count to extensions when using Envelop:
 
 ```javascript
 const { envelop, useSchema } = require('@envelop/core');
 const { makeExecutableSchema } = require('@graphql-tools/schema');
+const simfinity = require('@simtlix/simfinity-js');
 
 const schema = makeExecutableSchema({
   typeDefs,
@@ -3047,12 +3022,41 @@ const schema = makeExecutableSchema({
 const getEnveloped = envelop({
   plugins: [
     useSchema(schema),
-    useCountPlugin(), // Add the count plugin here
+    simfinity.plugins.envelopCountPlugin(), // Add the count plugin here
   ],
 });
 
 // Use getEnveloped in your server setup
 ```
+
+### Apollo Server Plugin
+
+Use `simfinity.plugins.apolloCountPlugin()` to add count to extensions when using Apollo Server:
+
+```javascript
+const { ApolloServer } = require('apollo-server-express');
+const simfinity = require('@simtlix/simfinity-js');
+
+const server = new ApolloServer({
+  schema,
+  plugins: [
+    simfinity.plugins.apolloCountPlugin(), // Add the count plugin here
+  ],
+  context: ({ req }) => {
+    // Your context setup
+    return {
+      user: req.user,
+      // count will be automatically added to extensions if present in context
+    };
+  },
+});
+```
+
+### How to Use
+
+1. **Import the Plugin**: Use `simfinity.plugins.envelopCountPlugin()` or `simfinity.plugins.apolloCountPlugin()` depending on your GraphQL server.
+2. **Configure Context**: Ensure that your context includes the count value when executing queries (Simfinity.js automatically sets `context.count` when `count: true` is specified in pagination).
+3. **Access Count**: The count will be available in the `extensions` field of the GraphQL response.
 
 ### Example Response
 
