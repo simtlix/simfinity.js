@@ -20,6 +20,12 @@ A powerful Node.js framework that automatically generates GraphQL schemas from y
   - [Adding Middlewares](#adding-middlewares)
   - [Middleware Parameters](#middleware-parameters)
   - [Common Use Cases](#common-use-cases)
+- [Authorization Middleware](#-authorization-middleware)
+  - [Quick Start](#quick-start-1)
+  - [Permission Schema](#permission-schema)
+  - [Rule Helpers](#rule-helpers)
+  - [Policy Expressions (JSON AST)](#policy-expressions-json-ast)
+  - [Integration with graphql-middleware](#integration-with-graphql-middleware)
 - [Relationships](#-relationships)
   - [Defining Relationships](#defining-relationships)
   - [Auto-Generated Resolve Methods](#auto-generated-resolve-methods)
@@ -69,6 +75,7 @@ A powerful Node.js framework that automatically generates GraphQL schemas from y
 - **Lifecycle Hooks**: Controller methods for granular control over operations
 - **Custom Validation**: Field-level and type-level custom validations
 - **Relationship Management**: Support for embedded and referenced relationships
+- **Authorization Middleware**: Production-grade GraphQL authorization with RBAC/ABAC, function-based rules, and declarative policy expressions
 
 ## 📦 Installation
 
@@ -621,6 +628,378 @@ simfinity.use((params, next) => {
 4. **Order matters**: Register middlewares in logical order (auth → validation → logging)
 5. **Performance consideration**: Middlewares run on every operation, keep them lightweight
 6. **Use context wisely**: Store request-specific data in the GraphQL context object
+
+## 🔐 Authorization Middleware
+
+Simfinity.js provides a production-grade centralized GraphQL authorization middleware supporting RBAC/ABAC, function-based rules, declarative policy expressions (JSON AST), wildcard permissions, and configurable default policies.
+
+### Quick Start
+
+```javascript
+const { auth } = require('@simtlix/simfinity-js');
+const { applyMiddleware } = require('graphql-middleware');
+
+const { createAuthMiddleware, requireAuth, requireRole } = auth;
+
+// Define your permission schema
+const permissions = {
+  Query: {
+    users: requireAuth(),
+    adminDashboard: requireRole('ADMIN'),
+  },
+  Mutation: {
+    publishPost: requireRole('EDITOR'),
+  },
+  User: {
+    '*': requireAuth(),           // Wildcard: all fields require auth
+    email: requireRole('ADMIN'),  // Override: email requires ADMIN role
+  },
+  Post: {
+    '*': requireAuth(),
+    content: async (post, _args, ctx) => {
+      // Custom logic: allow if published OR if author
+      if (post.published) return true;
+      if (post.authorId === ctx.user?.id) return true;
+      return false;
+    },
+  },
+};
+
+// Create and apply the middleware
+const authMiddleware = createAuthMiddleware(permissions, { defaultPolicy: 'DENY' });
+const schemaWithAuth = applyMiddleware(schema, authMiddleware);
+```
+
+### Permission Schema
+
+The permission schema defines authorization rules per type and field:
+
+```javascript
+const permissions = {
+  // Operation types (Query, Mutation, Subscription)
+  Query: {
+    fieldName: ruleOrRules,
+  },
+  
+  // Object types
+  TypeName: {
+    '*': wildcardRule,      // Applies to all fields unless overridden
+    fieldName: specificRule, // Overrides wildcard for this field
+  },
+};
+```
+
+**Resolution Order:**
+1. Check exact field rule: `permissions[TypeName][fieldName]`
+2. Fallback to wildcard: `permissions[TypeName]['*']`
+3. Apply default policy (ALLOW or DENY)
+
+**Rule Types:**
+- **Function**: `(parent, args, ctx, info) => boolean | void | Promise<boolean | void>`
+- **Array of functions**: All rules must pass (AND logic)
+- **Policy expression**: JSON AST object (see below)
+
+**Rule Semantics:**
+- `return true` or `return void` → allow
+- `return false` → deny
+- `throw Error` → deny with error
+
+### Rule Helpers
+
+Simfinity.js provides reusable rule builders:
+
+```javascript
+const { auth } = require('@simtlix/simfinity-js');
+
+const {
+  resolvePath,       // Utility to resolve dotted paths in objects
+  requireAuth,       // Requires ctx.user to exist
+  requireRole,       // Requires specific role(s)
+  requirePermission, // Requires specific permission(s)
+  composeRules,      // Combine rules (AND logic)
+  anyRule,           // Combine rules (OR logic)
+  isOwner,           // Check resource ownership
+  allow,             // Always allow
+  deny,              // Always deny
+  createRule,        // Create custom rule
+} = auth;
+```
+
+#### requireAuth(userPath?)
+
+Requires the user to be authenticated. Supports custom user paths in context:
+
+```javascript
+const permissions = {
+  Query: {
+    // Default: checks ctx.user
+    me: requireAuth(),
+    
+    // Custom path: checks ctx.auth.currentUser
+    profile: requireAuth('auth.currentUser'),
+    
+    // Deep path: checks ctx.session.data.user
+    settings: requireAuth('session.data.user'),
+  },
+};
+```
+
+#### requireRole(role, options?)
+
+Requires the user to have a specific role. Supports custom paths:
+
+```javascript
+const permissions = {
+  Query: {
+    // Default: checks ctx.user.role
+    adminDashboard: requireRole('ADMIN'),
+    modTools: requireRole(['ADMIN', 'MODERATOR']), // Any of these roles
+    
+    // Custom paths: checks ctx.auth.user.profile.role
+    superAdmin: requireRole('SUPER_ADMIN', { 
+      userPath: 'auth.user', 
+      rolePath: 'profile.role',
+    }),
+  },
+};
+```
+
+#### requirePermission(permission, options?)
+
+Requires the user to have specific permission(s). Supports custom paths:
+
+```javascript
+const permissions = {
+  Mutation: {
+    // Default: checks ctx.user.permissions
+    deletePost: requirePermission('posts:delete'),
+    manageUsers: requirePermission(['users:read', 'users:write']), // All required
+    
+    // Custom paths: checks ctx.session.user.access.grants
+    admin: requirePermission('admin:all', {
+      userPath: 'session.user',
+      permissionsPath: 'access.grants',
+    }),
+  },
+};
+```
+
+#### composeRules(...rules)
+
+Combines multiple rules with AND logic (all must pass):
+
+```javascript
+const permissions = {
+  Mutation: {
+    updatePost: composeRules(
+      requireAuth(),
+      requireRole('EDITOR'),
+      async (post, args, ctx) => post.authorId === ctx.user.id,
+    ),
+  },
+};
+```
+
+#### anyRule(...rules)
+
+Combines multiple rules with OR logic (any must pass):
+
+```javascript
+const permissions = {
+  Post: {
+    content: anyRule(
+      requireRole('ADMIN'),
+      async (post, args, ctx) => post.authorId === ctx.user.id,
+    ),
+  },
+};
+```
+
+#### isOwner(ownerField, userIdField)
+
+Checks if the authenticated user owns the resource:
+
+```javascript
+const permissions = {
+  Post: {
+    '*': composeRules(
+      requireAuth(),
+      isOwner('authorId', 'id'), // Compares post.authorId with ctx.user.id
+    ),
+  },
+};
+```
+
+### Policy Expressions (JSON AST)
+
+For declarative rules, use JSON AST policy expressions:
+
+```javascript
+const permissions = {
+  Post: {
+    content: {
+      anyOf: [
+        { eq: [{ ref: 'parent.published' }, true] },
+        { eq: [{ ref: 'parent.authorId' }, { ref: 'ctx.user.id' }] },
+      ],
+    },
+  },
+};
+```
+
+**Supported Operators:**
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `eq` | Equals | `{ eq: [{ ref: 'parent.status' }, 'active'] }` |
+| `in` | Value in array | `{ in: [{ ref: 'ctx.user.role' }, ['ADMIN', 'MOD']] }` |
+| `allOf` | All must be true (AND) | `{ allOf: [expr1, expr2] }` |
+| `anyOf` | Any must be true (OR) | `{ anyOf: [expr1, expr2] }` |
+| `not` | Negation | `{ not: { eq: [{ ref: 'parent.deleted' }, true] } }` |
+
+**References:**
+
+Use `{ ref: 'path' }` to reference values:
+- `parent.*` - Parent resolver result (the object being resolved)
+- `args.*` - GraphQL arguments
+- `ctx.*` - GraphQL context
+
+**Security:**
+- Only `parent`, `args`, and `ctx` roots are allowed
+- Unknown operators fail closed (deny)
+- No `eval()` or `Function()` - pure object traversal
+
+### Integration with graphql-middleware
+
+The auth middleware integrates with the `graphql-middleware` package:
+
+```javascript
+const express = require('express');
+const { graphqlHTTP } = require('express-graphql');
+const { applyMiddleware } = require('graphql-middleware');
+const simfinity = require('@simtlix/simfinity-js');
+
+const { auth } = simfinity;
+const { createAuthMiddleware, requireAuth, requireRole, requirePermission } = auth;
+
+// Define your types and connect them
+simfinity.connect(null, UserType, 'user', 'users');
+simfinity.connect(null, PostType, 'post', 'posts');
+
+// Create base schema
+const baseSchema = simfinity.createSchema();
+
+// Define permissions
+const permissions = {
+  Query: {
+    users: requireAuth(),
+    user: requireAuth(),
+    posts: requireAuth(),
+    post: requireAuth(),
+  },
+  Mutation: {
+    adduser: requireRole('ADMIN'),
+    updateuser: requireRole('ADMIN'),
+    deleteuser: requireRole('ADMIN'),
+    addpost: requireAuth(),
+    updatepost: composeRules(requireAuth(), isOwner('authorId')),
+    deletepost: requireRole('ADMIN'),
+  },
+  User: {
+    '*': requireAuth(),
+    email: requireRole('ADMIN'),
+    password: deny('Password field is not accessible'),
+  },
+  Post: {
+    '*': requireAuth(),
+    content: {
+      anyOf: [
+        { eq: [{ ref: 'parent.published' }, true] },
+        { eq: [{ ref: 'parent.authorId' }, { ref: 'ctx.user.id' }] },
+      ],
+    },
+  },
+};
+
+// Create auth middleware
+const authMiddleware = createAuthMiddleware(permissions, {
+  defaultPolicy: 'DENY',  // Deny access when no rule matches
+  debug: false,           // Enable for debugging
+});
+
+// Apply middleware to schema
+const schema = applyMiddleware(baseSchema, authMiddleware);
+
+// Setup Express with context
+const app = express();
+
+app.use('/graphql', graphqlHTTP((req) => ({
+  schema,
+  graphiql: true,
+  context: {
+    user: req.user,  // Set by your authentication middleware
+  },
+  formatError: simfinity.buildErrorFormatter((err) => {
+    console.error(err);
+  }),
+})));
+
+app.listen(4000);
+```
+
+### Middleware Options
+
+```javascript
+const middleware = createAuthMiddleware(permissions, {
+  defaultPolicy: 'DENY',  // 'ALLOW' or 'DENY' (default: 'DENY')
+  debug: false,           // Enable debug logging
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `defaultPolicy` | `'ALLOW' \| 'DENY'` | `'DENY'` | Policy when no rule matches |
+| `debug` | `boolean` | `false` | Log authorization decisions |
+
+### Error Handling
+
+The auth middleware uses Simfinity error classes:
+
+```javascript
+const { auth } = require('@simtlix/simfinity-js');
+
+const { UnauthenticatedError, ForbiddenError } = auth;
+
+// UnauthenticatedError: code 'UNAUTHENTICATED', status 401
+// ForbiddenError: code 'FORBIDDEN', status 403
+```
+
+Custom error handling in rules:
+
+```javascript
+const permissions = {
+  Mutation: {
+    deleteAccount: async (parent, args, ctx) => {
+      if (!ctx.user) {
+        throw new auth.UnauthenticatedError('Please log in');
+      }
+      if (ctx.user.role !== 'ADMIN' && ctx.user.id !== args.id) {
+        throw new auth.ForbiddenError('Cannot delete other users');
+      }
+      return true;
+    },
+  },
+};
+```
+
+### Best Practices
+
+1. **Default to DENY**: Use `defaultPolicy: 'DENY'` for security
+2. **Use wildcards wisely**: `'*'` rules provide baseline security per type
+3. **Prefer helper rules**: Use `requireAuth()`, `requireRole()` over custom functions
+4. **Fail closed**: Custom rules should deny on unexpected conditions
+5. **Keep rules simple**: Complex logic belongs in controllers, not auth rules
+6. **Test thoroughly**: Auth rules are critical - test all scenarios
 
 ## 🔗 Relationships
 

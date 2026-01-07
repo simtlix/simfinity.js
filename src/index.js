@@ -2144,6 +2144,7 @@ export { createValidatedScalar };
 export { default as validators } from './validators.js';
 export { default as scalars } from './scalars.js';
 export { default as plugins } from './plugins.js';
+export { default as auth } from './auth/index.js';
 
 const createArgsForQuery = (argTypes) => {
     const argsObject = {};

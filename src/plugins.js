@@ -13,9 +13,9 @@ export const apolloCountPlugin = () => {
               count: contextValue.count,
             };
           }
-        }
+        },
       };
-    }
+    },
   };
 };
 
@@ -31,12 +31,12 @@ export const envelopCountPlugin = () => {
           if (args.contextValue?.count) {
             result.extensions = {
               ...result.extensions,
-              count: args.contextValue.count
+              count: args.contextValue.count,
             };
           }
-        }
+        },
       };
-    }
+    },
   };
 };
 
