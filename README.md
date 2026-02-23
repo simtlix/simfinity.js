@@ -20,12 +20,13 @@ A powerful Node.js framework that automatically generates GraphQL schemas from y
   - [Adding Middlewares](#adding-middlewares)
   - [Middleware Parameters](#middleware-parameters)
   - [Common Use Cases](#common-use-cases)
-- [Authorization Middleware](#-authorization-middleware)
+- [Authorization](#-authorization)
   - [Quick Start](#quick-start-1)
   - [Permission Schema](#permission-schema)
   - [Rule Helpers](#rule-helpers)
   - [Policy Expressions (JSON AST)](#policy-expressions-json-ast)
-  - [Integration with graphql-middleware](#integration-with-graphql-middleware)
+  - [Integration with GraphQL Yoga / Envelop](#integration-with-graphql-yoga--envelop)
+  - [Legacy: Integration with graphql-middleware](#legacy-integration-with-graphql-middleware)
 - [Relationships](#-relationships)
   - [Defining Relationships](#defining-relationships)
   - [Auto-Generated Resolve Methods](#auto-generated-resolve-methods)
@@ -75,7 +76,7 @@ A powerful Node.js framework that automatically generates GraphQL schemas from y
 - **Lifecycle Hooks**: Controller methods for granular control over operations
 - **Custom Validation**: Field-level and type-level custom validations
 - **Relationship Management**: Support for embedded and referenced relationships
-- **Authorization Middleware**: Production-grade GraphQL authorization with RBAC/ABAC, function-based rules, and declarative policy expressions
+- **Authorization**: Production-grade GraphQL authorization with RBAC/ABAC, function-based rules, declarative policy expressions, and native Envelop/Yoga plugin support
 
 ## 📦 Installation
 
@@ -629,17 +630,17 @@ simfinity.use((params, next) => {
 5. **Performance consideration**: Middlewares run on every operation, keep them lightweight
 6. **Use context wisely**: Store request-specific data in the GraphQL context object
 
-## 🔐 Authorization Middleware
+## 🔐 Authorization
 
-Simfinity.js provides a production-grade centralized GraphQL authorization middleware supporting RBAC/ABAC, function-based rules, declarative policy expressions (JSON AST), wildcard permissions, and configurable default policies.
+Simfinity.js provides production-grade centralized GraphQL authorization supporting RBAC/ABAC, function-based rules, declarative policy expressions (JSON AST), wildcard permissions, and configurable default policies. It ships as a native Envelop plugin for GraphQL Yoga (recommended) and also supports the legacy graphql-middleware approach.
 
 ### Quick Start
 
 ```javascript
 const { auth } = require('@simtlix/simfinity-js');
-const { applyMiddleware } = require('graphql-middleware');
+const { createYoga } = require('graphql-yoga');
 
-const { createAuthMiddleware, requireAuth, requireRole } = auth;
+const { createAuthPlugin, requireAuth, requireRole } = auth;
 
 // Define your permission schema
 const permissions = {
@@ -665,9 +666,9 @@ const permissions = {
   },
 };
 
-// Create and apply the middleware
-const authMiddleware = createAuthMiddleware(permissions, { defaultPolicy: 'DENY' });
-const schemaWithAuth = applyMiddleware(schema, authMiddleware);
+// Create the Envelop auth plugin and pass it to your server
+const authPlugin = createAuthPlugin(permissions, { defaultPolicy: 'DENY' });
+const yoga = createYoga({ schema, plugins: [authPlugin] });
 ```
 
 ### Permission Schema
@@ -869,25 +870,24 @@ Use `{ ref: 'path' }` to reference values:
 - Unknown operators fail closed (deny)
 - No `eval()` or `Function()` - pure object traversal
 
-### Integration with graphql-middleware
+### Integration with GraphQL Yoga / Envelop
 
-The auth middleware integrates with the `graphql-middleware` package:
+The recommended way to use the auth system is via the Envelop plugin, which works natively with GraphQL Yoga and any Envelop-based server. The plugin wraps resolvers in-place without rebuilding the schema, avoiding compatibility issues.
 
 ```javascript
-const express = require('express');
-const { graphqlHTTP } = require('express-graphql');
-const { applyMiddleware } = require('graphql-middleware');
+const { createYoga } = require('graphql-yoga');
+const { createServer } = require('http');
 const simfinity = require('@simtlix/simfinity-js');
 
 const { auth } = simfinity;
-const { createAuthMiddleware, requireAuth, requireRole, requirePermission } = auth;
+const { createAuthPlugin, requireAuth, requireRole, requirePermission } = auth;
 
 // Define your types and connect them
 simfinity.connect(null, UserType, 'user', 'users');
 simfinity.connect(null, PostType, 'post', 'posts');
 
 // Create base schema
-const baseSchema = simfinity.createSchema();
+const schema = simfinity.createSchema();
 
 // Define permissions
 const permissions = {
@@ -921,36 +921,51 @@ const permissions = {
   },
 };
 
-// Create auth middleware
-const authMiddleware = createAuthMiddleware(permissions, {
-  defaultPolicy: 'DENY',  // Deny access when no rule matches
-  debug: false,           // Enable for debugging
+// Create auth plugin
+const authPlugin = createAuthPlugin(permissions, {
+  defaultPolicy: 'DENY',
+  debug: false,
 });
 
-// Apply middleware to schema
-const schema = applyMiddleware(baseSchema, authMiddleware);
-
-// Setup Express with context
-const app = express();
-
-app.use('/graphql', graphqlHTTP((req) => ({
+// Setup Yoga with the auth plugin
+const yoga = createYoga({
   schema,
-  graphiql: true,
-  context: {
-    user: req.user,  // Set by your authentication middleware
-  },
-  formatError: simfinity.buildErrorFormatter((err) => {
-    console.error(err);
+  plugins: [authPlugin],
+  context: (req) => ({
+    user: req.user,  // Set by your authentication layer
   }),
-})));
+});
 
-app.listen(4000);
+const server = createServer(yoga);
+server.listen(4000);
 ```
 
-### Middleware Options
+### Legacy: Integration with graphql-middleware
+
+> **Deprecated:** `applyMiddleware` from `graphql-middleware` rebuilds the schema via `mapSchema`,
+> which can cause `"Schema must contain uniquely named types"` errors with Simfinity schemas.
+> Use `createAuthPlugin` with GraphQL Yoga / Envelop instead.
 
 ```javascript
-const middleware = createAuthMiddleware(permissions, {
+const { applyMiddleware } = require('graphql-middleware');
+const simfinity = require('@simtlix/simfinity-js');
+
+const { auth } = simfinity;
+const { createAuthMiddleware, requireAuth, requireRole } = auth;
+
+const baseSchema = simfinity.createSchema();
+
+const authMiddleware = createAuthMiddleware(permissions, {
+  defaultPolicy: 'DENY',
+});
+
+const schema = applyMiddleware(baseSchema, authMiddleware);
+```
+
+### Plugin / Middleware Options
+
+```javascript
+const plugin = createAuthPlugin(permissions, {
   defaultPolicy: 'DENY',  // 'ALLOW' or 'DENY' (default: 'DENY')
   debug: false,           // Enable debug logging
 });

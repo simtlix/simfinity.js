@@ -1,3 +1,7 @@
+import { createAuthPlugin } from './auth/index.js';
+
+export { createAuthPlugin } from './auth/index.js';
+
 /**
  * Apollo Server plugin to add count to GraphQL response extensions
  * @returns {Object} Apollo Server plugin
@@ -40,11 +44,10 @@ export const envelopCountPlugin = () => {
   };
 };
 
-// Export all plugins as an object for convenience
 const plugins = {
+  createAuthPlugin,
   apolloCountPlugin,
   envelopCountPlugin,
 };
 
 export default plugins;
-

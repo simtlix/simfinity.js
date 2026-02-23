@@ -1,5 +1,5 @@
 /**
- * Simfinity GraphQL Authorization Middleware
+ * Simfinity GraphQL Authorization
  * 
  * Production-grade centralized GraphQL authorization supporting:
  * - RBAC / ABAC
@@ -10,9 +10,9 @@
  * 
  * @example
  * import { auth } from '@simtlix/simfinity-js';
- * import { applyMiddleware } from 'graphql-middleware';
+ * import { createYoga } from 'graphql-yoga';
  * 
- * const { createAuthMiddleware, requireAuth, requireRole } = auth;
+ * const { createAuthPlugin, requireAuth, requireRole } = auth;
  * 
  * const permissions = {
  *   Query: {
@@ -28,10 +28,11 @@
  *   }
  * };
  * 
- * const authMiddleware = createAuthMiddleware(permissions, { defaultPolicy: 'DENY' });
- * const schemaWithAuth = applyMiddleware(schema, authMiddleware);
+ * const authPlugin = createAuthPlugin(permissions, { defaultPolicy: 'DENY' });
+ * const yoga = createYoga({ schema, plugins: [authPlugin] });
  */
 
+import { GraphQLObjectType, defaultFieldResolver } from 'graphql';
 import { UnauthenticatedError, ForbiddenError, createAuthError } from './errors.js';
 import { isPolicyExpression, createRuleFromExpression, evaluateExpression } from './expressions.js';
 import {
@@ -169,33 +170,14 @@ const executeRule = async (rule, parent, args, ctx, info) => {
 };
 
 /**
- * Creates a graphql-middleware compatible authorization middleware
+ * Creates a graphql-middleware compatible authorization middleware.
+ * 
+ * @deprecated Use {@link createAuthPlugin} instead. `applyMiddleware` from graphql-middleware
+ * can cause duplicate-type errors when the schema contains custom introspection extensions.
  * 
  * @param {PermissionSchema} permissions - The permission schema object
  * @param {AuthMiddlewareOptions} [options={}] - Middleware options
  * @returns {Function} A graphql-middleware compatible middleware function
- * 
- * @example
- * const permissions = {
- *   Query: {
- *     users: requireAuth(),
- *     adminDashboard: requireRole('ADMIN')
- *   },
- *   User: {
- *     '*': requireAuth(),
- *     email: requireRole('ADMIN')
- *   },
- *   Post: {
- *     content: {
- *       anyOf: [
- *         { eq: [{ ref: 'parent.published' }, true] },
- *         { eq: [{ ref: 'parent.authorId' }, { ref: 'ctx.user.id' }] }
- *       ]
- *     }
- *   }
- * };
- * 
- * const middleware = createAuthMiddleware(permissions, { defaultPolicy: 'DENY' });
  */
 export const createAuthMiddleware = (permissions, options = {}) => {
   const {
@@ -250,8 +232,11 @@ export const createAuthMiddleware = (permissions, options = {}) => {
 };
 
 /**
- * Creates a field-level middleware object from a permission schema
- * This can be used with graphql-middleware's applyMiddleware
+ * Creates a field-level middleware object from a permission schema.
+ * This can be used with graphql-middleware's applyMiddleware.
+ * 
+ * @deprecated Use {@link createAuthPlugin} instead. `applyMiddleware` from graphql-middleware
+ * can cause duplicate-type errors when the schema contains custom introspection extensions.
  * 
  * @param {PermissionSchema} permissions - The permission schema
  * @param {AuthMiddlewareOptions} [options={}] - Middleware options
@@ -277,9 +262,103 @@ export const createFieldMiddleware = (permissions, options = {}) => {
   return fieldMiddleware;
 };
 
+/**
+ * Creates an Envelop-compatible authorization plugin that wraps schema resolvers in-place.
+ * 
+ * Unlike {@link createAuthMiddleware} (which requires graphql-middleware's `applyMiddleware`
+ * and rebuilds the schema), this plugin mutates resolvers directly on the existing schema,
+ * avoiding schema reconstruction and the duplicate-type errors it can cause.
+ * 
+ * @param {PermissionSchema} permissions - The permission schema object
+ * @param {AuthMiddlewareOptions} [options={}] - Plugin options
+ * @returns {Object} An Envelop plugin with an `onSchemaChange` hook
+ * 
+ * @example
+ * import { auth } from '@simtlix/simfinity-js';
+ * import { createYoga } from 'graphql-yoga';
+ * 
+ * const permissions = {
+ *   Query: {
+ *     users: requireAuth(),
+ *     adminDashboard: requireRole('ADMIN')
+ *   },
+ *   User: {
+ *     '*': requireAuth(),
+ *     email: requireRole('ADMIN')
+ *   }
+ * };
+ * 
+ * const authPlugin = auth.createAuthPlugin(permissions, { defaultPolicy: 'DENY' });
+ * const yoga = createYoga({ schema, plugins: [authPlugin] });
+ */
+export const createAuthPlugin = (permissions, options = {}) => {
+  const {
+    defaultPolicy = 'DENY',
+    debug = false,
+  } = options;
+
+  const log = debug ? console.log.bind(console, '[auth]') : () => {};
+  const processedSchemas = new WeakSet();
+
+  const wrapSchemaResolvers = (schema) => {
+    if (processedSchemas.has(schema)) return;
+
+    const typeMap = schema.getTypeMap();
+
+    for (const [typeName, type] of Object.entries(typeMap)) {
+      if (!(type instanceof GraphQLObjectType) || typeName.startsWith('__')) continue;
+
+      const fields = type.getFields();
+
+      for (const [fieldName, field] of Object.entries(fields)) {
+        const rules = getFieldRules(permissions, typeName, fieldName);
+        const originalResolve = field.resolve || defaultFieldResolver;
+
+        field.resolve = async (parent, args, ctx, info) => {
+          log(`Checking ${typeName}.${fieldName}`);
+
+          if (rules === null || rules.length === 0) {
+            log(`No rules for ${typeName}.${fieldName}, applying default policy: ${defaultPolicy}`);
+
+            if (defaultPolicy === 'DENY') {
+              throw new ForbiddenError(`Access denied to ${typeName}.${fieldName}`);
+            }
+
+            return originalResolve(parent, args, ctx, info);
+          }
+
+          for (const rule of rules) {
+            log(`Executing rule for ${typeName}.${fieldName}`);
+
+            const allowed = await executeRule(rule, parent, args, ctx, info);
+
+            if (!allowed) {
+              log(`Rule denied access to ${typeName}.${fieldName}`);
+              throw new ForbiddenError(`Access denied to ${typeName}.${fieldName}`);
+            }
+          }
+
+          log(`Access granted to ${typeName}.${fieldName}`);
+
+          return originalResolve(parent, args, ctx, info);
+        };
+      }
+    }
+
+    processedSchemas.add(schema);
+  };
+
+  return {
+    onSchemaChange({ schema }) {
+      wrapSchemaResolvers(schema);
+    },
+  };
+};
+
 // Default export with all auth utilities
 const auth = {
-  // Main factory
+  // Main factories
+  createAuthPlugin,
   createAuthMiddleware,
   createFieldMiddleware,
   

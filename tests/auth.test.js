@@ -1,10 +1,14 @@
 import {
   describe, test, expect, beforeEach,
 } from 'vitest';
+import {
+  GraphQLObjectType, GraphQLString, GraphQLSchema,
+} from 'graphql';
 import { auth } from '../src/index.js';
 import SimfinityError from '../src/errors/simfinity.error.js';
 
 const {
+  createAuthPlugin,
   createAuthMiddleware,
   resolvePath,
   requireAuth,
@@ -1046,6 +1050,434 @@ describe('Integration: Example Permission Schema', () => {
         createMockInfo('Unknown', 'field'),
       ),
     ).rejects.toThrow(ForbiddenError);
+  });
+});
+
+// --- createAuthPlugin (Envelop plugin) tests ---
+
+const buildTestSchema = (queryFields) => {
+  const QueryType = new GraphQLObjectType({
+    name: 'Query',
+    fields: queryFields,
+  });
+  return new GraphQLSchema({ query: QueryType });
+};
+
+const buildTestSchemaWithTypes = (queryFields, extraTypes) => {
+  const QueryType = new GraphQLObjectType({
+    name: 'Query',
+    fields: queryFields,
+  });
+  return new GraphQLSchema({ query: QueryType, types: extraTypes });
+};
+
+const executeField = async (schema, typeName, fieldName, { parent, args, ctx } = {}) => {
+  const type = schema.getType(typeName);
+  const field = type.getFields()[fieldName];
+  return field.resolve(
+    parent ?? {},
+    args ?? {},
+    ctx ?? {},
+    { parentType: { name: typeName }, fieldName },
+  );
+};
+
+describe('createAuthPlugin', () => {
+  test('should export createAuthPlugin', () => {
+    expect(createAuthPlugin).toBeDefined();
+    expect(typeof createAuthPlugin).toBe('function');
+  });
+
+  test('should return an object with onSchemaChange hook', () => {
+    const plugin = createAuthPlugin({});
+    expect(plugin).toBeDefined();
+    expect(typeof plugin.onSchemaChange).toBe('function');
+  });
+
+  describe('resolver wrapping via onSchemaChange', () => {
+    test('should deny by default when no rules match (defaultPolicy: DENY)', async () => {
+      const schema = buildTestSchema({
+        hello: { type: GraphQLString, resolve: () => 'world' },
+      });
+
+      const plugin = createAuthPlugin({}, { defaultPolicy: 'DENY' });
+      plugin.onSchemaChange({ schema });
+
+      await expect(
+        executeField(schema, 'Query', 'hello'),
+      ).rejects.toThrow(ForbiddenError);
+    });
+
+    test('should allow by default when no rules match (defaultPolicy: ALLOW)', async () => {
+      const schema = buildTestSchema({
+        hello: { type: GraphQLString, resolve: () => 'world' },
+      });
+
+      const plugin = createAuthPlugin({}, { defaultPolicy: 'ALLOW' });
+      plugin.onSchemaChange({ schema });
+
+      const result = await executeField(schema, 'Query', 'hello');
+      expect(result).toBe('world');
+    });
+
+    test('should allow when rule returns true', async () => {
+      const schema = buildTestSchema({
+        hello: { type: GraphQLString, resolve: () => 'world' },
+      });
+
+      const plugin = createAuthPlugin({
+        Query: { hello: () => true },
+      });
+      plugin.onSchemaChange({ schema });
+
+      const result = await executeField(schema, 'Query', 'hello');
+      expect(result).toBe('world');
+    });
+
+    test('should deny when rule returns false', async () => {
+      const schema = buildTestSchema({
+        hello: { type: GraphQLString, resolve: () => 'world' },
+      });
+
+      const plugin = createAuthPlugin({
+        Query: { hello: () => false },
+      });
+      plugin.onSchemaChange({ schema });
+
+      await expect(
+        executeField(schema, 'Query', 'hello'),
+      ).rejects.toThrow(ForbiddenError);
+    });
+
+    test('should deny when rule throws', async () => {
+      const schema = buildTestSchema({
+        hello: { type: GraphQLString, resolve: () => 'world' },
+      });
+
+      const plugin = createAuthPlugin({
+        Query: { hello: () => { throw new ForbiddenError('nope'); } },
+      });
+      plugin.onSchemaChange({ schema });
+
+      await expect(
+        executeField(schema, 'Query', 'hello'),
+      ).rejects.toThrow('nope');
+    });
+
+    test('should pass resolver arguments through to the original resolver', async () => {
+      const schema = buildTestSchema({
+        greet: {
+          type: GraphQLString,
+          resolve: (_parent, _args, ctx) => `hello ${ctx.user.name}`,
+        },
+      });
+
+      const plugin = createAuthPlugin({
+        Query: { greet: requireAuth() },
+      });
+      plugin.onSchemaChange({ schema });
+
+      const result = await executeField(schema, 'Query', 'greet', {
+        ctx: { user: { name: 'Alice' } },
+      });
+      expect(result).toBe('hello Alice');
+    });
+
+    test('should support requireAuth rule', async () => {
+      const schema = buildTestSchema({
+        me: { type: GraphQLString, resolve: () => 'user' },
+      });
+
+      const plugin = createAuthPlugin({
+        Query: { me: requireAuth() },
+      });
+      plugin.onSchemaChange({ schema });
+
+      await expect(
+        executeField(schema, 'Query', 'me', { ctx: {} }),
+      ).rejects.toThrow(UnauthenticatedError);
+
+      const result = await executeField(schema, 'Query', 'me', {
+        ctx: { user: { id: '1' } },
+      });
+      expect(result).toBe('user');
+    });
+
+    test('should support requireRole rule', async () => {
+      const schema = buildTestSchema({
+        admin: { type: GraphQLString, resolve: () => 'dashboard' },
+      });
+
+      const plugin = createAuthPlugin({
+        Query: { admin: requireRole('ADMIN') },
+      });
+      plugin.onSchemaChange({ schema });
+
+      await expect(
+        executeField(schema, 'Query', 'admin', {
+          ctx: { user: { id: '1', role: 'USER' } },
+        }),
+      ).rejects.toThrow(ForbiddenError);
+
+      const result = await executeField(schema, 'Query', 'admin', {
+        ctx: { user: { id: '1', role: 'ADMIN' } },
+      });
+      expect(result).toBe('dashboard');
+    });
+  });
+
+  describe('wildcard and field priority', () => {
+    test('should apply wildcard rule to unspecified fields', async () => {
+      const UserType = new GraphQLObjectType({
+        name: 'User',
+        fields: {
+          id: { type: GraphQLString },
+          name: { type: GraphQLString },
+          email: { type: GraphQLString },
+        },
+      });
+
+      const schema = buildTestSchemaWithTypes(
+        { user: { type: UserType, resolve: () => ({ id: '1', name: 'Alice', email: 'a@b.com' }) } },
+        [UserType],
+      );
+
+      const plugin = createAuthPlugin({
+        User: { '*': requireAuth() },
+      }, { defaultPolicy: 'ALLOW' });
+      plugin.onSchemaChange({ schema });
+
+      await expect(
+        executeField(schema, 'User', 'name', { ctx: {} }),
+      ).rejects.toThrow(UnauthenticatedError);
+
+      const result = await executeField(schema, 'User', 'name', {
+        ctx: { user: { id: '1' } },
+      });
+      expect(result).toBeUndefined();
+    });
+
+    test('should prefer exact field rule over wildcard', async () => {
+      let wildcardCalled = false;
+      let exactCalled = false;
+
+      const UserType = new GraphQLObjectType({
+        name: 'User',
+        fields: {
+          name: { type: GraphQLString },
+          email: { type: GraphQLString },
+        },
+      });
+
+      const schema = buildTestSchemaWithTypes(
+        { user: { type: UserType, resolve: () => ({}) } },
+        [UserType],
+      );
+
+      const plugin = createAuthPlugin({
+        User: {
+          '*': () => { wildcardCalled = true; return true; },
+          email: () => { exactCalled = true; return true; },
+        },
+      });
+      plugin.onSchemaChange({ schema });
+
+      await executeField(schema, 'User', 'email');
+
+      expect(exactCalled).toBe(true);
+      expect(wildcardCalled).toBe(false);
+    });
+  });
+
+  describe('double-wrap prevention', () => {
+    test('should not wrap resolvers twice for the same schema', async () => {
+      let callCount = 0;
+      const schema = buildTestSchema({
+        hello: {
+          type: GraphQLString,
+          resolve: () => { callCount++; return 'world'; },
+        },
+      });
+
+      const plugin = createAuthPlugin({
+        Query: { hello: () => true },
+      });
+
+      plugin.onSchemaChange({ schema });
+      plugin.onSchemaChange({ schema });
+
+      await executeField(schema, 'Query', 'hello');
+      expect(callCount).toBe(1);
+    });
+
+    test('should wrap a different schema instance independently', async () => {
+      const schema1 = buildTestSchema({
+        hello: { type: GraphQLString, resolve: () => 'from-1' },
+      });
+      const schema2 = buildTestSchema({
+        hello: { type: GraphQLString, resolve: () => 'from-2' },
+      });
+
+      const plugin = createAuthPlugin({}, { defaultPolicy: 'ALLOW' });
+
+      plugin.onSchemaChange({ schema: schema1 });
+      plugin.onSchemaChange({ schema: schema2 });
+
+      const r1 = await executeField(schema1, 'Query', 'hello');
+      const r2 = await executeField(schema2, 'Query', 'hello');
+      expect(r1).toBe('from-1');
+      expect(r2).toBe('from-2');
+    });
+  });
+
+  describe('introspection types', () => {
+    test('should not wrap __-prefixed introspection types', async () => {
+      const schema = buildTestSchema({
+        hello: { type: GraphQLString, resolve: () => 'world' },
+      });
+
+      const plugin = createAuthPlugin({}, { defaultPolicy: 'DENY' });
+      plugin.onSchemaChange({ schema });
+
+      const introspectionType = schema.getType('__Schema');
+      if (introspectionType) {
+        const fields = introspectionType.getFields();
+        const typesField = fields.types;
+        expect(typesField.resolve).toBeDefined();
+      }
+    });
+  });
+
+  describe('AND logic for rule arrays', () => {
+    test('should require all rules to pass', async () => {
+      let rule1Called = false;
+      let rule2Called = false;
+
+      const schema = buildTestSchema({
+        hello: { type: GraphQLString, resolve: () => 'world' },
+      });
+
+      const plugin = createAuthPlugin({
+        Query: {
+          hello: [
+            () => { rule1Called = true; return true; },
+            () => { rule2Called = true; return true; },
+          ],
+        },
+      });
+      plugin.onSchemaChange({ schema });
+
+      await executeField(schema, 'Query', 'hello');
+      expect(rule1Called).toBe(true);
+      expect(rule2Called).toBe(true);
+    });
+
+    test('should short-circuit on first failing rule', async () => {
+      let rule2Called = false;
+
+      const schema = buildTestSchema({
+        hello: { type: GraphQLString, resolve: () => 'world' },
+      });
+
+      const plugin = createAuthPlugin({
+        Query: {
+          hello: [
+            () => false,
+            () => { rule2Called = true; return true; },
+          ],
+        },
+      });
+      plugin.onSchemaChange({ schema });
+
+      await expect(
+        executeField(schema, 'Query', 'hello'),
+      ).rejects.toThrow(ForbiddenError);
+      expect(rule2Called).toBe(false);
+    });
+  });
+
+  describe('policy expressions', () => {
+    test('should support expression rules', async () => {
+      const PostType = new GraphQLObjectType({
+        name: 'Post',
+        fields: {
+          title: { type: GraphQLString },
+          content: { type: GraphQLString },
+        },
+      });
+
+      const schema = buildTestSchemaWithTypes(
+        { post: { type: PostType, resolve: () => ({}) } },
+        [PostType],
+      );
+
+      const plugin = createAuthPlugin({
+        Post: {
+          content: {
+            eq: [{ ref: 'parent.published' }, true],
+          },
+        },
+      }, { defaultPolicy: 'ALLOW' });
+      plugin.onSchemaChange({ schema });
+
+      const allowed = await executeField(schema, 'Post', 'content', {
+        parent: { published: true },
+      });
+      expect(allowed).toBeUndefined();
+
+      await expect(
+        executeField(schema, 'Post', 'content', {
+          parent: { published: false },
+        }),
+      ).rejects.toThrow(ForbiddenError);
+    });
+  });
+
+  describe('async rules', () => {
+    test('should support async rule functions', async () => {
+      const schema = buildTestSchema({
+        hello: { type: GraphQLString, resolve: () => 'world' },
+      });
+
+      const plugin = createAuthPlugin({
+        Query: {
+          hello: async () => {
+            await new Promise(r => setTimeout(r, 10));
+            return true;
+          },
+        },
+      });
+      plugin.onSchemaChange({ schema });
+
+      const result = await executeField(schema, 'Query', 'hello');
+      expect(result).toBe('world');
+    });
+  });
+
+  describe('fields without custom resolvers', () => {
+    test('should use defaultFieldResolver for fields without a resolve function', async () => {
+      const UserType = new GraphQLObjectType({
+        name: 'User',
+        fields: {
+          name: { type: GraphQLString },
+        },
+      });
+
+      const schema = buildTestSchemaWithTypes(
+        { user: { type: UserType, resolve: () => ({ name: 'Alice' }) } },
+        [UserType],
+      );
+
+      const plugin = createAuthPlugin({
+        User: { name: () => true },
+      });
+      plugin.onSchemaChange({ schema });
+
+      const result = await executeField(schema, 'User', 'name', {
+        parent: { name: 'Alice' },
+      });
+      expect(result).toBe('Alice');
+    });
   });
 });
 
