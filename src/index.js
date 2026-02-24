@@ -63,6 +63,7 @@ const FieldExtensionsType = new GraphQLObjectType({
   fields: () => ({
     relation: { type: RelationType },
     stateMachine: { type: GraphQLBoolean },
+    readOnly: { type: GraphQLBoolean },
   }),
 });
 
