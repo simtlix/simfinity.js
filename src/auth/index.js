@@ -16,19 +16,19 @@
  * 
  * const permissions = {
  *   Query: {
- *     users: requireAuth(),
- *     adminDashboard: requireRole('ADMIN')
+ *     series: requireAuth(),
+ *     seasons: requireAuth(),
  *   },
  *   Mutation: {
- *     publishPost: requireRole('EDITOR')
+ *     deleteserie: requireRole('admin'),
+ *     deletestar: requireRole('admin'),
  *   },
- *   User: {
+ *   serie: {
  *     '*': requireAuth(),
- *     email: requireRole('ADMIN')
  *   }
  * };
  * 
- * const authPlugin = createAuthPlugin(permissions, { defaultPolicy: 'DENY' });
+ * const authPlugin = createAuthPlugin(permissions, { defaultPolicy: 'ALLOW' });
  * const yoga = createYoga({ schema, plugins: [authPlugin] });
  */
 

@@ -16,31 +16,20 @@ A powerful Node.js framework that automatically generates GraphQL schemas from y
   - [Automatic Mutation Generation](#automatic-mutation-generation)
   - [Filtering and Querying](#filtering-and-querying)
   - [Collection Field Filtering](#collection-field-filtering)
-- [Middlewares](#-middlewares)
-  - [Adding Middlewares](#adding-middlewares)
-  - [Middleware Parameters](#middleware-parameters)
-  - [Common Use Cases](#common-use-cases)
-- [Authorization](#-authorization)
-  - [Quick Start](#quick-start-1)
-  - [Permission Schema](#permission-schema)
-  - [Rule Helpers](#rule-helpers)
-  - [Policy Expressions (JSON AST)](#policy-expressions-json-ast)
-  - [Integration with GraphQL Yoga / Envelop](#integration-with-graphql-yoga--envelop)
-  - [Legacy: Integration with graphql-middleware](#legacy-integration-with-graphql-middleware)
 - [Relationships](#-relationships)
   - [Defining Relationships](#defining-relationships)
   - [Auto-Generated Resolve Methods](#auto-generated-resolve-methods)
   - [Adding Types Without Endpoints](#adding-types-without-endpoints)
   - [Embedded vs Referenced Relationships](#embedded-vs-referenced-relationships)
   - [Querying Relationships](#querying-relationships)
-- [Controllers & Lifecycle Hooks](#️-controllers--lifecycle-hooks)
-  - [Hook Parameters](#hook-parameters)
-- [State Machines](#-state-machines)
 - [Validations](#-validations)
   - [Field-Level Validations](#field-level-validations)
   - [Type-Level Validations](#type-level-validations)
   - [Custom Validated Scalar Types](#custom-validated-scalar-types)
   - [Custom Error Classes](#custom-error-classes)
+- [State Machines](#-state-machines)
+- [Controllers & Lifecycle Hooks](#️-controllers--lifecycle-hooks)
+  - [Hook Parameters](#hook-parameters)
 - [Query Scope](#-query-scope)
   - [Overview](#overview)
   - [Defining Scope](#defining-scope)
@@ -48,6 +37,17 @@ A powerful Node.js framework that automatically generates GraphQL schemas from y
   - [Scope for Aggregate Operations](#scope-for-aggregate-operations)
   - [Scope for Get By ID Operations](#scope-for-get-by-id-operations)
   - [Scope Function Parameters](#scope-function-parameters)
+- [Authorization](#-authorization)
+  - [Quick Start](#quick-start-1)
+  - [Permission Schema](#permission-schema)
+  - [Rule Helpers](#rule-helpers)
+  - [Policy Expressions (JSON AST)](#policy-expressions-json-ast)
+  - [Integration with GraphQL Yoga / Envelop](#integration-with-graphql-yoga--envelop)
+  - [Legacy: Integration with graphql-middleware](#legacy-integration-with-graphql-middleware)
+- [Middlewares](#-middlewares)
+  - [Adding Middlewares](#adding-middlewares)
+  - [Middleware Parameters](#middleware-parameters)
+  - [Common Use Cases](#common-use-cases)
 - [Advanced Features](#-advanced-features)
   - [Field Extensions](#field-extensions)
   - [Custom Mutations](#custom-mutations)
@@ -58,10 +58,6 @@ A powerful Node.js framework that automatically generates GraphQL schemas from y
 - [Resources](#-resources)
 - [License](#-license)
 - [Contributing](#-contributing)
-- [Query Examples from Series-Sample](#-query-examples-from-series-sample)
-- [State Machine Example from Series-Sample](#-state-machine-example-from-series-sample)
-- [Plugins for Count in Extensions](#-plugins-for-count-in-extensions)
-- [API Reference](#-api-reference)
 
 ## ✨ Features
 
@@ -174,6 +170,8 @@ query {
   }
 }
 ```
+
+> For a full working application, see the [Series Sample Project](https://github.com/simtlix/series-sample) -- a complete TV series microservice with types, relationships, state machines, controllers, and authorization.
 
 ## 🔧 Core Concepts
 
@@ -382,639 +380,6 @@ query {
 ```
 
 **Note**: Collection field filtering uses the exact same format as main query filtering, ensuring consistency across your GraphQL API. All available operators (`EQ`, `NE`, `GT`, `LT`, `GTE`, `LTE`, `LIKE`, `IN`, `NIN`, `BTW`) work with collection fields.
-
-## 🔧 Middlewares
-
-Middlewares provide a powerful way to intercept and process all GraphQL operations before they execute. Use them for cross-cutting concerns like authentication, logging, validation, and performance monitoring.
-
-### Adding Middlewares
-
-Register middlewares using `simfinity.use()`. Middlewares execute in the order they're registered:
-
-```javascript
-// Basic logging middleware
-simfinity.use((params, next) => {
-  console.log(`Executing ${params.operation} on ${params.type?.name || 'custom mutation'}`);
-  next();
-});
-```
-
-### Middleware Parameters
-
-Each middleware receives a `params` object containing:
-
-```javascript
-simfinity.use((params, next) => {
-  // params object contains:
-  const {
-    type,        // Type information (model, gqltype, controller, etc.)
-    args,        // GraphQL arguments passed to the operation
-    operation,   // Operation type: 'save', 'update', 'delete', 'get_by_id', 'find', 'state_changed', 'custom_mutation'
-    context,     // GraphQL context object (includes request info, user data, etc.)
-    actionName,  // For state machine actions (only present for state_changed operations)
-    actionField, // State machine action details (only present for state_changed operations)
-    entry        // Custom mutation name (only present for custom_mutation operations)
-  } = params;
-  
-  // Always call next() to continue the middleware chain
-  next();
-});
-```
-
-### Common Use Cases
-
-#### 1. Authentication & Authorization
-
-```javascript
-simfinity.use((params, next) => {
-  const { context, operation, type } = params;
-  
-  // Skip authentication for read operations
-  if (operation === 'get_by_id' || operation === 'find') {
-    return next();
-  }
-  
-  // Check if user is authenticated
-  if (!context.user) {
-    throw new simfinity.SimfinityError('Authentication required', 'UNAUTHORIZED', 401);
-  }
-  
-  // Check permissions for specific types
-  if (type?.name === 'User' && context.user.role !== 'admin') {
-    throw new simfinity.SimfinityError('Admin access required', 'FORBIDDEN', 403);
-  }
-  
-  next();
-});
-```
-
-#### 2. Request Logging & Monitoring
-
-```javascript
-simfinity.use((params, next) => {
-  const { operation, type, args, context } = params;
-  const startTime = Date.now();
-  
-  console.log(`[${new Date().toISOString()}] Starting ${operation}${type ? ` on ${type.name}` : ''}`);
-  
-  // Continue with the operation
-  next();
-  
-  const duration = Date.now() - startTime;
-  console.log(`[${new Date().toISOString()}] Completed ${operation} in ${duration}ms`);
-});
-```
-
-#### 3. Input Validation & Sanitization
-
-```javascript
-simfinity.use((params, next) => {
-  const { operation, args, type } = params;
-  
-  // Validate input for save operations
-  if (operation === 'save' && args.input) {
-    // Trim string fields
-    Object.keys(args.input).forEach(key => {
-      if (typeof args.input[key] === 'string') {
-        args.input[key] = args.input[key].trim();
-      }
-    });
-    
-    // Validate required business rules
-    if (type?.name === 'Book' && args.input.title && args.input.title.length < 3) {
-      throw new simfinity.SimfinityError('Book title must be at least 3 characters', 'VALIDATION_ERROR', 400);
-    }
-  }
-  
-  next();
-});
-```
-
-#### 4. Rate Limiting
-
-```javascript
-const requestCounts = new Map();
-
-simfinity.use((params, next) => {
-  const { context, operation } = params;
-  const userId = context.user?.id || context.ip;
-  const now = Date.now();
-  const windowMs = 60000; // 1 minute
-  const maxRequests = 100;
-  
-  // Only apply rate limiting to mutations
-  if (operation === 'save' || operation === 'update' || operation === 'delete') {
-    const userRequests = requestCounts.get(userId) || [];
-    const recentRequests = userRequests.filter(time => now - time < windowMs);
-    
-    if (recentRequests.length >= maxRequests) {
-      throw new simfinity.SimfinityError('Rate limit exceeded', 'TOO_MANY_REQUESTS', 429);
-    }
-    
-    recentRequests.push(now);
-    requestCounts.set(userId, recentRequests);
-  }
-  
-  next();
-});
-```
-
-#### 5. Audit Trail
-
-```javascript
-simfinity.use((params, next) => {
-  const { operation, type, args, context } = params;
-  
-  // Log all mutations for audit purposes
-  if (operation === 'save' || operation === 'update' || operation === 'delete') {
-    const auditEntry = {
-      timestamp: new Date(),
-      user: context.user?.id,
-      operation,
-      type: type?.name,
-      entityId: args.id || 'new',
-      data: operation === 'delete' ? null : args.input,
-      ip: context.ip,
-      userAgent: context.userAgent
-    };
-    
-    // Save to audit log (could be database, file, or external service)
-    console.log('AUDIT:', JSON.stringify(auditEntry));
-  }
-  
-  next();
-});
-```
-
-### Multiple Middlewares
-
-Middlewares execute in registration order. Each middleware must call `next()` to continue the chain:
-
-```javascript
-// Middleware 1: Authentication
-simfinity.use((params, next) => {
-  console.log('1. Checking authentication...');
-  // Authentication logic here
-  next(); // Continue to next middleware
-});
-
-// Middleware 2: Authorization  
-simfinity.use((params, next) => {
-  console.log('2. Checking permissions...');
-  // Authorization logic here
-  next(); // Continue to next middleware
-});
-
-// Middleware 3: Logging
-simfinity.use((params, next) => {
-  console.log('3. Logging request...');
-  // Logging logic here
-  next(); // Continue to GraphQL operation
-});
-```
-
-### Error Handling in Middlewares
-
-Middlewares can throw errors to stop the operation:
-
-```javascript
-simfinity.use((params, next) => {
-  const { context, operation } = params;
-  
-  try {
-    // Validation logic
-    if (!context.user && operation !== 'find') {
-      throw new simfinity.SimfinityError('Authentication required', 'UNAUTHORIZED', 401);
-    }
-    
-    next(); // Continue only if validation passes
-  } catch (error) {
-    // Error automatically bubbles up to GraphQL error handling
-    throw error;
-  }
-});
-```
-
-### Conditional Middleware Execution
-
-Execute middleware logic conditionally based on operation type or context:
-
-```javascript
-simfinity.use((params, next) => {
-  const { operation, type, context } = params;
-  
-  // Only apply to specific types
-  if (type?.name === 'SensitiveData') {
-    // Special handling for sensitive data
-    if (!context.user?.hasHighSecurity) {
-      throw new simfinity.SimfinityError('High security clearance required', 'FORBIDDEN', 403);
-    }
-  }
-  
-  // Only apply to mutation operations
-  if (['save', 'update', 'delete', 'state_changed'].includes(operation)) {
-    // Mutation-specific logic
-    console.log(`Mutation ${operation} executing...`);
-  }
-  
-  next();
-});
-```
-
-### Best Practices
-
-1. **Always call `next()`**: Failing to call `next()` will hang the request
-2. **Handle errors gracefully**: Use try-catch blocks for error-prone operations
-3. **Keep middlewares focused**: Each middleware should handle one concern
-4. **Order matters**: Register middlewares in logical order (auth → validation → logging)
-5. **Performance consideration**: Middlewares run on every operation, keep them lightweight
-6. **Use context wisely**: Store request-specific data in the GraphQL context object
-
-## 🔐 Authorization
-
-Simfinity.js provides production-grade centralized GraphQL authorization supporting RBAC/ABAC, function-based rules, declarative policy expressions (JSON AST), wildcard permissions, and configurable default policies. It ships as a native Envelop plugin for GraphQL Yoga (recommended) and also supports the legacy graphql-middleware approach.
-
-### Quick Start
-
-```javascript
-const { auth } = require('@simtlix/simfinity-js');
-const { createYoga } = require('graphql-yoga');
-
-const { createAuthPlugin, requireAuth, requireRole } = auth;
-
-// Define your permission schema
-const permissions = {
-  Query: {
-    users: requireAuth(),
-    adminDashboard: requireRole('ADMIN'),
-  },
-  Mutation: {
-    publishPost: requireRole('EDITOR'),
-  },
-  User: {
-    '*': requireAuth(),           // Wildcard: all fields require auth
-    email: requireRole('ADMIN'),  // Override: email requires ADMIN role
-  },
-  Post: {
-    '*': requireAuth(),
-    content: async (post, _args, ctx) => {
-      // Custom logic: allow if published OR if author
-      if (post.published) return true;
-      if (post.authorId === ctx.user?.id) return true;
-      return false;
-    },
-  },
-};
-
-// Create the Envelop auth plugin and pass it to your server
-const authPlugin = createAuthPlugin(permissions, { defaultPolicy: 'DENY' });
-const yoga = createYoga({ schema, plugins: [authPlugin] });
-```
-
-### Permission Schema
-
-The permission schema defines authorization rules per type and field:
-
-```javascript
-const permissions = {
-  // Operation types (Query, Mutation, Subscription)
-  Query: {
-    fieldName: ruleOrRules,
-  },
-  
-  // Object types
-  TypeName: {
-    '*': wildcardRule,      // Applies to all fields unless overridden
-    fieldName: specificRule, // Overrides wildcard for this field
-  },
-};
-```
-
-**Resolution Order:**
-1. Check exact field rule: `permissions[TypeName][fieldName]`
-2. Fallback to wildcard: `permissions[TypeName]['*']`
-3. Apply default policy (ALLOW or DENY)
-
-**Rule Types:**
-- **Function**: `(parent, args, ctx, info) => boolean | void | Promise<boolean | void>`
-- **Array of functions**: All rules must pass (AND logic)
-- **Policy expression**: JSON AST object (see below)
-
-**Rule Semantics:**
-- `return true` or `return void` → allow
-- `return false` → deny
-- `throw Error` → deny with error
-
-### Rule Helpers
-
-Simfinity.js provides reusable rule builders:
-
-```javascript
-const { auth } = require('@simtlix/simfinity-js');
-
-const {
-  resolvePath,       // Utility to resolve dotted paths in objects
-  requireAuth,       // Requires ctx.user to exist
-  requireRole,       // Requires specific role(s)
-  requirePermission, // Requires specific permission(s)
-  composeRules,      // Combine rules (AND logic)
-  anyRule,           // Combine rules (OR logic)
-  isOwner,           // Check resource ownership
-  allow,             // Always allow
-  deny,              // Always deny
-  createRule,        // Create custom rule
-} = auth;
-```
-
-#### requireAuth(userPath?)
-
-Requires the user to be authenticated. Supports custom user paths in context:
-
-```javascript
-const permissions = {
-  Query: {
-    // Default: checks ctx.user
-    me: requireAuth(),
-    
-    // Custom path: checks ctx.auth.currentUser
-    profile: requireAuth('auth.currentUser'),
-    
-    // Deep path: checks ctx.session.data.user
-    settings: requireAuth('session.data.user'),
-  },
-};
-```
-
-#### requireRole(role, options?)
-
-Requires the user to have a specific role. Supports custom paths:
-
-```javascript
-const permissions = {
-  Query: {
-    // Default: checks ctx.user.role
-    adminDashboard: requireRole('ADMIN'),
-    modTools: requireRole(['ADMIN', 'MODERATOR']), // Any of these roles
-    
-    // Custom paths: checks ctx.auth.user.profile.role
-    superAdmin: requireRole('SUPER_ADMIN', { 
-      userPath: 'auth.user', 
-      rolePath: 'profile.role',
-    }),
-  },
-};
-```
-
-#### requirePermission(permission, options?)
-
-Requires the user to have specific permission(s). Supports custom paths:
-
-```javascript
-const permissions = {
-  Mutation: {
-    // Default: checks ctx.user.permissions
-    deletePost: requirePermission('posts:delete'),
-    manageUsers: requirePermission(['users:read', 'users:write']), // All required
-    
-    // Custom paths: checks ctx.session.user.access.grants
-    admin: requirePermission('admin:all', {
-      userPath: 'session.user',
-      permissionsPath: 'access.grants',
-    }),
-  },
-};
-```
-
-#### composeRules(...rules)
-
-Combines multiple rules with AND logic (all must pass):
-
-```javascript
-const permissions = {
-  Mutation: {
-    updatePost: composeRules(
-      requireAuth(),
-      requireRole('EDITOR'),
-      async (post, args, ctx) => post.authorId === ctx.user.id,
-    ),
-  },
-};
-```
-
-#### anyRule(...rules)
-
-Combines multiple rules with OR logic (any must pass):
-
-```javascript
-const permissions = {
-  Post: {
-    content: anyRule(
-      requireRole('ADMIN'),
-      async (post, args, ctx) => post.authorId === ctx.user.id,
-    ),
-  },
-};
-```
-
-#### isOwner(ownerField, userIdField)
-
-Checks if the authenticated user owns the resource:
-
-```javascript
-const permissions = {
-  Post: {
-    '*': composeRules(
-      requireAuth(),
-      isOwner('authorId', 'id'), // Compares post.authorId with ctx.user.id
-    ),
-  },
-};
-```
-
-### Policy Expressions (JSON AST)
-
-For declarative rules, use JSON AST policy expressions:
-
-```javascript
-const permissions = {
-  Post: {
-    content: {
-      anyOf: [
-        { eq: [{ ref: 'parent.published' }, true] },
-        { eq: [{ ref: 'parent.authorId' }, { ref: 'ctx.user.id' }] },
-      ],
-    },
-  },
-};
-```
-
-**Supported Operators:**
-
-| Operator | Description | Example |
-|----------|-------------|---------|
-| `eq` | Equals | `{ eq: [{ ref: 'parent.status' }, 'active'] }` |
-| `in` | Value in array | `{ in: [{ ref: 'ctx.user.role' }, ['ADMIN', 'MOD']] }` |
-| `allOf` | All must be true (AND) | `{ allOf: [expr1, expr2] }` |
-| `anyOf` | Any must be true (OR) | `{ anyOf: [expr1, expr2] }` |
-| `not` | Negation | `{ not: { eq: [{ ref: 'parent.deleted' }, true] } }` |
-
-**References:**
-
-Use `{ ref: 'path' }` to reference values:
-- `parent.*` - Parent resolver result (the object being resolved)
-- `args.*` - GraphQL arguments
-- `ctx.*` - GraphQL context
-
-**Security:**
-- Only `parent`, `args`, and `ctx` roots are allowed
-- Unknown operators fail closed (deny)
-- No `eval()` or `Function()` - pure object traversal
-
-### Integration with GraphQL Yoga / Envelop
-
-The recommended way to use the auth system is via the Envelop plugin, which works natively with GraphQL Yoga and any Envelop-based server. The plugin wraps resolvers in-place without rebuilding the schema, avoiding compatibility issues.
-
-```javascript
-const { createYoga } = require('graphql-yoga');
-const { createServer } = require('http');
-const simfinity = require('@simtlix/simfinity-js');
-
-const { auth } = simfinity;
-const { createAuthPlugin, requireAuth, requireRole, requirePermission } = auth;
-
-// Define your types and connect them
-simfinity.connect(null, UserType, 'user', 'users');
-simfinity.connect(null, PostType, 'post', 'posts');
-
-// Create base schema
-const schema = simfinity.createSchema();
-
-// Define permissions
-const permissions = {
-  Query: {
-    users: requireAuth(),
-    user: requireAuth(),
-    posts: requireAuth(),
-    post: requireAuth(),
-  },
-  Mutation: {
-    adduser: requireRole('ADMIN'),
-    updateuser: requireRole('ADMIN'),
-    deleteuser: requireRole('ADMIN'),
-    addpost: requireAuth(),
-    updatepost: composeRules(requireAuth(), isOwner('authorId')),
-    deletepost: requireRole('ADMIN'),
-  },
-  User: {
-    '*': requireAuth(),
-    email: requireRole('ADMIN'),
-    password: deny('Password field is not accessible'),
-  },
-  Post: {
-    '*': requireAuth(),
-    content: {
-      anyOf: [
-        { eq: [{ ref: 'parent.published' }, true] },
-        { eq: [{ ref: 'parent.authorId' }, { ref: 'ctx.user.id' }] },
-      ],
-    },
-  },
-};
-
-// Create auth plugin
-const authPlugin = createAuthPlugin(permissions, {
-  defaultPolicy: 'DENY',
-  debug: false,
-});
-
-// Setup Yoga with the auth plugin
-const yoga = createYoga({
-  schema,
-  plugins: [authPlugin],
-  context: (req) => ({
-    user: req.user,  // Set by your authentication layer
-  }),
-});
-
-const server = createServer(yoga);
-server.listen(4000);
-```
-
-### Legacy: Integration with graphql-middleware
-
-> **Deprecated:** `applyMiddleware` from `graphql-middleware` rebuilds the schema via `mapSchema`,
-> which can cause `"Schema must contain uniquely named types"` errors with Simfinity schemas.
-> Use `createAuthPlugin` with GraphQL Yoga / Envelop instead.
-
-```javascript
-const { applyMiddleware } = require('graphql-middleware');
-const simfinity = require('@simtlix/simfinity-js');
-
-const { auth } = simfinity;
-const { createAuthMiddleware, requireAuth, requireRole } = auth;
-
-const baseSchema = simfinity.createSchema();
-
-const authMiddleware = createAuthMiddleware(permissions, {
-  defaultPolicy: 'DENY',
-});
-
-const schema = applyMiddleware(baseSchema, authMiddleware);
-```
-
-### Plugin / Middleware Options
-
-```javascript
-const plugin = createAuthPlugin(permissions, {
-  defaultPolicy: 'DENY',  // 'ALLOW' or 'DENY' (default: 'DENY')
-  debug: false,           // Enable debug logging
-});
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `defaultPolicy` | `'ALLOW' \| 'DENY'` | `'DENY'` | Policy when no rule matches |
-| `debug` | `boolean` | `false` | Log authorization decisions |
-
-### Error Handling
-
-The auth middleware uses Simfinity error classes:
-
-```javascript
-const { auth } = require('@simtlix/simfinity-js');
-
-const { UnauthenticatedError, ForbiddenError } = auth;
-
-// UnauthenticatedError: code 'UNAUTHENTICATED', status 401
-// ForbiddenError: code 'FORBIDDEN', status 403
-```
-
-Custom error handling in rules:
-
-```javascript
-const permissions = {
-  Mutation: {
-    deleteAccount: async (parent, args, ctx) => {
-      if (!ctx.user) {
-        throw new auth.UnauthenticatedError('Please log in');
-      }
-      if (ctx.user.role !== 'ADMIN' && ctx.user.id !== args.id) {
-        throw new auth.ForbiddenError('Cannot delete other users');
-      }
-      return true;
-    },
-  },
-};
-```
-
-### Best Practices
-
-1. **Default to DENY**: Use `defaultPolicy: 'DENY'` for security
-2. **Use wildcards wisely**: `'*'` rules provide baseline security per type
-3. **Prefer helper rules**: Use `requireAuth()`, `requireRole()` over custom functions
-4. **Fail closed**: Custom rules should deny on unexpected conditions
-5. **Keep rules simple**: Complex logic belongs in controllers, not auth rules
-6. **Test thoroughly**: Auth rules are critical - test all scenarios
 
 ## 🔗 Relationships
 
@@ -1382,231 +747,6 @@ mutation {
 }
 ```
 
-## 🎛️ Controllers & Lifecycle Hooks
-
-Controllers provide fine-grained control over operations with lifecycle hooks:
-
-```javascript
-const bookController = {
-  onSaving: async (doc, args, session, context) => {
-    // Before saving - doc is a Mongoose document
-    if (!doc.title || doc.title.trim().length === 0) {
-      throw new Error('Book title cannot be empty');
-    }
-    // Access user from context to set owner
-    if (context && context.user) {
-      doc.owner = context.user.id;
-    }
-    console.log(`Creating book: ${doc.title}`);
-  },
-
-  onSaved: async (doc, args, session, context) => {
-    // After saving - doc is a plain object
-    console.log(`Book saved: ${doc._id}`);
-    // Can access context.user for post-save operations like notifications
-  },
-
-  onUpdating: async (id, doc, session, context) => {
-    // Before updating - doc contains only changed fields
-    // Validate user has permission to update
-    if (context && context.user && context.user.role !== 'admin') {
-      throw new simfinity.SimfinityError('Only admins can update books', 'FORBIDDEN', 403);
-    }
-    console.log(`Updating book ${id}`);
-  },
-
-  onUpdated: async (doc, session, context) => {
-    // After updating - doc is the updated document
-    console.log(`Book updated: ${doc.title}`);
-  },
-
-  onDelete: async (doc, session, context) => {
-    // Before deleting - doc is the document to be deleted
-    // Validate user has permission to delete
-    if (context && context.user && context.user.role !== 'admin') {
-      throw new simfinity.SimfinityError('Only admins can delete books', 'FORBIDDEN', 403);
-    }
-    console.log(`Deleting book: ${doc.title}`);
-  }
-};
-
-// Connect with controller
-simfinity.connect(null, BookType, 'book', 'books', bookController);
-```
-
-### Hook Parameters
-
-**`onSaving(doc, args, session, context)`**:
-- `doc`: Mongoose Document instance (not yet saved)
-- `args`: Raw GraphQL mutation input
-- `session`: Mongoose session for transaction
-- `context`: GraphQL context object (includes request info, user data, etc.)
-
-**`onSaved(doc, args, session, context)`**:
-- `doc`: Plain object of saved document
-- `args`: Raw GraphQL mutation input
-- `session`: Mongoose session for transaction
-- `context`: GraphQL context object (includes request info, user data, etc.)
-
-**`onUpdating(id, doc, session, context)`**:
-- `id`: Document ID being updated
-- `doc`: Plain object with only changed fields
-- `session`: Mongoose session for transaction
-- `context`: GraphQL context object (includes request info, user data, etc.)
-
-**`onUpdated(doc, session, context)`**:
-- `doc`: Full updated Mongoose document
-- `session`: Mongoose session for transaction
-- `context`: GraphQL context object (includes request info, user data, etc.)
-
-**`onDelete(doc, session, context)`**:
-- `doc`: Plain object of document to be deleted
-- `session`: Mongoose session for transaction
-- `context`: GraphQL context object (includes request info, user data, etc.)
-
-### Using Context in Controllers
-
-The `context` parameter provides access to the GraphQL request context, which typically includes user information, request metadata, and other application-specific data. This is particularly useful for:
-
-- **Setting ownership**: Automatically assign the current user as the owner of new entities
-- **Authorization checks**: Validate user permissions before allowing operations
-- **Audit logging**: Track who performed which operations
-- **User-specific business logic**: Apply different logic based on user roles or attributes
-
-**Example: Setting Owner on Creation**
-
-```javascript
-const documentController = {
-  onSaving: async (doc, args, session, context) => {
-    // Automatically set the owner to the current user
-    if (context && context.user) {
-      doc.owner = context.user.id;
-    }
-  }
-};
-```
-
-**Example: Role-Based Authorization**
-
-```javascript
-const adminOnlyController = {
-  onUpdating: async (id, doc, session, context) => {
-    if (!context || !context.user || context.user.role !== 'admin') {
-      throw new simfinity.SimfinityError('Admin access required', 'FORBIDDEN', 403);
-    }
-  },
-  
-  onDelete: async (doc, session, context) => {
-    if (!context || !context.user || context.user.role !== 'admin') {
-      throw new simfinity.SimfinityError('Admin access required', 'FORBIDDEN', 403);
-    }
-  }
-};
-```
-
-**Note**: When using `saveObject` programmatically (outside of GraphQL), the `context` parameter is optional and may be `undefined`. Always check for context existence before accessing its properties.
-
-## 🔄 State Machines
-
-Implement declarative state machine workflows:
-
-### 1. Define States
-
-```javascript
-const { GraphQLEnumType } = require('graphql');
-
-const OrderState = new GraphQLEnumType({
-  name: 'OrderState',
-  values: {
-    PENDING: { value: 'PENDING' },
-    PROCESSING: { value: 'PROCESSING' },
-    SHIPPED: { value: 'SHIPPED' },
-    DELIVERED: { value: 'DELIVERED' },
-    CANCELLED: { value: 'CANCELLED' }
-  }
-});
-```
-
-### 2. Define Type with State Field
-
-```javascript
-const OrderType = new GraphQLObjectType({
-  name: 'Order',
-  fields: () => ({
-    id: { type: GraphQLID },
-    customer: { type: GraphQLString },
-    state: { type: OrderState }
-  })
-});
-```
-
-### 3. Configure State Machine
-
-```javascript
-const stateMachine = {
-  initialState: { name: 'PENDING', value: 'PENDING' },
-  actions: {
-    process: {
-      from: { name: 'PENDING', value: 'PENDING' },
-      to: { name: 'PROCESSING', value: 'PROCESSING' },
-      description: 'Process the order',
-      action: async (args, session) => {
-        // Business logic for processing
-        console.log(`Processing order ${args.id}`);
-        // You can perform additional operations here
-      }
-    },
-    ship: {
-      from: { name: 'PROCESSING', value: 'PROCESSING' },
-      to: { name: 'SHIPPED', value: 'SHIPPED' },
-      description: 'Ship the order',
-      action: async (args, session) => {
-        // Business logic for shipping
-        console.log(`Shipping order ${args.id}`);
-      }
-    },
-    deliver: {
-      from: { name: 'SHIPPED', value: 'SHIPPED' },
-      to: { name: 'DELIVERED', value: 'DELIVERED' },
-      description: 'Mark as delivered'
-    },
-    cancel: {
-      from: { name: 'PENDING', value: 'PENDING' },
-      to: { name: 'CANCELLED', value: 'CANCELLED' },
-      description: 'Cancel the order'
-    }
-  }
-};
-```
-
-### 4. Connect with State Machine
-
-```javascript
-simfinity.connect(null, OrderType, 'order', 'orders', null, null, stateMachine);
-```
-
-### 5. Use State Machine Mutations
-
-The state machine automatically generates mutations for each action:
-
-```graphql
-mutation {
-  process_order(input: {
-    id: "order_id"
-  }) {
-    id
-    state
-    customer
-  }
-}
-```
-
-**Important Notes**:
-- The `state` field is automatically read-only and managed by the state machine
-- State transitions are only allowed based on the defined actions
-- Business logic in the `action` function is executed during transitions
-- Invalid transitions throw errors automatically
-
 ## ✅ Validations
 
 ### Declarative Validation Helpers
@@ -1947,6 +1087,231 @@ class NotFoundError extends SimfinityError {
 }
 ```
 
+## 🔄 State Machines
+
+Implement declarative state machine workflows:
+
+### 1. Define States
+
+```javascript
+const { GraphQLEnumType } = require('graphql');
+
+const OrderState = new GraphQLEnumType({
+  name: 'OrderState',
+  values: {
+    PENDING: { value: 'PENDING' },
+    PROCESSING: { value: 'PROCESSING' },
+    SHIPPED: { value: 'SHIPPED' },
+    DELIVERED: { value: 'DELIVERED' },
+    CANCELLED: { value: 'CANCELLED' }
+  }
+});
+```
+
+### 2. Define Type with State Field
+
+```javascript
+const OrderType = new GraphQLObjectType({
+  name: 'Order',
+  fields: () => ({
+    id: { type: GraphQLID },
+    customer: { type: GraphQLString },
+    state: { type: OrderState }
+  })
+});
+```
+
+### 3. Configure State Machine
+
+```javascript
+const stateMachine = {
+  initialState: { name: 'PENDING', value: 'PENDING' },
+  actions: {
+    process: {
+      from: { name: 'PENDING', value: 'PENDING' },
+      to: { name: 'PROCESSING', value: 'PROCESSING' },
+      description: 'Process the order',
+      action: async (args, session) => {
+        // Business logic for processing
+        console.log(`Processing order ${args.id}`);
+        // You can perform additional operations here
+      }
+    },
+    ship: {
+      from: { name: 'PROCESSING', value: 'PROCESSING' },
+      to: { name: 'SHIPPED', value: 'SHIPPED' },
+      description: 'Ship the order',
+      action: async (args, session) => {
+        // Business logic for shipping
+        console.log(`Shipping order ${args.id}`);
+      }
+    },
+    deliver: {
+      from: { name: 'SHIPPED', value: 'SHIPPED' },
+      to: { name: 'DELIVERED', value: 'DELIVERED' },
+      description: 'Mark as delivered'
+    },
+    cancel: {
+      from: { name: 'PENDING', value: 'PENDING' },
+      to: { name: 'CANCELLED', value: 'CANCELLED' },
+      description: 'Cancel the order'
+    }
+  }
+};
+```
+
+### 4. Connect with State Machine
+
+```javascript
+simfinity.connect(null, OrderType, 'order', 'orders', null, null, stateMachine);
+```
+
+### 5. Use State Machine Mutations
+
+The state machine automatically generates mutations for each action:
+
+```graphql
+mutation {
+  process_order(input: {
+    id: "order_id"
+  }) {
+    id
+    state
+    customer
+  }
+}
+```
+
+**Important Notes**:
+- The `state` field is automatically read-only and managed by the state machine
+- State transitions are only allowed based on the defined actions
+- Business logic in the `action` function is executed during transitions
+- Invalid transitions throw errors automatically
+
+## 🎛️ Controllers & Lifecycle Hooks
+
+Controllers provide fine-grained control over operations with lifecycle hooks:
+
+```javascript
+const bookController = {
+  onSaving: async (doc, args, session, context) => {
+    // Before saving - doc is a Mongoose document
+    if (!doc.title || doc.title.trim().length === 0) {
+      throw new Error('Book title cannot be empty');
+    }
+    // Access user from context to set owner
+    if (context && context.user) {
+      doc.owner = context.user.id;
+    }
+    console.log(`Creating book: ${doc.title}`);
+  },
+
+  onSaved: async (doc, args, session, context) => {
+    // After saving - doc is a plain object
+    console.log(`Book saved: ${doc._id}`);
+    // Can access context.user for post-save operations like notifications
+  },
+
+  onUpdating: async (id, doc, session, context) => {
+    // Before updating - doc contains only changed fields
+    // Validate user has permission to update
+    if (context && context.user && context.user.role !== 'admin') {
+      throw new simfinity.SimfinityError('Only admins can update books', 'FORBIDDEN', 403);
+    }
+    console.log(`Updating book ${id}`);
+  },
+
+  onUpdated: async (doc, session, context) => {
+    // After updating - doc is the updated document
+    console.log(`Book updated: ${doc.title}`);
+  },
+
+  onDelete: async (doc, session, context) => {
+    // Before deleting - doc is the document to be deleted
+    // Validate user has permission to delete
+    if (context && context.user && context.user.role !== 'admin') {
+      throw new simfinity.SimfinityError('Only admins can delete books', 'FORBIDDEN', 403);
+    }
+    console.log(`Deleting book: ${doc.title}`);
+  }
+};
+
+// Connect with controller
+simfinity.connect(null, BookType, 'book', 'books', bookController);
+```
+
+### Hook Parameters
+
+**`onSaving(doc, args, session, context)`**:
+- `doc`: Mongoose Document instance (not yet saved)
+- `args`: Raw GraphQL mutation input
+- `session`: Mongoose session for transaction
+- `context`: GraphQL context object (includes request info, user data, etc.)
+
+**`onSaved(doc, args, session, context)`**:
+- `doc`: Plain object of saved document
+- `args`: Raw GraphQL mutation input
+- `session`: Mongoose session for transaction
+- `context`: GraphQL context object (includes request info, user data, etc.)
+
+**`onUpdating(id, doc, session, context)`**:
+- `id`: Document ID being updated
+- `doc`: Plain object with only changed fields
+- `session`: Mongoose session for transaction
+- `context`: GraphQL context object (includes request info, user data, etc.)
+
+**`onUpdated(doc, session, context)`**:
+- `doc`: Full updated Mongoose document
+- `session`: Mongoose session for transaction
+- `context`: GraphQL context object (includes request info, user data, etc.)
+
+**`onDelete(doc, session, context)`**:
+- `doc`: Plain object of document to be deleted
+- `session`: Mongoose session for transaction
+- `context`: GraphQL context object (includes request info, user data, etc.)
+
+### Using Context in Controllers
+
+The `context` parameter provides access to the GraphQL request context, which typically includes user information, request metadata, and other application-specific data. This is particularly useful for:
+
+- **Setting ownership**: Automatically assign the current user as the owner of new entities
+- **Authorization checks**: Validate user permissions before allowing operations
+- **Audit logging**: Track who performed which operations
+- **User-specific business logic**: Apply different logic based on user roles or attributes
+
+**Example: Setting Owner on Creation**
+
+```javascript
+const documentController = {
+  onSaving: async (doc, args, session, context) => {
+    // Automatically set the owner to the current user
+    if (context && context.user) {
+      doc.owner = context.user.id;
+    }
+  }
+};
+```
+
+**Example: Role-Based Authorization**
+
+```javascript
+const adminOnlyController = {
+  onUpdating: async (id, doc, session, context) => {
+    if (!context || !context.user || context.user.role !== 'admin') {
+      throw new simfinity.SimfinityError('Admin access required', 'FORBIDDEN', 403);
+    }
+  },
+  
+  onDelete: async (doc, session, context) => {
+    if (!context || !context.user || context.user.role !== 'admin') {
+      throw new simfinity.SimfinityError('Admin access required', 'FORBIDDEN', 403);
+    }
+  }
+};
+```
+
+**Note**: When using `saveObject` programmatically (outside of GraphQL), the `context` parameter is optional and may be `undefined`. Always check for context existence before accessing its properties.
+
 ## 🔒 Query Scope
 
 ### Overview
@@ -2257,6 +1622,622 @@ const EpisodeType = new GraphQLObjectType({
 - **Role-based access**: Filter based on user roles or permissions
 - **Department/Team scoping**: Show only data relevant to user's department
 - **Geographic scoping**: Filter by user's location or region
+
+## 🔐 Authorization
+
+Simfinity.js provides production-grade centralized GraphQL authorization supporting RBAC/ABAC, function-based rules, declarative policy expressions (JSON AST), wildcard permissions, and configurable default policies. It ships as a native Envelop plugin for GraphQL Yoga (recommended) and also supports the legacy graphql-middleware approach.
+
+### Quick Start
+
+```javascript
+const { auth } = require('@simtlix/simfinity-js');
+const { createYoga } = require('graphql-yoga');
+
+const { createAuthPlugin, requireAuth, requireRole } = auth;
+
+// Define your permission schema
+// Query/Mutation names match the ones generated by simfinity.connect()
+const permissions = {
+  Query: {
+    series: requireAuth(),
+    seasons: requireAuth(),
+  },
+  Mutation: {
+    deleteserie: requireRole('admin'),
+    deletestar: requireRole('admin'),
+  },
+  serie: {
+    '*': requireAuth(),           // Wildcard: all fields require auth
+  },
+};
+
+// Create the Envelop auth plugin and pass it to your server
+const authPlugin = createAuthPlugin(permissions, { defaultPolicy: 'ALLOW' });
+const yoga = createYoga({ schema, plugins: [authPlugin] });
+```
+
+### Permission Schema
+
+The permission schema defines authorization rules per type and field:
+
+```javascript
+const permissions = {
+  // Operation types (Query, Mutation, Subscription)
+  Query: {
+    fieldName: ruleOrRules,
+  },
+  
+  // Object types
+  TypeName: {
+    '*': wildcardRule,      // Applies to all fields unless overridden
+    fieldName: specificRule, // Overrides wildcard for this field
+  },
+};
+```
+
+**Resolution Order:**
+1. Check exact field rule: `permissions[TypeName][fieldName]`
+2. Fallback to wildcard: `permissions[TypeName]['*']`
+3. Apply default policy (ALLOW or DENY)
+
+**Rule Types:**
+- **Function**: `(parent, args, ctx, info) => boolean | void | Promise<boolean | void>`
+- **Array of functions**: All rules must pass (AND logic)
+- **Policy expression**: JSON AST object (see below)
+
+**Rule Semantics:**
+- `return true` or `return void` → allow
+- `return false` → deny
+- `throw Error` → deny with error
+
+### Rule Helpers
+
+Simfinity.js provides reusable rule builders:
+
+```javascript
+const { auth } = require('@simtlix/simfinity-js');
+
+const {
+  resolvePath,       // Utility to resolve dotted paths in objects
+  requireAuth,       // Requires ctx.user to exist
+  requireRole,       // Requires specific role(s)
+  requirePermission, // Requires specific permission(s)
+  composeRules,      // Combine rules (AND logic)
+  anyRule,           // Combine rules (OR logic)
+  isOwner,           // Check resource ownership
+  allow,             // Always allow
+  deny,              // Always deny
+  createRule,        // Create custom rule
+} = auth;
+```
+
+#### requireAuth(userPath?)
+
+Requires the user to be authenticated. Supports custom user paths in context:
+
+```javascript
+const permissions = {
+  Query: {
+    // Default: checks ctx.user
+    me: requireAuth(),
+    
+    // Custom path: checks ctx.auth.currentUser
+    profile: requireAuth('auth.currentUser'),
+    
+    // Deep path: checks ctx.session.data.user
+    settings: requireAuth('session.data.user'),
+  },
+};
+```
+
+#### requireRole(role, options?)
+
+Requires the user to have a specific role. Supports custom paths:
+
+```javascript
+const permissions = {
+  Query: {
+    // Default: checks ctx.user.role
+    adminDashboard: requireRole('ADMIN'),
+    modTools: requireRole(['ADMIN', 'MODERATOR']), // Any of these roles
+    
+    // Custom paths: checks ctx.auth.user.profile.role
+    superAdmin: requireRole('SUPER_ADMIN', { 
+      userPath: 'auth.user', 
+      rolePath: 'profile.role',
+    }),
+  },
+};
+```
+
+#### requirePermission(permission, options?)
+
+Requires the user to have specific permission(s). Supports custom paths:
+
+```javascript
+const permissions = {
+  Mutation: {
+    // Default: checks ctx.user.permissions
+    deletePost: requirePermission('posts:delete'),
+    manageUsers: requirePermission(['users:read', 'users:write']), // All required
+    
+    // Custom paths: checks ctx.session.user.access.grants
+    admin: requirePermission('admin:all', {
+      userPath: 'session.user',
+      permissionsPath: 'access.grants',
+    }),
+  },
+};
+```
+
+#### composeRules(...rules)
+
+Combines multiple rules with AND logic (all must pass):
+
+```javascript
+const permissions = {
+  Mutation: {
+    updatePost: composeRules(
+      requireAuth(),
+      requireRole('EDITOR'),
+      async (post, args, ctx) => post.authorId === ctx.user.id,
+    ),
+  },
+};
+```
+
+#### anyRule(...rules)
+
+Combines multiple rules with OR logic (any must pass):
+
+```javascript
+const permissions = {
+  Post: {
+    content: anyRule(
+      requireRole('ADMIN'),
+      async (post, args, ctx) => post.authorId === ctx.user.id,
+    ),
+  },
+};
+```
+
+#### isOwner(ownerField, userIdField)
+
+Checks if the authenticated user owns the resource:
+
+```javascript
+const permissions = {
+  Post: {
+    '*': composeRules(
+      requireAuth(),
+      isOwner('authorId', 'id'), // Compares post.authorId with ctx.user.id
+    ),
+  },
+};
+```
+
+### Policy Expressions (JSON AST)
+
+For declarative rules, use JSON AST policy expressions:
+
+```javascript
+const permissions = {
+  Post: {
+    content: {
+      anyOf: [
+        { eq: [{ ref: 'parent.published' }, true] },
+        { eq: [{ ref: 'parent.authorId' }, { ref: 'ctx.user.id' }] },
+      ],
+    },
+  },
+};
+```
+
+**Supported Operators:**
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `eq` | Equals | `{ eq: [{ ref: 'parent.status' }, 'active'] }` |
+| `in` | Value in array | `{ in: [{ ref: 'ctx.user.role' }, ['ADMIN', 'MOD']] }` |
+| `allOf` | All must be true (AND) | `{ allOf: [expr1, expr2] }` |
+| `anyOf` | Any must be true (OR) | `{ anyOf: [expr1, expr2] }` |
+| `not` | Negation | `{ not: { eq: [{ ref: 'parent.deleted' }, true] } }` |
+
+**References:**
+
+Use `{ ref: 'path' }` to reference values:
+- `parent.*` - Parent resolver result (the object being resolved)
+- `args.*` - GraphQL arguments
+- `ctx.*` - GraphQL context
+
+**Security:**
+- Only `parent`, `args`, and `ctx` roots are allowed
+- Unknown operators fail closed (deny)
+- No `eval()` or `Function()` - pure object traversal
+
+### Integration with GraphQL Yoga / Envelop
+
+The recommended way to use the auth system is via the Envelop plugin, which works natively with GraphQL Yoga and any Envelop-based server. The plugin wraps resolvers in-place without rebuilding the schema, avoiding compatibility issues.
+
+```javascript
+const { createYoga } = require('graphql-yoga');
+const { createServer } = require('http');
+const simfinity = require('@simtlix/simfinity-js');
+
+const { auth } = simfinity;
+const { createAuthPlugin, requireAuth, requireRole, composeRules, isOwner, deny } = auth;
+
+// Define your types and connect them
+simfinity.connect(null, SerieType, 'serie', 'series');
+simfinity.connect(null, SeasonType, 'season', 'seasons');
+simfinity.connect(null, StarType, 'star', 'stars');
+
+// Create base schema
+const schema = simfinity.createSchema();
+
+// Define permissions
+// Query/Mutation names match the ones generated by simfinity.connect()
+const permissions = {
+  Query: {
+    series: requireAuth(),
+    seasons: requireAuth(),
+    stars: requireAuth(),
+  },
+  Mutation: {
+    addserie: requireAuth(),
+    updateserie: composeRules(requireAuth(), isOwner('createdBy')),
+    deleteserie: requireRole('admin'),
+    deletestar: requireRole('admin'),
+  },
+  serie: {
+    '*': requireAuth(),
+  },
+  season: {
+    '*': requireAuth(),
+  },
+};
+
+// Create auth plugin
+const authPlugin = createAuthPlugin(permissions, {
+  defaultPolicy: 'ALLOW',
+  debug: false,
+});
+
+// Setup Yoga with the auth plugin
+const yoga = createYoga({
+  schema,
+  plugins: [authPlugin],
+  context: (req) => ({
+    user: req.user,  // Set by your authentication layer
+  }),
+});
+
+const server = createServer(yoga);
+server.listen(4000);
+```
+
+### Legacy: Integration with graphql-middleware
+
+> **Deprecated:** `applyMiddleware` from `graphql-middleware` rebuilds the schema via `mapSchema`,
+> which can cause `"Schema must contain uniquely named types"` errors with Simfinity schemas.
+> Use `createAuthPlugin` with GraphQL Yoga / Envelop instead.
+
+```javascript
+const { applyMiddleware } = require('graphql-middleware');
+const simfinity = require('@simtlix/simfinity-js');
+
+const { auth } = simfinity;
+const { createAuthMiddleware, requireAuth, requireRole } = auth;
+
+const baseSchema = simfinity.createSchema();
+
+const authMiddleware = createAuthMiddleware(permissions, {
+  defaultPolicy: 'DENY',
+});
+
+const schema = applyMiddleware(baseSchema, authMiddleware);
+```
+
+### Plugin / Middleware Options
+
+```javascript
+const plugin = createAuthPlugin(permissions, {
+  defaultPolicy: 'DENY',  // 'ALLOW' or 'DENY' (default: 'DENY')
+  debug: false,           // Enable debug logging
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `defaultPolicy` | `'ALLOW' \| 'DENY'` | `'DENY'` | Policy when no rule matches |
+| `debug` | `boolean` | `false` | Log authorization decisions |
+
+### Error Handling
+
+The auth middleware uses Simfinity error classes:
+
+```javascript
+const { auth } = require('@simtlix/simfinity-js');
+
+const { UnauthenticatedError, ForbiddenError } = auth;
+
+// UnauthenticatedError: code 'UNAUTHENTICATED', status 401
+// ForbiddenError: code 'FORBIDDEN', status 403
+```
+
+Custom error handling in rules:
+
+```javascript
+const permissions = {
+  Mutation: {
+    deleteserie: async (parent, args, ctx) => {
+      if (!ctx.user) {
+        throw new auth.UnauthenticatedError('Please log in');
+      }
+      if (ctx.user.role !== 'admin') {
+        throw new auth.ForbiddenError('Only admins can delete series');
+      }
+      return true;
+    },
+  },
+};
+```
+
+### Best Practices
+
+1. **Default to DENY**: Use `defaultPolicy: 'DENY'` for security
+2. **Use wildcards wisely**: `'*'` rules provide baseline security per type
+3. **Prefer helper rules**: Use `requireAuth()`, `requireRole()` over custom functions
+4. **Fail closed**: Custom rules should deny on unexpected conditions
+5. **Keep rules simple**: Complex logic belongs in controllers, not auth rules
+6. **Test thoroughly**: Auth rules are critical - test all scenarios
+
+## 🔧 Middlewares
+
+Middlewares provide a powerful way to intercept and process all GraphQL operations before they execute. Use them for cross-cutting concerns like authentication, logging, validation, and performance monitoring.
+
+### Adding Middlewares
+
+Register middlewares using `simfinity.use()`. Middlewares execute in the order they're registered:
+
+```javascript
+// Basic logging middleware
+simfinity.use((params, next) => {
+  console.log(`Executing ${params.operation} on ${params.type?.name || 'custom mutation'}`);
+  next();
+});
+```
+
+### Middleware Parameters
+
+Each middleware receives a `params` object containing:
+
+```javascript
+simfinity.use((params, next) => {
+  // params object contains:
+  const {
+    type,        // Type information (model, gqltype, controller, etc.)
+    args,        // GraphQL arguments passed to the operation
+    operation,   // Operation type: 'save', 'update', 'delete', 'get_by_id', 'find', 'state_changed', 'custom_mutation'
+    context,     // GraphQL context object (includes request info, user data, etc.)
+    actionName,  // For state machine actions (only present for state_changed operations)
+    actionField, // State machine action details (only present for state_changed operations)
+    entry        // Custom mutation name (only present for custom_mutation operations)
+  } = params;
+  
+  // Always call next() to continue the middleware chain
+  next();
+});
+```
+
+### Common Use Cases
+
+#### 1. Authentication & Authorization
+
+```javascript
+simfinity.use((params, next) => {
+  const { context, operation, type } = params;
+  
+  // Skip authentication for read operations
+  if (operation === 'get_by_id' || operation === 'find') {
+    return next();
+  }
+  
+  // Check if user is authenticated
+  if (!context.user) {
+    throw new simfinity.SimfinityError('Authentication required', 'UNAUTHORIZED', 401);
+  }
+  
+  // Check permissions for specific types
+  if (type?.name === 'User' && context.user.role !== 'admin') {
+    throw new simfinity.SimfinityError('Admin access required', 'FORBIDDEN', 403);
+  }
+  
+  next();
+});
+```
+
+#### 2. Request Logging & Monitoring
+
+```javascript
+simfinity.use((params, next) => {
+  const { operation, type, args, context } = params;
+  const startTime = Date.now();
+  
+  console.log(`[${new Date().toISOString()}] Starting ${operation}${type ? ` on ${type.name}` : ''}`);
+  
+  // Continue with the operation
+  next();
+  
+  const duration = Date.now() - startTime;
+  console.log(`[${new Date().toISOString()}] Completed ${operation} in ${duration}ms`);
+});
+```
+
+#### 3. Input Validation & Sanitization
+
+```javascript
+simfinity.use((params, next) => {
+  const { operation, args, type } = params;
+  
+  // Validate input for save operations
+  if (operation === 'save' && args.input) {
+    // Trim string fields
+    Object.keys(args.input).forEach(key => {
+      if (typeof args.input[key] === 'string') {
+        args.input[key] = args.input[key].trim();
+      }
+    });
+    
+    // Validate required business rules
+    if (type?.name === 'Book' && args.input.title && args.input.title.length < 3) {
+      throw new simfinity.SimfinityError('Book title must be at least 3 characters', 'VALIDATION_ERROR', 400);
+    }
+  }
+  
+  next();
+});
+```
+
+#### 4. Rate Limiting
+
+```javascript
+const requestCounts = new Map();
+
+simfinity.use((params, next) => {
+  const { context, operation } = params;
+  const userId = context.user?.id || context.ip;
+  const now = Date.now();
+  const windowMs = 60000; // 1 minute
+  const maxRequests = 100;
+  
+  // Only apply rate limiting to mutations
+  if (operation === 'save' || operation === 'update' || operation === 'delete') {
+    const userRequests = requestCounts.get(userId) || [];
+    const recentRequests = userRequests.filter(time => now - time < windowMs);
+    
+    if (recentRequests.length >= maxRequests) {
+      throw new simfinity.SimfinityError('Rate limit exceeded', 'TOO_MANY_REQUESTS', 429);
+    }
+    
+    recentRequests.push(now);
+    requestCounts.set(userId, recentRequests);
+  }
+  
+  next();
+});
+```
+
+#### 5. Audit Trail
+
+```javascript
+simfinity.use((params, next) => {
+  const { operation, type, args, context } = params;
+  
+  // Log all mutations for audit purposes
+  if (operation === 'save' || operation === 'update' || operation === 'delete') {
+    const auditEntry = {
+      timestamp: new Date(),
+      user: context.user?.id,
+      operation,
+      type: type?.name,
+      entityId: args.id || 'new',
+      data: operation === 'delete' ? null : args.input,
+      ip: context.ip,
+      userAgent: context.userAgent
+    };
+    
+    // Save to audit log (could be database, file, or external service)
+    console.log('AUDIT:', JSON.stringify(auditEntry));
+  }
+  
+  next();
+});
+```
+
+### Multiple Middlewares
+
+Middlewares execute in registration order. Each middleware must call `next()` to continue the chain:
+
+```javascript
+// Middleware 1: Authentication
+simfinity.use((params, next) => {
+  console.log('1. Checking authentication...');
+  // Authentication logic here
+  next(); // Continue to next middleware
+});
+
+// Middleware 2: Authorization  
+simfinity.use((params, next) => {
+  console.log('2. Checking permissions...');
+  // Authorization logic here
+  next(); // Continue to next middleware
+});
+
+// Middleware 3: Logging
+simfinity.use((params, next) => {
+  console.log('3. Logging request...');
+  // Logging logic here
+  next(); // Continue to GraphQL operation
+});
+```
+
+### Error Handling in Middlewares
+
+Middlewares can throw errors to stop the operation:
+
+```javascript
+simfinity.use((params, next) => {
+  const { context, operation } = params;
+  
+  try {
+    // Validation logic
+    if (!context.user && operation !== 'find') {
+      throw new simfinity.SimfinityError('Authentication required', 'UNAUTHORIZED', 401);
+    }
+    
+    next(); // Continue only if validation passes
+  } catch (error) {
+    // Error automatically bubbles up to GraphQL error handling
+    throw error;
+  }
+});
+```
+
+### Conditional Middleware Execution
+
+Execute middleware logic conditionally based on operation type or context:
+
+```javascript
+simfinity.use((params, next) => {
+  const { operation, type, context } = params;
+  
+  // Only apply to specific types
+  if (type?.name === 'SensitiveData') {
+    // Special handling for sensitive data
+    if (!context.user?.hasHighSecurity) {
+      throw new simfinity.SimfinityError('High security clearance required', 'FORBIDDEN', 403);
+    }
+  }
+  
+  // Only apply to mutation operations
+  if (['save', 'update', 'delete', 'state_changed'].includes(operation)) {
+    // Mutation-specific logic
+    console.log(`Mutation ${operation} executing...`);
+  }
+  
+  next();
+});
+```
+
+### Best Practices
+
+1. **Always call `next()`**: Failing to call `next()` will hang the request
+2. **Handle errors gracefully**: Use try-catch blocks for error-prone operations
+3. **Keep middlewares focused**: Each middleware should handle one concern
+4. **Order matters**: Register middlewares in logical order (auth → validation → logging)
+5. **Performance consideration**: Middlewares run on every operation, keep them lightweight
+6. **Use context wisely**: Store request-specific data in the GraphQL context object
 
 ## 🔧 Advanced Features
 
@@ -2705,6 +2686,7 @@ app.listen(4000, () => {
 
 ## 🔗 Resources
 
+- **[Series Sample Project](https://github.com/simtlix/series-sample)** - A complete TV series microservice built with Simfinity.js demonstrating types, relationships, state machines, controllers, and authorization
 - **[Samples Repository](https://github.com/simtlix/simfinity.js-samples)** - Complete examples and use cases
 - **[MongoDB Query Language](https://docs.mongodb.com/manual/tutorial/query-documents/)** - Learn about MongoDB querying
 - **[GraphQL Documentation](https://graphql.org/learn/)** - Learn about GraphQL
