@@ -680,7 +680,10 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
 
     if (args[fieldEntryName] === null
       && !(fieldEntry.type instanceof GraphQLNonNull)) {
-      materializedModel.modelArgs = { ...materializedModel.modelArgs, $unset: { [fieldEntryName]: '' } };
+      materializedModel.modelArgs = {
+        ...materializedModel.modelArgs,
+        $unset: { ...materializedModel.modelArgs.$unset, [fieldEntryName]: '' },
+      };
     }
   });
 
