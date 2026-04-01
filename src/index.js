@@ -416,8 +416,8 @@ const buildInputType = (gqltype) => {
           if (fieldEntry.type.ofType === gqltype) {
             selfReferenceCollections[fieldEntryName] = fieldEntry;
           } else {
-            const listInputTypeForAdd = graphQLListInputType(typesDict, fieldEntry, fieldEntryName, 'A', fieldEntry.extensions?.relation?.connectionField);
-            const listInputTypeForUpdate = graphQLListInputType(typesDictForUpdate, fieldEntry, fieldEntryName, 'U', fieldEntry.extensions?.relation?.connectionField);
+            const listInputTypeForAdd = graphQLListInputType(typesDict, fieldEntry, fieldEntryName, gqltype.name + 'A', fieldEntry.extensions?.relation?.connectionField);
+            const listInputTypeForUpdate = graphQLListInputType(typesDictForUpdate, fieldEntry, fieldEntryName, gqltype.name +'U', fieldEntry.extensions?.relation?.connectionField);
             if (listInputTypeForAdd && listInputTypeForUpdate) {
               fieldArg.type = listInputTypeForAdd;
               fieldArgForUpdate.type = listInputTypeForUpdate;
