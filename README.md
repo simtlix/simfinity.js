@@ -265,6 +265,208 @@ query {
 - `NIN` - Not in array
 - `BTW` - Between two values
 
+### Logical Filters (AND / OR)
+
+By default, all field-level filters are combined with implicit AND logic. For complex conditions requiring OR logic or nested combinations, use the `AND` and `OR` query arguments.
+
+#### Simple OR
+
+Return books in either the Sci-Fi or Fantasy category:
+
+```graphql
+query {
+  books(
+    OR: [
+      { conditions: [{ field: "category", operator: EQ, value: "Sci-Fi" }] }
+      { conditions: [{ field: "category", operator: EQ, value: "Fantasy" }] }
+    ]
+  ) {
+    id
+    title
+    category
+  }
+}
+```
+
+#### Flat Filters Combined with OR
+
+Flat field filters are always ANDed at the top level, making them ideal for scope/security conditions that cannot be bypassed by user OR logic:
+
+```graphql
+query {
+  books(
+    rating: { operator: GTE, value: 7.0 }
+    OR: [
+      { conditions: [{ field: "category", operator: EQ, value: "Sci-Fi" }] }
+      { conditions: [{ field: "category", operator: EQ, value: "Fantasy" }] }
+    ]
+  ) {
+    id
+    title
+  }
+}
+```
+
+This translates to: `rating >= 7.0 AND (category = "Sci-Fi" OR category = "Fantasy")`.
+
+#### Nested AND inside OR
+
+```graphql
+query {
+  books(
+    OR: [
+      { AND: [
+        { conditions: [{ field: "rating", operator: GTE, value: 9.0 }] }
+        { conditions: [{ field: "category", operator: EQ, value: "Sci-Fi" }] }
+      ]}
+      { AND: [
+        { conditions: [{ field: "rating", operator: GTE, value: 8.0 }] }
+        { conditions: [{ field: "category", operator: EQ, value: "Fantasy" }] }
+      ]}
+    ]
+  ) {
+    id
+    title
+  }
+}
+```
+
+This translates to: `(rating >= 9.0 AND category = "Sci-Fi") OR (rating >= 8.0 AND category = "Fantasy")`.
+
+#### Filtering on Relationships within AND/OR
+
+Use the `path` parameter to filter on related entity fields:
+
+```graphql
+query {
+  books(
+    OR: [
+      { conditions: [{ field: "author", path: "name", operator: LIKE, value: "Adams" }] }
+      { conditions: [{ field: "author", path: "name", operator: LIKE, value: "Pratchett" }] }
+    ]
+  ) {
+    id
+    title
+    author { name }
+  }
+}
+```
+
+#### Mixing Flat Filters with AND/OR
+
+You can freely combine the existing flat filter syntax with AND/OR groups. Flat filters and AND groups are all ANDed together at the top level:
+
+```graphql
+query {
+  books(
+    rating: { operator: GTE, value: 7.0 }
+    author: { terms: [{ path: "country", operator: EQ, value: "UK" }] }
+    OR: [
+      { conditions: [{ field: "category", operator: EQ, value: "Sci-Fi" }] }
+      { conditions: [{ field: "category", operator: EQ, value: "Fantasy" }] }
+    ]
+  ) {
+    id
+    title
+    rating
+    category
+    author { name country }
+  }
+}
+```
+
+This translates to: `rating >= 7.0 AND author.country = "UK" AND (category = "Sci-Fi" OR category = "Fantasy")`. The flat field filters (`rating`, `author`) use the existing syntax while the OR group uses the new `QLFilterGroup` syntax.
+
+You can also combine flat filters with explicit AND groups for more complex logic:
+
+```graphql
+query {
+  books(
+    rating: { operator: GTE, value: 5.0 }
+    AND: [
+      {
+        OR: [
+          { conditions: [{ field: "category", operator: EQ, value: "Sci-Fi" }] }
+          { conditions: [{ field: "category", operator: EQ, value: "Fantasy" }] }
+        ]
+      }
+      {
+        OR: [
+          { conditions: [{ field: "author", path: "country", operator: EQ, value: "UK" }] }
+          { conditions: [{ field: "author", path: "country", operator: EQ, value: "US" }] }
+        ]
+      }
+    ]
+  ) {
+    id
+    title
+  }
+}
+```
+
+This translates to: `rating >= 5.0 AND (category = "Sci-Fi" OR category = "Fantasy") AND (author.country = "UK" OR author.country = "US")`.
+
+#### Collection Filtering with AND/OR
+
+AND/OR filters are also available on collection fields (one-to-many relationships). The auto-generated resolvers for collection fields support the same `AND` and `OR` arguments:
+
+```graphql
+query {
+  series {
+    seasons(
+      OR: [
+        { conditions: [{ field: "year", operator: EQ, value: 2020 }] }
+        { conditions: [{ field: "year", operator: EQ, value: 2021 }] }
+      ]
+    ) {
+      number
+      year
+    }
+  }
+}
+```
+
+You can mix flat collection filters with AND/OR:
+
+```graphql
+query {
+  series {
+    seasons(
+      number: { operator: GT, value: 1 }
+      OR: [
+        { conditions: [{ field: "year", operator: EQ, value: 2020 }] }
+        {
+          AND: [
+            { conditions: [{ field: "year", operator: GTE, value: 2022 }] }
+            { conditions: [
+                { field: "episodes", path: "name", operator: LIKE, value: "Final" }
+            ] }
+          ]
+        }
+      ]
+    ) {
+      number
+      year
+      episodes { name }
+    }
+  }
+}
+```
+
+This translates to: `number > 1 AND (year = 2020 OR (year >= 2022 AND episodes.name LIKE "Final"))`.
+
+#### Filter Types Reference
+
+| Type | Fields | Description |
+|------|--------|-------------|
+| `QLFilterGroup` | `AND: [QLFilterGroup]`, `OR: [QLFilterGroup]`, `conditions: [QLFilterCondition]` | Recursive logical group |
+| `QLFilterCondition` | `field: String!`, `operator: QLOperator`, `value: QLValue`, `path: String` | Individual filter condition |
+
+- `field` identifies the entity field by name (e.g., `"title"`, `"author"`)
+- `path` is required for object/relationship fields (e.g., `"name"`, `"country.name"`)
+- Multiple `conditions` in the same group are combined with AND
+- Maximum nesting depth: 5 levels
+
 ### Collection Field Filtering
 
 Simfinity.js now supports filtering collection fields (one-to-many relationships) using the same powerful query format. This allows you to filter related objects directly within your GraphQL queries.
