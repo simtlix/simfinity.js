@@ -167,6 +167,25 @@ const QLTypeFilterExpression = new GraphQLInputObjectType({
   }),
 });
 
+const QLFilterCondition = new GraphQLInputObjectType({
+  name: 'QLFilterCondition',
+  fields: () => ({
+    field: { type: new GraphQLNonNull(GraphQLString) },
+    operator: { type: QLOperator },
+    value: { type: QLValue },
+    path: { type: GraphQLString },
+  }),
+});
+
+const QLFilterGroup = new GraphQLInputObjectType({
+  name: 'QLFilterGroup',
+  fields: () => ({
+    AND: { type: new GraphQLList(QLFilterGroup) },
+    OR: { type: new GraphQLList(QLFilterGroup) },
+    conditions: { type: new GraphQLList(QLFilterCondition) },
+  }),
+});
+
 const QLPagination = new GraphQLInputObjectType({
   name: 'QLPagination',
   fields: () => ({
@@ -1492,10 +1511,122 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
   return { aggregateClauses, matchesClauses };
 };
 
+const MAX_FILTER_GROUP_DEPTH = 5;
+
+const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, aggregationsIncluded, depth = 0) => {
+  if (depth > MAX_FILTER_GROUP_DEPTH) {
+    throw new SimfinityError('Filter nesting too deep', 'FILTER_DEPTH_EXCEEDED', 400);
+  }
+
+  const parts = [];
+  const fields = gqltype.getFields();
+
+  // Process leaf conditions
+  if (filterGroup.conditions && filterGroup.conditions.length > 0) {
+    for (const condition of filterGroup.conditions) {
+      const qlField = fields[condition.field];
+      if (!qlField) {
+        throw new SimfinityError(
+          `Unknown filter field: ${condition.field}`,
+          'INVALID_FILTER_FIELD',
+          400,
+        );
+      }
+
+      let filterInput;
+      let fieldType = qlField.type;
+      if (fieldType instanceof GraphQLList || fieldType instanceof GraphQLNonNull) {
+        fieldType = fieldType.ofType;
+      }
+
+      if (fieldType instanceof GraphQLObjectType
+        || isNonNullOfType(fieldType, GraphQLObjectType)) {
+        // Object/relation field — wrap as QLTypeFilterExpression shape
+        if (!condition.path) {
+          throw new SimfinityError(
+            `Filter on object field "${condition.field}" requires a path`,
+            'MISSING_FILTER_PATH',
+            400,
+          );
+        }
+        filterInput = {
+          terms: [{
+            path: condition.path,
+            operator: condition.operator,
+            value: condition.value,
+          }],
+        };
+      } else {
+        // Scalar/enum field
+        filterInput = {
+          operator: condition.operator,
+          value: condition.value,
+        };
+      }
+
+      const result = await buildQueryTerms(filterInput, qlField, condition.field);
+
+      if (result) {
+        // Collect lookups (deduplicated)
+        for (const [prop, aggregate] of Object.entries(result.aggregateClauses)) {
+          if (!aggregationsIncluded[prop]) {
+            aggregateClauses.push(aggregate.lookup);
+            aggregateClauses.push(aggregate.unwind);
+            aggregationsIncluded[prop] = true;
+          }
+        }
+
+        // Collect match conditions
+        for (const matchClause of Object.values(result.matchesClauses)) {
+          for (const [matchKey, match] of Object.entries(matchClause)) {
+            parts.push({ [matchKey]: match });
+          }
+        }
+      }
+    }
+  }
+
+  // Process AND sub-groups
+  if (filterGroup.AND && filterGroup.AND.length > 0) {
+    for (const subGroup of filterGroup.AND) {
+      const subMatch = await buildFilterGroupMatch(
+        subGroup, gqltype, aggregateClauses, aggregationsIncluded, depth + 1,
+      );
+      if (subMatch) {
+        parts.push(subMatch);
+      }
+    }
+  }
+
+  // Process OR sub-groups
+  if (filterGroup.OR && filterGroup.OR.length > 0) {
+    const orParts = [];
+    for (const subGroup of filterGroup.OR) {
+      const subMatch = await buildFilterGroupMatch(
+        subGroup, gqltype, aggregateClauses, aggregationsIncluded, depth + 1,
+      );
+      if (subMatch) {
+        orParts.push(subMatch);
+      }
+    }
+    if (orParts.length === 1) {
+      parts.push(orParts[0]);
+    } else if (orParts.length > 1) {
+      parts.push({ $or: orParts });
+    }
+  }
+
+  if (parts.length === 0) return null;
+  if (parts.length === 1) return parts[0];
+  return { $and: parts };
+};
+
+const RESERVED_QUERY_KEYS = new Set(['pagination', 'sort', 'AND', 'OR', 'aggregation']);
+
 const buildQuery = async (input, gqltype, isCount) => {
   const aggregateClauses = [];
-  const matchesClauses = { $match: {} };
-  let addMatch = false;
+  const flatMatchConditions = {};
+  let hasFlat = false;
   let limitClause = { $limit: 100 };
   let skipClause = { $skip: 0 };
   let sortClause = {};
@@ -1503,7 +1634,7 @@ const buildQuery = async (input, gqltype, isCount) => {
   const aggregationsIncluded = {};
 
   for (const [key, filterField] of Object.entries(input)) {
-    if (Object.prototype.hasOwnProperty.call(input, key) && key !== 'pagination' && key !== 'sort') {
+    if (Object.prototype.hasOwnProperty.call(input, key) && !RESERVED_QUERY_KEYS.has(key)) {
       const qlField = gqltype.getFields()[key];
 
       const result = await buildQueryTerms(filterField, qlField, key);
@@ -1519,8 +1650,8 @@ const buildQuery = async (input, gqltype, isCount) => {
           if (Object.prototype.hasOwnProperty.call(result.matchesClauses, matchClauseKey)) {
             for (const [matchKey, match] of Object.entries(matchClause)) {
               if (Object.prototype.hasOwnProperty.call(matchClause, matchKey)) {
-                matchesClauses.$match[matchKey] = match;
-                addMatch = true;
+                flatMatchConditions[matchKey] = match;
+                hasFlat = true;
               }
             }
           }
@@ -1539,9 +1670,9 @@ const buildQuery = async (input, gqltype, isCount) => {
 
         if (sort.field.indexOf('.') >= 0) {
           const sortParts = sort.field.split('.');
-           
+
           fixedSortField = sortParts[0];
-           
+
           for (let i = 1; i < sortParts.length - 1; i++) {
             fixedSortField += `_${sortParts[i]}`;
           }
@@ -1564,8 +1695,45 @@ const buildQuery = async (input, gqltype, isCount) => {
     }
   }
 
-  if (addMatch) {
-    aggregateClauses.push(matchesClauses);
+  // Combine flat conditions with AND/OR groups
+  const topLevelAndParts = [];
+
+  if (hasFlat) {
+    topLevelAndParts.push(flatMatchConditions);
+  }
+
+  if (input.AND && input.AND.length > 0) {
+    for (const group of input.AND) {
+      const groupMatch = await buildFilterGroupMatch(
+        group, gqltype, aggregateClauses, aggregationsIncluded,
+      );
+      if (groupMatch) {
+        topLevelAndParts.push(groupMatch);
+      }
+    }
+  }
+
+  if (input.OR && input.OR.length > 0) {
+    const orParts = [];
+    for (const group of input.OR) {
+      const groupMatch = await buildFilterGroupMatch(
+        group, gqltype, aggregateClauses, aggregationsIncluded,
+      );
+      if (groupMatch) {
+        orParts.push(groupMatch);
+      }
+    }
+    if (orParts.length === 1) {
+      topLevelAndParts.push(orParts[0]);
+    } else if (orParts.length > 1) {
+      topLevelAndParts.push({ $or: orParts });
+    }
+  }
+
+  if (topLevelAndParts.length === 1) {
+    aggregateClauses.push({ $match: topLevelAndParts[0] });
+  } else if (topLevelAndParts.length > 1) {
+    aggregateClauses.push({ $match: { $and: topLevelAndParts } });
   }
 
   if (addSort && !isCount) {
@@ -1653,33 +1821,33 @@ const buildFieldPath = (gqltype, fieldPath) => {
 
 const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
   const aggregateClauses = [];
-  const matchesClauses = { $match: {} };
-  let addMatch = false;
+  const flatMatchConditions = {};
+  let hasFlat = false;
   const aggregationsIncluded = {};
   const sortTerms = []; // Store multiple sort terms
   let limitClause = null;
   let skipClause = null;
-  
+
   // Build filter and lookup clauses (similar to buildQuery)
   for (const [key, filterField] of Object.entries(input)) {
-    if (Object.prototype.hasOwnProperty.call(input, key) && key !== 'pagination' && key !== 'sort' && key !== 'aggregation') {
+    if (Object.prototype.hasOwnProperty.call(input, key) && !RESERVED_QUERY_KEYS.has(key)) {
       const qlField = gqltype.getFields()[key];
-      
+
       const result = await buildQueryTerms(filterField, qlField, key);
-      
+
       if (result) {
         for (const [prop, aggregate] of Object.entries(result.aggregateClauses)) {
           aggregateClauses.push(aggregate.lookup);
           aggregateClauses.push(aggregate.unwind);
           aggregationsIncluded[prop] = true;
         }
-        
+
         for (const [matchClauseKey, matchClause] of Object.entries(result.matchesClauses)) {
           if (Object.prototype.hasOwnProperty.call(result.matchesClauses, matchClauseKey)) {
             for (const [matchKey, match] of Object.entries(matchClause)) {
               if (Object.prototype.hasOwnProperty.call(matchClause, matchKey)) {
-                matchesClauses.$match[matchKey] = match;
-                addMatch = true;
+                flatMatchConditions[matchKey] = match;
+                hasFlat = true;
               }
             }
           }
@@ -1702,9 +1870,46 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
       }
     }
   }
-  
-  if (addMatch) {
-    aggregateClauses.push(matchesClauses);
+
+  // Combine flat conditions with AND/OR groups
+  const topLevelAndParts = [];
+
+  if (hasFlat) {
+    topLevelAndParts.push(flatMatchConditions);
+  }
+
+  if (input.AND && input.AND.length > 0) {
+    for (const group of input.AND) {
+      const groupMatch = await buildFilterGroupMatch(
+        group, gqltype, aggregateClauses, aggregationsIncluded,
+      );
+      if (groupMatch) {
+        topLevelAndParts.push(groupMatch);
+      }
+    }
+  }
+
+  if (input.OR && input.OR.length > 0) {
+    const orParts = [];
+    for (const group of input.OR) {
+      const groupMatch = await buildFilterGroupMatch(
+        group, gqltype, aggregateClauses, aggregationsIncluded,
+      );
+      if (groupMatch) {
+        orParts.push(groupMatch);
+      }
+    }
+    if (orParts.length === 1) {
+      topLevelAndParts.push(orParts[0]);
+    } else if (orParts.length > 1) {
+      topLevelAndParts.push({ $or: orParts });
+    }
+  }
+
+  if (topLevelAndParts.length === 1) {
+    aggregateClauses.push({ $match: topLevelAndParts[0] });
+  } else if (topLevelAndParts.length > 1) {
+    aggregateClauses.push({ $match: { $and: topLevelAndParts } });
   }
   
   // Now build the aggregation with $group
@@ -2150,6 +2355,8 @@ export { default as scalars } from './scalars.js';
 export { default as plugins } from './plugins.js';
 export { default as auth } from './auth/index.js';
 
+export { buildQuery, buildFilterGroupMatch };
+
 const createArgsForQuery = (argTypes) => {
     const argsObject = {};
 
@@ -2182,6 +2389,13 @@ const createArgsForQuery = (argTypes) => {
 
     argsObject.sort = {};
     argsObject.sort.type = QLSortExpression;
+
+    argsObject.AND = {};
+    argsObject.AND.type = new GraphQLList(QLFilterGroup);
+
+    argsObject.OR = {};
+    argsObject.OR.type = new GraphQLList(QLFilterGroup);
+
     return argsObject;
 };
 
