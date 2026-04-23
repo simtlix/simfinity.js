@@ -28,6 +28,7 @@ const GraphQLJSON = new GraphQLScalarType({
       case Kind.BOOLEAN:
         return ast.value;
       case Kind.INT:
+        return parseInt(ast.value, 10);
       case Kind.FLOAT:
         return parseFloat(ast.value);
       case Kind.OBJECT: {
@@ -302,6 +303,19 @@ const buildRelationLookup = ({
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+const PATH_SEGMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+const assertValidFilterPath = (path) => {
+  if (typeof path !== 'string' || path.length === 0) {
+    throw new SimfinityError('Filter path must be a non-empty string', 'INVALID_FILTER_PATH', 400);
+  }
+  for (const segment of path.split('.')) {
+    if (!PATH_SEGMENT_RE.test(segment)) {
+      throw new SimfinityError(`Invalid filter path segment: "${segment}"`, 'INVALID_FILTER_PATH', 400);
+    }
+  }
+};
+
 const OP_TO_MONGO = {
   LT: (v) => ({ $lt: v }),
   GT: (v) => ({ $gt: v }),
@@ -381,7 +395,13 @@ function createValidatedScalar(name, description, baseScalarType, validate) {
 const createTypeWithExcludedField = (inputNamePrefix, originalType, fieldToExclude) => {
   const originalFields = originalType.getFields();
   const newFields = Object.fromEntries(
-    Object.entries(originalFields).filter(([fieldName]) => fieldName !== fieldToExclude),
+    Object.entries(originalFields)
+      .filter(([fieldName]) => fieldName !== fieldToExclude)
+      .map(([fieldName, field]) => [fieldName, {
+        type: field.type,
+        description: field.description,
+        defaultValue: field.defaultValue,
+      }]),
   );
 
   return new GraphQLInputObjectType({
@@ -448,9 +468,9 @@ const buildInputType = (gqltype) => {
 
     if (!fieldEntry.extensions || !fieldEntry.extensions.readOnly) {
       const hasStateMachine = !!typesDict.types[gqltype.name].stateMachine;
-      const doesEstateFieldExistButIsManagedByStateMachine = !!(fieldEntryName === 'state' && hasStateMachine);
+      const stateFieldManagedByStateMachine = !!(fieldEntryName === 'state' && hasStateMachine);
 
-      if (!doesEstateFieldExistButIsManagedByStateMachine) {
+      if (!stateFieldManagedByStateMachine) {
         if (fieldEntry.type instanceof GraphQLScalarType
           || fieldEntry.type instanceof GraphQLEnumType
           || isNonNullOfType(fieldEntry.type, GraphQLScalarType)
@@ -486,8 +506,8 @@ const buildInputType = (gqltype) => {
           if (fieldEntry.type.ofType === gqltype) {
             selfReferenceCollections[fieldEntryName] = fieldEntry;
           } else {
-            const listInputTypeForAdd = graphQLListInputType(typesDict, fieldEntry, fieldEntryName, gqltype.name + 'A', fieldEntry.extensions?.relation?.connectionField);
-            const listInputTypeForUpdate = graphQLListInputType(typesDictForUpdate, fieldEntry, fieldEntryName, gqltype.name +'U', fieldEntry.extensions?.relation?.connectionField);
+            const listInputTypeForAdd = graphQLListInputType(typesDict, fieldEntry, fieldEntryName, `${gqltype.name}A`, fieldEntry.extensions?.relation?.connectionField);
+            const listInputTypeForUpdate = graphQLListInputType(typesDictForUpdate, fieldEntry, fieldEntryName, `${gqltype.name}U`, fieldEntry.extensions?.relation?.connectionField);
             if (listInputTypeForAdd && listInputTypeForUpdate) {
               fieldArg.type = listInputTypeForAdd;
               fieldArgForUpdate.type = listInputTypeForUpdate;
@@ -559,29 +579,35 @@ const getInputType = (type) => typesDict.types[type.name].inputType;
 export { getInputType };
 
 const buildPendingInputTypes = (waitingForInputType) => {
-  const stillWaitingInputType = {};
-  let isThereAtLeastOneWaiting = false;
+  let pending = waitingForInputType;
+  let previousPendingCount = Object.keys(pending).length + 1;
 
-  Object.entries(waitingForInputType).forEach(([key, value]) => {
-    const { gqltype } = value;
+  while (Object.keys(pending).length > 0) {
+    const currentCount = Object.keys(pending).length;
+    if (currentCount >= previousPendingCount) {
+      const unresolved = Object.keys(pending).join(', ');
+      throw new SimfinityError(
+        `Could not build input types for: ${unresolved}. Check for circular or misconfigured relations.`,
+        'INPUT_TYPE_UNRESOLVED',
+        500,
+      );
+    }
+    previousPendingCount = currentCount;
 
-    if (!typesDict.types[gqltype.name].inputType) {
-      const buildInputTypeResult = buildInputType(gqltype);
+    const stillWaiting = {};
+    for (const [key, value] of Object.entries(pending)) {
+      const { gqltype } = value;
+      if (typesDict.types[gqltype.name].inputType) continue;
 
-      if (buildInputTypeResult && buildInputTypeResult.inputTypeBody
-        && buildInputTypeResult.inputTypeBodyForUpdate) {
-        typesDict.types[gqltype.name].inputType = buildInputTypeResult.inputTypeBody;
-        typesDictForUpdate.types[gqltype.name].inputType = buildInputTypeResult
-          .inputTypeBodyForUpdate;
+      const result = buildInputType(gqltype);
+      if (result && result.inputTypeBody && result.inputTypeBodyForUpdate) {
+        typesDict.types[gqltype.name].inputType = result.inputTypeBody;
+        typesDictForUpdate.types[gqltype.name].inputType = result.inputTypeBodyForUpdate;
       } else {
-        stillWaitingInputType[key] = value;
-        isThereAtLeastOneWaiting = true;
+        stillWaiting[key] = value;
       }
     }
-  });
-
-  if (isThereAtLeastOneWaiting) {
-    buildPendingInputTypes(stillWaitingInputType);
+    pending = stillWaiting;
   }
 };
 
@@ -624,9 +650,11 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
               null, operation, session)).modelArgs;
           }
         } else {
-          modelArgs[fieldEntry.name] = new mongoose.Types
-            .ObjectId(args[fieldEntryName].id);
-          console.warn(`Configuration issue: Field ${fieldEntryName} does not define extensions.relation`);
+          throw new SimfinityError(
+            `Field ${gqltype.name}.${fieldEntryName} is an object type but does not define extensions.relation`,
+            'MISSING_RELATION_EXTENSION',
+            500,
+          );
         }
       } else if (fieldEntry.type instanceof GraphQLList) {
         const { ofType } = fieldEntry.type;
@@ -696,12 +724,12 @@ const withTransaction = async (session, body) => {
   }
 };
 
-const executeRegisteredMutation = (args, callback, session) => withTransaction(
+const executeRegisteredMutation = (args, callback, context, session) => withTransaction(
   session,
-  (mySession) => callback(args, mySession),
+  (mySession) => callback(args, mySession, context),
 );
 
-const iterateonCollectionFields = async (materializedModel, gqltype, objectId, session, context) => {
+const iterateOnCollectionFields = async (materializedModel, gqltype, objectId, session, context) => {
   for (const [collectionFieldKey, collectionField] of Object.entries(materializedModel.collectionFields)) {
     if (collectionField.added) {
       await executeItemFunction(gqltype, collectionFieldKey, objectId, session,
@@ -781,7 +809,7 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
   ).session(session);
 
   if (materializedModel.collectionFields) {
-    await iterateonCollectionFields(materializedModel, gqltype, objectId, session, context);
+    await iterateOnCollectionFields(materializedModel, gqltype, objectId, session, context);
   }
 
   if (controller && controller.onUpdated) {
@@ -828,10 +856,9 @@ const onSaveObject = async (Model, gqltype, controller, args, session, linkToPar
   result = result.toObject();
 
   if (materializedModel.collectionFields) {
-    await iterateonCollectionFields(materializedModel, gqltype, newObject._id, session, context);
+    await iterateOnCollectionFields(materializedModel, gqltype, newObject._id, session, context);
   }
 
-  
   if (controller && controller.onSaved) {
     await controller.onSaved(result, args, session, context);
   }
@@ -904,7 +931,7 @@ const executeItemFunction = async (gqltype, collectionField, objectId, session,
 const shouldNotBeIncludedInSchema = (includedTypes,
   type) => includedTypes && !includedTypes.includes(type);
 
-const excecuteMiddleware = async (context) => {
+const executeMiddleware = async (context) => {
   const buildNext = (middlewaresParam) => {
     if (!middlewaresParam) {
       return async () => {};
@@ -922,7 +949,7 @@ const excecuteMiddleware = async (context) => {
 
 const executeScope = async (params) => {
   const { type, args, operation, context } = params;
-  
+
   if (!type || !type.gqltype || !type.gqltype.extensions) {
     return null;
   }
@@ -964,7 +991,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
               context,
             };
 
-            await excecuteMiddleware(params);
+            await executeMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.input, operations.SAVE, null, null, context);
           },
@@ -981,7 +1008,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
               context,
             };
 
-            await excecuteMiddleware(params);
+            await executeMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.id, operations.DELETE, null, null, context);
           },
@@ -1006,7 +1033,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
               context,
             };
 
-            await excecuteMiddleware(params);
+            await executeMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.input, operations.UPDATE, null, null, context);
           },
@@ -1028,7 +1055,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
                     context,
                   };
 
-                  await excecuteMiddleware(params);
+                  await executeMiddleware(params);
                   return executeOperation(type.model, type.gqltype, type.controller,
                     args.input, operations.STATE_CHANGED, actionField, null, context);
                 },
@@ -1055,8 +1082,8 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
             entry,
             context,
           };
-          await excecuteMiddleware(params);
-          return executeRegisteredMutation(args.input, registeredMutation.callback);
+          await executeMiddleware(params);
+          return executeRegisteredMutation(args.input, registeredMutation.callback, context);
         },
       };
     }
@@ -1132,10 +1159,10 @@ const generateSchemaDefinition = (gqlType) => {
 
 const findObjectIdFields = (schemaDefinition, parentPath = '') => {
   const objectIdFields = [];
-  
+
   for (const [fieldName, fieldDefinition] of Object.entries(schemaDefinition)) {
     const currentPath = parentPath ? `${parentPath}.${fieldName}` : fieldName;
-    
+
     if (fieldDefinition === mongoose.Schema.Types.ObjectId) {
       objectIdFields.push(currentPath);
     } else if (typeof fieldDefinition === 'object' && fieldDefinition !== null) {
@@ -1151,7 +1178,7 @@ const findObjectIdFields = (schemaDefinition, parentPath = '') => {
       }
     }
   }
-  
+
   return objectIdFields;
 };
 
@@ -1236,6 +1263,7 @@ const buildAggregationsForSort = (filterField, qlField, fieldName) => {
   const resolvedFieldType = unwrapNonNull(fieldType);
 
   filterField.terms.forEach((term) => {
+    assertValidFilterPath(term.path);
     if (qlField.extensions?.relation && !qlField.extensions.relation.embedded
       && !aggregateClauses[fieldName]) {
       aggregateClauses[fieldName] = topLevelRelationLookup(qlField, resolvedFieldType, fieldName);
@@ -1293,6 +1321,7 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
   const resolvedFieldType = unwrapNonNull(fieldType);
 
   filterField.terms.forEach((term) => {
+    assertValidFilterPath(term.path);
     if (qlField.extensions?.relation && !qlField.extensions.relation.embedded
       && !aggregateClauses[fieldName]) {
       aggregateClauses[fieldName] = topLevelRelationLookup(qlField, resolvedFieldType, fieldName);
@@ -1477,6 +1506,7 @@ const buildSortClause = (sortTerms, gqltype, aggregateClauses, aggregationsInclu
   const fields = gqltype.getFields();
 
   sortTerms.forEach((sort) => {
+    assertValidFilterPath(sort.field);
     let fixedSortField = sort.field;
     if (sort.field.indexOf('.') >= 0) {
       const sortParts = sort.field.split('.');
@@ -1528,6 +1558,7 @@ const buildQuery = async (input, gqltype, isCount) => {
 };
 
 const buildFieldPath = (gqltype, fieldPath) => {
+  assertValidFilterPath(fieldPath);
   const pathParts = fieldPath.split('.');
   const lookupPairs = [];
   let currentPath = '';
@@ -1652,7 +1683,7 @@ const buildRootQuery = (name, includedTypes) => {
             const params = {
               type, args, operation: 'get_by_id', context,
             };
-            await excecuteMiddleware(params);
+            await executeMiddleware(params);
 
             const hasScope = type.gqltype.extensions?.scope?.get_by_id;
             if (!hasScope) {
@@ -1686,7 +1717,7 @@ const buildRootQuery = (name, includedTypes) => {
               operation: 'find',
               context,
             };
-            await excecuteMiddleware(params);
+            await executeMiddleware(params);
             await executeScope(params);
             const aggregateClauses = await buildQuery(args, type.gqltype);
             const wantsCount = !!(args.pagination && args.pagination.count);
@@ -1721,7 +1752,7 @@ const buildRootQuery = (name, includedTypes) => {
               operation: 'aggregate',
               context,
             };
-            await excecuteMiddleware(params);
+            await executeMiddleware(params);
             await executeScope(params);
             const aggregateClauses = await buildAggregationQuery(args, type.gqltype, args.aggregation);
             const result = await type.model.aggregate(aggregateClauses);
