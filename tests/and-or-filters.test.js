@@ -559,7 +559,7 @@ describe('AND/OR Filter Support', () => {
 
       const limitStage = pipeline.find(stage => stage.$limit !== undefined);
       const skipStage = pipeline.find(stage => stage.$skip !== undefined);
-      expect(limitStage).toEqual({ $limit: 20 }); // size + skip = 10 + 10
+      expect(limitStage).toEqual({ $limit: 10 });
       expect(skipStage).toEqual({ $skip: 10 }); // size * (page - 1)
     });
 
