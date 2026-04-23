@@ -1,0 +1,90 @@
+---
+description: Testing conventions, patterns, and requirements for when tests must be updated
+globs: tests/**
+alwaysApply: false
+---
+
+# Testing Conventions
+
+## Framework and Setup
+
+- **Vitest** with ES module imports: `import { describe, test, expect, beforeAll } from 'vitest';`
+- Run tests: `npm test` (runs `vitest run`), `npm run test:watch`, `npm run test:coverage`
+- Call `simfinity.preventCreatingCollection(true)` in `beforeAll` to prevent MongoDB collection creation during tests.
+
+## Test File Naming
+
+- `tests/{module}.test.js` corresponding to `src/{module}.js`
+- Auth tests: `tests/auth.test.js` covers `src/auth/index.js`, `src/auth/rules.js`, `src/auth/expressions.js`
+- Feature-specific tests: `tests/aggregation.test.js`, `tests/scalar-naming.test.js`, etc.
+
+## Test Structure
+
+```javascript
+describe('Module or Feature Name', () => {
+  beforeAll(() => {
+    simfinity.preventCreatingCollection(true);
+  });
+
+  describe('function or sub-feature', () => {
+    test('should describe expected behavior', () => {
+      // Arrange, Act, Assert
+    });
+  });
+});
+```
+
+- Group by module, then by function/feature.
+- Mirror the export structure: if a module exports `{ foo, bar }`, have `describe('foo', ...)` and `describe('bar', ...)`.
+- Test export existence: verify all expected exports are defined.
+
+## When to Update Tests
+
+**Any change to `src/` must have corresponding test updates:**
+
+- **New export**: add a test verifying the export exists and has the expected type.
+- **New function/feature**: add both positive cases (happy path) and negative cases (error handling, edge cases).
+- **Changed behavior**: update existing tests to reflect the new behavior. Add tests for any new code paths.
+- **Bug fix**: add a regression test that would have caught the bug.
+- **Deprecated function**: keep existing tests but add a note. Do not remove tests for deprecated functions that still exist.
+
+## Common Test Patterns
+
+### Testing GraphQL types without MongoDB
+
+```javascript
+const TestType = new GraphQLObjectType({
+  name: 'TestType',
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: { type: GraphQLString },
+  }),
+});
+
+const schema = new GraphQLSchema({
+  query: new GraphQLObjectType({
+    name: 'Query',
+    fields: { test: { type: TestType, resolve: () => ({ id: '1', name: 'test' }) } },
+  }),
+});
+```
+
+### Testing auth rules
+
+```javascript
+const rule = requireAuth();
+expect(rule(null, {}, { user: { id: '1' } }, null)).toBe(true);
+expect(() => rule(null, {}, {}, null)).toThrow(UnauthenticatedError);
+```
+
+### Testing validators
+
+```javascript
+const validation = validators.stringLength('Name', 2, 100);
+await expect(validation.CREATE[0].validate('Type', 'field', 'ab', null)).resolves.not.toThrow();
+await expect(validation.CREATE[0].validate('Type', 'field', 'a', null)).rejects.toThrow();
+```
+
+## Lint After Testing
+
+Run `npm run lint` after modifying test files to catch unused imports or style violations.

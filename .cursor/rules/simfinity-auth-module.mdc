@@ -1,0 +1,100 @@
+---
+description: Documents the authorization subsystem -- Envelop plugin, permission maps, rule helpers, and policy expressions
+globs: src/auth/**
+alwaysApply: false
+---
+
+# Authorization Module (`src/auth/`)
+
+## File Structure
+
+- `index.js` -- `createAuthPlugin` (Envelop), deprecated `createAuthMiddleware`, permission resolution logic
+- `rules.js` -- Rule helper functions: `requireAuth`, `requireRole`, `requirePermission`, `composeRules`, `anyRule`, `isOwner`, `allow`, `deny`, `createRule`
+- `expressions.js` -- Policy expression DSL: `evaluateExpression`, `isPolicyExpression`, `createRuleFromExpression`
+- `errors.js` -- `UnauthenticatedError`, `ForbiddenError` (extend `SimfinityError`)
+
+## `createAuthPlugin(permissions, options)` -- Envelop Plugin
+
+The recommended auth integration. Returns an Envelop plugin with an `onSchemaChange` hook.
+
+```javascript
+const authPlugin = createAuthPlugin(permissions, { defaultPolicy: 'DENY', debug: false });
+// Use with GraphQL Yoga:
+const yoga = createYoga({ schema, plugins: [authPlugin] });
+```
+
+**How it works:**
+1. On `onSchemaChange({ schema })`, iterates all types in `schema.getTypeMap()`
+2. Skips non-`GraphQLObjectType` types and `__`-prefixed introspection types
+3. For each field, looks up rules from the permission map via `getFieldRules()`
+4. Wraps `field.resolve` in-place (mutates the schema, no rebuild)
+5. Uses a `WeakSet` to prevent double-wrapping if `onSchemaChange` fires again
+
+**`defaultPolicy`**: `'DENY'` (default) blocks fields with no rules; `'ALLOW'` permits them.
+
+## Permission Map Structure
+
+```javascript
+const permissions = {
+  Query: {
+    '*': allow(),                    // wildcard: default for all Query fields
+    series: requireAuth(),           // specific field overrides wildcard
+  },
+  Mutation: {
+    addserie: requireRole('admin'),
+    deleteserie: composeRules(requireAuth(), requireRole('admin')),
+  },
+  Serie: {
+    title: allow(),
+    internalNotes: requireRole('admin'),
+  },
+};
+```
+
+- Keys are GraphQL type names (must match `GraphQLObjectType.name` exactly)
+- Field keys are the auto-generated endpoint names (lowercase)
+- Wildcard `'*'` applies to all fields of a type unless overridden by an exact match
+- Values can be: a rule function, an array of rule functions (AND logic), or a policy expression string
+
+## Rule Resolution (`getFieldRules`)
+
+1. Check `permissions[typeName][fieldName]` (exact match)
+2. Fall back to `permissions[typeName]['*']` (wildcard)
+3. If neither exists, return `null` (applies `defaultPolicy`)
+
+Each rule receives `(parent, args, ctx, info)` and must return `true` or throw an error.
+
+## Rule Helpers (from `rules.js`)
+
+| Helper | Description |
+|--------|-------------|
+| `requireAuth(userPath?)` | Checks `ctx[userPath]` exists (default: `'user'`) |
+| `requireRole(role, options?)` | Checks user has role. Options: `{ userPath, rolesPath }` |
+| `requirePermission(perm, options?)` | Checks user has permission string |
+| `composeRules(...rules)` | AND: all rules must pass |
+| `anyRule(...rules)` | OR: at least one rule must pass |
+| `isOwner(ownerField, userIdField?, options?)` | Compares `parent[ownerField]` with user ID |
+| `createRule(predicate, errorMessage?, errorCode?)` | Custom rule from predicate function |
+| `allow()` | Always returns `true` |
+| `deny(message?)` | Always throws `ForbiddenError` |
+
+## Policy Expressions (from `expressions.js`)
+
+String-based alternative to function rules. Evaluated by `evaluateExpression()`.
+
+```javascript
+const permissions = {
+  Mutation: {
+    deleteserie: 'ROLE:admin',
+    updateserie: 'AUTH AND ROLE:editor',
+    addserie: 'ROLE:admin OR ROLE:editor',
+  },
+};
+```
+
+`createRuleFromExpression()` converts an expression string into a standard rule function.
+
+## Deprecated APIs
+
+- `createAuthMiddleware()` -- uses `graphql-middleware`'s `applyMiddleware` which causes duplicate type errors with Simfinity's introspection patch. Use `createAuthPlugin` instead.
+- `createFieldMiddleware()` -- same issue. Use `createAuthPlugin` instead.

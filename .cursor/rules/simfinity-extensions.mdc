@@ -1,0 +1,121 @@
+---
+description: Documents the field/type extensions metadata system used in GraphQLObjectType definitions
+globs: src/index.js
+alwaysApply: false
+---
+
+# Extensions Metadata System
+
+Simfinity uses the standard GraphQL `extensions` property on fields and types to carry metadata that drives schema generation, model creation, resolver wiring, and validation.
+
+## Field-Level Extensions
+
+### `extensions.relation`
+
+Defines relationships between types. Required on every field whose type is another `GraphQLObjectType` or `GraphQLList` of one.
+
+```javascript
+fields: () => ({
+  author: {
+    type: AuthorType,
+    extensions: {
+      relation: {
+        embedded: false,          // false = ObjectId reference, true = nested document
+        connectionField: 'author_id',  // MongoDB field storing the ObjectId (defaults to field name)
+        displayField: 'name',     // field shown in introspection UI hints
+      },
+    },
+  },
+  chapters: {
+    type: new GraphQLList(ChapterType),
+    extensions: {
+      relation: {
+        embedded: true,           // stored inline in parent document
+      },
+    },
+  },
+})
+```
+
+- **Non-embedded** (`embedded: false`): stored as ObjectId in MongoDB. Input types use `IdInputType` (`{ id: String! }`). List fields generate `OneToMany` input with `added`/`updated`/`deleted` sub-fields. Auto-generates `$lookup` resolvers.
+- **Embedded** (`embedded: true`): stored inline. Input types use the nested type's full input type. No `$lookup` needed.
+- **`connectionField`**: the actual MongoDB field name for the ObjectId reference. If omitted, defaults to the GraphQL field name.
+
+### `extensions.readOnly`
+
+```javascript
+createdAt: {
+  type: GraphQLString,
+  extensions: { readOnly: true },
+}
+```
+
+Excludes the field from both add and update input types. The field can only be set programmatically (e.g., in a controller hook).
+
+### `extensions.unique`
+
+```javascript
+email: {
+  type: GraphQLString,
+  extensions: { unique: true },
+}
+```
+
+Adds a MongoDB unique index on the field in `generateSchemaDefinition()`.
+
+### `extensions.validations`
+
+```javascript
+name: {
+  type: new GraphQLNonNull(GraphQLString),
+  extensions: {
+    validations: validators.stringLength('Name', 2, 100),
+    // Returns: { CREATE: [validator], UPDATE: [validator] }
+  },
+}
+```
+
+Validators are executed during `materializeModel()` before saving/updating. Each validator has a `.validate(typeName, fieldName, value, session)` method. The `CREATE` array runs on add, `UPDATE` on update.
+
+### `extensions.stateMachine` (auto-set)
+
+Not set manually. When `buildInputType()` detects a `state` field on a type that has a state machine, it sets `extensions.stateMachine = true` on that field and excludes it from input types.
+
+## Type-Level Extensions
+
+### `extensions.validations` (on the type)
+
+```javascript
+const BookType = new GraphQLObjectType({
+  name: 'Book',
+  extensions: {
+    validations: {
+      CREATE: [{ validate: async (typeName, args, modelArgs, session) => { /* cross-field validation */ } }],
+      UPDATE: [{ validate: async (typeName, args, modelArgs, session) => { /* ... */ } }],
+    },
+  },
+  fields: () => ({ /* ... */ }),
+});
+```
+
+Type-level validators run after all field-level validators, receiving the full args and materialized model.
+
+### `extensions.scope`
+
+```javascript
+const BookType = new GraphQLObjectType({
+  name: 'Book',
+  extensions: {
+    scope: {
+      find: async ({ type, args, operation, context }) => {
+        args.owner_id = { operator: 'EQ', value: context.user.id };
+      },
+      get_by_id: async ({ type, args, operation, context }) => { /* ... */ },
+      aggregate: async ({ type, args, operation, context }) => { /* ... */ },
+    },
+  },
+  fields: () => ({ /* ... */ }),
+});
+```
+
+Scope functions modify query args in-place to enforce row-level security. Called by `executeScope()` before building the MongoDB aggregation pipeline.

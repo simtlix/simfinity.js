@@ -1,0 +1,62 @@
+---
+description: Coding standards and best practices for writing new Simfinity.js code
+alwaysApply: true
+---
+
+# Coding Standards
+
+## Module System
+
+- Use ES module syntax (`import`/`export`). No CommonJS (`require`/`module.exports`).
+- All imports at the top of the file. No inline or dynamic imports inside functions.
+
+## Style (enforced by ESLint)
+
+- Single quotes, semicolons, trailing commas in multiline constructs.
+- `prefer-const` -- use `const` unless reassignment is needed.
+- No `var`, no `for...in` loops. Use `Object.entries()`, `Object.keys()`, or `for...of`.
+- `no-param-reassign` with `props: false` -- reassigning parameter properties is allowed (common in resolvers and `materializeModel`).
+- `no-underscore-dangle` is off -- `_id` and `_fields` are used throughout for MongoDB and GraphQL internals.
+
+## Error Handling
+
+- Extend `SimfinityError` for all domain errors. Always provide `message`, `code` (string), and `status` (HTTP number):
+
+```javascript
+throw new SimfinityError('Resource not found', 'NOT_FOUND', 404);
+```
+
+- For auth errors, use `UnauthenticatedError` (401) or `ForbiddenError` (403) from `src/auth/errors.js`.
+- Wrap mutation logic in Mongoose transactions. Handle `TransientTransactionError` with retry (see `executeOperation` pattern).
+
+## GraphQL Type Definitions
+
+- Always use `extensions.relation` on fields referencing other `GraphQLObjectType`s. Omitting it causes warnings and broken input types.
+- Use `GraphQLNonNull` wrapper for required fields.
+- Use `extensions.readOnly` for computed/system fields that should not appear in input types.
+- Validated scalars: use `createValidatedScalar(name, description, baseScalarType, validate)` -- the resulting scalar name is `{name}_{baseScalarType.name}`.
+
+## Schema Transformations
+
+- **Never** use `graphql-middleware`'s `applyMiddleware` or `@graphql-tools/utils`'s `mapSchema` on a Simfinity schema. These rebuild the schema, duplicating the globally-injected `FieldExtensionsType`.
+- Use Envelop plugins (`onSchemaChange` hook) to wrap resolvers in-place.
+
+## Export Conventions
+
+- Named exports for public API functions.
+- Default export as an object aggregating all named exports (for convenient destructuring).
+- Re-export submodule defaults from `src/index.js`: `validators`, `scalars`, `plugins`, `auth`.
+
+## Function Naming
+
+- Internal helpers: camelCase, not exported.
+- Public API: camelCase, exported with `export const`.
+- Deprecated functions: mark with `@deprecated` JSDoc tag.
+
+## Keeping Project Artifacts in Sync
+
+When making code changes, update **all** related artifacts:
+
+1. **Tests** (`tests/`): add or update tests for any new or changed behavior. See `simfinity-testing.mdc`.
+2. **Documentation** (`README.md`): update examples, API docs, and Table of Contents for any public API change. See `simfinity-documentation.mdc`.
+3. **Cursor rules** (`.cursor/rules/`): if a change affects architecture, internal functions, the extensions system, the auth module, coding standards, or testing/documentation conventions, update the corresponding `.mdc` rule file so it stays accurate.

@@ -1,0 +1,71 @@
+---
+description: Simfinity.js project architecture overview -- always loaded for context
+alwaysApply: true
+---
+
+# Simfinity.js Architecture
+
+`@simtlix/simfinity-js` is a GraphQL framework that auto-generates schemas, CRUD queries, mutations, and MongoDB models from `GraphQLObjectType` definitions.
+
+## Tech Stack
+
+- **Language**: JavaScript (ES modules, `"type": "module"`)
+- **Runtime**: Node.js >= 18.18.0
+- **GraphQL**: `graphql` ^16 (peer dependency)
+- **Database**: MongoDB via `mongoose` ^8 (peer dependency)
+- **Testing**: Vitest
+- **Linting**: ESLint 9 (flat config)
+- **Server integration**: GraphQL Yoga with Envelop plugins
+
+## Core Flow
+
+```
+Define GraphQLObjectType
+       |
+       v
+simfinity.connect(null, Type, 'singular', 'plural', controller, onModelCreated, stateMachine)
+  -- or --
+simfinity.addNoEndpointType(Type)   // supporting types without endpoints
+       |
+       v
+simfinity.createSchema()
+       |
+       +-- buildPendingInputTypes()    // resolve deferred input types
+       +-- generateModel()            // create Mongoose schema + model per type
+       +-- autoGenerateResolvers()    // wire relationship resolvers
+       +-- buildRootQuery()           // list, single-entity, aggregate queries
+       +-- buildMutation()            // add, update, delete, state-change mutations
+       |
+       v
+  GraphQLSchema ready for Yoga/Apollo
+```
+
+## Module Map
+
+| File | Responsibility |
+|------|---------------|
+| `src/index.js` | Core engine: type registration, schema/model generation, query/mutation builders, resolvers, middleware, scope |
+| `src/auth/index.js` | Auth plugin (`createAuthPlugin`), permission resolution, deprecated middleware |
+| `src/auth/rules.js` | Rule helpers: `requireAuth`, `requireRole`, `composeRules`, `isOwner`, `allow`, `deny` |
+| `src/auth/expressions.js` | Policy expression DSL evaluator |
+| `src/auth/errors.js` | `UnauthenticatedError`, `ForbiddenError` (extend `SimfinityError`) |
+| `src/validators.js` | Declarative field validators: `stringLength`, `pattern`, `email`, `numberRange`, etc. |
+| `src/scalars.js` | Pre-built scalars (`EmailScalar`, `URLScalar`) and scalar factories |
+| `src/plugins.js` | Plugin exports: `createAuthPlugin`, `apolloCountPlugin`, `envelopCountPlugin` |
+| `src/const/QLOperator.js` | `GraphQLEnumType` for filter operators (EQ, LT, GT, IN, LIKE, etc.) |
+| `src/const/QLValue.js` | `GraphQLScalarType` for filter values |
+| `src/const/QLSort.js` | `GraphQLInputObjectType` for sort expressions |
+| `src/errors/simfinity.error.js` | Base error class with `code` and `status` extensions |
+| `src/errors/internal-server.error.js` | Internal server error (extends `SimfinityError`) |
+
+## Key Global State (in `src/index.js`)
+
+- `typesDict` -- primary registry: `{ types: { [typeName]: { model, gqltype, simpleEntityEndpointName, listEntitiesEndpointName, endpoint, controller, stateMachine, inputType } } }`
+- `typesDictForUpdate` -- parallel registry with update-specific input types
+- `waitingInputType` -- deferred input types awaiting dependency resolution (circular refs)
+- `registeredMutations` -- custom mutations registered via `registerMutation()`
+- `middlewares` -- array of global middleware functions registered via `use()`
+
+## Introspection Extension (Critical)
+
+Simfinity monkey-patches `__Field._fields` to inject `FieldExtensionsType` and `RelationType` into GraphQL introspection globally. This means these types exist outside the schema's type map. Any tool that rebuilds or copies the schema (like `graphql-middleware`'s `applyMiddleware` / `mapSchema`) will cause duplicate type errors. Always use Envelop plugins for schema transformations.

@@ -1,0 +1,84 @@
+---
+description: Documents the critical internal functions and pipelines in the Simfinity core engine
+globs: src/index.js
+alwaysApply: false
+---
+
+# Core Functions in src/index.js
+
+## Registration Phase
+
+### `connect(model, gqltype, simpleEntityEndpointName, listEntitiesEndpointName, controller, onModelCreated, stateMachine)`
+
+Registers a GraphQL type for full CRUD endpoint generation. The `model` param is typically `null` (generated later by `createSchema`). Stores metadata in `typesDict` and `typesDictForUpdate`.
+
+### `addNoEndpointType(gqltype)`
+
+Registers a supporting type (no query/mutation endpoints). Auto-detects whether a Mongoose model is needed based on relationship fields. Used for embedded types or types only referenced by other types.
+
+### `registerMutation(name, description, inputModel, outputModel, callback)`
+
+Registers a custom mutation outside the standard CRUD pattern.
+
+## Schema Build Phase (`createSchema()`)
+
+Called after all `connect()`/`addNoEndpointType()` calls. Executes in order:
+
+1. **`generateModel()`** / **`generateModelWithoutCollection()`** -- creates Mongoose schemas via `generateSchemaDefinition()`, auto-indexes all ObjectId fields via `createSchemaWithIndexes()` / `findObjectIdFields()`.
+2. **`buildPendingInputTypes()`** -- recursively resolves deferred input types (handles circular dependencies by retrying until all resolve).
+3. **`autoGenerateResolvers()`** -- for each type's fields with `extensions.relation` and no existing resolver, generates: one-to-one resolvers (`findById`), one-to-many resolvers (aggregation pipeline with filter support).
+4. **`buildRootQuery()`** -- creates the root Query type with: `{singular}(id)` single-entity query, `{plural}(filters, pagination, sort)` list query, `{plural}_aggregate(filters, aggregation)` aggregation query.
+5. **`buildMutation()`** -- creates the Mutation type with: `add{singular}(input)`, `update{singular}(input)`, `delete{singular}(id)`, `{actionName}_{singular}(input)` for state machine transitions.
+
+## Auto-Generated Endpoint Naming
+
+- **Single entity query**: `simpleEntityEndpointName` (e.g., `serie`)
+- **List query**: `listEntitiesEndpointName` (e.g., `series`)
+- **Add mutation**: `add` + `simpleEntityEndpointName` (e.g., `addserie`)
+- **Update mutation**: `update` + `simpleEntityEndpointName` (e.g., `updateserie`)
+- **Delete mutation**: `delete` + `simpleEntityEndpointName` (e.g., `deleteserie`)
+- **State action**: `{actionName}_{simpleEntityEndpointName}` (e.g., `approve_serie`)
+
+All names are lowercase as provided by the consumer in `connect()`.
+
+## Input Type Generation (`buildInputType()`)
+
+Creates two input types per registered type:
+
+- `{Type}Input` -- for `add` mutations (excludes `id`, readOnly fields, state-machine-managed `state`)
+- `{Type}InputForUpdate` -- for `update` mutations (all fields optional except `id` which is required)
+
+Handles: scalars, enums, relation fields (`IdInputType` for refs, nested input for embedded), `GraphQLList` fields (`OneToMany{A|U}{fieldName}` with `added`/`updated`/`deleted` sub-fields), self-referencing collections.
+
+## Query Pipeline
+
+`buildQuery(args, gqltype)` translates GraphQL filter arguments into a MongoDB aggregation pipeline:
+
+- `buildQueryTerms()` -- converts scalar/enum filters to `$match`, object/relation filters to `$lookup` + `$unwind` + `$match`
+- `buildFilterGroupMatch()` -- recursively processes `QLFilterGroup` (AND/OR) into nested MongoDB `$and`/`$or` match expressions. Reuses `buildQueryTerms()` for each leaf condition. Deduplicates `$lookup` stages via shared `aggregationsIncluded` dict. Max depth: 5.
+- `buildAggregationsForSort()` -- adds `$lookup`/`$unwind` for sort on related fields
+- Pagination: `$skip` + `$limit` from `QLPagination` input
+- Sort: `$sort` from `QLSortExpression` input
+- AND/OR: optional `AND`/`OR` arguments containing `QLFilterGroup` trees. Flat field filters and scope-injected filters are always ANDed at the top level (cannot be bypassed by user OR).
+
+`buildAggregationQuery()` extends this with `$group` for aggregation operations (SUM, COUNT, AVG, MIN, MAX). Supports the same AND/OR filter pattern.
+
+## Mutation Pipeline
+
+`executeOperation()` wraps all mutations in Mongoose transactions:
+
+1. Starts a session + transaction
+2. Calls the appropriate handler: `onSaveObject`, `onUpdateSubject`, `onDeleteObject`, `onStateChanged`
+3. Commits on success, aborts on error
+4. Auto-retries on `TransientTransactionError`
+
+`materializeModel()` transforms GraphQL input args into Mongoose-compatible documents, running field-level and type-level validators during the process.
+
+## Middleware and Scope
+
+- `use(middleware)` -- pushes to global `middlewares` array. `excecuteMiddleware()` chains them with `next()` pattern.
+- `executeScope()` -- checks `type.gqltype.extensions.scope[operation]` and calls the scope function to apply row-level filtering for `find`, `get_by_id`, and `aggregate` operations.
+
+## Introspection Monkey-Patch
+
+Lines 52-85: `FieldExtensionsType` and `RelationType` are injected into `__Field._fields` globally. This enables introspection clients to discover relation metadata and state machine flags. **Never rebuild the schema** with tools that clone types (e.g., `mapSchema` from `@graphql-tools/utils`) -- it will duplicate these globally-injected types.

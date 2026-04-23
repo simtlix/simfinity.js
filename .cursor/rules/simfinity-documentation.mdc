@@ -1,0 +1,59 @@
+---
+description: Rules for maintaining README.md documentation when code changes
+globs: README.md
+alwaysApply: false
+---
+
+# Documentation Maintenance
+
+## When to Update README.md
+
+- **New public API**: document the function signature, purpose, and a usage example.
+- **Changed behavior**: update relevant sections and code examples to reflect the change.
+- **New feature**: add a new section in the appropriate position (see section order below).
+- **Removed/deprecated feature**: mark as deprecated with migration guidance; do not silently remove.
+
+## Section Order
+
+Maintain this logical flow (define -> operate -> protect -> advanced):
+
+1. Overview / Quick Start
+2. Schema Definition (defining `GraphQLObjectType` with Simfinity)
+3. Relationships (embedded, non-embedded, one-to-many)
+4. Validations (field-level, type-level, declarative validators)
+5. Queries (single entity, list, filtering, pagination, sorting)
+6. Mutations (add, update, delete)
+7. State Machines (states, transitions, actions)
+8. Controllers & Lifecycle Hooks (onSaving, onSaved, onUpdating, onUpdated, onDelete)
+9. Query Scope (row-level security via scope functions)
+10. Authorization (Envelop auth plugin, permission maps, rule helpers)
+11. Middlewares (global middleware via `use()`)
+12. Plugins (count plugins, auth plugin re-export)
+13. Custom Scalars (pre-built and factory functions)
+14. Error Handling
+15. Resources (links to example projects, API docs)
+
+## Table of Contents
+
+Update the Table of Contents whenever sections are added, removed, or reordered. Ensure every `##` and `###` heading has a corresponding ToC entry.
+
+## Naming in Code Examples
+
+Use Simfinity's auto-generated endpoint names consistently:
+
+- **Queries**: `{plural}` for list (e.g., `series`), `{singular}` for single entity (e.g., `serie`)
+- **Mutations**: `add{singular}` (e.g., `addserie`), `update{singular}` (e.g., `updateserie`), `delete{singular}` (e.g., `deleteserie`)
+- **State actions**: `{actionName}_{singular}` (e.g., `approve_serie`)
+- **Aggregation**: `{plural}_aggregate` (e.g., `series_aggregate`)
+
+All names are lowercase as defined in `connect()` calls.
+
+## Reference Project
+
+Always link to the [Series Sample Project](https://github.com/simtlix/series-sample) as a complete working example. Mention it in Quick Start and Resources sections.
+
+## Style Guidelines
+
+- Use fenced code blocks with `javascript` language tag for all code examples.
+- Keep examples realistic -- use types and field names from the series-sample project (Serie, Season, Star, etc.) rather than abstract names.
+- Show both the type definition and the resulting GraphQL operation where appropriate.
