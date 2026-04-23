@@ -1260,6 +1260,10 @@ const buildAggregationsForSort = (filterField, qlField, fieldName) => {
     return aggregateClauses;
   }
 
+  if (!Array.isArray(filterField?.terms) || filterField.terms.length === 0) {
+    return aggregateClauses;
+  }
+
   const resolvedFieldType = unwrapNonNull(fieldType);
 
   filterField.terms.forEach((term) => {
@@ -1305,6 +1309,10 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
   const matchesClauses = {};
   const fieldType = unwrapListAndNonNull(qlField.type);
 
+  if (filterField == null) {
+    return { aggregateClauses, matchesClauses };
+  }
+
   if (fieldType instanceof GraphQLScalarType
     || isNonNullOfType(fieldType, GraphQLScalarType)
     || fieldType instanceof GraphQLEnumType
@@ -1315,6 +1323,10 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
   }
 
   if (!(fieldType instanceof GraphQLObjectType || isNonNullOfType(fieldType, GraphQLObjectType))) {
+    return { aggregateClauses, matchesClauses };
+  }
+
+  if (!Array.isArray(filterField.terms) || filterField.terms.length === 0) {
     return { aggregateClauses, matchesClauses };
   }
 
