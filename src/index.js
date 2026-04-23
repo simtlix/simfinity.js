@@ -300,6 +300,8 @@ const buildRelationLookup = ({
   unwind: { $unwind: { path: `$${alias}`, preserveNullAndEmptyArrays: true } },
 });
 
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 const OP_TO_MONGO = {
   LT: (v) => ({ $lt: v }),
   GT: (v) => ({ $gt: v }),
@@ -307,7 +309,7 @@ const OP_TO_MONGO = {
   GTE: (v) => ({ $gte: v }),
   NE: (v) => ({ $ne: v }),
   BTW: (v) => ({ $gte: v[0], $lte: v[1] }),
-  LIKE: (v) => ({ $regex: `.*${v}.*` }),
+  LIKE: (v) => ({ $regex: `.*${escapeRegex(v)}.*` }),
 };
 
 const AGG_OP_TO_MONGO = {
@@ -668,26 +670,30 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
 const MAX_TRANSIENT_RETRIES = 5;
 
 const withTransaction = async (session, body) => {
+  const ownsSession = !session;
   const mySession = session || await mongoose.startSession();
-  for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
-    await mySession.startTransaction();
-    try {
-      const result = await body(mySession);
-      await mySession.commitTransaction();
-      mySession.endSession();
-      return result;
-    } catch (error) {
-      await mySession.abortTransaction();
-      const isTransient = error.errorLabels?.includes('TransientTransactionError');
-      if (isTransient && attempt < MAX_TRANSIENT_RETRIES) {
-        continue;
+  try {
+    for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
+      await mySession.startTransaction();
+      try {
+        const result = await body(mySession);
+        await mySession.commitTransaction();
+        return result;
+      } catch (error) {
+        await mySession.abortTransaction();
+        const isTransient = error.errorLabels?.includes('TransientTransactionError');
+        if (isTransient && attempt < MAX_TRANSIENT_RETRIES) {
+          continue;
+        }
+        throw error;
       }
+    }
+    throw new SimfinityError('Transaction exceeded retry limit', 'TRANSACTION_RETRY_EXCEEDED', 500);
+  } finally {
+    if (ownsSession) {
       mySession.endSession();
-      throw error;
     }
   }
-  mySession.endSession();
-  throw new SimfinityError('Transaction exceeded retry limit', 'TRANSACTION_RETRY_EXCEEDED', 500);
 };
 
 const executeRegisteredMutation = (args, callback, session) => withTransaction(
@@ -741,7 +747,7 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
 
   if (embeddedFieldNames.length > 0) {
     const projection = Object.fromEntries(embeddedFieldNames.map((name) => [name, 1]));
-    const currentObject = await Model.findById(objectId, projection).lean();
+    const currentObject = await Model.findById(objectId, projection).session(session).lean();
     if (currentObject) {
       for (const fieldEntryName of embeddedFieldNames) {
         const oldObjectData = currentObject[fieldEntryName];
@@ -786,7 +792,7 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
 };
 
 const onStateChanged = async (Model, gqltype, controller, args, session, actionField, context) => {
-  const storedModel = await Model.findById(args.id);
+  const storedModel = await Model.findById(args.id).session(session);
   if (!storedModel) {
     throw new SimfinityError(`${gqltype.name} ${args.id} is not valid`, 'NOT_VALID_ID', 404);
   }
@@ -898,22 +904,20 @@ const executeItemFunction = async (gqltype, collectionField, objectId, session,
 const shouldNotBeIncludedInSchema = (includedTypes,
   type) => includedTypes && !includedTypes.includes(type);
 
-const excecuteMiddleware = (context) => {
+const excecuteMiddleware = async (context) => {
   const buildNext = (middlewaresParam) => {
     if (!middlewaresParam) {
-      return () => {};
+      return async () => {};
     }
-    const next = () => {
+    return async () => {
       const middleware = middlewaresParam[0];
       if (middleware) {
-        middleware(context, buildNext(middlewaresParam.slice(1)));
+        await middleware(context, buildNext(middlewaresParam.slice(1)));
       }
     };
-    return next;
   };
 
-  const middleware = buildNext(middlewares);
-  middleware();
+  await buildNext(middlewares)();
 };
 
 const executeScope = async (params) => {
@@ -960,7 +964,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
               context,
             };
 
-            excecuteMiddleware(params);
+            await excecuteMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.input, operations.SAVE, null, null, context);
           },
@@ -977,7 +981,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
               context,
             };
 
-            excecuteMiddleware(params);
+            await excecuteMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.id, operations.DELETE, null, null, context);
           },
@@ -1002,7 +1006,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
               context,
             };
 
-            excecuteMiddleware(params);
+            await excecuteMiddleware(params);
             return executeOperation(type.model, type.gqltype, type.controller,
               args.input, operations.UPDATE, null, null, context);
           },
@@ -1024,7 +1028,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
                     context,
                   };
 
-                  excecuteMiddleware(params);
+                  await excecuteMiddleware(params);
                   return executeOperation(type.model, type.gqltype, type.controller,
                     args.input, operations.STATE_CHANGED, actionField, null, context);
                 },
@@ -1051,7 +1055,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
             entry,
             context,
           };
-          excecuteMiddleware(params);
+          await excecuteMiddleware(params);
           return executeRegisteredMutation(args.input, registeredMutation.callback);
         },
       };
@@ -1172,7 +1176,12 @@ const generateModel = (gqlType, onModelCreated, { createCollection = true } = {}
   return model;
 };
 
-const coerceIdArray = (value) => value.map((element) => new mongoose.Types.ObjectId(element));
+const coerceIdArray = (value) => value.map((element) => {
+  if (element === null || element === undefined) {
+    throw new SimfinityError('ID value cannot be null in collection filter', 'INVALID_FILTER_VALUE', 400);
+  }
+  return new mongoose.Types.ObjectId(element);
+});
 
 const buildMatchesClause = (fieldname, operator, value) => {
   const isIdField = fieldname.endsWith('_id');
@@ -1181,11 +1190,12 @@ const buildMatchesClause = (fieldname, operator, value) => {
   if (op === 'EQ') {
     return { [fieldname]: isIdField ? new mongoose.Types.ObjectId(value) : value };
   }
-  if (op === 'IN') {
-    return { [fieldname]: { $in: value && isIdField ? coerceIdArray(value) : value } };
-  }
-  if (op === 'NIN') {
-    return { [fieldname]: { $nin: value && isIdField ? coerceIdArray(value) : value } };
+  if (op === 'IN' || op === 'NIN') {
+    if (!Array.isArray(value)) {
+      throw new SimfinityError(`${op} requires an array value for ${fieldname}`, 'INVALID_FILTER_VALUE', 400);
+    }
+    const coerced = isIdField ? coerceIdArray(value) : value;
+    return { [fieldname]: { [op === 'IN' ? '$in' : '$nin']: coerced } };
   }
   const builder = OP_TO_MONGO[op];
   return builder ? { [fieldname]: builder(value) } : {};
@@ -1506,14 +1516,13 @@ const buildQuery = async (input, gqltype, isCount) => {
     aggregateClauses.push(buildSortClause(input.sort.terms, gqltype, aggregateClauses, aggregationsIncluded));
   }
 
-  let limitClause = { $limit: 100 };
   let skipClause = { $skip: 0 };
+  let limitClause = { $limit: 100 };
   if (input.pagination?.page && input.pagination?.size) {
-    const skip = input.pagination.size * (input.pagination.page - 1);
-    limitClause = { $limit: input.pagination.size + skip };
-    skipClause = { $skip: skip };
+    skipClause = { $skip: input.pagination.size * (input.pagination.page - 1) };
+    limitClause = { $limit: input.pagination.size };
   }
-  aggregateClauses.push(limitClause, skipClause);
+  aggregateClauses.push(skipClause, limitClause);
 
   return aggregateClauses;
 };
@@ -1617,7 +1626,7 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
 
   if (input.pagination?.page && input.pagination?.size) {
     const skip = input.pagination.size * (input.pagination.page - 1);
-    aggregateClauses.push({ $limit: input.pagination.size + skip }, { $skip: skip });
+    aggregateClauses.push({ $skip: skip }, { $limit: input.pagination.size });
   }
 
   return aggregateClauses;
@@ -1643,7 +1652,7 @@ const buildRootQuery = (name, includedTypes) => {
             const params = {
               type, args, operation: 'get_by_id', context,
             };
-            excecuteMiddleware(params);
+            await excecuteMiddleware(params);
 
             const hasScope = type.gqltype.extensions?.scope?.get_by_id;
             if (!hasScope) {
@@ -1677,7 +1686,7 @@ const buildRootQuery = (name, includedTypes) => {
               operation: 'find',
               context,
             };
-            excecuteMiddleware(params);
+            await excecuteMiddleware(params);
             await executeScope(params);
             const aggregateClauses = await buildQuery(args, type.gqltype);
             const wantsCount = !!(args.pagination && args.pagination.count);
@@ -1712,7 +1721,7 @@ const buildRootQuery = (name, includedTypes) => {
               operation: 'aggregate',
               context,
             };
-            excecuteMiddleware(params);
+            await excecuteMiddleware(params);
             await executeScope(params);
             const aggregateClauses = await buildAggregationQuery(args, type.gqltype, args.aggregation);
             const result = await type.model.aggregate(aggregateClauses);
