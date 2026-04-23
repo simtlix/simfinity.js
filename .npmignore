@@ -1,3 +1,7 @@
+# IDE / agent local trees (never publish)
+.claude/
+.cursor/
+
 # Package files
 *.tgz
 
@@ -15,6 +19,12 @@ README_INDEX_EXAMPLE.md
 node_modules/
 data/
 **/config.js
+eslint.config.mjs
+package-lock.json
+coverage/
+
+# Local utilities
+git-report.js
 
 # Git files
 .git/
@@ -23,4 +33,3 @@ data/
 # Editor files
 .vscode/
 .DS_Store
-
