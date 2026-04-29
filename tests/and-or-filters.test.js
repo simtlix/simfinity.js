@@ -657,6 +657,118 @@ describe('AND/OR Filter Support', () => {
     });
   });
 
+  describe('Dotted field syntax (backward-compatible alternative to field+path)', () => {
+    // Inline embedded type — no relation extension, so no $lookup / model lookup is needed
+    // and the pipeline can be verified end-to-end.
+    const NestedType = new GraphQLObjectType({
+      name: 'DottedNested',
+      fields: () => ({
+        name: { type: GraphQLString },
+        country: { type: GraphQLString },
+      }),
+    });
+
+    const DeepType = new GraphQLObjectType({
+      name: 'DottedDeep',
+      fields: () => ({
+        nested: { type: NestedType },
+      }),
+    });
+
+    const DottedHostType = new GraphQLObjectType({
+      name: 'DottedHost',
+      fields: () => ({
+        id: { type: GraphQLString },
+        title: { type: GraphQLString },
+        nested: { type: NestedType },
+        deep: { type: DeepType },
+      }),
+    });
+
+    it('produces the same match as field+path for a single-segment path', async () => {
+      const dotted = await simfinity.buildFilterGroupMatch(
+        { conditions: [{ field: 'nested.name', operator: 'EQ', value: 'Alice' }] },
+        DottedHostType, [], {},
+      );
+      const split = await simfinity.buildFilterGroupMatch(
+        { conditions: [{ field: 'nested', path: 'name', operator: 'EQ', value: 'Alice' }] },
+        DottedHostType, [], {},
+      );
+      expect(dotted).toEqual(split);
+      expect(dotted).toEqual({ 'nested.name': 'Alice' });
+    });
+
+    it('produces the same match as field+path for a multi-segment path', async () => {
+      const dotted = await simfinity.buildFilterGroupMatch(
+        { conditions: [{ field: 'deep.nested.name', operator: 'LIKE', value: 'Bob' }] },
+        DottedHostType, [], {},
+      );
+      const split = await simfinity.buildFilterGroupMatch(
+        { conditions: [{ field: 'deep', path: 'nested.name', operator: 'LIKE', value: 'Bob' }] },
+        DottedHostType, [], {},
+      );
+      expect(dotted).toEqual(split);
+      expect(dotted).toEqual({ 'deep.nested.name': { $regex: '.*Bob.*' } });
+    });
+
+    it('mixes dotted-field and field+path conditions in the same group', async () => {
+      const result = await simfinity.buildFilterGroupMatch(
+        {
+          conditions: [
+            { field: 'nested.name', operator: 'EQ', value: 'Alice' },
+            { field: 'nested', path: 'country', operator: 'EQ', value: 'AR' },
+          ],
+        },
+        DottedHostType, [], {},
+      );
+      expect(result.$and).toHaveLength(2);
+      expect(result.$and[0]).toEqual({ 'nested.name': 'Alice' });
+      expect(result.$and[1]).toEqual({ 'nested.country': 'AR' });
+    });
+
+    it('works inside OR groups alongside scalar conditions', async () => {
+      const result = await simfinity.buildFilterGroupMatch(
+        {
+          OR: [
+            { conditions: [{ field: 'title', operator: 'EQ', value: 'X' }] },
+            { conditions: [{ field: 'nested.name', operator: 'EQ', value: 'Alice' }] },
+          ],
+        },
+        DottedHostType, [], {},
+      );
+      expect(result.$or).toHaveLength(2);
+      expect(result.$or[0]).toEqual({ title: 'X' });
+      expect(result.$or[1]).toEqual({ 'nested.name': 'Alice' });
+    });
+
+    it('rejects a condition that supplies both dotted field and explicit path', async () => {
+      const filterGroup = {
+        conditions: [{ field: 'nested.name', path: 'name', operator: 'EQ', value: 'Alice' }],
+      };
+      await expect(
+        simfinity.buildFilterGroupMatch(filterGroup, DottedHostType, [], {}),
+      ).rejects.toThrow('cannot use both dotted field syntax and a separate path');
+    });
+
+    it('throws Unknown filter field when the dotted head does not exist', async () => {
+      const filterGroup = {
+        conditions: [{ field: 'doesNotExist.name', operator: 'EQ', value: 'x' }],
+      };
+      await expect(
+        simfinity.buildFilterGroupMatch(filterGroup, DottedHostType, [], {}),
+      ).rejects.toThrow('Unknown filter field: doesNotExist');
+    });
+
+    it('rejects an invalid path segment in the dotted form', async () => {
+      const filterGroup = {
+        conditions: [{ field: 'nested.1bad', operator: 'EQ', value: 'x' }],
+      };
+      await expect(
+        simfinity.buildFilterGroupMatch(filterGroup, DottedHostType, [], {}),
+      ).rejects.toThrow('Invalid filter path segment');
+    });
+  });
+
   describe('Collection Filtering with AND/OR - Schema', () => {
     it('should have AND and OR args on collection field resolvers', () => {
       const seriesQueryType = schema.getQueryType();
