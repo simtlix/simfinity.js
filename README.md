@@ -352,6 +352,25 @@ query {
 }
 ```
 
+As an equivalent shorthand, you can pass the full dotted path in `field` and omit `path`:
+
+```graphql
+query {
+  books(
+    OR: [
+      { conditions: [{ field: "author.name", operator: LIKE, value: "Adams" }] }
+      { conditions: [{ field: "author.name", operator: LIKE, value: "Pratchett" }] }
+    ]
+  ) {
+    id
+    title
+    author { name }
+  }
+}
+```
+
+Both forms produce the same query. Multi-segment paths work too — e.g. `field: "author.country.code"` is equivalent to `field: "author", path: "country.code"`. Supplying both a dotted `field` and a separate `path` is rejected as ambiguous.
+
 #### Mixing Flat Filters with AND/OR
 
 You can freely combine the existing flat filter syntax with AND/OR groups. Flat filters and AND groups are all ANDed together at the top level:
@@ -439,7 +458,8 @@ query {
           AND: [
             { conditions: [{ field: "year", operator: GTE, value: 2022 }] }
             { conditions: [
-                { field: "episodes", path: "name", operator: LIKE, value: "Final" }
+                # Equivalent to: { field: "episodes", path: "name", ... }
+                { field: "episodes.name", operator: LIKE, value: "Final" }
             ] }
           ]
         }
@@ -462,8 +482,8 @@ This translates to: `number > 1 AND (year = 2020 OR (year >= 2022 AND episodes.n
 | `QLFilterGroup` | `AND: [QLFilterGroup]`, `OR: [QLFilterGroup]`, `conditions: [QLFilterCondition]` | Recursive logical group |
 | `QLFilterCondition` | `field: String!`, `operator: QLOperator`, `value: QLValue`, `path: String` | Individual filter condition |
 
-- `field` identifies the entity field by name (e.g., `"title"`, `"author"`)
-- `path` is required for object/relationship fields (e.g., `"name"`, `"country.name"`)
+- `field` identifies the entity field by name (e.g., `"title"`, `"author"`). For object/relationship fields you can also pass the full dotted path here as a shorthand (e.g., `"author.name"`, `"author.country.name"`)
+- `path` is required for object/relationship fields when `field` is just the top-level name (e.g., `"name"`, `"country.name"`). Omit `path` if you used the dotted-`field` shorthand. Supplying both is an error.
 - Multiple `conditions` in the same group are combined with AND
 - Maximum nesting depth: 5 levels
 

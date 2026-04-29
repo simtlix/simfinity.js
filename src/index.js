@@ -316,6 +316,25 @@ const assertValidFilterPath = (path) => {
   }
 };
 
+const normalizeFilterCondition = (condition) => {
+  const { field } = condition;
+  if (typeof field !== 'string') return condition;
+  const dotIdx = field.indexOf('.');
+  if (dotIdx < 0) return condition;
+  if (condition.path != null && condition.path !== '') {
+    throw new SimfinityError(
+      'Filter condition cannot use both dotted field syntax and a separate path',
+      'AMBIGUOUS_FILTER_FIELD',
+      400,
+    );
+  }
+  return {
+    ...condition,
+    field: field.slice(0, dotIdx),
+    path: field.slice(dotIdx + 1),
+  };
+};
+
 const OP_TO_MONGO = {
   LT: (v) => ({ $lt: v }),
   GT: (v) => ({ $gt: v }),
@@ -1397,7 +1416,8 @@ const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, agg
   const fields = gqltype.getFields();
 
   if (filterGroup.conditions?.length > 0) {
-    for (const condition of filterGroup.conditions) {
+    for (const rawCondition of filterGroup.conditions) {
+      const condition = normalizeFilterCondition(rawCondition);
       const qlField = fields[condition.field];
       if (!qlField) {
         throw new SimfinityError(`Unknown filter field: ${condition.field}`, 'INVALID_FILTER_FIELD', 400);
