@@ -52,6 +52,7 @@ simfinity.createSchema()
 | `src/validators.js` | Declarative field validators: `stringLength`, `pattern`, `email`, `numberRange`, etc. |
 | `src/scalars.js` | Pre-built scalars (`EmailScalar`, `URLScalar`) and scalar factories |
 | `src/plugins.js` | Plugin exports: `createAuthPlugin`, `apolloCountPlugin`, `envelopCountPlugin` |
+| `src/mcp.js` | MCP generation: `generateMCPTools`, `createMCPServer`, `startStdioMCPServer`, `createHTTPMCPHandler`. Converts the generated `GraphQLSchema` into MCP tools (one per Query/Mutation field) with JSON Schema inputs; in-process or remote execution. Uses optional `@modelcontextprotocol/sdk` |
 | `src/const/QLOperator.js` | `GraphQLEnumType` for filter operators (EQ, LT, GT, IN, LIKE, etc.) |
 | `src/const/QLValue.js` | `GraphQLScalarType` for filter values |
 | `src/const/QLSort.js` | `GraphQLInputObjectType` for sort expressions |

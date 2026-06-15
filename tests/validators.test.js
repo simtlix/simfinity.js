@@ -2,7 +2,7 @@ import {
   describe, test, expect, beforeAll,
 } from 'vitest';
 import {
-  GraphQLObjectType, GraphQLString, GraphQLInt, GraphQLID,
+  GraphQLObjectType, GraphQLString, GraphQLID,
 } from 'graphql';
 import { validators } from '../src/index.js';
 import * as simfinity from '../src/index.js';

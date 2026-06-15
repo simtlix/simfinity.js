@@ -553,11 +553,13 @@ const buildInputType = (gqltype) => {
 
   const inputTypeBody = {
     name: `${gqltype.name}Input`,
+    description: gqltype.description,
     fields: fieldsArgs,
   };
 
   const inputTypeBodyForUpdate = {
     name: `${gqltype.name}InputForUpdate`,
+    description: gqltype.description,
     fields: fieldsArgForUpdate,
   };
 
@@ -1939,6 +1941,14 @@ export { default as validators } from './validators.js';
 export { default as scalars } from './scalars.js';
 export { default as plugins } from './plugins.js';
 export { default as auth } from './auth/index.js';
+export { default as mcp } from './mcp.js';
+export {
+  generateMCPTools,
+  graphqlArgsToJSONSchema,
+  createMCPServer,
+  startStdioMCPServer,
+  createHTTPMCPHandler,
+} from './mcp.js';
 
 export { buildQuery, buildFilterGroupMatch };
 

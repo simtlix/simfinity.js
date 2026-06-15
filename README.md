@@ -53,6 +53,18 @@ A powerful Node.js framework that automatically generates GraphQL schemas from y
   - [Custom Mutations](#custom-mutations)
   - [Working with Existing Mongoose Models](#working-with-existing-mongoose-models)
   - [Programmatic Data Access](#programmatic-data-access)
+- [MCP Generation](#-mcp-generation)
+  - [Generating tool definitions](#generating-tool-definitions)
+  - [Standalone MCP server (stdio)](#standalone-mcp-server-stdio)
+  - [HTTP MCP endpoint (alongside GraphQL)](#http-mcp-endpoint-alongside-graphql)
+  - [Options](#options)
+  - [Selecting and naming tools](#selecting-and-naming-tools)
+  - [Customizing tools](#customizing-tools)
+  - [Limits](#limits)
+  - [Tool middleware](#tool-middleware)
+  - [Remote execution](#remote-execution)
+  - [Tool results and errors](#tool-results-and-errors)
+  - [Authentication](#authentication)
 - [Aggregation Queries](#-aggregation-queries)
 - [Complete Example](#-complete-example)
 - [Resources](#-resources)
@@ -2559,6 +2571,289 @@ console.log(UserType.getFields()); // Access GraphQL fields
 // Get the input type for a GraphQL type
 const BookInput = simfinity.getInputType(BookType);
 ```
+
+## 🤖 MCP Generation
+
+Simfinity can automatically expose every generated GraphQL operation as a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) tool. For each connected type you get one MCP tool per generated query and mutation — exactly mirroring the GraphQL surface:
+
+| GraphQL operation | MCP tool name |
+| --- | --- |
+| Single-entity query | `book` |
+| List query | `books` |
+| Aggregate query | `books_aggregate` |
+| Add mutation | `addbook` |
+| Update mutation | `updatebook` |
+| Delete mutation | `deletebook` |
+| State-machine action | `publish_book` |
+| Custom mutation | _the registered name_ |
+
+Each generated tool follows MCP best practices so an agent can use it without extra context:
+
+- **`description`**: reuses the GraphQL type/field descriptions and adds an actionable summary. List and aggregate tools spell out the available filter operators (`EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE`), `AND`/`OR` groups, pagination and sorting; aggregate tools additionally document the `SUM/COUNT/AVG/MIN/MAX` operations and the `aggregation` argument.
+- **`title`**: a human-readable label (e.g. `List Book`, `Create Book`, `Aggregate Book`).
+- **`inputSchema`**: JSON Schema derived with full fidelity from the GraphQL arguments (scalars, enums, input objects, lists, non-null wrappers, and recursive filter types such as `QLFilterGroup` via `$defs`/`$ref`). GraphQL type and field descriptions are propagated, with curated descriptions for the synthetic filter/pagination/sort/aggregation types. `Date`/`DateTime`/`Time` scalars map to `string` with the matching JSON Schema `format` (`date` / `date-time` / `time`), and arguments with a GraphQL default value carry a JSON Schema `default` and are never listed as `required`.
+- **`outputSchema`**: JSON Schema describing the returned data (mirroring the auto-generated selection set), with type/field descriptions. Every nullable GraphQL position also accepts `null` (e.g. `type: ['string', 'null']`; enums get `null` appended), so validating MCP clients accept the `null`s GraphQL legitimately returns in `structuredContent` (get-by-id misses, unset optional fields). Non-null positions stay single-typed, and input schemas are never null-widened.
+- **`annotations`**: behavioral hints — queries are `readOnlyHint: true`, `delete*` is `destructiveHint: true`, `update*` is `idempotentHint: true`. Generated CRUD mutations are recognized by the placeholder descriptions Simfinity stamps on them, so a custom mutation that happens to be named `updateReport` (and carries its own description) keeps that description and gets no inferred hints.
+
+On execution, each tool returns both a serialized JSON `text` content block and a machine-readable `structuredContent` (the GraphQL `data`) that conforms to the `outputSchema`. When the caller requests `pagination: { count: true }` on a **list** tool, the total record count is delivered in the tool result `_meta.count` (aggregate tools ignore the flag — their resolver never computes a total).
+
+> The MCP transports require the optional `@modelcontextprotocol/sdk` dependency (`^1.13.0` or newer). Install it with `npm install @modelcontextprotocol/sdk`. `generateMCPTools` works without it. SDK load problems raise distinct error codes: `MCP_SDK_NOT_INSTALLED` (not installed), `MCP_SDK_INCOMPATIBLE` (installed but too old to provide the requested transport — upgrade it), `MCP_SDK_LOAD_FAILED` (any other import failure).
+
+### Installation
+
+```bash
+npm install @modelcontextprotocol/sdk
+```
+
+### Generating tool definitions
+
+`generateMCPTools(schema, options)` returns the tool list, a `callTool` executor and a `getOperation` inspector. It does not require the SDK and is handy for inspection or custom wiring:
+
+```javascript
+import * as simfinity from '@simtlix/simfinity-js';
+
+const schema = simfinity.createSchema();
+const { tools, callTool, getOperation } = simfinity.generateMCPTools(schema);
+
+// tools: [{ name, title, description, inputSchema, outputSchema, annotations, kind }, ...]
+const result = await callTool('addbook', { input: { title: 'Dune' } });
+// result: { content: [{ type: 'text', text: '...JSON...' }],
+//           structuredContent: { addbook: { ... } }, isError: false }
+
+// getOperation returns the prebuilt GraphQL document a tool executes
+console.log(getOperation('books'));
+// query booksOperation($id: QLFilter, $pagination: QLPagination, ...) {
+//   books(id: $id, pagination: $pagination, ...) { id title ... }
+// }
+```
+
+Both `callTool` and `getOperation` throw a `SimfinityError` with code `MCP_TOOL_NOT_FOUND` for unknown tool names.
+
+### Standalone MCP server (stdio)
+
+Use stdio for a standalone executable consumed by clients like Cursor or Claude Desktop:
+
+```javascript
+import * as simfinity from '@simtlix/simfinity-js';
+
+const schema = simfinity.createSchema();
+await simfinity.startStdioMCPServer(schema, {
+  serverName: 'my-api-mcp',
+  context: { user: { id: 'system' } },
+});
+```
+
+### HTTP MCP endpoint (alongside GraphQL)
+
+Mount an MCP endpoint (Streamable HTTP) next to your existing GraphQL server:
+
+```javascript
+import express from 'express';
+import * as simfinity from '@simtlix/simfinity-js';
+
+const schema = simfinity.createSchema();
+const app = express();
+app.use(express.json());
+
+const mcpHandler = await simfinity.createHTTPMCPHandler(schema, {
+  // In HTTP mode the context factory receives the Express `req`,
+  // so you can authenticate per request (e.g. from the Authorization header).
+  context: (req) => ({ user: resolveUserFrom(req.headers.authorization) }),
+});
+app.post('/mcp', mcpHandler);
+```
+
+For deployments reachable from a browser (especially localhost), enable the SDK's DNS-rebinding protection via `transportOptions`, and observe failures with `onError`:
+
+```javascript
+const mcpHandler = await simfinity.createHTTPMCPHandler(schema, {
+  context: (req) => ({ user: resolveUserFrom(req.headers.authorization) }),
+  // Spread into the SDK's StreamableHTTPServerTransport options
+  transportOptions: {
+    enableDnsRebindingProtection: true,
+    allowedHosts: ['127.0.0.1:3000', 'localhost:3000'],
+    allowedOrigins: ['http://localhost:3000'],
+  },
+  onError: (err, req, res) => console.error('MCP request failed', err),
+});
+```
+
+The handler catches all errors itself: `onError` is for logging/metrics, and a JSON-RPC internal error (HTTP 500) is sent automatically when response headers were not already written.
+
+### Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `execution` | `{ mode: 'in-process' }` | `in-process` runs against the in-memory `schema`. `remote` issues HTTP GraphQL requests: `{ mode: 'remote', endpoint, headers, timeoutMs, retry: { attempts, backoffMs } }`. See [Remote execution](#remote-execution). |
+| `context` | `{}` | GraphQL context value, or a factory. For in-process/stdio it is called as `(extra) => context`; for the HTTP handler it is called as `(req, extra) => context` so you can authenticate per request. Passed through to execution so `scope` functions and auth rules work (they read `context.user`). |
+| `include` / `exclude` | — | String or array: raw GraphQL field names, prefixed tool names, or the categories `'query'` / `'mutation'`. `exclude` wins over `include`. |
+| `includeTypes` / `excludeTypes` | — | String or array of entity (return) type names — one entry covers every tool for that entity (`'Book'` matches `book`, `books`, `books_aggregate`, `addbook`, ...). `excludeTypes` wins. |
+| `selectionDepth` | `1` | Nesting depth for the auto-generated output selection set (and the mirrored `outputSchema`). |
+| `includeId` | `true` | Always select `id` when nothing else is selectable on an object type. |
+| `toolNamePrefix` | — | Prefix prepended to every published tool name (e.g. `'catalog_'`). Must match `/^[a-zA-Z0-9_-]+$/`; the resulting names must match `/^[a-zA-Z0-9_-]{1,128}$/` (`MCP_INVALID_TOOL_NAME` otherwise). |
+| `toolOverrides` | `{}` | Per-tool overrides keyed by tool (or unprefixed field) name: `{ description, title, annotations, selectionDepth, includeId, selection }`. See [Customizing tools](#customizing-tools). |
+| `toolMiddleware` | — | Array of koa-style `async (call, next)` functions run around every tool call. See [Tool middleware](#tool-middleware). |
+| `limits` | — | Guardrails: `{ maxPageSize, defaultPagination, maxResultBytes }`. See [Limits](#limits). |
+| `schemaPlugins` | — | Envelop-style plugins whose `onSchemaChange` hook is applied once before serving (in-process execution only). See [Authentication](#authentication). |
+| `serverName` / `serverVersion` | `'simfinity-mcp'` / `'1.0.0'` | Identity reported by the MCP server. |
+| `transportOptions` | — | `createHTTPMCPHandler` only: extra options spread into the SDK's `StreamableHTTPServerTransport` (e.g. `enableDnsRebindingProtection`, `allowedHosts`, `allowedOrigins`). |
+| `onError` | — | `createHTTPMCPHandler` only: `(err, req, res)` callback invoked when a request fails; the handler still responds with a JSON-RPC internal error (HTTP 500) if headers were not sent. |
+
+Selection sets always fall back to `id` and then `__typename` when nothing else is selectable (interface/union return types select `__typename`), so the generated documents are always statically valid — and the output schemas mirror the same fallbacks.
+
+### Selecting and naming tools
+
+Trim and namespace the published surface with `include`/`exclude`, `includeTypes`/`excludeTypes` and `toolNamePrefix`:
+
+```javascript
+const { tools, callTool, getOperation } = simfinity.generateMCPTools(schema, {
+  exclude: 'mutation',          // read-only server
+  excludeTypes: 'AuditLog',     // hide every tool whose entity type is AuditLog
+  toolNamePrefix: 'catalog_',   // books -> catalog_books
+});
+
+// callTool/getOperation use the published (prefixed) name;
+// the underlying GraphQL document still uses the raw field name.
+console.log(getOperation('catalog_books'));
+// query booksOperation(...) { books(...) { ... } }
+```
+
+- `include`/`exclude` entries match the raw GraphQL field name, the prefixed tool name, or the categories `'query'` / `'mutation'`. `exclude` always wins over `include`.
+- `includeTypes`/`excludeTypes` match the entity (return) type. Aggregate queries resolve their entity through the sibling list field (`books_aggregate` → `books`), so `excludeTypes: 'Book'` also hides the aggregate tool. With an `includeTypes` allowlist, tools without an object return type are dropped too.
+- Duplicate tool names (e.g. a Query field and a Mutation field sharing a name) are not allowed by MCP: the first tool wins and the later one is skipped with a `console.warn` — rename one of the GraphQL fields or use `include`/`exclude`.
+
+### Customizing tools
+
+`toolOverrides` tunes individual tools without touching the schema. Keys accept either the published tool name or the unprefixed field name:
+
+```javascript
+const { tools } = simfinity.generateMCPTools(schema, {
+  toolOverrides: {
+    books: {
+      title: 'Search books',
+      description: 'Search the book catalog. Filter by title, author or publication year.',
+      selectionDepth: 2,                        // deeper selection set for this tool only
+    },
+    publish_book: {
+      annotations: { idempotentHint: true },    // merged over the generated annotations
+    },
+    book: {
+      selection: 'id title author { name }',    // explicit selection set
+    },
+  },
+});
+```
+
+`selection` accepts `'id title'` or `'{ id title }'` and replaces the auto-generated selection set. When it is set, the `outputSchema` is **omitted** for that tool — it can no longer be guaranteed to match the returned data, and publishing a wrong schema would make validating clients reject valid results.
+
+### Limits
+
+`limits` protects agents (and your database) from oversized requests and responses. Violations come back as regular `isError` tool results, not exceptions:
+
+```javascript
+const { callTool } = simfinity.generateMCPTools(schema, {
+  limits: {
+    maxPageSize: 100,                          // MCP_PAGE_SIZE_EXCEEDED above this
+    defaultPagination: { page: 1, size: 20 },  // injected when the caller sends none
+    maxResultBytes: 262144,                    // MCP_RESULT_TOO_LARGE above this
+  },
+});
+```
+
+- `maxPageSize`: rejects calls whose `pagination.size` exceeds the cap.
+- `defaultPagination`: injected only for tools that have a `pagination` argument, and only when the caller did not send one. `page` and `size` are both required (QLPagination declares them non-null), and `size` must not exceed `maxPageSize` — that misconfiguration throws `MCP_INVALID_LIMITS` at setup.
+- `maxResultBytes`: rejects results whose serialized `data` is larger than the cap (the error message suggests narrowing the query, lowering `selectionDepth` or paginating).
+
+### Tool middleware
+
+`toolMiddleware` wraps every tool execution with koa-style `(call, next)` functions — for logging, metrics, argument rewriting or policy checks. `call` is `{ name, args, extra, kind, operation }`:
+
+```javascript
+const { callTool } = simfinity.generateMCPTools(schema, {
+  toolMiddleware: [
+    async (call, next) => {
+      const started = Date.now();
+      const result = await next();
+      console.log(`[mcp] ${call.name} (${call.kind}) took ${Date.now() - started}ms`);
+      return result;
+    },
+    async (call, next) => {
+      if (call.kind === 'mutation' && process.env.MCP_READ_ONLY === 'true') {
+        // Short-circuit: return a result without calling next()
+        return {
+          content: [{ type: 'text', text: 'Mutations are disabled on this server.' }],
+          isError: true,
+        };
+      }
+      return next();
+    },
+  ],
+});
+```
+
+Middleware can mutate `call.args` before calling `next()`, short-circuit by returning a result, or throw. Calling `next()` twice rejects with `MCP_MIDDLEWARE_ERROR`.
+
+### Remote execution
+
+`execution.mode: 'remote'` turns the MCP server into a thin proxy that POSTs each operation to an existing GraphQL endpoint. Harden it with `timeoutMs` and `retry`:
+
+```javascript
+const { callTool } = simfinity.generateMCPTools(schema, {
+  execution: {
+    mode: 'remote',
+    endpoint: 'https://api.example.com/graphql',
+    headers: { Authorization: `Bearer ${token}` },
+    timeoutMs: 10000,                        // abort requests slower than 10s
+    retry: { attempts: 2, backoffMs: 250 },  // up to 2 extra attempts, linear backoff
+  },
+});
+```
+
+- `timeoutMs` aborts slow requests (`AbortSignal.timeout`); the timeout signal is combined with the MCP client's cancellation signal.
+- `retry` re-issues failed **queries only — never mutations** — after network errors/timeouts, HTTP 5xx and 429 responses. Backoff is linear: the first retry waits `backoffMs`, the second `2 × backoffMs`, and so on (default `backoffMs`: 250).
+- Transport failures do not throw: they surface as `isError` tool results carrying GraphQL-shaped errors with the codes `MCP_REMOTE_HTTP_ERROR` (non-2xx response, includes `extensions.status`), `MCP_REMOTE_REQUEST_FAILED` (network error/timeout) and `MCP_REMOTE_INVALID_RESPONSE` (non-JSON body, or JSON with neither `data` nor `errors`).
+- If the remote response carries a numeric `extensions.count` (e.g. exposed via `simfinity.plugins.envelopCountPlugin()`), it is surfaced as `_meta.count` on the tool result.
+
+`schemaPlugins` is not applied in remote mode — the remote GraphQL server enforces its own plugins.
+
+### Tool results and errors
+
+Successful calls return `{ content: [textJSON], structuredContent: data, isError: false }`. Failures and edge cases behave as follows:
+
+- **Total count**: with `pagination: { count: true }` on a **list** tool, the count lands in `_meta.count` on the tool result — in-process it is read back from a per-call context layer (Simfinity's find resolver writes it there; counts never leak across calls), in remote mode from the response `extensions.count`. Aggregate tools never deliver a count.
+- **Execution errors**: `isError: true` with a `text` payload of `{ errors, data? }` — partial data is preserved alongside the errors when GraphQL returned any. `structuredContent` is omitted on errors.
+- **Remote transport failures** and **limit violations** are also `isError` results (see [Remote execution](#remote-execution) and [Limits](#limits) for the codes).
+- **Unknown tool names** are the exception: `callTool` and `getOperation` throw `MCP_TOOL_NOT_FOUND`. A call whose `extra.signal` is already aborted throws `MCP_CALL_CANCELLED` before executing.
+
+### Authentication
+
+The MCP tools execute the same resolvers as GraphQL, so the GraphQL `context` flows through unchanged: pass credentials via `options.context` (a value or a factory). [Query scope](#-query-scope) functions read the context on every execution and need no extra wiring.
+
+Field-level rules from [`createAuthPlugin`](#-authorization) are different. The auth plugin is an Envelop plugin that wraps resolvers from its `onSchemaChange` hook — a hook that only fires when an Envelop/Yoga server boots. A standalone MCP server executes operations with bare `graphql()`, so without help the hook never fires and the field-level rules are silently skipped. Pass the plugin via `schemaPlugins` to get auth parity: every plugin's `onSchemaChange` is invoked once before serving (in-process execution only):
+
+```javascript
+import * as simfinity from '@simtlix/simfinity-js';
+
+const { createAuthPlugin, requireAuth, requireRole } = simfinity.auth;
+
+// Permissions are keyed by the schema's type names. Simfinity names its
+// roots `RootQueryType` and `Mutation`.
+const permissions = {
+  RootQueryType: { books: requireAuth() },
+  Mutation: { deletebook: requireRole('admin') },
+};
+
+const schema = simfinity.createSchema();
+await simfinity.startStdioMCPServer(schema, {
+  // requireRole reads `user.role` by default (see rolePath to customize).
+  context: { user: { id: 'agent', role: 'admin' } },
+  schemaPlugins: [createAuthPlugin(permissions, { defaultPolicy: 'ALLOW' })],
+});
+```
+
+Mounting the MCP handler next to a running Envelop/Yoga server that shares the same `schema` object also works: Yoga fires `onSchemaChange` at startup and `createAuthPlugin` wraps the resolvers in place, so the MCP tools execute the already-wrapped schema.
+
+For per-request HTTP auth, use a function `context`: the HTTP handler invokes it as `(req, extra) => context`, so you can read the `Authorization` header from the Express `req` and map it to `context.user` exactly like your GraphQL server does.
 
 ## 📊 Aggregation Queries
 
