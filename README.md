@@ -191,6 +191,12 @@ const schema = simfinity.createSchema(
 );
 ```
 
+Importing Simfinity initializes its global `__Field.extensions` introspection field safely whether GraphQL's fields have already been materialized or a schema already exists. Repeated module evaluation with the same GraphQL peer reuses the existing extension field and metadata types. Application field metadata is preserved.
+
+The extension remains shared by every schema using that GraphQL peer; Simfinity's type and middleware registries also remain module-level state. Schemas constructed after import include `FieldExtensionsType` and `RelationType` in their type maps. Earlier schemas keep their original type maps: ordinary operations and direct metadata selections work, but named fragments on the new metadata types require a schema constructed after import.
+
+Schema-cloning tools remain unsupported. In a process that has imported Simfinity, `buildClientSchema()` on a post-import schema's introspection result can also fail with duplicate metadata type names. Use Envelop plugins and in-place resolver wrapping; see the [introspection metadata reference](docs/reference/extensions.md).
+
 ### Global Configuration
 
 ```javascript
