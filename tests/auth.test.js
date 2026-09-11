@@ -815,7 +815,7 @@ describe('createAuthMiddleware', () => {
       ).rejects.toThrow(ForbiddenError);
     });
 
-    test('invalid expressions should fail closed', async () => {
+    test('invalid expressions should fail closed when middleware is created', () => {
       const permissions = {
         Post: {
           content: {
@@ -824,10 +824,7 @@ describe('createAuthMiddleware', () => {
         },
       };
 
-      const middleware = createAuthMiddleware(permissions);
-      await expect(
-        middleware(mockResolve(), {}, {}, {}, createMockInfo('Post', 'content')),
-      ).rejects.toThrow(ForbiddenError);
+      expect(() => createAuthMiddleware(permissions)).toThrow(TypeError);
     });
   });
 

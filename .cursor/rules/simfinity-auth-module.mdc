@@ -30,7 +30,7 @@ const yoga = createYoga({ schema, plugins: [authPlugin] });
 4. Wraps `field.resolve` in-place (mutates the schema, no rebuild)
 5. Uses a `WeakSet` to prevent double-wrapping if `onSchemaChange` fires again
 
-**`defaultPolicy`**: `'DENY'` (default) blocks fields with no rules; `'ALLOW'` permits them.
+**`defaultPolicy`**: exactly `'DENY'` (default) or `'ALLOW'`, applied only when no exact or wildcard rule is configured. Factories throw `TypeError` for other values and for malformed permission maps or configured rules. A configured `null`, `undefined`, unknown object, or empty rule array cannot fall back to the default policy.
 
 ## Permission Map Structure
 
@@ -54,7 +54,8 @@ const permissions = {
 - Keys are GraphQL type names (must match `GraphQLObjectType.name` exactly)
 - Field keys are the auto-generated endpoint names (lowercase)
 - Wildcard `'*'` applies to all fields of a type unless overridden by an exact match
-- Values can be: a rule function, an array of rule functions (AND logic), or a policy expression string
+- Permission maps must be plain objects (including null-prototype objects); only own entries are used
+- Values can be: a rule function, a nonempty array of rules (nested arrays and mixed expressions are supported), or a JSON AST/boolean policy expression
 
 ## Rule Resolution (`getFieldRules`)
 
@@ -62,37 +63,45 @@ const permissions = {
 2. Fall back to `permissions[typeName]['*']` (wildcard)
 3. If neither exists, return `null` (applies `defaultPolicy`)
 
-Each rule receives `(parent, args, ctx, info)` and must return `true` or throw an error.
+Each rule receives `(parent, args, ctx, info)`. Only `true` or `undefined` grants access; all other results deny, including `null`, zero, empty strings, and truthy objects. Throwing denies with an error. This applies equally to direct functions, `composeRules`, `anyRule`, and `createRule`, including async results. Composition helpers and `createRule` reject nonfunction arguments at creation.
 
 ## Rule Helpers (from `rules.js`)
 
 | Helper | Description |
 |--------|-------------|
 | `requireAuth(userPath?)` | Checks `ctx[userPath]` exists (default: `'user'`) |
-| `requireRole(role, options?)` | Checks user has role. Options: `{ userPath, rolesPath }` |
-| `requirePermission(perm, options?)` | Checks user has permission string |
+| `requireRole(role, options?)` | Exact membership against one user role. Required roles must be nonempty strings. Options: `{ userPath, rolePath }` |
+| `requirePermission(perm, options?)` | Requires every permission; claims must be arrays of nonempty strings with exact membership. Only a standalone `'*'` entry grants all |
 | `composeRules(...rules)` | AND: all rules must pass |
 | `anyRule(...rules)` | OR: at least one rule must pass |
-| `isOwner(ownerField, userIdField?, options?)` | Compares `parent[ownerField]` with user ID |
+| `isOwner(ownerField, userIdField?, options?)` | Compares nonempty strings, finite numbers, or Mongoose ObjectIds. Missing/null and arbitrary object IDs deny |
 | `createRule(predicate, errorMessage?, errorCode?)` | Custom rule from predicate function |
 | `allow()` | Always returns `true` |
 | `deny(message?)` | Always throws `ForbiddenError` |
 
 ## Policy Expressions (from `expressions.js`)
 
-String-based alternative to function rules. Evaluated by `evaluateExpression()`.
+JSON AST alternative to function rules. Evaluated by `evaluateExpression()`; expression strings such as `'ROLE:admin'` are unsupported.
 
 ```javascript
 const permissions = {
   Mutation: {
-    deleteserie: 'ROLE:admin',
-    updateserie: 'AUTH AND ROLE:editor',
-    addserie: 'ROLE:admin OR ROLE:editor',
+    deleteserie: { eq: [{ ref: 'ctx.user.role' }, 'admin'] },
+    updateserie: [requireAuth(), { eq: [{ ref: 'ctx.user.role' }, 'editor'] }],
+    addserie: { in: [{ ref: 'ctx.user.role' }, ['admin', 'editor']] },
   },
 };
 ```
 
-`createRuleFromExpression()` converts an expression string into a standard rule function.
+`createRuleFromExpression()` validates the complete AST and throws `TypeError` for malformed configuration. `isPolicyExpression()` also validates the full AST. Direct `evaluateExpression()` calls return false for malformed ASTs.
+
+- `eq` and `in` require exactly two operands. The right side of `in` must be an array or a reference resolving to one
+- `allOf`/`anyOf` take arrays; `not` takes a valid expression. Unknown operators anywhere invalidate the entire AST
+- Boolean expressions, multiple operator keys (implicit AND), and empty logical identities remain supported (`allOf: []` is true, `anyOf: []` is false)
+- References use `parent`, `args`, or `ctx`, with dotted fields, numeric array indices, and document getters. Empty segments and `__proto__`, `prototype`, or `constructor` segments are invalid
+- Missing references yield an internal invalid result, distinct from false. Invalid results remain invalid through `not` and AND; a valid `anyOf` grant can still succeed independently (for example, public content without a logged-in user)
+- Explicit null/false/zero/empty-string literals remain valid and `eq` remains strict. Use `isOwner` for identity validation instead of relying on null equality
+- `requireRole` and `requirePermission` reject missing, empty, or non-string required values with `TypeError`. Malformed permission claims deny with `ForbiddenError`
 
 ## Deprecated APIs
 

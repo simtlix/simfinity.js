@@ -18,6 +18,8 @@ const plugin = simfinity.plugins.createAuthPlugin(permissions, {
 
 This is the same factory exposed as `simfinity.auth.createAuthPlugin`. It wraps schema resolvers through the Envelop `onSchemaChange` hook. See [authorization](/guide/authorization) for permission maps, rule helpers, and the generated `RootQueryType` name.
 
+`defaultPolicy` accepts only `'ALLOW'` or `'DENY'` (the default). Invalid permission maps, configured rules, or policy ASTs throw `TypeError` when the plugin is created. Default policy applies only to fields without an exact or wildcard entry.
+
 ## Envelop count plugin
 
 ```javascript

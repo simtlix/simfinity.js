@@ -88,7 +88,7 @@ export {
  */
 
 /**
- * @typedef {Object|RuleFunction|Array<RuleFunction>} Rule
+ * @typedef {boolean|Object|RuleFunction|Array<Rule>} Rule
  */
 
 /**
@@ -110,6 +110,9 @@ const normalizeRule = (rule) => {
   }
   
   if (Array.isArray(rule)) {
+    if (rule.length === 0 || Array.from(rule).some(r => r === undefined)) {
+      throw new TypeError('Authorization rule arrays must contain valid rules');
+    }
     return rule.flatMap(r => normalizeRule(r));
   }
   
@@ -117,8 +120,31 @@ const normalizeRule = (rule) => {
     return [createRuleFromExpression(rule)];
   }
   
-  // Unknown rule type - return empty (will use default policy)
-  return [];
+  throw new TypeError('Invalid authorization rule: expected a function, nonempty rule array, or policy expression');
+};
+
+const isPermissionMap = value => value !== null && typeof value === 'object'
+  && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+
+const validateConfiguration = (permissions, defaultPolicy) => {
+  if (defaultPolicy !== 'ALLOW' && defaultPolicy !== 'DENY') {
+    throw new TypeError('defaultPolicy must be ALLOW or DENY');
+  }
+  if (!isPermissionMap(permissions)) {
+    throw new TypeError('Authorization permissions must be an object');
+  }
+  for (const [typeName, typePermissions] of Object.entries(permissions)) {
+    if (!isPermissionMap(typePermissions)) {
+      throw new TypeError(`Permissions for ${typeName} must be an object`);
+    }
+    for (const [fieldName, rule] of Object.entries(typePermissions)) {
+      try {
+        normalizeRule(rule);
+      } catch (error) {
+        throw new TypeError(`Invalid authorization rule for ${typeName}.${fieldName}: ${error.message}`);
+      }
+    }
+  }
 };
 
 /**
@@ -129,19 +155,19 @@ const normalizeRule = (rule) => {
  * @returns {Function[]|null} Array of rule functions or null if no rule found
  */
 const getFieldRules = (permissions, typeName, fieldName) => {
+  if (!Object.hasOwn(permissions, typeName)) return null;
   const typePerms = permissions[typeName];
-  
-  if (!typePerms) {
-    return null;
+  if (!isPermissionMap(typePerms)) {
+    throw new TypeError(`Permissions for ${typeName} must be an object`);
   }
   
   // Check for exact field rule first
-  if (fieldName in typePerms) {
+  if (Object.hasOwn(typePerms, fieldName)) {
     return normalizeRule(typePerms[fieldName]);
   }
   
   // Fallback to wildcard
-  if ('*' in typePerms) {
+  if (Object.hasOwn(typePerms, '*')) {
     return normalizeRule(typePerms['*']);
   }
   
@@ -185,6 +211,8 @@ export const createAuthMiddleware = (permissions, options = {}) => {
     debug = false,
   } = options;
 
+  validateConfiguration(permissions, defaultPolicy);
+
   const log = debug ? console.log.bind(console, '[auth]') : () => {};
 
   /**
@@ -201,7 +229,7 @@ export const createAuthMiddleware = (permissions, options = {}) => {
     const rules = getFieldRules(permissions, typeName, fieldName);
 
     // If no rules found, apply default policy
-    if (rules === null || rules.length === 0) {
+    if (rules === null) {
       log(`No rules for ${typeName}.${fieldName}, applying default policy: ${defaultPolicy}`);
       
       if (defaultPolicy === 'DENY') {
@@ -297,11 +325,14 @@ export const createAuthPlugin = (permissions, options = {}) => {
     debug = false,
   } = options;
 
+  validateConfiguration(permissions, defaultPolicy);
+
   const log = debug ? console.log.bind(console, '[auth]') : () => {};
   const processedSchemas = new WeakSet();
 
   const wrapSchemaResolvers = (schema) => {
     if (processedSchemas.has(schema)) return;
+    validateConfiguration(permissions, defaultPolicy);
 
     const typeMap = schema.getTypeMap();
 
@@ -317,7 +348,7 @@ export const createAuthPlugin = (permissions, options = {}) => {
         field.resolve = async (parent, args, ctx, info) => {
           log(`Checking ${typeName}.${fieldName}`);
 
-          if (rules === null || rules.length === 0) {
+          if (rules === null) {
             log(`No rules for ${typeName}.${fieldName}, applying default policy: ${defaultPolicy}`);
 
             if (defaultPolicy === 'DENY') {

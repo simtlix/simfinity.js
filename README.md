@@ -1906,13 +1906,19 @@ const permissions = {
 
 **Rule Types:**
 - **Function**: `(parent, args, ctx, info) => boolean | void | Promise<boolean | void>`
-- **Array of functions**: All rules must pass (AND logic)
-- **Policy expression**: JSON AST object (see below)
+- **Nonempty array of rules**: All rules must pass (AND logic); functions, expressions, and nested nonempty arrays can be mixed
+- **Policy expression**: JSON AST object or boolean literal (see below)
+
+Permission maps must be plain objects (including objects with a null prototype). Only their own type and field entries are used. The default policy applies only when an exact field entry and wildcard are both absent. `defaultPolicy` must be exactly `'ALLOW'` or `'DENY'`; omitting it defaults to `'DENY'`.
+
+`createAuthPlugin`, `createAuthMiddleware`, and `createFieldMiddleware` throw `TypeError` when configured with an invalid rule, empty rule array, malformed policy expression, permission map, or default policy. A configured `null`, `undefined`, or unknown object never falls back to `ALLOW`. Use `allow()` or `true` to grant access explicitly, or omit the entry to use the default policy.
 
 **Rule Semantics:**
 - `return true` or `return void` → allow
 - `return false` → deny
 - `throw Error` → deny with error
+
+Only `true` and `undefined` allow access. Other results, including `null`, `0`, an empty string, objects, and other truthy values, deny access. This contract is identical for direct rules, `composeRules`, `anyRule`, and `createRule`, including async results. `composeRules`, `anyRule`, and `createRule` require function arguments. `anyRule` may continue after a denial or error to a different granting rule.
 
 ### Rule Helpers
 
@@ -1958,6 +1964,8 @@ const permissions = {
 
 Requires the user to have a specific role. Supports custom paths:
 
+The required role must be a nonempty string or nonempty array of nonempty strings; invalid configuration throws `TypeError`. The user's single role value must match an allowed string exactly.
+
 ```javascript
 const permissions = {
   Query: {
@@ -1977,6 +1985,8 @@ const permissions = {
 #### requirePermission(permission, options?)
 
 Requires the user to have specific permission(s). Supports custom paths:
+
+The required permission must be a nonempty string or nonempty array of nonempty strings; invalid configuration throws `TypeError`. The user's claim must be an array of nonempty strings. Entries match exactly; only a standalone `'*'` entry grants every permission. A claim such as `'posts:read'` must be supplied as `['posts:read']`. String claims, substrings, and embedded wildcard characters do not grant access.
 
 ```javascript
 const permissions = {
@@ -2029,6 +2039,8 @@ const permissions = {
 
 Checks if the authenticated user owns the resource:
 
+IDs must be nonempty strings, finite numbers (including zero), or Mongoose `ObjectId` instances. Numbers compare by their string representation, and ObjectIds compare by hexadecimal value. Missing/null IDs, empty strings, arrays, booleans, and arbitrary objects deny access. Use the path or extractor arguments to obtain a supported ID from a custom identity object.
+
 ```javascript
 const permissions = {
   Post: {
@@ -2076,7 +2088,13 @@ Use `{ ref: 'path' }` to reference values:
 
 **Security:**
 - Only `parent`, `args`, and `ctx` roots are allowed
-- Unknown operators fail closed (deny)
+- Reference paths support root values, dotted fields, document getters, and numeric array indices. Empty path segments and `__proto__`, `prototype`, or `constructor` segments are invalid
+- `eq` and `in` require exactly two operands; `in` requires an array or a reference resolving to an array. `allOf` and `anyOf` require arrays of valid expressions; `not` requires a valid expression
+- Unknown operators or malformed nested expressions invalidate the entire configured policy, even inside an otherwise granting `anyOf`
+- Factories reject malformed expressions with `TypeError`; `isPolicyExpression` validates the complete AST, and direct `evaluateExpression` calls return `false` for malformed ASTs
+- Missing references and invalid runtime membership operands cannot grant access, including under `not` or repeated negation. They propagate through `allOf` and implicit AND. A separate valid `anyOf` branch can still grant access, such as a published post without an authenticated user
+- Explicit `null`, `false`, `0`, and empty-string comparison values remain valid; equality is strict. Use `requireAuth()` or `isOwner()` for identity checks rather than treating two explicit null IDs as ownership
+- Boolean expressions and logical identities remain valid: `{ allOf: [] }` is true, `{ anyOf: [] }` is false, and `{ not: false }` is true. Multiple operator keys form an implicit AND
 - No `eval()` or `Function()` - pure object traversal
 
 ### Integration with GraphQL Yoga / Envelop
