@@ -521,7 +521,7 @@ export const scalars: {
  * Auth (src/auth/index.js default export)
  * ========================================================================== */
 
-/** A rule function: return true/void to allow, false to deny (or throw). */
+/** A rule function: only true/void allows; all other values deny (or throw). */
 export type AuthRuleFunction = (
   parent: any,
   args: any,
@@ -529,11 +529,11 @@ export type AuthRuleFunction = (
   info: any,
 ) => boolean | void | Promise<boolean | void>;
 
-/** Declarative policy expression (JSON AST). */
-export type PolicyExpression = Record<string, unknown>;
+/** Declarative policy expression (JSON AST or boolean). The complete AST is validated at runtime. */
+export type PolicyExpression = boolean | Record<string, unknown>;
 
-/** A rule: function, array of functions (AND), or a policy expression. */
-export type AuthRule = AuthRuleFunction | AuthRuleFunction[] | PolicyExpression;
+/** A rule: function, nonempty nested array of rules (AND), or a policy expression. */
+export type AuthRule = AuthRuleFunction | AuthRule[] | PolicyExpression;
 
 /** Field-name (or '*') to rule mapping for one GraphQL type. */
 export type TypePermissions = Record<string, AuthRule>;
@@ -558,7 +558,7 @@ declare class ForbiddenError extends SimfinityError {
 
 /** Authorization utilities (RBAC/ABAC rules, plugin factories and auth errors). */
 export const auth: {
-  /** Envelop-compatible plugin that wraps schema resolvers in-place via `onSchemaChange`. */
+  /** Wraps schema resolvers in-place. Throws TypeError for invalid rules, maps, or defaultPolicy. */
   createAuthPlugin(permissions: PermissionSchema, options?: AuthPluginOptions): EnvelopSchemaPlugin;
   /** @deprecated Use createAuthPlugin instead. graphql-middleware compatible middleware. */
   createAuthMiddleware(
@@ -572,19 +572,24 @@ export const auth: {
   ): Record<string, Record<string, any>>;
   resolvePath(obj: any, pathOrFn: string | ((obj: any) => any)): any;
   requireAuth(userPath?: string): AuthRuleFunction;
+  /** Required roles must be nonempty strings; invalid configuration throws TypeError. */
   requireRole(role: string | string[], options?: { userPath?: string; rolePath?: string }): AuthRuleFunction;
+  /** Exact array membership; only a standalone '*' claim grants all permissions. */
   requirePermission(
     permission: string | string[],
     options?: { userPath?: string; permissionsPath?: string },
   ): AuthRuleFunction;
   composeRules(...rules: AuthRuleFunction[]): AuthRuleFunction;
   anyRule(...rules: AuthRuleFunction[]): AuthRuleFunction;
+  /** Compares nonempty string, finite number, or Mongoose ObjectId identities; missing IDs deny. */
   isOwner(ownerField?: string, userIdField?: string, options?: { userPath?: string }): AuthRuleFunction;
   createRule(predicate: AuthRuleFunction, errorMessage?: string, errorCode?: string): AuthRuleFunction;
   allow(): AuthRuleFunction;
   deny(message?: string): AuthRuleFunction;
-  evaluateExpression(expression: PolicyExpression, context: any): boolean;
+  /** Invalid ASTs and unresolved comparisons deny, including under negation. */
+  evaluateExpression(expression: unknown, context: any): boolean;
   isPolicyExpression(value: unknown): boolean;
+  /** Throws TypeError for a malformed expression. */
   createRuleFromExpression(expression: PolicyExpression): AuthRuleFunction;
   UnauthenticatedError: typeof UnauthenticatedError;
   ForbiddenError: typeof ForbiddenError;
