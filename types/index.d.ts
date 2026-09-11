@@ -420,6 +420,15 @@ export function buildErrorFormatter(
 /** Globally prevent Mongoose collection creation for generated models. */
 export function preventCreatingCollection(prevent: boolean): void;
 
+/** Process-wide limits for generated list and paginated aggregate queries. */
+export interface QueryLimitsOptions {
+  /** Positive safe integer; defaults to 1000. Unpaged lists use min(100, maxPageSize). */
+  maxPageSize?: number;
+}
+
+/** Configure at startup. Invalid configuration throws INVALID_QUERY_LIMITS (400). */
+export function configureQueryLimits(options?: QueryLimitsOptions): void;
+
 /** Get the generated GraphQL input type registered for an object type. */
 export function getInputType(type: GraphQLObjectType | { name: string }): GraphQLInputObjectType;
 

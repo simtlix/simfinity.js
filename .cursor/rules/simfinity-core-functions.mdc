@@ -54,10 +54,11 @@ Handles: scalars, enums, relation fields (`IdInputType` for refs, nested input f
 
 `buildQuery(args, gqltype)` translates GraphQL filter arguments into a MongoDB aggregation pipeline:
 
-- `buildQueryTerms()` -- converts scalar/enum filters to `$match`, object/relation filters to `$lookup` + `$unwind` + `$match`
+- `resolveQueryPath()` resolves declared filter/list-sort paths and Mongoose schema paths together, maps `id` to `_id`, and collects required lookups. `buildQueryTerms()` preserves every scalar/enum condition and relationship term, including repeated leaves. Values are validated and cast against the real schema, with state-machine state-name storage preserved.
 - `buildFilterGroupMatch()` -- recursively processes `QLFilterGroup` (AND/OR) into nested MongoDB `$and`/`$or` match expressions. Reuses `buildQueryTerms()` for each leaf condition. Deduplicates `$lookup` stages via shared `aggregationsIncluded` dict. Max depth: 5.
-- `buildAggregationsForSort()` -- adds `$lookup`/`$unwind` for sort on related fields
-- Pagination: `$skip` + `$limit` from `QLPagination` input
+- `buildSortClause()` uses `resolveQueryPath()` and deduplicates lookups for related sort terms.
+- `configureQueryLimits({ maxPageSize })` sets a process-wide positive safe-integer maximum (default 1000). `paginationStages()` validates explicit page/size/skip, applies `min(100, maxPageSize)` to unpaged lists, and leaves unpaged aggregates unbounded.
+- `QLValue.parseLiteral()` preserves explicit null and flat-list elements, rejecting unsupported literal objects/nested lists. Query validation rejects null list elements and invalid scalar/operator/group shapes.
 - Sort: `$sort` from `QLSortExpression` input
 - AND/OR: optional `AND`/`OR` arguments containing `QLFilterGroup` trees. Flat field filters and scope-injected filters are always ANDed at the top level (cannot be bypassed by user OR).
 

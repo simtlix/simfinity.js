@@ -39,7 +39,7 @@ query {
 }
 ```
 
-The result is an array directly under `data.series`, rather than an `edges` / `nodes` connection. With no pagination supplied, list queries return at most 100 records.
+The result is an array directly under `data.series`, rather than an `edges` / `nodes` connection. With no pagination supplied, list queries return at most `Math.min(100, maxPageSize)` records; the configurable maximum defaults to 1000.
 
 ### Operators
 
@@ -54,6 +54,8 @@ The result is an array directly under `data.series`, rather than an `edges` / `n
 | `LIKE` | Case-sensitive literal substring match | `"Expanse"` |
 
 `LIKE` escapes regular expression characters; `.` or `*` in the value are literal characters. Use the value's actual JSON type: a number for a numeric comparison, a Boolean for a Boolean field, and an array for `IN`, `NIN`, or `BTW`.
+
+`IN` and `NIN` require flat scalar lists; `BTW` requires exactly two non-null bounds. Null list elements, literal objects, nested lists, unsupported operators and invalid scalar values are rejected. Explicit `null` is supported by `EQ` and `NE`. Inline GraphQL values and variables follow the same rules. Enum names or declared internal values are converted to the stored representation, including the state names used by state machines. Date values are converted without changing the input arguments. Validated scalars use their base scalar type for filters, allowing string fragments in `LIKE` and range bounds outside create/update constraints.
 
 ## Combine conditions with AND and OR
 
@@ -139,6 +141,8 @@ query {
 
 Logical groups can describe the same path with `{ field: "serie", path: "name", ... }` or the dotted field form `{ field: "serie.name", ... }`. Do not combine the dotted form and a separate `path` in one condition.
 
+All `terms` are ANDed, including multiple conditions on the same path. For example, `[{ path: "year", operator: GTE, value: 2020 }, { path: "year", operator: LTE, value: 2025 }]` preserves both bounds. These conditions remain ANDed with logical groups and scope filters. Paths must terminate at a declared scalar or enum field. ID comparisons use the actual Mongoose schema path, including supplied models with string or numeric `_id` fields.
+
 ::: info Referenced collection joins
 Root filters that traverse a one-to-many relation use MongoDB lookups and unwinds. A parent can appear more than once when multiple child records match; the generated list pipeline does not add a distinct-parent grouping stage. Account for this when designing result lists and counts.
 :::
@@ -160,6 +164,14 @@ query {
 ```
 
 `page: 2, size: 20` skips the first 20 matching records and returns the next 20. Both `page` and `size` are required when the pagination object is present. Use a deterministic sort for paginated screens; if a field is not unique, consider a unique stored field as a final sort term.
+
+The default maximum page size is **1000**. Configure the process-wide limit at startup:
+
+```javascript
+simfinity.configureQueryLimits({ maxPageSize: 500 });
+```
+
+The configured maximum may be any positive safe integer. Unpaged lists use `Math.min(100, maxPageSize)`; unpaged aggregates remain unbounded. Both pagination values and the computed skip must be safe integers, with `page >= 1` and `1 <= size <= maxPageSize`. Invalid pagination throws `INVALID_PAGINATION` (400); invalid configuration throws `INVALID_QUERY_LIMITS` (400). `configureQueryLimits()` restores the default maximum. This is an intentional limit on previously unrestricted explicit page sizes; configure a larger maximum when your application requires it.
 
 When `count: true`, the list resolver calculates the matching count before pagination and places it on the GraphQL context. Add the count plugin to expose it in the response:
 
@@ -207,6 +219,8 @@ query {
 ```
 
 Referenced fields can use dotted paths, for example `serie.name` when sorting seasons. Provide at least one sort term when supplying `sort`.
+
+List sort paths are checked against the declared fields. `id` sorts by `_id`, and `serie.id` sorts by the related `_id`; embedded paths stay dotted. Multiple terms through the same relationship reuse its lookup.
 
 ## Aggregate records
 

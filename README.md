@@ -223,6 +223,10 @@ Simfinity automatically generates mutations for each connected type:
 
 ### Filtering and Querying
 
+Every relationship or embedded `terms` entry is combined with AND, including repeated paths such as `age GTE 18` and `age LTE 30`. These conditions remain ANDed with top-level logical groups and scope filters. Filter and list-sort paths must resolve to declared scalar or enum fields. `id` paths refer to the stored `_id`; comparisons use the connected Mongoose model's schema, so supplied string or numeric ID models retain their identifier representation.
+
+Filter values must use the field's JSON scalar type. `IN` and `NIN` require flat lists, `BTW` requires exactly two non-null bounds, and `LIKE` requires a string search fragment. Literal objects, nested lists, null list elements, invalid operators, unknown paths, and malformed groups are rejected with a structured 400 error instead of being ignored. Explicit `null` remains supported by `EQ` and `NE`. Enum names or declared internal enum values are converted to the stored representation; state-machine `state` filters preserve stored state names. Date filters convert valid date values without mutating the query input. Validated string scalars support partial `LIKE` searches, and range filters use their base scalar type rather than the field's create/update validation constraints.
+
 Query with powerful filtering options:
 
 ```graphql
@@ -3038,9 +3042,10 @@ The `groupId` and `path` parameters support:
 
 ### Pagination Notes
 
-- The `page` and `size` parameters work as expected
+- Explicit `page` and `size` must be positive safe integers, and `size` must fit the configured maximum (1000 by default). Invalid input produces `INVALID_PAGINATION` with status 400.
 - The `count` parameter is **ignored** for aggregation queries
 - Pagination is applied **after** grouping and sorting
+- Aggregation queries remain unbounded when pagination is omitted; they do not inherit the list default limit.
 
 ### MongoDB Translation
 
@@ -3483,6 +3488,16 @@ query {
 
 Simfinity.js supports built-in pagination with optional total count:
 
+Configure the process-wide maximum once during application startup:
+
+```javascript
+import * as simfinity from '@simtlix/simfinity-js';
+
+simfinity.configureQueryLimits({ maxPageSize: 500 });
+```
+
+The default maximum is **1000**. Explicit `page` and `size` must be positive safe integers, `size` must not exceed the maximum, and the computed skip must remain a safe integer. Invalid pagination throws `INVALID_PAGINATION` (400); invalid configuration throws `INVALID_QUERY_LIMITS` (400). With no pagination, a list returns at most `Math.min(100, maxPageSize)` records. Any positive safe-integer maximum is allowed, including values below 100. Call `configureQueryLimits()` to restore the default maximum. This deliberately tightens previously unbounded explicit page sizes; applications needing larger pages can configure an appropriate maximum. Unpaginated aggregate queries retain their existing behavior.
+
 ```graphql
 query {
   series(
@@ -3569,6 +3584,8 @@ See the [Plugins for Count in Extensions](#-plugins-for-count-in-extensions) sec
 ```
 
 ### 11. Sorting
+
+List sort fields must resolve to declared scalar or enum paths, and every term requires `ASC` or `DESC`. Root `id` and related `author.id` sort by their stored `_id` paths. Embedded paths remain dotted, and repeated sort terms through one relationship reuse the same lookup. Supply at least one term; invalid sort input is rejected before executing the list query.
 
 Simfinity.js supports sorting with multiple fields and sort orders:
 
