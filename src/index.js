@@ -48,39 +48,36 @@ const GraphQLJSON = new GraphQLScalarType({
   },
 });
 
-const RelationType = new GraphQLObjectType({
-  name: 'RelationType',
-  fields: () => ({
-    embedded: { type: GraphQLBoolean },
-    connectionField: { type: GraphQLString },
-    displayField: { type: GraphQLString },
-  }),
-});
+// getFields() supports both lazy and already materialized introspection fields.
+// Reuse the shared field on repeated module evaluation to preserve type identity.
+const introspectionFields = __Field.getFields();
+if (!introspectionFields.extensions) {
+  const RelationType = new GraphQLObjectType({
+    name: 'RelationType',
+    fields: () => ({
+      embedded: { type: GraphQLBoolean },
+      connectionField: { type: GraphQLString },
+      displayField: { type: GraphQLString },
+    }),
+  });
 
-const FieldExtensionsType = new GraphQLObjectType({
-  name: 'FieldExtensionsType',
-  fields: () => ({
-    relation: { type: RelationType },
-    stateMachine: { type: GraphQLBoolean },
-    readOnly: { type: GraphQLBoolean },
-  }),
-});
+  const FieldExtensionsType = new GraphQLObjectType({
+    name: 'FieldExtensionsType',
+    fields: () => ({
+      relation: { type: RelationType },
+      stateMachine: { type: GraphQLBoolean },
+      readOnly: { type: GraphQLBoolean },
+    }),
+  });
 
-const fieldTypeDefinitions = __Field._fields;
-
-const fixedFieldsWithExtensions = () => {
-  const originalFields = fieldTypeDefinitions();
-  originalFields.extensions = {
+  introspectionFields.extensions = {
     type: FieldExtensionsType,
     name: 'extensions',
     resolve: (obj) => obj.extensions,
     args: [],
     isDeprecated: false,
   };
-  return originalFields;
-};
-
-__Field._fields = fixedFieldsWithExtensions;
+}
 
 const typesDict = { types: {} };
 const waitingInputType = {};
@@ -265,17 +262,6 @@ const unwrapListAndNonNull = (type) => {
     return type.ofType;
   }
   return type;
-};
-
-const coerceDateValue = (fieldType, holder, key) => {
-  const typeName = getEffectiveTypeName(unwrapNonNull(fieldType));
-  if (!isGraphQLisoDate(typeName)) return;
-  const raw = holder[key];
-  if (Array.isArray(raw)) {
-    holder[key] = raw.map((v) => v && new Date(v));
-  } else {
-    holder[key] = raw && new Date(raw);
-  }
 };
 
 const isCustomValidatedScalar = (type) => type instanceof GraphQLScalarType && type.baseScalarType;
@@ -873,6 +859,9 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
   if (controller && controller.onUpdating) {
     await controller.onUpdating(objectId, materializedModel.modelArgs, session, context);
   }
+  if (linkToParent) {
+    linkToParent(materializedModel.modelArgs);
+  }
 
   const result = await Model.findByIdAndUpdate(
     objectId, materializedModel.modelArgs, { new: true },
@@ -925,6 +914,9 @@ const onSaveObject = async (Model, gqltype, controller, args, session, linkToPar
   if (controller && controller.onSaving) {
     await controller.onSaving(newObject, args, session, context);
   }
+  if (linkToParent) {
+    linkToParent(newObject);
+  }
 
   let result = await newObject.save();
   result = result.toObject();
@@ -973,35 +965,41 @@ const executeItemFunction = async (gqltype, collectionField, objectId, session,
   const argTypes = gqltype.getFields();
   const collectionGQLType = argTypes[collectionField].type.ofType;
   const { connectionField } = argTypes[collectionField].extensions.relation;
-
-  let operationFunction = async () => { };
-
-  switch (operationType) {
-    case operations.SAVE:
-      operationFunction = async (collectionItem) => {
-        await onSaveObject(typesDict.types[collectionGQLType.name].model, collectionGQLType,
-          typesDict.types[collectionGQLType.name].controller, collectionItem, session, (item) => {
-            item[connectionField] = objectId;
-          }, context);
-      };
-      break;
-    case operations.UPDATE:
-      operationFunction = async (collectionItem) => {
-        await onUpdateSubject(typesDict.types[collectionGQLType.name].model, collectionGQLType,
-          typesDict.types[collectionGQLType.name].controller, collectionItem, session, (item) => {
-            item[connectionField] = objectId;
-          }, context);
-      };
-      break;
-    case operations.DELETE:
-      operationFunction = async (collectionItem) => {
-        await onDelete(typesDict.types[collectionGQLType.name].model,
-          typesDict.types[collectionGQLType.name].controller, collectionItem, session, context);
-      };
-  }
+  const type = operationType === operations.UPDATE
+    ? typesDictForUpdate.types[collectionGQLType.name] : typesDict.types[collectionGQLType.name];
+  const linkToParent = (item) => {
+    item[connectionField] = objectId;
+    if (item.$unset) delete item.$unset[connectionField];
+    if (item.$set) delete item.$set[connectionField];
+  };
 
   for (const element of collectionFieldsList) {
-    await operationFunction(element);
+    const args = operationType === operations.DELETE ? { id: element } : { input: element };
+    await executeMiddleware({ type, args, operation: operationType, context });
+
+    if (operationType === operations.UPDATE || operationType === operations.DELETE) {
+      const id = operationType === operations.DELETE ? args.id : args.input.id;
+      const child = await type.model.findById(id).session(session).lean();
+      if (!child) {
+        throw new SimfinityError(`${collectionGQLType.name} ${id} is not valid`, 'NOT_VALID_ID', 404);
+      }
+      if (String(child[connectionField]) !== String(objectId)) {
+        throw new SimfinityError('Child does not belong to this parent', 'FORBIDDEN', 403);
+      }
+    }
+
+    switch (operationType) {
+      case operations.SAVE:
+        await onSaveObject(type.model, collectionGQLType, type.controller,
+          args.input, session, linkToParent, context);
+        break;
+      case operations.UPDATE:
+        await onUpdateSubject(type.model, collectionGQLType, type.controller,
+          args.input, session, linkToParent, context);
+        break;
+      case operations.DELETE:
+        await onDelete(type.model, type.controller, args.id, session, context);
+    }
   }
 };
 
@@ -1042,6 +1040,27 @@ const executeScope = async (params) => {
   }
 
   return scopeFunction({ type, args, operation, context });
+};
+
+const resolveById = async (type, args, context, requiredId) => {
+  await executeMiddleware({ type, args, operation: 'get_by_id', context });
+  if (!type.gqltype.extensions?.scope?.get_by_id) {
+    return requiredId
+      ? type.model.findOne({ $and: [{ _id: requiredId }, { _id: args.id }] })
+      : type.model.findById(args.id);
+  }
+
+  const queryArgs = { id: { operator: 'EQ', value: args.id } };
+  await executeScope({ type, args: queryArgs, operation: 'get_by_id', context });
+  const aggregateClauses = await buildQuery(queryArgs, type.gqltype);
+  if (requiredId) {
+    aggregateClauses.unshift({ $match: { _id: type.model.schema.path('_id').cast(requiredId) } });
+  }
+  if (aggregateClauses.length === 0) {
+    return type.model.findOne({ _id: args.id });
+  }
+  const results = await type.model.aggregate(aggregateClauses);
+  return results[0] || null;
 };
 
 const buildMutation = (name, includedMutationTypes, includedCustomMutations) => {
@@ -1280,201 +1299,168 @@ const generateModel = (gqlType, onModelCreated, { createCollection = true } = {}
   return model;
 };
 
-const coerceIdArray = (value) => value.map((element) => {
-  if (element === null || element === undefined) {
-    throw new SimfinityError('ID value cannot be null in collection filter', 'INVALID_FILTER_VALUE', 400);
-  }
-  return new mongoose.Types.ObjectId(element);
-});
+const filterError = (message, code = 'INVALID_FILTER_VALUE') => new SimfinityError(message, code, 400);
 
-const buildMatchesClause = (fieldname, operator, value) => {
-  const isIdField = fieldname.endsWith('_id');
-  const op = operator || 'EQ';
-
-  if (op === 'EQ') {
-    return { [fieldname]: isIdField ? new mongoose.Types.ObjectId(value) : value };
-  }
-  if (op === 'IN' || op === 'NIN') {
-    if (!Array.isArray(value)) {
-      throw new SimfinityError(`${op} requires an array value for ${fieldname}`, 'INVALID_FILTER_VALUE', 400);
-    }
-    const coerced = isIdField ? coerceIdArray(value) : value;
-    return { [fieldname]: { [op === 'IN' ? '$in' : '$nin']: coerced } };
-  }
-  const builder = OP_TO_MONGO[op];
-  return builder ? { [fieldname]: builder(value) } : {};
+const queryNamedType = (type) => {
+  let result = type;
+  while (result instanceof GraphQLList || result instanceof GraphQLNonNull) result = result.ofType;
+  return result;
 };
 
-const topLevelRelationLookup = (qlField, fieldType, fieldName) => {
-  const { collectionName } = typesDict.types[fieldType.name].model.collection;
-  const connField = qlField.extensions?.relation?.connectionField || fieldName;
-  const isList = qlField.type instanceof GraphQLList;
-  return buildRelationLookup({
-    collectionName,
-    localField: isList ? '_id' : connField,
-    foreignField: isList ? connField : '_id',
-    alias: fieldName,
-  });
-};
-
-const nestedRelationLookup = (pathField, pathFieldType, currentPath, aliasPath, pathFieldName) => {
-  const { collectionName } = typesDict.types[pathFieldType.name].model.collection;
-  const connField = pathField.extensions?.relation?.connectionField || pathFieldName;
-  const isList = pathField.type instanceof GraphQLList;
-  return buildRelationLookup({
-    collectionName,
-    localField: isList ? `${currentPath}._id` : `${currentPath}.${connField}`,
-    foreignField: isList ? connField : '_id',
-    alias: aliasPath,
-  });
-};
-
-const buildAggregationsForSort = (filterField, qlField, fieldName) => {
+// Resolve GraphQL paths and storage paths together; supplied models own ID casting.
+const resolveQueryPath = (gqltype, path) => {
+  assertValidFilterPath(path);
+  const parts = path.split('.');
+  let currentType = gqltype;
+  let currentModel = typesDict.types[gqltype.name]?.model;
+  let mongoPath = '';
+  let schemaPath = '';
   const aggregateClauses = {};
-  const fieldType = unwrapListAndNonNull(qlField.type);
 
-  if (!(fieldType instanceof GraphQLObjectType || isNonNullOfType(fieldType, GraphQLObjectType))) {
-    return aggregateClauses;
-  }
-
-  if (!Array.isArray(filterField?.terms) || filterField.terms.length === 0) {
-    return aggregateClauses;
-  }
-
-  const resolvedFieldType = unwrapNonNull(fieldType);
-
-  filterField.terms.forEach((term) => {
-    assertValidFilterPath(term.path);
-    if (qlField.extensions?.relation && !qlField.extensions.relation.embedded
-      && !aggregateClauses[fieldName]) {
-      aggregateClauses[fieldName] = topLevelRelationLookup(qlField, resolvedFieldType, fieldName);
-    }
-
-    let currentGQLPathFieldType = unwrapListAndNonNull(qlField.type);
-    let aliasPath = fieldName;
-    let embeddedPath = '';
-
-    term.path.split('.').forEach((pathFieldName) => {
-      const pathField = currentGQLPathFieldType.getFields()[pathFieldName];
-      if (pathField.type instanceof GraphQLObjectType
-        || pathField.type instanceof GraphQLList
-        || isNonNullOfType(pathField.type, GraphQLObjectType)) {
-        const pathFieldType = unwrapListAndNonNull(pathField.type);
-        currentGQLPathFieldType = pathFieldType;
-
-        if (pathField.extensions?.relation && !pathField.extensions.relation.embedded) {
-          const currentPath = aliasPath + (embeddedPath !== '' ? `.${embeddedPath}` : '');
-          aliasPath += (embeddedPath !== '' ? `_${embeddedPath}_` : '_') + pathFieldName;
-          embeddedPath = '';
-
-          if (!aggregateClauses[aliasPath]) {
-            aggregateClauses[aliasPath] = nestedRelationLookup(
-              pathField, pathFieldType, currentPath, aliasPath, pathFieldName,
-            );
-          }
-        } else {
-          embeddedPath = embeddedPath === '' ? pathFieldName : `${embeddedPath}.${pathFieldName}`;
-        }
+  for (const [index, part] of parts.entries()) {
+    const field = Object.hasOwn(currentType.getFields(), part) ? currentType.getFields()[part] : null;
+    if (!field) throw filterError(`Unknown query field: ${path}`, 'INVALID_FILTER_FIELD');
+    const fieldType = queryNamedType(field.type);
+    const relation = field.extensions?.relation;
+    if (fieldType instanceof GraphQLObjectType) {
+      if (index === parts.length - 1) throw filterError(`Query path must end in a scalar field: ${path}`, 'INVALID_FILTER_PATH');
+      if (!relation || relation.embedded) {
+        mongoPath = mongoPath ? `${mongoPath}.${part}` : part;
+        schemaPath = schemaPath ? `${schemaPath}.${part}` : part;
+      } else {
+        const relatedModel = typesDict.types[fieldType.name]?.model;
+        if (!relatedModel) throw filterError(`Related model is not available for ${path}`, 'INVALID_FILTER_PATH');
+        const isList = unwrapNonNull(field.type) instanceof GraphQLList;
+        const connField = relation.connectionField || part;
+        const localLeaf = isList ? '_id' : connField;
+        const alias = mongoPath ? `${mongoPath.replaceAll('.', '_')}_${part}` : part;
+        aggregateClauses[alias] = buildRelationLookup({
+          collectionName: relatedModel.collection.collectionName,
+          localField: mongoPath ? `${mongoPath}.${localLeaf}` : localLeaf,
+          foreignField: isList ? connField : '_id',
+          alias,
+        });
+        mongoPath = alias;
+        schemaPath = '';
+        currentModel = relatedModel;
       }
-    });
-  });
-  return aggregateClauses;
+      currentType = fieldType;
+    } else {
+      if (index !== parts.length - 1) throw filterError(`Cannot traverse scalar field in ${path}`, 'INVALID_FILTER_PATH');
+      const leaf = part === 'id' ? '_id' : part;
+      const storagePath = schemaPath ? `${schemaPath}.${leaf}` : leaf;
+      return {
+        mongoPath: mongoPath ? `${mongoPath}.${leaf}` : leaf,
+        schemaType: currentModel?.schema?.path(storagePath),
+        fieldType,
+        storesStateName: part === 'state' && !!typesDict.types[currentType.name]?.stateMachine,
+        aggregateClauses,
+      };
+    }
+  }
+  throw filterError(`Invalid query path: ${path}`, 'INVALID_FILTER_PATH');
 };
 
-const buildQueryTerms = async (filterField, qlField, fieldName) => {
+const castFilterValue = (value, resolved) => {
+  if (value === null) return null;
+  if (value === undefined || Array.isArray(value)
+    || (typeof value === 'object' && !(value instanceof Date) && !(value instanceof mongoose.Types.ObjectId))) {
+    throw filterError(`Expected a scalar value for ${resolved.mongoPath}`);
+  }
+  try {
+    const schemaType = resolved.schemaType?.caster || resolved.schemaType;
+    const scalar = resolved.fieldType;
+    if (scalar === GraphQLID && typeof value !== 'string' && typeof value !== 'number'
+      && !(value instanceof mongoose.Types.ObjectId)) throw new Error('Invalid ID');
+    // ID representation is a persistence concern, including String/Number/custom _id schemas.
+    if (schemaType && (scalar === GraphQLID || resolved.mongoPath.endsWith('._id') || resolved.mongoPath === '_id'
+      || schemaType.instance === 'ObjectId')) return schemaType.cast(value);
+    const typeName = getEffectiveTypeName(scalar);
+    if (isGraphQLisoDate(typeName)) {
+      const date = value instanceof Date ? value : new Date(value);
+      if (Number.isNaN(date.getTime())) throw new Error('Invalid date');
+      return date;
+    }
+    if (scalar === GraphQLID && !schemaType) return new mongoose.Types.ObjectId(value);
+    if (scalar instanceof GraphQLEnumType) {
+      const entry = scalar.getValues().find((item) => item.name === value)
+        || scalar.getValues().find((item) => item.value === value);
+      if (!entry) throw new Error('Invalid enum value');
+      const stored = resolved.storesStateName ? entry.name : entry.value;
+      return schemaType ? schemaType.cast(stored) : stored;
+    }
+    const parsed = (scalar.baseScalarType || scalar).parseValue(value);
+    return schemaType ? schemaType.cast(parsed) : parsed;
+  } catch {
+    throw filterError(`Invalid value for ${resolved.mongoPath}`);
+  }
+};
+
+const buildMatchesClause = (resolved, operator, value) => {
+  const op = operator ?? 'EQ';
+  if (!QLOperator.getValues().some((entry) => entry.value === op)) {
+    throw filterError(`Unsupported filter operator: ${op}`, 'INVALID_FILTER_OPERATOR');
+  }
+  const collectionOperator = op === 'IN' || op === 'NIN' || op === 'BTW';
+  if (collectionOperator && (!Array.isArray(value) || (op === 'BTW' && value.length !== 2))) {
+    throw filterError(`${op} requires ${op === 'BTW' ? 'exactly two values' : 'an array value'}`);
+  }
+  if (op === 'LIKE' && (typeof value !== 'string' || getEffectiveTypeName(resolved.fieldType) !== 'String')) {
+    throw filterError('LIKE requires a string field and string value');
+  }
+  if (value === null && op !== 'EQ' && op !== 'NE') throw filterError(`${op} does not accept null`);
+  const cast = (item) => {
+    if (item === null && collectionOperator) throw filterError(`${op} does not accept null elements`);
+    return castFilterValue(item, resolved);
+  };
+  const coerced = collectionOperator ? value.map(cast) : op === 'LIKE' ? value : cast(value);
+  if (op === 'EQ') return { [resolved.mongoPath]: coerced };
+  if (op === 'IN' || op === 'NIN') return { [resolved.mongoPath]: { [op === 'IN' ? '$in' : '$nin']: coerced } };
+  return { [resolved.mongoPath]: OP_TO_MONGO[op](coerced) };
+};
+
+const buildQueryTerms = async (filterField, qlField, fieldName, gqltype) => {
   const aggregateClauses = {};
-  const matchesClauses = {};
-  const fieldType = unwrapListAndNonNull(qlField.type);
-
-  if (filterField == null) {
-    return { aggregateClauses, matchesClauses };
+  const matchesClauses = [];
+  if (!qlField) throw filterError(`Unknown filter field: ${fieldName}`, 'INVALID_FILTER_FIELD');
+  if (filterField == null) return { aggregateClauses, matchesClauses };
+  if (typeof filterField !== 'object' || Array.isArray(filterField)) throw filterError(`Invalid filter for ${fieldName}`);
+  const isObject = queryNamedType(qlField.type) instanceof GraphQLObjectType;
+  if (isObject && (!Array.isArray(filterField.terms) || filterField.terms.length === 0)) {
+    throw filterError(`Filter on ${fieldName} requires non-empty terms`, 'MISSING_FILTER_PATH');
   }
-
-  if (fieldType instanceof GraphQLScalarType
-    || isNonNullOfType(fieldType, GraphQLScalarType)
-    || fieldType instanceof GraphQLEnumType
-    || isNonNullOfType(fieldType, GraphQLEnumType)) {
-    coerceDateValue(fieldType, filterField, 'value');
-    matchesClauses[fieldName] = buildMatchesClause(fieldName === 'id' ? '_id' : fieldName, filterField.operator, filterField.value);
-    return { aggregateClauses, matchesClauses };
+  const terms = isObject ? filterField.terms : [filterField];
+  for (const term of terms) {
+    if (!term || typeof term !== 'object' || Array.isArray(term)) throw filterError(`Invalid term for ${fieldName}`);
+    if (isObject) assertValidFilterPath(term.path);
+    const resolved = resolveQueryPath(gqltype, isObject ? `${fieldName}.${term.path}` : fieldName);
+    Object.assign(aggregateClauses, resolved.aggregateClauses);
+    matchesClauses.push(buildMatchesClause(resolved, term.operator, term.value));
   }
-
-  if (!(fieldType instanceof GraphQLObjectType || isNonNullOfType(fieldType, GraphQLObjectType))) {
-    return { aggregateClauses, matchesClauses };
-  }
-
-  if (!Array.isArray(filterField.terms) || filterField.terms.length === 0) {
-    return { aggregateClauses, matchesClauses };
-  }
-
-  const resolvedFieldType = unwrapNonNull(fieldType);
-
-  filterField.terms.forEach((term) => {
-    assertValidFilterPath(term.path);
-    if (qlField.extensions?.relation && !qlField.extensions.relation.embedded
-      && !aggregateClauses[fieldName]) {
-      aggregateClauses[fieldName] = topLevelRelationLookup(qlField, resolvedFieldType, fieldName);
-    }
-
-    if (term.path.indexOf('.') < 0) {
-      const { type: leafType } = resolvedFieldType.getFields()[term.path];
-      coerceDateValue(leafType, term, 'value');
-      const leafName = resolvedFieldType.getFields()[term.path].name === 'id' ? '_id' : term.path;
-      matchesClauses[fieldName] = buildMatchesClause(`${fieldName}.${leafName}`, term.operator, term.value);
-      return;
-    }
-
-    let currentGQLPathFieldType = unwrapListAndNonNull(qlField.type);
-    let aliasPath = fieldName;
-    let embeddedPath = '';
-
-    term.path.split('.').forEach((pathFieldName) => {
-      const pathField = currentGQLPathFieldType.getFields()[pathFieldName];
-      if (pathField.type instanceof GraphQLScalarType
-        || isNonNullOfType(pathField.type, GraphQLScalarType)) {
-        coerceDateValue(pathField.type, term, 'value');
-        const leafName = pathFieldName === 'id' ? '_id' : pathFieldName;
-        const mongoPath = aliasPath + (embeddedPath !== '' ? `.${embeddedPath}.` : '.') + leafName;
-        matchesClauses[`${aliasPath}_${pathFieldName}`] = buildMatchesClause(mongoPath, term.operator, term.value);
-        embeddedPath = '';
-      } else if (pathField.type instanceof GraphQLObjectType
-        || pathField.type instanceof GraphQLList
-        || isNonNullOfType(pathField.type, GraphQLObjectType)) {
-        const pathFieldType = unwrapListAndNonNull(pathField.type);
-        currentGQLPathFieldType = pathFieldType;
-
-        if (pathField.extensions?.relation && !pathField.extensions.relation.embedded) {
-          const currentPath = aliasPath + (embeddedPath !== '' ? `.${embeddedPath}` : '');
-          aliasPath += (embeddedPath !== '' ? `_${embeddedPath}_` : '_') + pathFieldName;
-          embeddedPath = '';
-
-          if (!aggregateClauses[aliasPath]) {
-            aggregateClauses[aliasPath] = nestedRelationLookup(
-              pathField, pathFieldType, currentPath, aliasPath, pathFieldName,
-            );
-          }
-        } else {
-          embeddedPath = embeddedPath === '' ? pathFieldName : `${embeddedPath}.${pathFieldName}`;
-        }
-      }
-    });
-  });
-
   return { aggregateClauses, matchesClauses };
 };
 
 const MAX_FILTER_GROUP_DEPTH = 5;
 
+const validateLogicalLists = (group) => {
+  if (!group || typeof group !== 'object' || Array.isArray(group)) throw filterError('Expected a filter group object');
+  for (const key of ['AND', 'OR', 'conditions']) {
+    if (group[key] != null && !Array.isArray(group[key])) throw filterError(`${key} requires an array`);
+  }
+};
+
 const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, aggregationsIncluded, depth = 0) => {
   if (depth > MAX_FILTER_GROUP_DEPTH) {
     throw new SimfinityError('Filter nesting too deep', 'FILTER_DEPTH_EXCEEDED', 400);
   }
+  validateLogicalLists(filterGroup);
 
   const parts = [];
   const fields = gqltype.getFields();
 
   if (filterGroup.conditions?.length > 0) {
     for (const rawCondition of filterGroup.conditions) {
+      if (!rawCondition || typeof rawCondition.field !== 'string') throw filterError('Filter conditions require a field');
       const condition = normalizeFilterCondition(rawCondition);
       const qlField = fields[condition.field];
       if (!qlField) {
@@ -1493,10 +1479,11 @@ const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, agg
           terms: [{ path: condition.path, operator: condition.operator, value: condition.value }],
         };
       } else {
+        if (condition.path != null && condition.path !== '') throw filterError(`Cannot traverse scalar field ${condition.field}`, 'INVALID_FILTER_PATH');
         filterInput = { operator: condition.operator, value: condition.value };
       }
 
-      const result = await buildQueryTerms(filterInput, qlField, condition.field);
+      const result = await buildQueryTerms(filterInput, qlField, condition.field, gqltype);
       if (!result) continue;
 
       for (const [prop, aggregate] of Object.entries(result.aggregateClauses)) {
@@ -1541,23 +1528,31 @@ const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, agg
 const RESERVED_QUERY_KEYS = new Set(['pagination', 'sort', 'AND', 'OR', 'aggregation']);
 
 const collectFiltersAndLookups = async (input, gqltype, aggregateClauses, aggregationsIncluded) => {
+  validateLogicalLists(input);
   const flatMatchConditions = {};
+  const repeatedConditions = [];
   let hasFlat = false;
   const fields = gqltype.getFields();
 
   for (const [key, filterField] of Object.entries(input)) {
     if (RESERVED_QUERY_KEYS.has(key)) continue;
     const qlField = fields[key];
-    const result = await buildQueryTerms(filterField, qlField, key);
+    const result = await buildQueryTerms(filterField, qlField, key, gqltype);
     if (!result) continue;
 
     for (const [prop, aggregate] of Object.entries(result.aggregateClauses)) {
-      aggregateClauses.push(aggregate.lookup, aggregate.unwind);
-      aggregationsIncluded[prop] = true;
+      if (!aggregationsIncluded[prop]) {
+        aggregateClauses.push(aggregate.lookup, aggregate.unwind);
+        aggregationsIncluded[prop] = true;
+      }
     }
     for (const matchClause of Object.values(result.matchesClauses)) {
       for (const [matchKey, match] of Object.entries(matchClause)) {
-        flatMatchConditions[matchKey] = match;
+        if (Object.hasOwn(flatMatchConditions, matchKey)) {
+          repeatedConditions.push({ [matchKey]: match });
+        } else {
+          flatMatchConditions[matchKey] = match;
+        }
         hasFlat = true;
       }
     }
@@ -1565,6 +1560,7 @@ const collectFiltersAndLookups = async (input, gqltype, aggregateClauses, aggreg
 
   const topLevelAndParts = [];
   if (hasFlat) topLevelAndParts.push(flatMatchConditions);
+  topLevelAndParts.push(...repeatedConditions);
 
   if (input.AND?.length > 0) {
     for (const group of input.AND) {
@@ -1591,38 +1587,59 @@ const collectFiltersAndLookups = async (input, gqltype, aggregateClauses, aggreg
   return null;
 };
 
+const validateSortTerms = (sort) => {
+  if (!Array.isArray(sort?.terms) || sort.terms.length === 0) throw filterError('Sort requires non-empty terms', 'INVALID_SORT');
+  for (const term of sort.terms) {
+    if (!term || !['ASC', 'DESC'].includes(term.order)) throw filterError('Sort order must be ASC or DESC', 'INVALID_SORT');
+    assertValidFilterPath(term.field);
+  }
+  return sort.terms;
+};
+
 const buildSortClause = (sortTerms, gqltype, aggregateClauses, aggregationsIncluded) => {
   const sortExpressions = {};
-  const fields = gqltype.getFields();
-
-  sortTerms.forEach((sort) => {
-    assertValidFilterPath(sort.field);
-    let fixedSortField = sort.field;
-    if (sort.field.indexOf('.') >= 0) {
-      const sortParts = sort.field.split('.');
-      fixedSortField = sortParts[0];
-      for (let i = 1; i < sortParts.length - 1; i++) {
-        fixedSortField += `_${sortParts[i]}`;
-      }
-      fixedSortField += `.${sortParts[sortParts.length - 1]}`;
-      const qlField = fields[sortParts[0]];
-      const path = sort.field.slice(sort.field.indexOf('.') + 1);
-      const sortAggregations = buildAggregationsForSort({ terms: [{ path }] }, qlField, sortParts[0]);
-      for (const [prop, aggregate] of Object.entries(sortAggregations)) {
-        if (!aggregationsIncluded[prop]) {
-          aggregateClauses.push(aggregate.lookup, aggregate.unwind);
-        }
+  for (const sort of sortTerms) {
+    const resolved = resolveQueryPath(gqltype, sort.field);
+    for (const [alias, aggregate] of Object.entries(resolved.aggregateClauses)) {
+      if (!aggregationsIncluded[alias]) {
+        aggregateClauses.push(aggregate.lookup, aggregate.unwind);
+        aggregationsIncluded[alias] = true;
       }
     }
-    sortExpressions[fixedSortField] = sort.order === 'ASC' ? 1 : -1;
-  });
-
+    sortExpressions[resolved.mongoPath] = sort.order === 'ASC' ? 1 : -1;
+  }
   return { $sort: sortExpressions };
+};
+
+let queryMaxPageSize = 1000;
+
+export const configureQueryLimits = (options = {}) => {
+  if (!options || typeof options !== 'object' || Array.isArray(options)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(options))) {
+    throw new SimfinityError('Query limit options must be a plain object', 'INVALID_QUERY_LIMITS', 400);
+  }
+  const { maxPageSize = 1000 } = options;
+  if (!Number.isSafeInteger(maxPageSize) || maxPageSize < 1) {
+    throw new SimfinityError('maxPageSize must be a positive safe integer', 'INVALID_QUERY_LIMITS', 400);
+  }
+  queryMaxPageSize = maxPageSize;
+};
+
+const paginationStages = (pagination, withDefault) => {
+  if (pagination == null) return withDefault ? [{ $skip: 0 }, { $limit: Math.min(100, queryMaxPageSize) }] : [];
+  const { page, size } = pagination;
+  const skip = size * (page - 1);
+  if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(size) || size < 1
+    || size > queryMaxPageSize || !Number.isSafeInteger(skip)) {
+    throw new SimfinityError(`Pagination requires positive safe integers and size <= ${queryMaxPageSize}`, 'INVALID_PAGINATION', 400);
+  }
+  return [{ $skip: skip }, { $limit: size }];
 };
 
 const buildQuery = async (input, gqltype, isCount) => {
   const aggregateClauses = [];
   const aggregationsIncluded = {};
+  const paging = paginationStages(input.pagination, true);
 
   const matchStage = await collectFiltersAndLookups(input, gqltype, aggregateClauses, aggregationsIncluded);
   if (matchStage) aggregateClauses.push(matchStage);
@@ -1633,16 +1650,10 @@ const buildQuery = async (input, gqltype, isCount) => {
   }
 
   if (input.sort) {
-    aggregateClauses.push(buildSortClause(input.sort.terms, gqltype, aggregateClauses, aggregationsIncluded));
+    aggregateClauses.push(buildSortClause(validateSortTerms(input.sort), gqltype, aggregateClauses, aggregationsIncluded));
   }
 
-  let skipClause = { $skip: 0 };
-  let limitClause = { $limit: 100 };
-  if (input.pagination?.page && input.pagination?.size) {
-    skipClause = { $skip: input.pagination.size * (input.pagination.page - 1) };
-    limitClause = { $limit: input.pagination.size };
-  }
-  aggregateClauses.push(skipClause, limitClause);
+  aggregateClauses.push(...paging);
 
   return aggregateClauses;
 };
@@ -1700,6 +1711,7 @@ const appendLookupPairs = (aggregateClauses, aggregationsIncluded, lookupPairs) 
 const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
   const aggregateClauses = [];
   const aggregationsIncluded = {};
+  const paging = paginationStages(input.pagination, false);
 
   const matchStage = await collectFiltersAndLookups(input, gqltype, aggregateClauses, aggregationsIncluded);
   if (matchStage) aggregateClauses.push(matchStage);
@@ -1731,7 +1743,7 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
     },
   });
 
-  const sortTerms = input.sort?.terms?.length > 0 ? input.sort.terms : null;
+  const sortTerms = input.sort ? validateSortTerms(input.sort) : null;
   if (sortTerms) {
     const factNames = facts.map((fact) => fact.factName);
     const sortObject = {};
@@ -1745,10 +1757,7 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
     aggregateClauses.push({ $sort: { groupId: 1 } });
   }
 
-  if (input.pagination?.page && input.pagination?.size) {
-    const skip = input.pagination.size * (input.pagination.page - 1);
-    aggregateClauses.push({ $skip: skip }, { $limit: input.pagination.size });
-  }
+  aggregateClauses.push(...paging);
 
   return aggregateClauses;
 };
@@ -1770,26 +1779,7 @@ const buildRootQuery = (name, includedTypes) => {
           type: type.gqltype,
           args: { id: { type: GraphQLID } },
           async resolve(parent, args, context) {
-            const params = {
-              type, args, operation: 'get_by_id', context,
-            };
-            await executeMiddleware(params);
-
-            const hasScope = type.gqltype.extensions?.scope?.get_by_id;
-            if (!hasScope) {
-              return type.model.findById(args.id);
-            }
-
-            const queryArgs = { id: { operator: 'EQ', value: args.id } };
-            await executeScope({
-              type, args: queryArgs, operation: 'get_by_id', context,
-            });
-            const aggregateClauses = await buildQuery(queryArgs, type.gqltype);
-            if (aggregateClauses.length === 0) {
-              return type.model.findOne({ _id: args.id });
-            }
-            const results = await type.model.aggregate(aggregateClauses);
-            return results[0] || null;
+            return resolveById(type, args, context);
           },
         };
 
@@ -1922,14 +1912,19 @@ const autoGenerateResolvers = (gqltype) => {
       delete argsObject[connectionField];
 
       fieldEntry.args = formatArgs(Object.entries(argsObject));
-      fieldEntry.resolve = async (parent, args) => {
+      fieldEntry.resolve = async (parent, args, context) => {
         if (!relatedTypeInfo || !relatedTypeInfo.model) {
           throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
         }
-        args[connectionField] = {
-          terms: [{ path: 'id', operator: 'EQ', value: parent.id || parent._id }],
-        };
+        const params = { type: relatedTypeInfo, args, operation: 'find', context };
+        await executeMiddleware(params);
+        await executeScope(params);
         const aggregateClauses = await buildQuery(args, relatedTypeInfo.gqltype);
+        const parentId = parent.id || parent._id;
+        const connectionPath = relatedTypeInfo.model.schema.path(connectionField);
+        aggregateClauses.unshift({
+          $match: { [connectionField]: connectionPath ? connectionPath.cast(parentId) : parentId },
+        });
         return relatedTypeInfo.model.aggregate(aggregateClauses);
       };
     } else if (fieldEntry.type instanceof GraphQLObjectType
@@ -1937,13 +1932,14 @@ const autoGenerateResolvers = (gqltype) => {
       const relatedType = unwrapNonNull(fieldEntry.type);
       const connectionField = relation.connectionField || fieldName;
 
-      fieldEntry.resolve = async (parent) => {
+      fieldEntry.resolve = async (parent, args, context) => {
         const relatedTypeInfo = typesDict.types[relatedType.name];
         if (!relatedTypeInfo || !relatedTypeInfo.model) {
           throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
         }
         const relatedId = parent[connectionField] || parent[fieldName];
-        return relatedId ? relatedTypeInfo.model.findById(relatedId) : null;
+        const id = relatedId?._id || relatedId;
+        return id ? resolveById(relatedTypeInfo, { id: String(id) }, context, id) : null;
       };
     }
   }

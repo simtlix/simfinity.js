@@ -76,10 +76,14 @@ The helper checks the error instance it receives. If your server wraps an applic
 | `VALIDATION_ERROR` | A declarative field validator rejects a value. |
 | `INPUT_TYPE_UNRESOLVED` | Input generation cannot resolve registered relationships or dependencies. |
 | `MISSING_RELATION_EXTENSION` | An object field used during materialization lacks relationship metadata. |
-| `INVALID_FILTER_FIELD` | A logical filter condition names an unknown field. |
+| `INVALID_FILTER_FIELD` | A filter or list-sort path names an unknown field. |
 | `INVALID_FILTER_PATH` | A filter path has an invalid structure or segment. |
 | `MISSING_FILTER_PATH` | A logical condition on an object field omits its related field path. |
-| `INVALID_FILTER_VALUE` | An array-valued filter has an invalid value shape. |
+| `INVALID_FILTER_VALUE` | A filter scalar, list, or logical group has an invalid shape or value. |
+| `INVALID_FILTER_OPERATOR` | A filter uses an unsupported operator. |
+| `INVALID_SORT` | A sort has no terms or an unsupported direction. |
+| `INVALID_PAGINATION` | Page, size, computed skip, or maximum page-size validation fails. |
+| `INVALID_QUERY_LIMITS` | The configured maximum page size is not a positive safe integer. |
 | `FILTER_DEPTH_EXCEEDED` | A recursive filter group exceeds the supported nesting limit. |
 | `NOT_VALID_ID` | A state action targets a record that does not exist. |
 | `BAD_REQUEST` | A state action is not allowed from the record's current state. |

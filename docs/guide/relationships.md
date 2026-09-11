@@ -198,6 +198,8 @@ query {
 
 Referenced collections receive scalar filters, relationship filters, logical groups, sorting, and pagination. Filtering inside `seasons(...)` changes the returned children; it does not exclude the parent serie. To filter the parent by its children, put a relationship filter on the root `series` query, as shown in [queries](./queries#filter-through-a-relationship).
 
+Generated referenced-object resolvers run the target type's `get_by_id` middleware and [query scope](./query-scope); generated collection resolvers run its `find` middleware and scope. They await callbacks and pass the request context. The original referenced ID or parent connection remains required even when middleware or scope changes filters. Scoped-out single records return `null`, and scoped-out children are omitted before pagination.
+
 ## Update a collection
 
 ```graphql
@@ -216,10 +218,10 @@ mutation EditSeasons($serieId: ID!, $seasonId: ID!, $removedId: ID!) {
 }
 ```
 
-`added` creates records, `updated` changes records by ID, and `deleted` deletes child documents. These changes share the parent mutation's transaction.
+`added` creates records, `updated` changes records by ID, and `deleted` deletes child documents. These changes share the parent mutation's transaction. Each child runs global middleware for the target type with the same request context and root argument shape: `save` and `update` receive `{ input }`; `delete` receives `{ id }`.
 
-::: warning Validate access to child IDs
-The generated collection mutation handlers operate on the IDs you supply. They do not establish an ownership boundary for your application. Validate child ownership before updates and deletes when callers can submit arbitrary IDs. See [authorization](./authorization) and [controllers](./controllers).
-:::
+After middleware, updated and deleted children are read in the transaction and must already belong to the current parent. A missing child raises `NOT_VALID_ID` (404); a child owned by another parent raises `FORBIDDEN` (403). Nested updates do not reparent foreign children. The required parent link is retained after child pre-write hooks, including ordinary field assignments and `$set`/`$unset` updates. A rejection aborts all changes in the parent mutation.
+
+Parent ownership does not replace application permissions. Use child operation middleware or [controller checks](./controllers) to authorize writes; query scope is a read restriction. Root mutation permissions in the [authorization plugin](./authorization) do not automatically authorize nested child mutation inputs.
 
 Deleting a parent does not automatically cascade through referenced collections. Implement the required deletion policy in your application. Existing field resolvers are preserved; Simfinity only generates a relation resolver when the field has none.

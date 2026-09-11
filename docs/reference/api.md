@@ -24,6 +24,15 @@ The package also provides named exports and TypeScript declarations. Schema regi
 | Work with its model | [getModel](#getmodel) | Registered Mongoose model |
 | Inspect a create input | [getInputType](#getinputtype) | Generated `GraphQLInputObjectType` |
 | Create in an owned or existing transaction | [saveObject](#saveobject) | Saved object |
+| Set the maximum query page size | [configureQueryLimits](#configurequerylimits) | Process-wide configuration |
+
+## configureQueryLimits
+
+```javascript
+simfinity.configureQueryLimits({ maxPageSize: 500 });
+```
+
+Sets the process-wide maximum for explicit list and aggregate page sizes. Configure it once at startup. `maxPageSize` must be a positive safe integer and defaults to 1000; calling without arguments resets that default. Invalid configuration throws `INVALID_QUERY_LIMITS` (400). Unpaged lists use `Math.min(100, maxPageSize)` and unpaged aggregate queries remain unbounded. See [pagination](/guide/queries#pagination-and-total-count) for request validation and compatibility details.
 
 ## connect
 

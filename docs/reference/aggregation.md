@@ -98,4 +98,6 @@ Sort terms can use `groupId` or a declared `factName`. Multiple terms are applie
 
 Pagination applies after grouping and sorting. `pagination.count` does not compute the number of groups and does not add a total count to the response.
 
+When pagination is supplied, `page` and `size` must be positive safe integers, the computed skip must be safe, and `size` must not exceed the process-wide `configureQueryLimits({ maxPageSize })` setting (1000 by default). Invalid pagination throws `INVALID_PAGINATION` (400). Omitting pagination keeps aggregate results unbounded. All relationship filter terms, including repeated bounds on one path, remain ANDed before grouping; scalar value and path validation follows the [query input rules](/guide/queries#operators).
+
 When using default-deny [authorization](/guide/authorization), grant access to both the root aggregation field and the returned `QLTypeAggregationResult` fields.

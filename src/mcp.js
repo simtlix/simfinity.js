@@ -2,6 +2,7 @@ import {
   graphql,
   getNamedType,
   astFromValue,
+  print,
   valueFromASTUntyped,
   GraphQLNonNull,
   GraphQLList,
@@ -24,7 +25,7 @@ const TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/;
  * `description`, so this map supplies one only when none is present. Keys are
  * either a type name (`QLFilter`) or a `TypeName.fieldName` pair.
  */
-const SIMFINITY_FILTER_DOCS = {
+const SIMFINITY_FILTER_DOCS = Object.assign(Object.create(null), {
   QLOperator: 'Comparison operator: EQ (equals), NE (not equals), LT, LTE, GT, GTE, IN (value in list), NIN (value not in list), BTW (between, value is [min, max]), LIKE (substring match).',
   QLValue: 'Filter value. Accepts a scalar, or an array for the IN, NIN and BTW operators.',
   QLFilter: 'Single-field filter: a comparison operator plus the value to compare against.',
@@ -45,20 +46,20 @@ const SIMFINITY_FILTER_DOCS = {
   QLTypeAggregationExpression: 'Aggregation specification: a groupId field path to group by and a list of facts to compute.',
   QLTypeAggregationFact: 'A single aggregation fact: the operation, an output factName and the field path to aggregate.',
   IdInputType: 'Reference to a related entity by its id.',
-};
+});
 
 /**
  * Curated fallback documentation for well-known operation-level arguments that
  * Simfinity injects into list and aggregate queries.
  */
-const SIMFINITY_ARG_DOCS = {
+const SIMFINITY_ARG_DOCS = Object.assign(Object.create(null), {
   id: 'Unique identifier (id) of the record.',
   pagination: 'Pagination: page (1-based), size, and an optional count flag (on list queries, the total is delivered in the tool result `_meta.count`).',
   sort: 'Sort results by one or more fields (terms of { field, order: ASC | DESC }).',
   AND: 'Logical AND group(s): every nested condition or group must match.',
   OR: 'Logical OR group(s): at least one nested condition or group must match.',
   aggregation: 'Aggregation spec: groupId to group by and facts [{ operation: SUM | COUNT | AVG | MIN | MAX, factName, path }].',
-};
+});
 
 /**
  * Resolve the JSON Schema primitive type for a GraphQL scalar. Custom validated
@@ -123,14 +124,15 @@ const externalDefaultValue = (value, type) => {
 
 /**
  * Make a JSON Schema fragment accept `null` in addition to its declared types.
- * GraphQL data contains `null` for every nullable position (missing optional
- * fields, get-by-id misses), so output schemas must allow it or validating MCP
- * clients reject perfectly valid `structuredContent`. Schemas without a `type`
- * keyword already accept null and pass through unchanged.
+ * Nullable GraphQL input and output positions allow explicit null. References
+ * need a null alternative; unconstrained opaque scalar schemas already accept it.
  * @param {Object} schema
  * @returns {Object}
  */
 const nullableSchema = (schema) => {
+  if (schema && schema.$ref) {
+    return { anyOf: [schema, { type: 'null' }] };
+  }
   if (!schema || !schema.type) {
     return schema;
   }
@@ -153,7 +155,7 @@ const nullableSchema = (schema) => {
  * @param {Object} defs
  */
 const ensureEnumDef = (type, defs) => {
-  if (defs[type.name]) {
+  if (Object.hasOwn(defs, type.name)) {
     return;
   }
   const def = {
@@ -178,7 +180,7 @@ const ensureEnumDef = (type, defs) => {
  * @param {Object} defs
  */
 const ensureInputDef = (type, defs) => {
-  if (defs[type.name]) {
+  if (Object.hasOwn(defs, type.name)) {
     return;
   }
   defs[type.name] = {};
@@ -222,26 +224,32 @@ const ensureInputDef = (type, defs) => {
  * @returns {{ schema: Object, isRequired: boolean }}
  */
 function typeToJSONSchema(type, defs) {
-  if (type instanceof GraphQLNonNull) {
-    const inner = typeToJSONSchema(type.ofType, defs);
-    return { schema: inner.schema, isRequired: true };
+  const isRequired = type instanceof GraphQLNonNull;
+  const schema = unwrappedInputTypeToSchema(isRequired ? type.ofType : type, defs);
+  if (isRequired && !schema.type && !schema.$ref) {
+    // Opaque scalars accept arbitrary JSON values, but NonNull still excludes null.
+    return { schema: { ...schema, not: { type: 'null' } }, isRequired };
   }
+  return { schema: isRequired ? schema : nullableSchema(schema), isRequired };
+}
+
+function unwrappedInputTypeToSchema(type, defs) {
   if (type instanceof GraphQLList) {
     const inner = typeToJSONSchema(type.ofType, defs);
-    return { schema: { type: 'array', items: inner.schema }, isRequired: false };
+    return { type: 'array', items: inner.schema };
   }
   if (type instanceof GraphQLScalarType) {
-    return { schema: scalarToJSONSchema(type), isRequired: false };
+    return scalarToJSONSchema(type);
   }
   if (type instanceof GraphQLEnumType) {
     ensureEnumDef(type, defs);
-    return { schema: { $ref: `#/$defs/${type.name}` }, isRequired: false };
+    return { $ref: `#/$defs/${type.name}` };
   }
   if (type instanceof GraphQLInputObjectType) {
     ensureInputDef(type, defs);
-    return { schema: { $ref: `#/$defs/${type.name}` }, isRequired: false };
+    return { $ref: `#/$defs/${type.name}` };
   }
-  return { schema: {}, isRequired: false };
+  return {};
 }
 
 const resolveArgDescription = (arg) => {
@@ -269,7 +277,7 @@ const resolveArgDescription = (arg) => {
  * @returns {Object} JSON Schema describing the tool input
  */
 export const graphqlArgsToJSONSchema = (field) => {
-  const defs = {};
+  const defs = Object.create(null);
   const properties = {};
   const required = [];
 
@@ -301,6 +309,14 @@ export const graphqlArgsToJSONSchema = (field) => {
 
 const hasRequiredArgs = (field) => (field.args || [])
   .some((arg) => arg.type instanceof GraphQLNonNull && arg.defaultValue === undefined);
+
+const hasSelectableId = (fields) => {
+  if (!fields.id || hasRequiredArgs(fields.id)) {
+    return false;
+  }
+  const type = getNamedType(fields.id.type);
+  return type instanceof GraphQLScalarType || type instanceof GraphQLEnumType;
+};
 
 /**
  * Auto-generate a GraphQL selection set string for a field's return type so MCP
@@ -345,7 +361,7 @@ const buildSelectionSet = (type, depth, includeId, visited = new Set()) => {
     }
   }
 
-  if (lines.length === 0 && includeId && fields.id && !hasRequiredArgs(fields.id)) {
+  if (lines.length === 0 && includeId && hasSelectableId(fields)) {
     lines.push('id');
   }
   if (lines.length === 0) {
@@ -439,7 +455,7 @@ function unwrappedReturnTypeToSchema(type, depth, includeId, visited) {
     }
   }
 
-  if (Object.keys(properties).length === 0 && includeId && fields.id && !hasRequiredArgs(fields.id)) {
+  if (Object.keys(properties).length === 0 && includeId && hasSelectableId(fields)) {
     properties.id = withDescription(
       returnTypeToSchema(fields.id.type, depth, includeId, nextVisited),
       fields.id.description,
@@ -485,7 +501,24 @@ const buildOutputSchema = (fieldName, field, selectionDepth, includeId) => ({
 const buildOperation = (kind, fieldName, field, selection) => {
   const args = field.args || [];
   const varDefs = args
-    .map((arg) => `$${arg.name}: ${arg.type.toString()}`)
+    .map((arg) => {
+      const declaration = `$${arg.name}: ${arg.type.toString()}`;
+      if (arg.defaultValue === undefined) {
+        return declaration;
+      }
+      try {
+        const defaultAST = astFromValue(arg.defaultValue, arg.type);
+        if (defaultAST) {
+          return `${declaration} = ${print(defaultAST)}`;
+        }
+      } catch {
+        // Opaque custom scalar defaults may have no literal representation.
+      }
+      // A nullable variable may feed a non-null argument with a location
+      // default. Omission uses that default; explicit null still fails coercion.
+      const variableType = arg.type instanceof GraphQLNonNull ? arg.type.ofType : arg.type;
+      return `$${arg.name}: ${variableType.toString()}`;
+    })
     .join(', ');
   const argUsage = args
     .map((arg) => `${arg.name}: $${arg.name}`)
@@ -683,6 +716,23 @@ const remoteTransportError = (message, code, extra = {}) => ({
   errors: [{ message, extensions: { code, ...extra } }],
 });
 
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const isGraphQLResponse = (body) => {
+  if (!isRecord(body)) {
+    return false;
+  }
+  const hasErrors = Object.hasOwn(body, 'errors');
+  if (hasErrors && (!Array.isArray(body.errors) || body.errors.length === 0
+    || !body.errors.every((error) => isRecord(error) && typeof error.message === 'string'))) {
+    return false;
+  }
+  if (Object.hasOwn(body, 'data') && body.data !== null && !isRecord(body.data)) {
+    return false;
+  }
+  return hasErrors || isRecord(body.data);
+};
+
 /**
  * Execute a GraphQL operation against a remote HTTP endpoint. Transport
  * failures (network errors, timeouts, non-2xx statuses, non-JSON bodies) are
@@ -719,14 +769,45 @@ const executeRemote = async (query, variables, execution, { signal, canRetry } =
       execution.timeoutMs ? AbortSignal.timeout(execution.timeoutMs) : undefined,
     ]);
 
-    let response;
     try {
-      response = await globalThis.fetch(execution.endpoint, {
+      const response = await globalThis.fetch(execution.endpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...(execution.headers || {}) },
         body: JSON.stringify({ query, variables }),
         signal: requestSignal,
       });
+
+      let body;
+      try {
+        body = await response.json();
+      } catch (err) {
+        // Reading the body is part of the request: aborts and broken streams
+        // must retain cancellation/retry semantics, even after headers arrive.
+        if ((requestSignal && requestSignal.aborted) || !(err instanceof SyntaxError)) {
+          throw err;
+        }
+        if (response.ok) {
+          return remoteTransportError('GraphQL endpoint returned a non-JSON response', 'MCP_REMOTE_INVALID_RESPONSE');
+        }
+      }
+
+      if (!response.ok) {
+        // Preserve real GraphQL errors from HTTP validation/coercion failures.
+        lastFailure = isGraphQLResponse(body) ? body : remoteTransportError(
+          `GraphQL endpoint responded with HTTP ${response.status}`,
+          'MCP_REMOTE_HTTP_ERROR',
+          { status: response.status },
+        );
+        if (response.status >= 500 || response.status === 429) {
+          continue;
+        }
+        return lastFailure;
+      }
+
+      if (!isGraphQLResponse(body)) {
+        return remoteTransportError('GraphQL endpoint returned an invalid GraphQL response payload', 'MCP_REMOTE_INVALID_RESPONSE');
+      }
+      return body;
     } catch (err) {
       if (signal && signal.aborted) {
         throw err;
@@ -735,41 +816,7 @@ const executeRemote = async (query, variables, execution, { signal, canRetry } =
         `GraphQL endpoint request failed: ${err && err.message ? err.message : err}`,
         'MCP_REMOTE_REQUEST_FAILED',
       );
-      continue;
     }
-
-    if (!response.ok) {
-      // GraphQL-over-HTTP servers commonly reply 400 with a real GraphQL
-      // errors body (validation/coercion failures) — pass that through
-      // verbatim instead of masking it with a synthesized transport error.
-      let errorBody;
-      try {
-        errorBody = await response.json();
-      } catch {
-        errorBody = undefined;
-      }
-      const isGraphQLBody = !!errorBody && (Array.isArray(errorBody.errors) || errorBody.data !== undefined);
-      lastFailure = isGraphQLBody ? errorBody : remoteTransportError(
-        `GraphQL endpoint responded with HTTP ${response.status}`,
-        'MCP_REMOTE_HTTP_ERROR',
-        { status: response.status },
-      );
-      if (response.status >= 500 || response.status === 429) {
-        continue;
-      }
-      return lastFailure;
-    }
-
-    let body;
-    try {
-      body = await response.json();
-    } catch {
-      return remoteTransportError('GraphQL endpoint returned a non-JSON response', 'MCP_REMOTE_INVALID_RESPONSE');
-    }
-    if (!body || (body.data === undefined && !body.errors)) {
-      return remoteTransportError('GraphQL endpoint returned an unexpected payload (no data or errors)', 'MCP_REMOTE_INVALID_RESPONSE');
-    }
-    return body;
   }
   return lastFailure;
 };
@@ -915,6 +962,9 @@ const createCallTool = ({
       if (wantsCount) {
         contextValue = Object.create(contextValue);
       }
+      if (call.extra && call.extra.signal && call.extra.signal.aborted) {
+        throw new SimfinityError(`MCP tool call cancelled: ${call.name}`, 'MCP_CALL_CANCELLED', 499);
+      }
       result = await graphql({
         schema,
         source: entry.operation,
@@ -924,19 +974,12 @@ const createCallTool = ({
     }
 
     const isError = !!(result.errors && result.errors.length);
-    if (isError) {
-      const payload = { errors: result.errors };
-      if (result.data != null) {
-        // Keep partial results visible alongside the errors.
-        payload.data = result.data;
-      }
-      return {
-        content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
-        isError: true,
-      };
+    const payload = isError ? { errors: result.errors } : result.data;
+    if (isError && result.data != null) {
+      // Keep partial results visible, subject to the same result-size cap.
+      payload.data = result.data;
     }
-
-    const text = JSON.stringify(result.data, null, 2);
+    const text = JSON.stringify(payload, null, 2);
     if (limits.maxResultBytes) {
       const bytes = Buffer.byteLength(text, 'utf8');
       if (bytes > limits.maxResultBytes) {
@@ -945,6 +988,10 @@ const createCallTool = ({
           'MCP_RESULT_TOO_LARGE',
         );
       }
+    }
+
+    if (isError) {
+      return { content: [{ type: 'text', text }], isError: true };
     }
 
     const response = {
@@ -1132,7 +1179,8 @@ const buildToolDefinitions = (schema, options = {}) => {
  *   `call` is `{ name, args, extra, kind, operation }`.
  * @param {{ maxPageSize?: number, defaultPagination?: Object,
  *   maxResultBytes?: number }} [options.limits] guardrails: reject oversized
- *   pages/results, inject default pagination when the caller sends none.
+ *   pages/logical result payloads (including errors), inject default pagination
+ *   when the caller sends none. Limit diagnostics themselves are exempt.
  * @param {Array<Object>} [options.schemaPlugins] Envelop-style plugins (e.g.
  *   simfinity's createAuthPlugin) whose `onSchemaChange` hook is applied before
  *   serving, so resolver-wrapping plugins also apply to in-process execution.
@@ -1292,12 +1340,20 @@ export const startStdioMCPServer = async (schema, options = {}) => {
  * @param {Object} [options.transportOptions] extra options passed to the SDK's
  *   StreamableHTTPServerTransport (e.g. `enableDnsRebindingProtection`,
  *   `allowedHosts`, `allowedOrigins` — recommended for localhost deployments).
+ *   Session generators/callbacks and event stores are rejected with
+ *   MCP_INVALID_TRANSPORT_OPTIONS; this handler is always stateless.
  * @param {Function} [options.onError] `(err, req, res)` invoked when the
  *   handler fails; the handler then responds 500 (JSON-RPC internal error) if
  *   headers were not already sent.
  * @returns {Promise<Function>} async `(req, res) => {}` handler
  */
 export const createHTTPMCPHandler = async (schema, options = {}) => {
+  const transportOptions = options.transportOptions || {};
+  const unsupportedOptions = ['sessionIdGenerator', 'onsessioninitialized', 'onsessionclosed', 'eventStore']
+    .filter((key) => transportOptions[key] !== undefined);
+  if (unsupportedOptions.length) {
+    throw new SimfinityError(`Stateless MCP HTTP handlers do not support transport options: ${unsupportedOptions.join(', ')}`, 'MCP_INVALID_TRANSPORT_OPTIONS', 500);
+  }
   const sdk = await loadSdkCore();
   let StreamableHTTPServerTransport;
   try {
@@ -1331,8 +1387,8 @@ export const createHTTPMCPHandler = async (schema, options = {}) => {
       });
       const server = newServerInstance(sdk, tools, callTool, options);
       const transport = new StreamableHTTPServerTransport({
+        ...transportOptions,
         sessionIdGenerator: undefined,
-        ...(options.transportOptions || {}),
       });
       res.on('close', () => {
         transport.close();

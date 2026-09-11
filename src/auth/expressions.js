@@ -1,266 +1,153 @@
 /**
- * JSON AST Policy Expression Evaluator
- * 
- * Safely evaluates declarative policy expressions without using eval() or Function().
- * Supports logical operators (allOf, anyOf, not), comparison operators (eq, in),
- * boolean literals, and references to parent/args/ctx.
- * 
- * Unknown operators or invalid references fail closed (deny).
+ * JSON AST policy evaluation without eval() or Function().
+ * Invalid syntax is rejected before execution. Missing runtime references remain
+ * distinct from false, so negation cannot turn an invalid comparison into a grant.
  */
 
-/**
- * Resolves a reference path like "parent.authorId" or "ctx.user.id"
- * @param {string} refPath - The reference path (e.g., "ctx.user.id")
- * @param {Object} context - The evaluation context { parent, args, ctx }
- * @returns {*} The resolved value or undefined if not found
- */
-const resolveRef = (refPath, context) => {
-  if (typeof refPath !== 'string') {
-    return undefined;
-  }
+const invalidResult = Symbol('invalid policy result');
 
+const isValidRef = (refPath) => {
+  if (typeof refPath !== 'string') return false;
   const parts = refPath.split('.');
-  const root = parts[0];
+  return ['parent', 'args', 'ctx'].includes(parts[0])
+    && parts.every(part => part.length > 0 && !['__proto__', 'prototype', 'constructor'].includes(part));
+};
 
-  // Only allow parent, args, ctx as root references
-  if (!['parent', 'args', 'ctx'].includes(root)) {
-    return undefined;
+const isReference = value => value !== null && typeof value === 'object' && 'ref' in value;
+
+const isValidValue = (value) => {
+  if (isReference(value)) {
+    return Object.keys(value).length === 1 && Object.hasOwn(value, 'ref') && isValidRef(value.ref);
   }
+  return value !== undefined && typeof value !== 'function' && typeof value !== 'symbol';
+};
 
-  let value = context[root];
-  
-  for (let i = 1; i < parts.length; i++) {
-    if (value === null || value === undefined) {
-      return undefined;
+const isDenseArray = value => Array.isArray(value)
+  && Array.from({ length: value.length }, (_, index) => Object.hasOwn(value, index)).every(Boolean);
+
+const validateExpression = (expression, ancestors = new Set()) => {
+  if (typeof expression === 'boolean') return true;
+  if (expression === null || typeof expression !== 'object' || Array.isArray(expression)) return false;
+  if (ancestors.has(expression)) return false;
+  const keys = Object.keys(expression);
+  if (keys.length === 0) return false;
+
+  ancestors.add(expression);
+  const valid = keys.every((operator) => {
+    const operand = expression[operator];
+    switch (operator) {
+      case 'eq':
+      case 'in':
+        return isDenseArray(operand) && operand.length === 2 && operand.every(isValidValue)
+          && (operator !== 'in' || Array.isArray(operand[1]) || isReference(operand[1]));
+      case 'allOf':
+      case 'anyOf':
+        return isDenseArray(operand) && operand.every(expr => validateExpression(expr, ancestors));
+      case 'not':
+        return validateExpression(operand, ancestors);
+      default:
+        return false;
     }
-    value = value[parts[i]];
-  }
+  });
+  ancestors.delete(expression);
+  return valid;
+};
 
+/** Resolve a parent/args/ctx reference, retaining document getters and array paths. */
+const resolveRef = (refPath, context) => {
+  if (!isValidRef(refPath)) return undefined;
+  const [root, ...parts] = refPath.split('.');
+  let value = context?.[root];
+  for (const part of parts) {
+    if (value === null || value === undefined) return undefined;
+    value = value[part];
+  }
   return value;
 };
 
-/**
- * Resolves a value which may be a literal or a reference
- * @param {*} value - The value to resolve (could be { ref: "..." } or a literal)
- * @param {Object} context - The evaluation context { parent, args, ctx }
- * @returns {*} The resolved value
- */
+/** Resolve a literal or reference without coercing its value. */
 const resolveValue = (value, context) => {
-  // Check if it's a reference object
-  if (value !== null && typeof value === 'object' && 'ref' in value) {
-    return resolveRef(value.ref, context);
-  }
-  // Return literal value
-  return value;
+  return isReference(value) ? resolveRef(value.ref, context) : value;
 };
 
-/**
- * Evaluates an 'eq' expression: { eq: [left, right] }
- * @param {Array} operands - Array of two operands to compare
- * @param {Object} context - The evaluation context
- * @returns {boolean}
- */
-const evaluateEq = (operands, context) => {
-  if (!Array.isArray(operands) || operands.length !== 2) {
-    return false; // Fail closed
-  }
+const evaluateComparison = (operator, operands, context) => {
   const left = resolveValue(operands[0], context);
   const right = resolveValue(operands[1], context);
-  return left === right;
+  if (left === undefined || right === undefined || typeof left === 'function' || typeof right === 'function') {
+    return invalidResult;
+  }
+  if (operator === 'eq') return left === right;
+  return Array.isArray(right) ? right.includes(left) : invalidResult;
 };
 
-/**
- * Evaluates an 'in' expression: { in: [value, array] }
- * @param {Array} operands - [value, array] where value should be in array
- * @param {Object} context - The evaluation context
- * @returns {boolean}
- */
-const evaluateIn = (operands, context) => {
-  if (!Array.isArray(operands) || operands.length !== 2) {
-    return false; // Fail closed
-  }
-  const value = resolveValue(operands[0], context);
-  const array = resolveValue(operands[1], context);
-  
-  if (!Array.isArray(array)) {
-    return false; // Fail closed
-  }
-  
-  return array.includes(value);
-};
-
-/**
- * Evaluates an 'allOf' expression: { allOf: [...expressions] }
- * All expressions must evaluate to true (logical AND)
- * @param {Array} expressions - Array of expressions to evaluate
- * @param {Object} context - The evaluation context
- * @returns {boolean}
- */
 const evaluateAllOf = (expressions, context) => {
-  if (!Array.isArray(expressions)) {
-    return false; // Fail closed
+  let result = true;
+  for (const expression of expressions) {
+    const current = evaluateValidatedExpression(expression, context);
+    if (current === invalidResult) return invalidResult;
+    if (current === false) result = false;
   }
-  
-  for (const expr of expressions) {
-    if (!evaluateExpression(expr, context)) {
-      return false;
-    }
-  }
-  return true;
+  return result;
 };
 
-/**
- * Evaluates an 'anyOf' expression: { anyOf: [...expressions] }
- * At least one expression must evaluate to true (logical OR)
- * @param {Array} expressions - Array of expressions to evaluate
- * @param {Object} context - The evaluation context
- * @returns {boolean}
- */
 const evaluateAnyOf = (expressions, context) => {
-  if (!Array.isArray(expressions)) {
-    return false; // Fail closed
+  let result = false;
+  for (const expression of expressions) {
+    const current = evaluateValidatedExpression(expression, context);
+    // A valid public branch may grant access even when another branch has no user.
+    if (current === true) return true;
+    if (current === invalidResult) result = invalidResult;
   }
-  
-  for (const expr of expressions) {
-    if (evaluateExpression(expr, context)) {
-      return true;
+  return result;
+};
+
+const evaluateOperator = (operator, operand, context) => {
+  switch (operator) {
+    case 'eq':
+    case 'in':
+      return evaluateComparison(operator, operand, context);
+    case 'allOf':
+      return evaluateAllOf(operand, context);
+    case 'anyOf':
+      return evaluateAnyOf(operand, context);
+    case 'not': {
+      const result = evaluateValidatedExpression(operand, context);
+      return result === invalidResult ? invalidResult : !result;
     }
+    default:
+      return invalidResult;
   }
-  return false;
 };
 
-/**
- * Evaluates a 'not' expression: { not: expression }
- * Negates the result of the inner expression
- * @param {*} expression - Expression to negate
- * @param {Object} context - The evaluation context
- * @returns {boolean}
- */
-const evaluateNot = (expression, context) => {
-  return !evaluateExpression(expression, context);
+const evaluateValidatedExpression = (expression, context) => {
+  if (typeof expression === 'boolean') return expression;
+  let result = true;
+  // Multiple operator keys retain the existing implicit AND behavior.
+  for (const [operator, operand] of Object.entries(expression)) {
+    const current = evaluateOperator(operator, operand, context);
+    if (current === invalidResult) return invalidResult;
+    if (current === false) result = false;
+  }
+  return result;
 };
 
-/**
- * Main expression evaluator
- * @param {*} expression - The expression to evaluate
- * @param {Object} context - The evaluation context { parent, args, ctx }
- * @returns {boolean} The result of the expression evaluation
- */
+/** Evaluate a policy; malformed expressions and unresolved comparisons deny. */
 export const evaluateExpression = (expression, context) => {
-  // Handle boolean literals
-  if (typeof expression === 'boolean') {
-    return expression;
-  }
-
-  // Handle null/undefined - fail closed
-  if (expression === null || expression === undefined) {
-    return false;
-  }
-
-  // Expression must be an object with exactly one operator key
-  if (typeof expression !== 'object') {
-    return false; // Fail closed for non-object expressions
-  }
-
-  const keys = Object.keys(expression);
-  
-  // Empty object fails closed
-  if (keys.length === 0) {
-    return false;
-  }
-
-  // Handle single operator expressions
-  if (keys.length === 1) {
-    const operator = keys[0];
-    const operand = expression[operator];
-
-    switch (operator) {
-      case 'eq':
-        return evaluateEq(operand, context);
-      case 'in':
-        return evaluateIn(operand, context);
-      case 'allOf':
-        return evaluateAllOf(operand, context);
-      case 'anyOf':
-        return evaluateAnyOf(operand, context);
-      case 'not':
-        return evaluateNot(operand, context);
-      default:
-        // Unknown operator - fail closed
-        return false;
-    }
-  }
-
-  // Multiple keys - treat as implicit allOf
-  // This allows { eq: [...], in: [...] } to mean both must pass
-  for (const operator of keys) {
-    const operand = expression[operator];
-    let result;
-    
-    switch (operator) {
-      case 'eq':
-        result = evaluateEq(operand, context);
-        break;
-      case 'in':
-        result = evaluateIn(operand, context);
-        break;
-      case 'allOf':
-        result = evaluateAllOf(operand, context);
-        break;
-      case 'anyOf':
-        result = evaluateAnyOf(operand, context);
-        break;
-      case 'not':
-        result = evaluateNot(operand, context);
-        break;
-      default:
-        // Unknown operator - fail closed
-        return false;
-    }
-    
-    if (!result) {
-      return false;
-    }
-  }
-  
-  return true;
+  if (!isPolicyExpression(expression)) return false;
+  return evaluateValidatedExpression(expression, context) === true;
 };
 
-/**
- * Checks if a value is a policy expression (object with operator keys)
- * @param {*} value - The value to check
- * @returns {boolean} True if the value appears to be a policy expression
- */
-export const isPolicyExpression = (value) => {
-  if (value === null || typeof value !== 'object') {
-    return false;
-  }
-  
-  // Check if it's a function (not an expression)
-  if (typeof value === 'function') {
-    return false;
-  }
-  
-  // Check if it has any known operator keys
-  const operatorKeys = ['eq', 'in', 'allOf', 'anyOf', 'not'];
-  const keys = Object.keys(value);
-  
-  return keys.some(key => operatorKeys.includes(key));
-};
+/** Check the complete AST, including boolean literals and every nested branch. */
+export const isPolicyExpression = value => validateExpression(value);
 
-/**
- * Creates a rule function from a policy expression
- * @param {Object} expression - The policy expression
- * @returns {Function} A rule function (parent, args, ctx, info) => boolean
- */
+/** Create a rule, rejecting malformed policies at configuration time. */
 export const createRuleFromExpression = (expression) => {
-  return (parent, args, ctx) => {
-    const context = { parent, args, ctx };
-    return evaluateExpression(expression, context);
-  };
+  if (!isPolicyExpression(expression)) {
+    throw new TypeError('Invalid authorization policy expression');
+  }
+  return (parent, args, ctx) => evaluateExpression(expression, { parent, args, ctx });
 };
 
-// Export all expression utilities as an object for convenience
 const expressions = {
   evaluateExpression,
   isPolicyExpression,
@@ -270,4 +157,3 @@ const expressions = {
 };
 
 export default expressions;
-
