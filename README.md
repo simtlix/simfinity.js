@@ -1,3 +1,5 @@
+![Simfinity.js — Define once. Build beyond. GraphQL, MongoDB, and MCP.](.github/assets/readme-cover.png)
+
 # Simfinity.js
 
 A powerful Node.js framework that automatically generates GraphQL schemas from your data models, bringing all the power and flexibility of MongoDB query language to GraphQL interfaces.
