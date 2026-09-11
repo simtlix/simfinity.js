@@ -340,11 +340,12 @@ export const mcp: {
  * Core schema-building API (src/index.js)
  * ========================================================================== */
 
-/** Lifecycle hooks invoked around create / update / delete of an entity. */
+/** Lifecycle hooks run before commit and may repeat on a transient transaction retry. */
 export interface EntityController {
   onSaving?(doc: any, args: any, session: any, context: any): void | Promise<void>;
   onSaved?(result: any, args: any, session: any, context: any): void | Promise<void>;
   onUpdating?(id: any, args: any, session: any, context: any): void | Promise<void>;
+  /** Receives the updated Mongoose document after parent and nested writes complete. */
   onUpdated?(result: any, session: any, context: any): void | Promise<void>;
   onDelete?(doc: any, session: any, context: any): void | Promise<void>;
 }
@@ -437,7 +438,13 @@ export function configureQueryLimits(options?: QueryLimitsOptions): void;
  */
 export function getInputType(type: GraphQLObjectType | { name: string }): GraphQLInputObjectType;
 
-/** Persist an object of a connected type inside a transaction (runs controllers/validators). */
+/**
+ * Persist an object and its nested writes inside a transaction (runs controllers/validators).
+ * Without a session, owns a transaction on the model's connection and awaits cleanup.
+ * A supplied session must have an active transaction and belong to the model's MongoDB client.
+ * The caller then owns retries, commit, abort, and cleanup; inactive sessions are rejected.
+ * Owned transactions retry transient failures and uncertain commits separately, up to five times each.
+ */
 export function saveObject(
   typeName: string,
   args: Record<string, any>,

@@ -34,7 +34,7 @@ If an operation is missing entirely, check the filters passed to `createSchema()
 
 Generated mutations use MongoDB transactions. A standalone MongoDB server does not support them. Connect to a replica set or a sharded deployment and wait for a writable primary. The [quick start](../guide/getting-started#_2-start-mongodb) includes a local replica-set setup.
 
-Custom mutation callbacks and `saveObject()` have different transaction responsibilities. See [mutations](../guide/mutations) and the [core API](../reference/api).
+Pass the supplied active session from a custom mutation to `saveObject()` to share its transaction. Without a session, `saveObject()` owns a separate transaction. See [mutations](../guide/mutations) and the [core API](../reference/api).
 
 ## Duplicate introspection types
 
