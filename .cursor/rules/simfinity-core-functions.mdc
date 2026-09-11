@@ -26,7 +26,7 @@ Called after all `connect()`/`addNoEndpointType()` calls. Executes in order:
 
 1. **`generateModel()`** / **`generateModelWithoutCollection()`** -- creates Mongoose schemas via `generateSchemaDefinition()`, auto-indexes all ObjectId fields via `createSchemaWithIndexes()` / `findObjectIdFields()`.
 2. **`buildPendingInputTypes()`** -- recursively resolves deferred input types (handles circular dependencies by retrying until all resolve).
-3. **`autoGenerateResolvers()`** -- for each type's fields with `extensions.relation` and no existing resolver, generates: one-to-one resolvers (`findById`), one-to-many resolvers (aggregation pipeline with filter support).
+3. **`autoGenerateResolvers()`** -- for each type's non-embedded fields with `extensions.relation` and no existing resolver, generates: one-to-one resolvers (`resolveById` with target `get_by_id` middleware/scope), one-to-many resolvers (target `find` middleware/scope followed by an aggregation pipeline). Both await callbacks with the request context and enforce an independent referenced-ID or stored-parent predicate. Existing resolvers are preserved.
 4. **`buildRootQuery()`** -- creates the root Query type with: `{singular}(id)` single-entity query, `{plural}(filters, pagination, sort)` list query, `{plural}_aggregate(filters, aggregation)` aggregation query.
 5. **`buildMutation()`** -- creates the Mutation type with: `add{singular}(input)`, `update{singular}(input)`, `delete{singular}(id)`, `{actionName}_{singular}(input)` for state machine transitions.
 
@@ -56,10 +56,11 @@ Preserves outer non-null wrappers for creation and removes only the outer wrappe
 
 `buildQuery(args, gqltype)` translates GraphQL filter arguments into a MongoDB aggregation pipeline:
 
-- `buildQueryTerms()` -- converts scalar/enum filters to `$match`, object/relation filters to `$lookup` + `$unwind` + `$match`
+- `resolveQueryPath()` resolves declared filter/list-sort paths and Mongoose schema paths together, maps `id` to `_id`, and collects required lookups. `buildQueryTerms()` preserves every scalar/enum condition and relationship term, including repeated leaves. Values are validated and cast against the real schema, with state-machine state-name storage preserved.
 - `buildFilterGroupMatch()` -- recursively processes `QLFilterGroup` (AND/OR) into nested MongoDB `$and`/`$or` match expressions. Reuses `buildQueryTerms()` for each leaf condition. Deduplicates `$lookup` stages via shared `aggregationsIncluded` dict. Max depth: 5.
-- `buildAggregationsForSort()` -- adds `$lookup`/`$unwind` for sort on related fields
-- Pagination: `$skip` + `$limit` from `QLPagination` input
+- `buildSortClause()` uses `resolveQueryPath()` and deduplicates lookups for related sort terms.
+- `configureQueryLimits({ maxPageSize })` sets a process-wide positive safe-integer maximum (default 1000). `paginationStages()` validates explicit page/size/skip, applies `min(100, maxPageSize)` to unpaged lists, and leaves unpaged aggregates unbounded.
+- `QLValue.parseLiteral()` preserves explicit null and flat-list elements, rejecting unsupported literal objects/nested lists. Query validation rejects null list elements and invalid scalar/operator/group shapes.
 - Sort: `$sort` from `QLSortExpression` input
 - AND/OR: optional `AND`/`OR` arguments containing `QLFilterGroup` trees. Flat field filters and scope-injected filters are always ANDed at the top level (cannot be bypassed by user OR).
 
@@ -78,11 +79,16 @@ Preserves outer non-null wrappers for creation and removes only the outer wrappe
 
 Only `undefined` and `null` skip value materialization; accepted empty strings, zero, false, and empty arrays must survive. Nullable embedded list items retain `null`; nullable referenced-collection operation items are ignored. Single-object references use `relation.connectionField || fieldName` for both writes and nullable update `$unset`. Merge all null clears into one `$unset` without clearing originally non-null fields. Validators continue receiving the original value and are awaited.
 
+`executeItemFunction()` runs target child middleware with root-shaped arguments (`{ input }` for save/update, `{ id }` for delete). Update/delete ownership is checked from the persisted child inside the transaction after middleware selects the effective ID. Missing children raise `NOT_VALID_ID`; a different parent raises `FORBIDDEN`. Child save/update handlers reapply the required parent link after pre-write controller hooks. Child failures abort the parent transaction. Query scopes do not authorize writes.
+
 ## Middleware and Scope
 
 - `use(middleware)` -- pushes to global `middlewares` array. `excecuteMiddleware()` chains them with `next()` pattern.
 - `executeScope()` -- checks `type.gqltype.extensions.scope[operation]` and calls the scope function to apply row-level filtering for `find`, `get_by_id`, and `aggregate` operations.
+- `resolveById()` -- shared root and generated single-relation read pipeline; generated relations supply an immutable target ID independently of mutable middleware/scope arguments. Required relation predicates are cast through the Mongoose schema path.
 
 ## Introspection Monkey-Patch
 
-Lines 52-85: `FieldExtensionsType` and `RelationType` are injected into `__Field._fields` globally. This enables introspection clients to discover relation metadata and state machine flags. **Never rebuild the schema** with tools that clone types (e.g., `mapSchema` from `@graphql-tools/utils`) -- it will duplicate these globally-injected types.
+Initialization adds `extensions` to `__Field.getFields()` once per shared GraphQL peer. It supports already materialized fields and reuses the extension field and its `FieldExtensionsType` / `RelationType` identities on repeated module evaluation. This exposes relation metadata, read-only flags, and state machine flags without replacing application metadata.
+
+The extension remains global. Newly constructed schemas collect the metadata types; schemas built before import retain their original type maps. **Never rebuild the schema** with tools that clone types (e.g., `mapSchema` from `@graphql-tools/utils`). A `buildClientSchema()` roundtrip of a post-import schema in the Simfinity process can likewise create duplicate metadata type names. See the architecture rule for import-order limits.

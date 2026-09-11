@@ -27,7 +27,7 @@ Register middleware once during application startup. Registrations are global to
 
 ## Execution order
 
-For root reads, the sequence is middleware, query scope, query construction, and database execution. For mutations, middleware runs before the transactional mutation handler.
+For root reads and generated non-embedded relationship reads, the sequence is middleware, query scope, query construction, and database execution. Root mutation middleware runs before the transactional mutation handler. Nested collection mutations run the target child's middleware inside that transaction before checking its persisted parent and performing the child operation.
 
 ::: warning What next() means
 `next()` advances to the next registered middleware. The database resolver executes after the entire middleware chain returns. Code after `await next()` still runs before database execution, and omitting `next()` only skips the remaining middleware. Throw an error to cancel the operation.
@@ -56,12 +56,12 @@ simfinity.use(async (params, next) => {
 
 | Operation | Trigger |
 | --- | --- |
-| `find` | List query. |
-| `get_by_id` | Single-record query. |
+| `find` | List query or generated non-embedded collection relation. |
+| `get_by_id` | Single-record query or generated non-embedded single relation with a reference. |
 | `aggregate` | Aggregation query. |
-| `save` | Generated add mutation. |
-| `update` | Generated update mutation. |
-| `delete` | Generated delete mutation. |
+| `save` | Generated add mutation or nested `added` child. |
+| `update` | Generated update mutation or nested `updated` child. |
+| `delete` | Generated delete mutation or nested `deleted` child. |
 | `state_changed` | Generated state-machine action. |
 | `custom_mutation` | Registered custom mutation. |
 
@@ -80,4 +80,4 @@ simfinity.use(async ({ operation, args }, next) => {
 
 Mutate the existing `args` object. Replacing `params.args` is not a reliable way to replace the resolver's arguments, because the resolver retains its own reference.
 
-For record visibility, prefer the type's [query scope](/guide/query-scope). Global middleware does not run for automatic nested relationship resolution or direct programmatic data access.
+For record visibility, prefer the type's [query scope](/guide/query-scope). Generated relationship reads and nested collection writes invoke middleware with the target type, the same request context, and root-compatible argument shapes. Existing custom resolvers and direct programmatic data access remain responsible for invoking their own checks. Review middleware that assumes a request only invokes it for its root operation.

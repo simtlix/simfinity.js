@@ -46,6 +46,8 @@ Here `schema.js` exports your already registered and built schema. The generated
 
 `exclude: 'mutation'` publishes only query tools. Use `include` to expose a specific allowlist, and inspect `tools` before connecting clients.
 
+Generated inputs distinguish omission from explicit null: defaulted arguments use their GraphQL defaults when omitted, nullable fields and list items accept null, and non-null positions reject it. `maxResultBytes` also covers errors and partial data; oversized payloads are replaced by an actionable limit error. Limit diagnostics themselves are exempt from the cap.
+
 ## Start a stdio server
 
 Install the SDK for protocol transports:
@@ -112,7 +114,7 @@ app.all('/mcp', authenticateRequest, handler);
 app.listen(3000, '127.0.0.1');
 ```
 
-Install Express separately if your application does not already use it. `authenticateRequest` is application-owned credential verification. Adjust host and origin values for your deployment. By default the handler creates a fresh stateless MCP server and transport for each HTTP request.
+Install Express separately if your application does not already use it. `authenticateRequest` is application-owned credential verification. Adjust host and origin values for your deployment. The handler creates a fresh stateless MCP server and transport for each HTTP request. Stateful options (`sessionIdGenerator`, session callbacks and `eventStore`) are rejected at setup; use `createMCPServer` with your own transport management if you need sessions.
 
 ## Preserve authorization
 
@@ -121,6 +123,8 @@ The context reaches generated resolvers and [root query scopes](/guide/query-sco
 For standalone in-process MCP, pass the plugin through `schemaPlugins`, as shown above. Creating a plugin object alone does not install it. If Yoga has already applied the same plugin to the same schema object, MCP executes those wrapped resolvers as well.
 
 `schemaPlugins` invokes schema hooks only. It does not run every Envelop request hook. In remote mode, the remote GraphQL server enforces authorization using the credentials supplied in `execution.headers`.
+
+If a call is cancelled while its context factory is pending, GraphQL execution does not start. Cancellation cannot undo database work already started. Remote timeouts cover both the request and response-body reading; only queries may retry, and client cancellation rejects without retrying.
 
 ## Choose the result shape
 

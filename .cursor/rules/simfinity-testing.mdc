@@ -85,6 +85,12 @@ await expect(validation.CREATE[0].validate('Type', 'field', 'ab', null)).resolve
 await expect(validation.CREATE[0].validate('Type', 'field', 'a', null)).rejects.toThrow();
 ```
 
+## Introspection Import-Order Regressions
+
+`tests/schema-initialization.test.js` runs `tests/fixtures/schema-initialization.js` in fresh Node processes. GraphQL introspection objects are shared singletons, so a module reset inside a test runner does not reliably recreate application startup. The fixture deliberately uses top-level dynamic imports, including distinct module URLs to force repeated evaluation against the same GraphQL peer. This is a test-only import-order requirement; production imports stay at the top of the file.
+
+Verify real schema validation, execution, metadata introspection, and type identity without MongoDB. Import initialization safety does not imply isolated Simfinity registries or compatibility with tools that clone introspection types.
+
 ## Lint After Testing
 
 Run `npm run lint` after modifying test files to catch unused imports or style violations.

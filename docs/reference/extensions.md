@@ -110,3 +110,9 @@ query SerieMetadata {
 ```
 
 This is a Simfinity introspection extension, not a field in standard GraphQL introspection. It does not expose arbitrary extensions such as validator functions. Avoid schema-cloning middleware; use [Envelop plugins](/reference/plugins) and in-place resolver wrapping.
+
+Initialization supports GraphQL fields that have already been materialized and schemas that already exist. Repeated evaluation of Simfinity with the same GraphQL peer preserves the existing extension field and metadata type identities. Your application field's `extensions` metadata remains intact.
+
+The extension is global to that GraphQL peer, including unrelated schemas; it does not isolate Simfinity's module-level type or middleware registries. Schemas constructed after import register `FieldExtensionsType` and `RelationType` in their type maps. Schemas constructed before import keep their original type maps: ordinary operations and direct selections such as the query above work, but named fragments on these metadata types require a schema constructed after import.
+
+In a process that has imported Simfinity, passing a post-import schema's introspection result to `buildClientSchema()` can still fail with duplicate `FieldExtensionsType` names. This is the same retained global-type limitation that affects schema-cloning middleware; import-order safety does not make schema cloning supported.

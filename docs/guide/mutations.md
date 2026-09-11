@@ -42,7 +42,7 @@ mutation RenameSerie($id: ID!) {
 }
 ```
 
-For a type with `id: GraphQLID` or `id: GraphQLID!`, `SerieInputForUpdate` requires `id`. Other fields, including other ID fields, can be omitted. Send the fields you want to change; omitted fields are left unchanged. An update targeting a nonexistent ID returns `null`.
+For a type with `id: GraphQLID`, `SerieInputForUpdate` requires `id`. Send the fields you want to change; omitted fields are left unchanged. An update targeting a nonexistent ID returns `null`.
 
 For nullable scalar, embedded, and single-object reference fields, explicit `null` unsets the stored field. A reference uses its configured `connectionField`, or the GraphQL field name when no override exists. Multiple null fields are cleared together:
 
@@ -56,7 +56,7 @@ mutation ClearCategory($id: ID!) {
 ```
 
 ::: info Partial updates and values
-Generated update inputs remove the outer non-null wrapper so you can omit required fields, while keeping list-item non-null constraints. An explicit `null` for an originally non-null field leaves its stored value unchanged; use a custom update validator to reject that input if needed. Empty strings, `false`, `0`, and empty arrays are persisted after validation. Use `""` to store an empty string and `null` to remove a nullable field.
+Generated update inputs remove the outer non-null wrapper so you can omit required fields, while keeping list-item non-null constraints. The entity `id` remains required for `GraphQLID` and `GraphQLID!`; other ID fields are optional. An explicit `null` for an originally non-null field leaves its stored value unchanged; use a custom update validator to reject that input if needed. Empty strings, `false`, `0`, and empty arrays are persisted after validation. Use `""` to store an empty string and `null` to remove a nullable field.
 :::
 
 Embedded objects merge supplied fields with their stored value; supplied embedded arrays replace the array. Referenced collection updates run their child operations using the parent mutation's session.

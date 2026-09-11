@@ -40,6 +40,8 @@ Custom mutation callbacks and `saveObject()` have different transaction responsi
 
 Do not wrap a Simfinity schema with `graphql-middleware`'s `applyMiddleware` or rebuild it with `mapSchema`. Simfinity extends GraphQL introspection globally; rebuilding a schema can introduce duplicate introspection type names.
 
+The same limitation affects `buildClientSchema()` on a post-import schema's introspection when called in a process that has imported Simfinity. Repeated Simfinity module evaluation with a shared GraphQL peer is safe and reuses its introspection types; it does not provide schema-cloning support. See [introspection metadata](../reference/extensions#introspection-metadata) for schemas created before import and their type-map limitations.
+
 Use the [Envelop authorization plugin](../guide/authorization) with GraphQL Yoga, or wrap existing resolvers in place. Register application types once at startup and reuse the resulting schema.
 
 ## A relationship is empty or its input is wrong
@@ -49,7 +51,7 @@ Check that:
 - Every related type was registered before `createSchema()`.
 - The field declares `extensions.relation`.
 - `embedded` matches how you intend to store the value.
-- `connectionField` names the correct reference field; provide it explicitly.
+- `connectionField` matches the stored link. Single-object references default to the GraphQL field name; referenced collections require the child back-reference explicitly.
 - An existing custom resolver returns the expected value. Simfinity preserves custom resolvers.
 
 See [relationships](../guide/relationships) for embedded, reference, and collection examples.
