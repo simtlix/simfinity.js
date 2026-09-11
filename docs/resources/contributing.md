@@ -19,6 +19,8 @@ npm ci
 
 Read `AGENTS.md` and the relevant files in `.cursor/rules/` before changing behavior. The project uses ES modules, Mongoose 8, GraphQL 16, and Vitest.
 
+Use Node.js 24 for the development commands below, matching the **Library CI** workflow. CI runs the existing lint and test commands on pull requests and pushes to `master`; it can also be started manually from Actions. This tooling version does not change the library's supported runtime range.
+
 ```sh
 npm run lint
 npm test
@@ -45,6 +47,24 @@ npm run docs:preview
 ```
 
 Check links, search, mobile navigation, code examples, and both color themes. The [website maintainer guide](https://github.com/simtlix/simfinity.js/blob/master/docs/.vitepress/README.md) covers the layout, assets, build configuration, and publication workflow.
+
+## Create a GitHub release
+
+After merging the intended changes, open **Actions → Create GitHub release → Run workflow** and select `master`.
+
+- Choose `patch`, `minor`, or `major` according to the compatibility impact. The workflow increments the version in `package.json` and the lockfile.
+- Enable **draft** to review the generated release notes before making the release public.
+- Enable **dry_run** to validate and preview the next version without changing the repository or creating a release.
+
+The workflow installs locked dependencies, runs lint and the existing tests, and checks the package contents. A normal run then pushes the version commit and matching `v` tag together and creates the GitHub release with generated notes. It does not publish packages. Real releases run only from `master`; other branches support dry runs.
+
+The push fails if `master` changed during validation, and existing tags are never overwritten. If the tag was pushed but GitHub release creation failed, create the release from that existing tag in GitHub's Releases page instead of incrementing the version again.
+
+## Publish packages separately
+
+Open **Actions → Publish packages → Run workflow**, select the workflow on `master`, and enter the existing release tag, such as `v3.0.2`. Select `npm`, `github`, or `both`; npm is the default. **dry_run** validates without publishing.
+
+The tag must match the package version. Validation runs against that tag, and publication uses the exact validated commit. Stable versions use the `latest` distribution tag; prereleases use `next`. npm publication uses the repository's `NPMJS_TOKEN` secret; GitHub Packages uses the workflow token. Creating a GitHub release does not start package publication automatically.
 
 ## Report a problem
 

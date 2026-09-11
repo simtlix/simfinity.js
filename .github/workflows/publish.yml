@@ -1,45 +1,104 @@
 name: Publish packages
 
 on:
-  create:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag, for example v3.0.2
+        type: string
+        required: true
+      registry:
+        description: Package registry
+        type: choice
+        options: [npm, github, both]
+        default: npm
+      dry_run:
+        description: Validate the package without publishing
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-publication-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
+      dist_tag: ${{ steps.release.outputs.dist_tag }}
     steps:
-      - uses: actions/checkout@v2.3.4
-      - uses: actions/setup-node@v1.4.4
+      - uses: actions/checkout@v7
         with:
-          node-version: 14
+          ref: refs/tags/${{ inputs.tag }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Validate release tag
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          version=$(node --input-type=module -e 'import { readFileSync } from "node:fs"; console.log(JSON.parse(readFileSync("package.json", "utf8")).version)')
+          if [ "$RELEASE_TAG" != "v$version" ]; then
+            echo 'The tag must match the version in package.json.' >&2
+            exit 1
+          fi
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then
+            echo 'dist_tag=next' >> "$GITHUB_OUTPUT"
+          else
+            echo 'dist_tag=latest' >> "$GITHUB_OUTPUT"
+          fi
       - run: npm ci
-      - run: npx json -f package.json peerDependencies | npx json -ka | xargs -i{} bash -c 'echo $0@$(npx json -f package.json peerDependencies.$0)' {} | xargs -i{}  npm install --save-optional {}
+      - run: npm run lint
       - run: npm test
+      - run: npm pack --dry-run --ignore-scripts
 
   publish-npm:
+    if: ${{ !inputs.dry_run && (inputs.registry == 'npm' || inputs.registry == 'both') }}
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v2.3.4
-      - uses: actions/setup-node@v1.4.4
+      - uses: actions/checkout@v7
         with:
-          node-version: 14
+          ref: ${{ needs.build.outputs.commit }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
           registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
       - run: npm ci
-      - run: npm publish --access public
+      - run: npm publish --access public --tag "$DIST_TAG"
         env:
-          NODE_AUTH_TOKEN: ${{secrets.NPMJS_TOKEN}}
+          NODE_AUTH_TOKEN: ${{ secrets.NPMJS_TOKEN }}
+          DIST_TAG: ${{ needs.build.outputs.dist_tag }}
+
   publish-gpr:
+    if: ${{ !inputs.dry_run && (inputs.registry == 'github' || inputs.registry == 'both') }}
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - uses: actions/checkout@v2.3.4
-      - uses: actions/setup-node@v1.4.4
+      - uses: actions/checkout@v7
         with:
-          node-version: 14
+          ref: ${{ needs.build.outputs.commit }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
           registry-url: https://npm.pkg.github.com/
+          package-manager-cache: false
       - run: npm ci
-      - run: npm publish
+      - run: npm publish --access public --tag "$DIST_TAG"
         env:
-          NODE_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+          NODE_AUTH_TOKEN: ${{ github.token }}
+          DIST_TAG: ${{ needs.build.outputs.dist_tag }}
