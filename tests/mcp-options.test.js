@@ -557,13 +557,12 @@ describe('MCP tool-definition options (stub schemas)', () => {
       expect(eventProps.slot).toMatchObject({ format: 'time' });
     });
 
-    it('does not null-widen input schemas', () => {
-      expect(eventTool.inputSchema.properties.on).toEqual({ type: 'string', format: 'date' });
+    it('accepts null at nullable input positions', () => {
+      expect(eventTool.inputSchema.properties.on).toEqual({ type: ['string', 'null'], format: 'date' });
 
       const { tools } = simfinity.generateMCPTools(stubSchema);
       const add = tools.find((tool) => tool.name === 'addItem');
-      // Nullable input field stays single-typed.
-      expect(add.inputSchema.$defs.McpOptStubInput.properties.nickname).toEqual({ type: 'string' });
+      expect(add.inputSchema.$defs.McpOptStubInput.properties.nickname).toEqual({ type: ['string', 'null'] });
     });
   });
 
@@ -628,7 +627,7 @@ describe('MCP tool-definition options (stub schemas)', () => {
 
     it('emits JSON Schema defaults and never marks defaulted args as required', () => {
       const search = tools.find((tool) => tool.name === 'search');
-      expect(search.inputSchema.properties.limit).toMatchObject({ type: 'integer', default: 10 });
+      expect(search.inputSchema.properties.limit).toMatchObject({ type: ['integer', 'null'], default: 10 });
       // NonNull arg with a default is still optional for the caller.
       expect(search.inputSchema.properties.mode).toMatchObject({ type: 'string', default: 'fast' });
       expect(search.inputSchema.required).toBeUndefined();
@@ -637,7 +636,7 @@ describe('MCP tool-definition options (stub schemas)', () => {
     it('applies the same rule to input object fields', () => {
       const search = tools.find((tool) => tool.name === 'search');
       const prefs = search.inputSchema.$defs.McpOptPrefs;
-      expect(prefs.properties.compact).toMatchObject({ type: 'boolean', default: true });
+      expect(prefs.properties.compact).toMatchObject({ type: ['boolean', 'null'], default: true });
       expect(prefs.required).toEqual(['theme']);
     });
 
@@ -645,12 +644,12 @@ describe('MCP tool-definition options (stub schemas)', () => {
       const search = tools.find((tool) => tool.name === 'search');
       // Argument-level enum default: internal 1 -> external name 'OPEN'.
       expect(search.inputSchema.properties.state).toMatchObject({
-        $ref: '#/$defs/McpOptState',
+        anyOf: [{ $ref: '#/$defs/McpOptState' }, { type: 'null' }],
         default: 'OPEN',
       });
       // Input-object-field enum default: internal 2 -> external name 'CLOSED'.
       expect(search.inputSchema.$defs.McpOptPrefs.properties.state).toMatchObject({
-        $ref: '#/$defs/McpOptState',
+        anyOf: [{ $ref: '#/$defs/McpOptState' }, { type: 'null' }],
         default: 'CLOSED',
       });
       // The enum $def itself publishes the member names a client must send.

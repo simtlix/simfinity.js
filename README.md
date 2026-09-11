@@ -2573,8 +2573,8 @@ Each generated tool follows MCP best practices so an agent can use it without ex
 
 - **`description`**: reuses the GraphQL type/field descriptions and adds an actionable summary. List and aggregate tools spell out the available filter operators (`EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE`), `AND`/`OR` groups, pagination and sorting; aggregate tools additionally document the `SUM/COUNT/AVG/MIN/MAX` operations and the `aggregation` argument.
 - **`title`**: a human-readable label (e.g. `List Book`, `Create Book`, `Aggregate Book`).
-- **`inputSchema`**: JSON Schema derived with full fidelity from the GraphQL arguments (scalars, enums, input objects, lists, non-null wrappers, and recursive filter types such as `QLFilterGroup` via `$defs`/`$ref`). GraphQL type and field descriptions are propagated, with curated descriptions for the synthetic filter/pagination/sort/aggregation types. `Date`/`DateTime`/`Time` scalars map to `string` with the matching JSON Schema `format` (`date` / `date-time` / `time`), and arguments with a GraphQL default value carry a JSON Schema `default` and are never listed as `required`.
-- **`outputSchema`**: JSON Schema describing the returned data (mirroring the auto-generated selection set), with type/field descriptions. Every nullable GraphQL position also accepts `null` (e.g. `type: ['string', 'null']`; enums get `null` appended), so validating MCP clients accept the `null`s GraphQL legitimately returns in `structuredContent` (get-by-id misses, unset optional fields). Non-null positions stay single-typed, and input schemas are never null-widened.
+- **`inputSchema`**: JSON Schema derived from the GraphQL arguments (scalars, enums, input objects, lists, non-null wrappers, and recursive filter types such as `QLFilterGroup` via `$defs`/`$ref`). Nullable arguments, input fields and list items accept explicit `null`; non-null positions reject it. Nullable references use `anyOf` with a null alternative. GraphQL type and field descriptions are propagated, with curated descriptions for synthetic types. `Date`/`DateTime`/`Time` scalars use the matching JSON Schema `format`. Defaulted arguments are optional; representable defaults appear in the schema and generated GraphQL variables, with enum member names rather than internal values. Omitted opaque scalar defaults that have no GraphQL literal representation use the field's original default.
+- **`outputSchema`**: JSON Schema describing the returned data (mirroring the auto-generated selection set), with type/field descriptions. Every nullable GraphQL position also accepts `null` (e.g. `type: ['string', 'null']`; enums get `null` appended), so validating MCP clients accept the `null`s GraphQL legitimately returns in `structuredContent` (get-by-id misses, unset optional fields).
 - **`annotations`**: behavioral hints — queries are `readOnlyHint: true`, `delete*` is `destructiveHint: true`, `update*` is `idempotentHint: true`. Generated CRUD mutations are recognized by the placeholder descriptions Simfinity stamps on them, so a custom mutation that happens to be named `updateReport` (and carries its own description) keeps that description and gets no inferred hints.
 
 On execution, each tool returns both a serialized JSON `text` content block and a machine-readable `structuredContent` (the GraphQL `data`) that conforms to the `outputSchema`. When the caller requests `pagination: { count: true }` on a **list** tool, the total record count is delivered in the tool result `_meta.count` (aggregate tools ignore the flag — their resolver never computes a total).
@@ -2671,14 +2671,14 @@ The handler catches all errors itself: `onError` is for logging/metrics, and a J
 | `include` / `exclude` | — | String or array: raw GraphQL field names, prefixed tool names, or the categories `'query'` / `'mutation'`. `exclude` wins over `include`. |
 | `includeTypes` / `excludeTypes` | — | String or array of entity (return) type names — one entry covers every tool for that entity (`'Book'` matches `book`, `books`, `books_aggregate`, `addbook`, ...). `excludeTypes` wins. |
 | `selectionDepth` | `1` | Nesting depth for the auto-generated output selection set (and the mirrored `outputSchema`). |
-| `includeId` | `true` | Always select `id` when nothing else is selectable on an object type. |
+| `includeId` | `true` | Select a scalar or enum `id` as a fallback when nothing else is selectable; otherwise use `__typename`. |
 | `toolNamePrefix` | — | Prefix prepended to every published tool name (e.g. `'catalog_'`). Must match `/^[a-zA-Z0-9_-]+$/`; the resulting names must match `/^[a-zA-Z0-9_-]{1,128}$/` (`MCP_INVALID_TOOL_NAME` otherwise). |
 | `toolOverrides` | `{}` | Per-tool overrides keyed by tool (or unprefixed field) name: `{ description, title, annotations, selectionDepth, includeId, selection }`. See [Customizing tools](#customizing-tools). |
 | `toolMiddleware` | — | Array of koa-style `async (call, next)` functions run around every tool call. See [Tool middleware](#tool-middleware). |
 | `limits` | — | Guardrails: `{ maxPageSize, defaultPagination, maxResultBytes }`. See [Limits](#limits). |
 | `schemaPlugins` | — | Envelop-style plugins whose `onSchemaChange` hook is applied once before serving (in-process execution only). See [Authentication](#authentication). |
 | `serverName` / `serverVersion` | `'simfinity-mcp'` / `'1.0.0'` | Identity reported by the MCP server. |
-| `transportOptions` | — | `createHTTPMCPHandler` only: extra options spread into the SDK's `StreamableHTTPServerTransport` (e.g. `enableDnsRebindingProtection`, `allowedHosts`, `allowedOrigins`). |
+| `transportOptions` | — | `createHTTPMCPHandler` only: stateless SDK transport options (e.g. `enableDnsRebindingProtection`, `allowedHosts`, `allowedOrigins`). Setting `sessionIdGenerator`, `onsessioninitialized`, `onsessionclosed` or `eventStore` raises `MCP_INVALID_TRANSPORT_OPTIONS` at setup. |
 | `onError` | — | `createHTTPMCPHandler` only: `(err, req, res)` callback invoked when a request fails; the handler still responds with a JSON-RPC internal error (HTTP 500) if headers were not sent. |
 
 Selection sets always fall back to `id` and then `__typename` when nothing else is selectable (interface/union return types select `__typename`), so the generated documents are always statically valid — and the output schemas mirror the same fallbacks.
@@ -2744,7 +2744,7 @@ const { callTool } = simfinity.generateMCPTools(schema, {
 
 - `maxPageSize`: rejects calls whose `pagination.size` exceeds the cap.
 - `defaultPagination`: injected only for tools that have a `pagination` argument, and only when the caller did not send one. `page` and `size` are both required (QLPagination declares them non-null), and `size` must not exceed `maxPageSize` — that misconfiguration throws `MCP_INVALID_LIMITS` at setup.
-- `maxResultBytes`: rejects results whose serialized `data` is larger than the cap (the error message suggests narrowing the query, lowering `selectionDepth` or paginating).
+- `maxResultBytes`: caps the UTF-8 byte length of the pretty-printed logical payload: `data` on success, or `{ errors, data? }` on failure. Oversized errors and partial data are replaced by `MCP_RESULT_TOO_LARGE`. This diagnostic and pagination-limit diagnostics are exempt from the cap, so even a tiny cap can return an actionable error. The cap excludes MCP envelope overhead, the duplicate `structuredContent`, and middleware-created results; it runs after execution and does not limit database work or remote download size.
 
 ### Tool middleware
 
@@ -2791,9 +2791,9 @@ const { callTool } = simfinity.generateMCPTools(schema, {
 });
 ```
 
-- `timeoutMs` aborts slow requests (`AbortSignal.timeout`); the timeout signal is combined with the MCP client's cancellation signal.
+- `timeoutMs` aborts slow attempts, including reading the response body (`AbortSignal.timeout`); the timeout signal is combined with the MCP client's cancellation signal. Client cancellation rejects during either fetch or body reading and is never retried.
 - `retry` re-issues failed **queries only — never mutations** — after network errors/timeouts, HTTP 5xx and 429 responses. Backoff is linear: the first retry waits `backoffMs`, the second `2 × backoffMs`, and so on (default `backoffMs`: 250).
-- Transport failures do not throw: they surface as `isError` tool results carrying GraphQL-shaped errors with the codes `MCP_REMOTE_HTTP_ERROR` (non-2xx response, includes `extensions.status`), `MCP_REMOTE_REQUEST_FAILED` (network error/timeout) and `MCP_REMOTE_INVALID_RESPONSE` (non-JSON body, or JSON with neither `data` nor `errors`).
+- Transport failures surface as `isError` tool results carrying GraphQL-shaped errors with the codes `MCP_REMOTE_HTTP_ERROR` (non-2xx response without a valid GraphQL body, includes `extensions.status`), `MCP_REMOTE_REQUEST_FAILED` (network error/timeout, including body-read failures) and `MCP_REMOTE_INVALID_RESPONSE` (non-JSON body or invalid GraphQL response shape). A valid body has object `data` or a nonempty `errors` array with string messages; `data: null` requires errors. Invalid successful HTTP responses are not retried. Client cancellation rejects instead of returning an error tool result.
 - If the remote response carries a numeric `extensions.count` (e.g. exposed via `simfinity.plugins.envelopCountPlugin()`), it is surfaced as `_meta.count` on the tool result.
 
 `schemaPlugins` is not applied in remote mode — the remote GraphQL server enforces its own plugins.
@@ -2803,9 +2803,9 @@ const { callTool } = simfinity.generateMCPTools(schema, {
 Successful calls return `{ content: [textJSON], structuredContent: data, isError: false }`. Failures and edge cases behave as follows:
 
 - **Total count**: with `pagination: { count: true }` on a **list** tool, the count lands in `_meta.count` on the tool result — in-process it is read back from a per-call context layer (Simfinity's find resolver writes it there; counts never leak across calls), in remote mode from the response `extensions.count`. Aggregate tools never deliver a count.
-- **Execution errors**: `isError: true` with a `text` payload of `{ errors, data? }` — partial data is preserved alongside the errors when GraphQL returned any. `structuredContent` is omitted on errors.
+- **Execution errors**: `isError: true` with a `text` payload of `{ errors, data? }` — partial data is preserved alongside errors when it fits `maxResultBytes`. `structuredContent` is omitted on errors.
 - **Remote transport failures** and **limit violations** are also `isError` results (see [Remote execution](#remote-execution) and [Limits](#limits) for the codes).
-- **Unknown tool names** are the exception: `callTool` and `getOperation` throw `MCP_TOOL_NOT_FOUND`. A call whose `extra.signal` is already aborted throws `MCP_CALL_CANCELLED` before executing.
+- **Unknown tool names** are the exception: `callTool` and `getOperation` throw `MCP_TOOL_NOT_FOUND`. An aborted `extra.signal` throws `MCP_CALL_CANCELLED` before execution, including cancellation while awaiting an asynchronous context factory. This prevents starting the GraphQL operation after cancellation; it does not undo or cancel database work already started.
 
 ### Authentication
 
