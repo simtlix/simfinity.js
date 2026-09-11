@@ -23,7 +23,7 @@ The package also provides named exports and TypeScript declarations. Schema regi
 | Retrieve a registered type | [getType](#gettype) | Type, `undefined`, or `null` as described below |
 | Work with its model | [getModel](#getmodel) | Registered Mongoose model |
 | Inspect a create input | [getInputType](#getinputtype) | Generated `GraphQLInputObjectType` |
-| Create within an existing transaction | [saveObject](#saveobject) | Persisted document |
+| Create in an owned or existing transaction | [saveObject](#saveobject) | Saved object |
 
 ## connect
 
@@ -158,7 +158,11 @@ await simfinity.saveObject('Serie', input, session, context);
 
 Runs create materialization, field/type validators, collection processing, state initialization, and create controller hooks for a registered type. The type name is a string. Generated models must already exist.
 
-`saveObject()` does not open a transaction by itself. Pass an active session from a controller or custom mutation to participate in that transaction. Calling it directly also bypasses GraphQL input coercion, field authorization, and global middleware; validate and authorize programmatic callers accordingly.
+Without `session`, `saveObject()` opens a session on the registered model's connection and owns the transaction, including bounded retries, commit/abort, and awaited cleanup. Parent and nested writes commit or roll back together. A transaction-capable MongoDB deployment is required.
+
+With `session`, the caller must already have started a transaction on a session belonging to the same MongoDB client as the model. `saveObject()` only participates: it never starts, commits, aborts, retries, or ends the caller's transaction/session. The caller must handle errors and decide whether to commit or abort. An inactive supplied session throws `ACTIVE_TRANSACTION_REQUIRED` (400) before writes. Pass the provided session inside a controller or custom mutation to share its transaction.
+
+Owned transactions retry transient failures up to five times after the first attempt. Uncertain commit results retry only commit up to five times; if still uncertain, the operation may already be committed. See [transaction boundaries](../guide/mutations#transaction-boundaries). Hooks run before commit and may repeat on a transient transaction retry. Calling `saveObject()` directly bypasses GraphQL input coercion, field authorization, and global middleware; validate and authorize programmatic callers accordingly.
 
 ## Configuration and helpers
 

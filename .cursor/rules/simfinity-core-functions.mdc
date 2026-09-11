@@ -65,12 +65,14 @@ Handles: scalars, enums, relation fields (`IdInputType` for refs, nested input f
 
 ## Mutation Pipeline
 
-`executeOperation()` wraps all mutations in Mongoose transactions:
+`withTransaction()` wraps generated mutations, custom mutations, and programmatic `saveObject()` calls:
 
-1. Starts a session + transaction
+1. Without a session, owns a session + transaction on the registered model's connection (default Mongoose connection for custom mutations). A supplied session must have an active transaction; the caller owns its lifecycle and retries.
 2. Calls the appropriate handler: `onSaveObject`, `onUpdateSubject`, `onDeleteObject`, `onStateChanged`
-3. Commits on success, aborts on error
-4. Auto-retries on `TransientTransactionError`
+3. Commits on success, aborts active transactions on write/hook errors, and awaits owned session cleanup. Abort/cleanup errors do not replace an earlier operation error.
+4. Retries the transaction on `TransientTransactionError`, up to five retries after the first attempt. `UnknownTransactionCommitResult` retries only commit, up to five retries, never repeating the body for an uncertain result. Expired commits are not retried; terminal uncertainty is surfaced without replaying writes.
+
+`onUpdateSubject()` awaits the parent update before collection writes and `onUpdated`. Missing parents throw `NOT_VALID_ID` (404) before child writes or `onUpdated`; the hook receives the updated Mongoose document. All hooks still run before commit and must tolerate transaction retries; external effects are not rolled back.
 
 `materializeModel()` transforms GraphQL input args into Mongoose-compatible documents, running field-level and type-level validators during the process.
 

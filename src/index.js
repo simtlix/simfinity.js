@@ -717,20 +717,68 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
 };
 
 const MAX_TRANSIENT_RETRIES = 5;
+const MAX_COMMIT_RETRIES = 5;
 
-const withTransaction = async (session, body) => {
-  const ownsSession = !session;
-  const mySession = session || await mongoose.startSession();
+const commitWithRetry = async (session) => {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await session.commitTransaction();
+      return;
+    } catch (error) {
+      const isUnknown = error?.errorLabels?.includes('UnknownTransactionCommitResult');
+      const isExpired = error?.code === 50 || error?.writeConcernError?.code === 50;
+      if (!isUnknown || isExpired || attempt >= MAX_COMMIT_RETRIES) {
+        throw error;
+      }
+      // An uncertain commit can already have succeeded. Retry only the commit,
+      // never the writes or hooks, even if this error also carries a transient label.
+    }
+  }
+};
+
+const endOwnedSession = async (session, failed) => {
+  try {
+    await session.endSession();
+  } catch (error) {
+    if (!failed) throw error;
+  }
+};
+
+const withTransaction = async (session, body, connection = mongoose.connection) => {
+  if (session) {
+    if (!session.inTransaction()) {
+      throw new SimfinityError(
+        'A supplied session must have an active transaction', 'ACTIVE_TRANSACTION_REQUIRED', 400,
+      );
+    }
+    // The caller owns retries, commit, abort, and cleanup for a borrowed session.
+    return body(session);
+  }
+
+  const mySession = connection === mongoose.connection
+    ? await mongoose.startSession() : await connection.startSession();
+  let failed = false;
   try {
     for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
       await mySession.startTransaction();
       try {
         const result = await body(mySession);
-        await mySession.commitTransaction();
+        await commitWithRetry(mySession);
         return result;
       } catch (error) {
-        await mySession.abortTransaction();
-        const isTransient = error.errorLabels?.includes('TransientTransactionError');
+        if (error?.errorLabels?.includes('UnknownTransactionCommitResult')) {
+          throw error;
+        }
+        if (mySession.inTransaction()) {
+          try {
+            await mySession.abortTransaction();
+          } catch {
+            // Do not replace the operation error or retry on a session whose
+            // previous transaction could not be aborted.
+            throw error;
+          }
+        }
+        const isTransient = error?.errorLabels?.includes('TransientTransactionError');
         if (isTransient && attempt < MAX_TRANSIENT_RETRIES) {
           continue;
         }
@@ -738,10 +786,11 @@ const withTransaction = async (session, body) => {
       }
     }
     throw new SimfinityError('Transaction exceeded retry limit', 'TRANSACTION_RETRY_EXCEEDED', 500);
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    if (ownsSession) {
-      mySession.endSession();
-    }
+    await endOwnedSession(mySession, failed);
   }
 };
 
@@ -825,9 +874,13 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
     await controller.onUpdating(objectId, materializedModel.modelArgs, session, context);
   }
 
-  const result = Model.findByIdAndUpdate(
+  const result = await Model.findByIdAndUpdate(
     objectId, materializedModel.modelArgs, { new: true },
   ).session(session);
+
+  if (!result) {
+    throw new SimfinityError(`${gqltype.name} ${objectId} is not valid`, 'NOT_VALID_ID', 404);
+  }
 
   if (materializedModel.collectionFields) {
     await iterateOnCollectionFields(materializedModel, gqltype, objectId, session, context);
@@ -891,7 +944,9 @@ const onSaveObject = async (Model, gqltype, controller, args, session, linkToPar
 
 export const saveObject = async (typeName, args, session, context) => {
   const type = typesDict.types[typeName];
-  return onSaveObject(type.model, type.gqltype, type.controller, args, session, null, context);
+  return withTransaction(session,
+    (mySession) => onSaveObject(type.model, type.gqltype, type.controller, args, mySession, null, context),
+    type.model.db);
 };
 
 const executeOperation = (Model, gqltype, controller, args, operation, actionField, session, context) => withTransaction(
@@ -910,6 +965,7 @@ const executeOperation = (Model, gqltype, controller, args, operation, actionFie
         return null;
     }
   },
+  Model.db,
 );
 
 const executeItemFunction = async (gqltype, collectionField, objectId, session,

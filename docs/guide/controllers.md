@@ -39,14 +39,12 @@ The controller is the fifth `connect()` argument. Register it before building th
 | `onSaving(document, args, session, context)` | Before inserting the parent document | Unsaved Mongoose document |
 | `onSaved(document, args, session, context)` | After saving the parent and processing its collection inputs | Plain object snapshot of the saved parent |
 | `onUpdating(id, changes, session, context)` | Before preparing the database update | Materialized update object |
-| `onUpdated(query, session, context)` | After constructing the update query and processing collection inputs | Mongoose Query; see the caveat below |
+| `onUpdated(document, session, context)` | After awaiting the parent update and processing collection inputs | Updated Mongoose document |
 | `onDelete(document, session, context)` | Before deleting the record | Existing plain object, or `null` |
 
 For create hooks, `args` is the inner mutation input. For update hooks, `changes` contains the materialized values, may contain `$unset`, and may include merged embedded data. It is not a complete copy of the stored document.
 
-::: warning Current `onUpdated` behavior
-The current implementation passes a Mongoose Query to `onUpdated`, before that query is resolved by the mutation pipeline. Do not treat its first argument as the updated document or execute/await that same query inside the hook. Use `onUpdating` for update validation and preparation. A custom mutation gives you explicit control when you need work after an awaited update.
-:::
+The parent update completes before collection writes. If no parent matches, the mutation throws `NOT_VALID_ID` (404) before processing children or calling `onUpdated`. The hook receives the updated Mongoose document, so it can read its fields or perform additional session-bound database work without executing the update query again.
 
 ## Check request context
 
@@ -113,7 +111,7 @@ The hook throws before the delete executes. A controller does not supply automat
 
 ## Transactions and side effects
 
-All these hooks run inside the mutation transaction, before it commits. Even `onSaved` is not an after-commit notification. If a later step fails, the transaction can still be rolled back.
+All these hooks run inside the mutation transaction, before it commits. Neither `onSaved` nor `onUpdated` is an after-commit notification. If a later step fails, the transaction can still be rolled back.
 
 Use the supplied session for additional database operations:
 
@@ -126,10 +124,10 @@ await AuditModel.create(
 
 `AuditModel` is an application-defined Mongoose model. This write can participate in the same transaction as the entity change.
 
-Transient transaction retries can execute hooks more than once. For email, webhooks, or other irreversible external actions, store an outbox event within the transaction and process it after commit. Calling an external service inside a hook does not make that call transactional.
+Transient transaction retries can execute hooks more than once, up to five retries after the initial attempt. An uncertain commit result retries only the commit, up to five times, without repeating hooks. If uncertainty remains, the error is returned even though the database may already have committed; reconcile the outcome before repeating the mutation. For email, webhooks, or other irreversible external actions, store an outbox event within the transaction and process it after commit. Calling an external service inside a hook does not make that call transactional.
 
 ## Nested writes and direct model access
 
 Referenced collection changes call the child type's controller with the same session and request context. Direct calls to a Mongoose model bypass Simfinity's controller and validation pipeline.
 
-Use [`saveObject()`](../reference/api#saveobject) when you need Simfinity's creation pipeline programmatically, passing the transaction session you already own. Use [custom mutations](./mutations#add-a-custom-mutation) when you need to coordinate an explicit sequence of operations.
+Use [`saveObject()`](../reference/api#saveobject) when you need Simfinity's creation pipeline programmatically. Pass the supplied active session inside a hook or custom mutation to share its transaction; without a session, `saveObject()` owns a separate transaction. Use [custom mutations](./mutations#add-a-custom-mutation) when you need to coordinate an explicit sequence of operations.

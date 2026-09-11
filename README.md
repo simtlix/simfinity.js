@@ -1419,7 +1419,7 @@ const bookController = {
   onSaved: async (doc, args, session, context) => {
     // After saving - doc is a plain object
     console.log(`Book saved: ${doc._id}`);
-    // Can access context.user for post-save operations like notifications
+    // Use context.user for transactional audit/outbox records on this session
   },
 
   onUpdating: async (id, doc, session, context) => {
@@ -1471,7 +1471,7 @@ simfinity.connect(null, BookType, 'book', 'books', bookController);
 - `context`: GraphQL context object (includes request info, user data, etc.)
 
 **`onUpdated(doc, session, context)`**:
-- `doc`: Full updated Mongoose document
+- `doc`: Full updated Mongoose document, after the parent update and nested collection writes have completed
 - `session`: Mongoose session for transaction
 - `context`: GraphQL context object (includes request info, user data, etc.)
 
@@ -1479,6 +1479,10 @@ simfinity.connect(null, BookType, 'book', 'books', bookController);
 - `doc`: Plain object of document to be deleted
 - `session`: Mongoose session for transaction
 - `context`: GraphQL context object (includes request info, user data, etc.)
+
+The parent update executes before nested child operations. An update with no matching parent throws `NOT_VALID_ID` (404), without running child operations or `onUpdated`.
+
+Lifecycle hooks, including `onSaved` and `onUpdated`, run before the transaction commits. They can run again after a transient transaction failure, with up to five retries after the first attempt. Keep additional database writes on the supplied session. For email or webhooks, write an outbox record in that transaction and deliver it after commit; external calls inside hooks cannot be rolled back. An uncertain commit result retries only the commit, up to five times, without repeating hooks. If the result remains uncertain, the error is returned and the database may already have committed; reconcile the outcome before repeating the operation.
 
 ### Using Context in Controllers
 
@@ -4181,16 +4185,20 @@ console.log(BookInput.getFields()); // Input fields for mutations
 
 ### `saveObject(typeName, args, session?, context?)`
 
-Programmatically save an object outside of GraphQL mutations.
+Programmatically save an object through the creation pipeline, including validation, controllers, and nested writes.
 
 **Parameters:**
 - `typeName` (string): The name of the GraphQL type
 - `args` (object): The data to save
-- `session` (MongooseSession, optional): Database session for transactions
+- `session` (MongooseSession, optional): Caller-owned session with an active transaction, from the same MongoDB client as the registered model
 - `context` (object, optional): GraphQL context object (includes request info, user data, etc.)
 
 **Returns:**
 - `Promise<object>`: The saved object
+
+Without a session, `saveObject()` starts a transaction on the registered model's connection, commits the parent and nested writes together, and awaits session cleanup. The same bounded transaction and commit retries described above apply. This requires a transaction-capable MongoDB deployment, such as a replica set.
+
+With a session, it participates in the caller's active transaction. It never starts, commits, aborts, retries, or ends that caller-owned transaction/session; the caller must handle failures and finish the transaction. An inactive supplied session is rejected with `ACTIVE_TRANSACTION_REQUIRED` (400) before writes. Pass the provided session when calling from a controller or custom mutation so the writes share its transaction. Direct calls bypass GraphQL input coercion, field authorization, and global middleware.
 
 **Example:**
 

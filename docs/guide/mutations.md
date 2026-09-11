@@ -42,7 +42,7 @@ mutation RenameSerie($id: ID!) {
 }
 ```
 
-For a type with `id: GraphQLID`, `SerieInputForUpdate` requires `id`. Send the fields you want to change; omitted fields are left unchanged. An update targeting a nonexistent ID returns `null`.
+For a type with `id: GraphQLID`, `SerieInputForUpdate` requires `id`. Send the fields you want to change; omitted fields are left unchanged. An update targeting a nonexistent ID throws `NOT_VALID_ID` (404), before child operations or the `onUpdated` hook run.
 
 For ordinary nullable scalar fields, explicit `null` unsets the stored field:
 
@@ -59,7 +59,7 @@ mutation ClearCategory($id: ID!) {
 Generated update inputs relax required scalar fields so you can omit them. That does not enforce the original non-null constraint when an explicit `null` is supplied: use a custom update validator when clearing must be rejected. The materialization pipeline skips empty strings, so use `null` to clear a nullable scalar instead of relying on `""` being stored.
 :::
 
-Embedded objects merge supplied fields with their stored value; supplied embedded arrays replace the array. Referenced collection updates run their child operations using the parent mutation's session.
+Embedded objects merge supplied fields with their stored value; supplied embedded arrays replace the array. The parent update executes before referenced collection operations, which share the parent mutation's session. `onUpdated` then receives the updated Mongoose document.
 
 ## Delete a record
 
@@ -78,7 +78,9 @@ Deleting a parent does not automatically delete referenced children. Choose an a
 
 ## Transaction boundaries
 
-Each generated root mutation field runs in its own transaction. Its parent and nested child writes share that transaction. A failure aborts those writes; a transient transaction error can retry the operation, up to five retries after the initial attempt.
+Each generated root mutation field runs in its own transaction on the registered model's connection. Its parent and nested child writes share that transaction. A write or hook failure aborts those writes; a transient transaction error can retry the operation, up to five retries after the initial attempt. A custom mutation uses the default Mongoose connection.
+
+An `UnknownTransactionCommitResult` retries only the commit, up to five retries, without repeating writes or hooks. An expired commit (`MaxTimeMSExpired`) is not retried. If uncertainty remains after the limit, the original error is returned; the data may already have committed. Reconcile that outcome before repeating the mutation. Session cleanup is awaited, and abort/cleanup failures do not replace an earlier operation error. A cleanup failure after a successful commit is reported, but does not undo the committed data.
 
 Multiple root mutation fields in a GraphQL request are not one shared transaction. If a later field fails, an earlier field may already have committed. Use a custom mutation when a business operation needs a single transaction spanning several writes.
 
@@ -134,6 +136,6 @@ mutation {
 }
 ```
 
-`saveObject()` does not create its own transaction. Pass the supplied session when using it inside a registered mutation. Direct Mongoose calls must also use that session and do not automatically run Simfinity validators, hooks, or authorization rules.
+`saveObject()` owns a transaction when no session is supplied. Pass the supplied active session when using it inside a registered mutation: it shares that transaction without starting, committing, aborting, retrying, or ending it. An inactive supplied session is rejected with `ACTIVE_TRANSACTION_REQUIRED` (400). Direct Mongoose calls must also use that session and do not automatically run Simfinity validators, hooks, or authorization rules.
 
 Continue with [validation](./validation) to reject invalid data and [authorization](./authorization) to control who can perform an operation.

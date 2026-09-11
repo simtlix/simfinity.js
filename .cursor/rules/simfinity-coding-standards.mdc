@@ -27,7 +27,7 @@ throw new SimfinityError('Resource not found', 'NOT_FOUND', 404);
 ```
 
 - For auth errors, use `UnauthenticatedError` (401) or `ForbiddenError` (403) from `src/auth/errors.js`.
-- Wrap mutation logic in Mongoose transactions. Handle `TransientTransactionError` with retry (see `executeOperation` pattern).
+- Wrap mutation logic in Mongoose transactions. Borrow only active caller sessions without managing their lifecycle. For owned transactions, retry `TransientTransactionError` separately from commit-only `UnknownTransactionCommitResult` retries, with bounded attempts; preserve primary errors and await cleanup (see `withTransaction` pattern).
 
 ## GraphQL Type Definitions
 
