@@ -957,6 +957,8 @@ mutation {
 }
 ```
 
+For non-embedded collections, each `added`, `updated`, or `deleted` child runs the target type's global middleware with the request context. The operation and argument shapes match root mutations: `save`/`update` receive `{ input }`, and `delete` receives `{ id }`. Updated and deleted children must already belong to the current parent in the transaction; a missing child raises `NOT_VALID_ID`, and a different parent raises `FORBIDDEN`. Nested updates cannot move a child between parents. A rejection aborts the parent mutation and its child changes.
+
 ## ✅ Validations
 
 ### Declarative Validation Helpers
@@ -1822,6 +1824,8 @@ const EpisodeType = new GraphQLObjectType({
 - **Modify Args In Place**: Scope functions should modify the `args` object directly
 - **Filter Structure**: Use the correct filter structure (`QLFilter` for scalars, `QLTypeFilterExpression` for relations)
 - **All Query Operations**: Scope applies to `find`, `aggregate`, and `get_by_id` operations
+- **Generated Relationships**: Non-embedded single relations run the target type's `get_by_id` middleware and scope; collection relations run its `find` middleware and scope with the same request context. A separate database predicate preserves the referenced ID or parent connection even when filters are changed, including by scope functions. A scoped-out single relation returns `null`; a collection omits scoped-out children.
+- **Custom Resolvers and Writes**: Existing relationship resolvers remain unchanged. Query scope does not authorize mutations; use global middleware or controller checks for write permissions, including permissions on nested children.
 - **Automatic Merging**: For `get_by_id`, the id filter is automatically combined with scope filters
 - **Context Access**: Use `context.user`, `context.ip`, or other context properties to determine scope
 
@@ -2221,6 +2225,8 @@ simfinity.use((params, next) => {
 ### Middleware Parameters
 
 Each middleware receives a `params` object containing:
+
+Generated non-embedded relationship reads and nested collection mutations also invoke middleware for the related type. Middleware and scope callbacks are awaited. Nested child operations use the same argument shapes and request context as their root equivalents; review middleware that previously assumed it ran only once per root operation.
 
 ```javascript
 simfinity.use((params, next) => {
