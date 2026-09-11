@@ -378,7 +378,7 @@ export function registerMutation(
   callback: (input: any, session: any, context: any) => any,
 ): void;
 
-/** Operation context passed to Simfinity middlewares registered via {@link use}. */
+/** Operation context for root operations, generated non-embedded relation reads, and nested collection writes. */
 export interface SimfinityMiddlewareContext {
   args: any;
   operation: string;
@@ -388,7 +388,11 @@ export interface SimfinityMiddlewareContext {
   [key: string]: any;
 }
 
-/** Register a koa-style middleware run around every Simfinity operation. */
+/**
+ * Register middleware before generated operations, including related-type reads and nested child writes.
+ * Nested operations keep root argument shapes and the GraphQL request context.
+ * Await next() to advance the middleware chain; throw to reject before the operation executes.
+ */
 export function use(
   middleware: (
     context: SimfinityMiddlewareContext,

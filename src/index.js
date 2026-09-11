@@ -824,6 +824,9 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
   if (controller && controller.onUpdating) {
     await controller.onUpdating(objectId, materializedModel.modelArgs, session, context);
   }
+  if (linkToParent) {
+    linkToParent(materializedModel.modelArgs);
+  }
 
   const result = Model.findByIdAndUpdate(
     objectId, materializedModel.modelArgs, { new: true },
@@ -872,6 +875,9 @@ const onSaveObject = async (Model, gqltype, controller, args, session, linkToPar
   if (controller && controller.onSaving) {
     await controller.onSaving(newObject, args, session, context);
   }
+  if (linkToParent) {
+    linkToParent(newObject);
+  }
 
   let result = await newObject.save();
   result = result.toObject();
@@ -917,35 +923,41 @@ const executeItemFunction = async (gqltype, collectionField, objectId, session,
   const argTypes = gqltype.getFields();
   const collectionGQLType = argTypes[collectionField].type.ofType;
   const { connectionField } = argTypes[collectionField].extensions.relation;
-
-  let operationFunction = async () => { };
-
-  switch (operationType) {
-    case operations.SAVE:
-      operationFunction = async (collectionItem) => {
-        await onSaveObject(typesDict.types[collectionGQLType.name].model, collectionGQLType,
-          typesDict.types[collectionGQLType.name].controller, collectionItem, session, (item) => {
-            item[connectionField] = objectId;
-          }, context);
-      };
-      break;
-    case operations.UPDATE:
-      operationFunction = async (collectionItem) => {
-        await onUpdateSubject(typesDict.types[collectionGQLType.name].model, collectionGQLType,
-          typesDict.types[collectionGQLType.name].controller, collectionItem, session, (item) => {
-            item[connectionField] = objectId;
-          }, context);
-      };
-      break;
-    case operations.DELETE:
-      operationFunction = async (collectionItem) => {
-        await onDelete(typesDict.types[collectionGQLType.name].model,
-          typesDict.types[collectionGQLType.name].controller, collectionItem, session, context);
-      };
-  }
+  const type = operationType === operations.UPDATE
+    ? typesDictForUpdate.types[collectionGQLType.name] : typesDict.types[collectionGQLType.name];
+  const linkToParent = (item) => {
+    item[connectionField] = objectId;
+    if (item.$unset) delete item.$unset[connectionField];
+    if (item.$set) delete item.$set[connectionField];
+  };
 
   for (const element of collectionFieldsList) {
-    await operationFunction(element);
+    const args = operationType === operations.DELETE ? { id: element } : { input: element };
+    await executeMiddleware({ type, args, operation: operationType, context });
+
+    if (operationType === operations.UPDATE || operationType === operations.DELETE) {
+      const id = operationType === operations.DELETE ? args.id : args.input.id;
+      const child = await type.model.findById(id).session(session).lean();
+      if (!child) {
+        throw new SimfinityError(`${collectionGQLType.name} ${id} is not valid`, 'NOT_VALID_ID', 404);
+      }
+      if (String(child[connectionField]) !== String(objectId)) {
+        throw new SimfinityError('Child does not belong to this parent', 'FORBIDDEN', 403);
+      }
+    }
+
+    switch (operationType) {
+      case operations.SAVE:
+        await onSaveObject(type.model, collectionGQLType, type.controller,
+          args.input, session, linkToParent, context);
+        break;
+      case operations.UPDATE:
+        await onUpdateSubject(type.model, collectionGQLType, type.controller,
+          args.input, session, linkToParent, context);
+        break;
+      case operations.DELETE:
+        await onDelete(type.model, type.controller, args.id, session, context);
+    }
   }
 };
 
@@ -986,6 +998,27 @@ const executeScope = async (params) => {
   }
 
   return scopeFunction({ type, args, operation, context });
+};
+
+const resolveById = async (type, args, context, requiredId) => {
+  await executeMiddleware({ type, args, operation: 'get_by_id', context });
+  if (!type.gqltype.extensions?.scope?.get_by_id) {
+    return requiredId
+      ? type.model.findOne({ $and: [{ _id: requiredId }, { _id: args.id }] })
+      : type.model.findById(args.id);
+  }
+
+  const queryArgs = { id: { operator: 'EQ', value: args.id } };
+  await executeScope({ type, args: queryArgs, operation: 'get_by_id', context });
+  const aggregateClauses = await buildQuery(queryArgs, type.gqltype);
+  if (requiredId) {
+    aggregateClauses.unshift({ $match: { _id: type.model.schema.path('_id').cast(requiredId) } });
+  }
+  if (aggregateClauses.length === 0) {
+    return type.model.findOne({ _id: args.id });
+  }
+  const results = await type.model.aggregate(aggregateClauses);
+  return results[0] || null;
 };
 
 const buildMutation = (name, includedMutationTypes, includedCustomMutations) => {
@@ -1714,26 +1747,7 @@ const buildRootQuery = (name, includedTypes) => {
           type: type.gqltype,
           args: { id: { type: GraphQLID } },
           async resolve(parent, args, context) {
-            const params = {
-              type, args, operation: 'get_by_id', context,
-            };
-            await executeMiddleware(params);
-
-            const hasScope = type.gqltype.extensions?.scope?.get_by_id;
-            if (!hasScope) {
-              return type.model.findById(args.id);
-            }
-
-            const queryArgs = { id: { operator: 'EQ', value: args.id } };
-            await executeScope({
-              type, args: queryArgs, operation: 'get_by_id', context,
-            });
-            const aggregateClauses = await buildQuery(queryArgs, type.gqltype);
-            if (aggregateClauses.length === 0) {
-              return type.model.findOne({ _id: args.id });
-            }
-            const results = await type.model.aggregate(aggregateClauses);
-            return results[0] || null;
+            return resolveById(type, args, context);
           },
         };
 
@@ -1866,14 +1880,19 @@ const autoGenerateResolvers = (gqltype) => {
       delete argsObject[connectionField];
 
       fieldEntry.args = formatArgs(Object.entries(argsObject));
-      fieldEntry.resolve = async (parent, args) => {
+      fieldEntry.resolve = async (parent, args, context) => {
         if (!relatedTypeInfo || !relatedTypeInfo.model) {
           throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
         }
-        args[connectionField] = {
-          terms: [{ path: 'id', operator: 'EQ', value: parent.id || parent._id }],
-        };
+        const params = { type: relatedTypeInfo, args, operation: 'find', context };
+        await executeMiddleware(params);
+        await executeScope(params);
         const aggregateClauses = await buildQuery(args, relatedTypeInfo.gqltype);
+        const parentId = parent.id || parent._id;
+        const connectionPath = relatedTypeInfo.model.schema.path(connectionField);
+        aggregateClauses.unshift({
+          $match: { [connectionField]: connectionPath ? connectionPath.cast(parentId) : parentId },
+        });
         return relatedTypeInfo.model.aggregate(aggregateClauses);
       };
     } else if (fieldEntry.type instanceof GraphQLObjectType
@@ -1881,13 +1900,14 @@ const autoGenerateResolvers = (gqltype) => {
       const relatedType = unwrapNonNull(fieldEntry.type);
       const connectionField = relation.connectionField || fieldName;
 
-      fieldEntry.resolve = async (parent) => {
+      fieldEntry.resolve = async (parent, args, context) => {
         const relatedTypeInfo = typesDict.types[relatedType.name];
         if (!relatedTypeInfo || !relatedTypeInfo.model) {
           throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
         }
         const relatedId = parent[connectionField] || parent[fieldName];
-        return relatedId ? relatedTypeInfo.model.findById(relatedId) : null;
+        const id = relatedId?._id || relatedId;
+        return id ? resolveById(relatedTypeInfo, { id: String(id) }, context, id) : null;
       };
     }
   }

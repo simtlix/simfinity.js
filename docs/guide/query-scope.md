@@ -5,7 +5,7 @@ description: Apply server-controlled filters to list, single-record, and aggrega
 
 # Query scope
 
-Scope functions add server-controlled filters before generated root queries reach MongoDB. Use them to restrict records by tenant, owner, or another field in your GraphQL model.
+Scope functions add server-controlled filters before generated root queries and non-embedded relationship reads reach MongoDB. Use them to restrict records by tenant, owner, or another field in your GraphQL model.
 
 <DomainDiagram kind="access" />
 
@@ -86,6 +86,10 @@ Scopes run after [global middleware](/guide/middleware). Flat filters, including
 
 ## Scope boundaries
 
-Scope hooks apply to these generated root queries. They do not automatically run for generated relationship resolvers, direct Mongoose access, `saveObject`, or mutations. Keep relationships within the same authorization boundary, or supply custom relationship resolvers that apply the necessary restrictions.
+Generated non-embedded single relationships run the target type's `get_by_id` middleware and scope. Generated collection relationships run the target type's `find` middleware and scope. Both receive the same request context and await asynchronous callbacks. A scoped-out single relationship returns `null`; scoped-out children are omitted from a collection.
+
+The referenced ID or stored parent connection is enforced by a separate database predicate, so middleware, scope filters, and user `OR` conditions cannot redirect a relationship to another record or parent. Scope filtering and the parent constraint are applied before collection pagination.
+
+Custom relationship resolvers are preserved and must implement their own data restrictions. Scope hooks do not automatically run for embedded values, direct Mongoose access, `saveObject`, or mutations. Nested collection mutations enforce parent ownership and run child operation middleware, but their write permissions remain separate from query scopes.
 
 Combine scope with [authorization](/guide/authorization) for operation and field permissions, and with [controller checks](/guide/controllers) for writes. A scope alone is not a complete tenant authorization policy.

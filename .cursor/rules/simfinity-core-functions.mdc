@@ -26,7 +26,7 @@ Called after all `connect()`/`addNoEndpointType()` calls. Executes in order:
 
 1. **`generateModel()`** / **`generateModelWithoutCollection()`** -- creates Mongoose schemas via `generateSchemaDefinition()`, auto-indexes all ObjectId fields via `createSchemaWithIndexes()` / `findObjectIdFields()`.
 2. **`buildPendingInputTypes()`** -- recursively resolves deferred input types (handles circular dependencies by retrying until all resolve).
-3. **`autoGenerateResolvers()`** -- for each type's fields with `extensions.relation` and no existing resolver, generates: one-to-one resolvers (`findById`), one-to-many resolvers (aggregation pipeline with filter support).
+3. **`autoGenerateResolvers()`** -- for each type's non-embedded fields with `extensions.relation` and no existing resolver, generates: one-to-one resolvers (`resolveById` with target `get_by_id` middleware/scope), one-to-many resolvers (target `find` middleware/scope followed by an aggregation pipeline). Both await callbacks with the request context and enforce an independent referenced-ID or stored-parent predicate. Existing resolvers are preserved.
 4. **`buildRootQuery()`** -- creates the root Query type with: `{singular}(id)` single-entity query, `{plural}(filters, pagination, sort)` list query, `{plural}_aggregate(filters, aggregation)` aggregation query.
 5. **`buildMutation()`** -- creates the Mutation type with: `add{singular}(input)`, `update{singular}(input)`, `delete{singular}(id)`, `{actionName}_{singular}(input)` for state machine transitions.
 
@@ -74,10 +74,13 @@ Handles: scalars, enums, relation fields (`IdInputType` for refs, nested input f
 
 `materializeModel()` transforms GraphQL input args into Mongoose-compatible documents, running field-level and type-level validators during the process.
 
+`executeItemFunction()` runs target child middleware with root-shaped arguments (`{ input }` for save/update, `{ id }` for delete). Update/delete ownership is checked from the persisted child inside the transaction after middleware selects the effective ID. Missing children raise `NOT_VALID_ID`; a different parent raises `FORBIDDEN`. Child save/update handlers reapply the required parent link after pre-write controller hooks. Child failures abort the parent transaction. Query scopes do not authorize writes.
+
 ## Middleware and Scope
 
 - `use(middleware)` -- pushes to global `middlewares` array. `excecuteMiddleware()` chains them with `next()` pattern.
 - `executeScope()` -- checks `type.gqltype.extensions.scope[operation]` and calls the scope function to apply row-level filtering for `find`, `get_by_id`, and `aggregate` operations.
+- `resolveById()` -- shared root and generated single-relation read pipeline; generated relations supply an immutable target ID independently of mutable middleware/scope arguments. Required relation predicates are cast through the Mongoose schema path.
 
 ## Introspection Monkey-Patch
 
