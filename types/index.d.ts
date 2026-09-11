@@ -66,7 +66,7 @@ export interface MCPTool {
   name: string;
   title: string;
   description: string;
-  /** JSON Schema for the tool arguments (full-fidelity conversion of the GraphQL args). */
+  /** JSON Schema for GraphQL arguments, preserving defaults and nullable input/list positions. */
   inputSchema: JSONSchema;
   /**
    * JSON Schema mirroring the generated selection set (nullable GraphQL
@@ -99,7 +99,7 @@ export interface MCPRemoteExecutionOptions {
   endpoint: string;
   /** Extra HTTP headers merged over `content-type: application/json`. */
   headers?: Record<string, string>;
-  /** Abort slow remote requests after this many milliseconds (AbortSignal.timeout). */
+  /** Abort each remote attempt, including response-body reading, after this many milliseconds. */
   timeoutMs?: number;
   /** Retry policy for transport failures, HTTP 5xx and 429 (queries only). */
   retry?: MCPRetryOptions;
@@ -140,13 +140,20 @@ export interface MCPLimits {
     count?: boolean;
     [key: string]: unknown;
   };
-  /** Reject (isError MCP_RESULT_TOO_LARGE) when the serialized data is larger than this. */
+  /**
+   * Cap pretty-printed UTF-8 JSON for data or { errors, data? } with MCP_RESULT_TOO_LARGE.
+   * Limit diagnostics, MCP envelope overhead, duplicate structuredContent and
+   * middleware-created results are exempt. Checking occurs after execution.
+   */
   maxResultBytes?: number;
 }
 
 /** Per-call metadata passed through to middleware and context factories (e.g. the SDK's RequestHandlerExtra). */
 export interface MCPCallExtra {
-  /** Already-aborted signals make `callTool` throw MCP_CALL_CANCELLED; remote fetches receive the combined signal. */
+  /**
+   * Aborted signals prevent execution, including after awaiting the context.
+   * Remote fetch/body reading receives the signal. Already-started database work is not undone.
+   */
   signal?: AbortSignal;
   [key: string]: unknown;
 }
@@ -219,7 +226,7 @@ export interface GenerateMCPToolsOptions {
   excludeTypes?: string | string[];
   /** Nesting depth for the auto-generated selection set and output schema. Default 1. */
   selectionDepth?: number;
-  /** Always select `id` when nothing else is selectable on an object type. Default true. */
+  /** Select a scalar/enum `id` as a fallback; otherwise use __typename. Default true. */
   includeId?: boolean;
   /** Prefix prepended to every published tool name (validated /^[a-zA-Z0-9_-]+$/). */
   toolNamePrefix?: string;
@@ -243,8 +250,13 @@ export interface MCPServerOptions extends GenerateMCPToolsOptions {
 
 /** Extra options accepted by {@link createHTTPMCPHandler}. */
 export interface HTTPMCPHandlerOptions extends MCPServerOptions {
-  /** Spread into the SDK's StreamableHTTPServerTransport options (e.g. enableDnsRebindingProtection, allowedHosts, allowedOrigins). */
-  transportOptions?: Record<string, unknown>;
+  /** Stateless SDK options; stateful settings raise MCP_INVALID_TRANSPORT_OPTIONS at setup. */
+  transportOptions?: Record<string, unknown> & {
+    sessionIdGenerator?: never;
+    onsessioninitialized?: never;
+    onsessionclosed?: never;
+    eventStore?: never;
+  };
   /** Invoked when the handler fails; the handler then responds 500 (JSON-RPC internal error) if headers were not sent. */
   onError?: (err: unknown, req: any, res: any) => void;
 }
@@ -256,7 +268,7 @@ export interface GeneratedMCPTools {
    * Execute a tool by its published name. Returns a {@link CallToolResult}
    * (GraphQL errors become `isError` results). Throws SimfinityError
    * MCP_TOOL_NOT_FOUND for unknown names and MCP_CALL_CANCELLED when
-   * `extra.signal` is already aborted.
+   * `extra.signal` is aborted before execution, including while awaiting context.
    */
   callTool: (
     name: string,

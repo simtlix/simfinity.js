@@ -59,6 +59,14 @@ simfinity.createSchema()
 | `src/errors/simfinity.error.js` | Base error class with `code` and `status` extensions |
 | `src/errors/internal-server.error.js` | Internal server error (extends `SimfinityError`) |
 
+### MCP contracts
+
+- Generated input schemas preserve nullability independently from requiredness, including list items and recursive `$defs`. Defaults use GraphQL AST serialization; enum literals use member names. Opaque defaults without a literal representation use the original field default when omitted.
+- `maxResultBytes` caps the serialized logical payload on success and on errors, including partial data. Limit diagnostics are exempt; envelope overhead, duplicate structured content, remote download size and middleware-created results are outside the cap.
+- Check cancellation again after awaiting an in-process context factory, before calling GraphQL. Do not promise to undo database work already started.
+- Remote attempt timeouts include reading the body. Queries alone may retry transport failures; client cancellation rejects during fetch or body reading. Validate the remote GraphQL envelope before creating a tool result.
+- `createHTTPMCPHandler` always creates a fresh stateless server/transport per request. Reject session generators, session callbacks and event stores at setup; applications needing sessions manage a transport with `createMCPServer`.
+
 ## Key Global State (in `src/index.js`)
 
 - `typesDict` -- primary registry: `{ types: { [typeName]: { model, gqltype, simpleEntityEndpointName, listEntitiesEndpointName, endpoint, controller, stateMachine, inputType } } }`
