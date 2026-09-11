@@ -1,19 +1,26 @@
-name: Build on master
+name: Library CI
 
 on:
   push:
-    branches: master
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v2.3.4
-      - uses: actions/setup-node@v1.4.4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 14
+          node-version: 24
+          cache: npm
       - run: npm ci
-      - run: npx json -f package.json peerDependencies | npx json -ka | xargs -i{} bash -c 'echo $0@$(npx json -f package.json peerDependencies.$0)' {} | xargs -i{}  npm install --save-optional {}
       - run: npm run lint
       - run: npm test
 
