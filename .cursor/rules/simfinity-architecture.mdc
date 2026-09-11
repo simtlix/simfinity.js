@@ -69,4 +69,8 @@ simfinity.createSchema()
 
 ## Introspection Extension (Critical)
 
-Simfinity monkey-patches `__Field._fields` to inject `FieldExtensionsType` and `RelationType` into GraphQL introspection globally. This means these types exist outside the schema's type map. Any tool that rebuilds or copies the schema (like `graphql-middleware`'s `applyMiddleware` / `mapSchema`) will cause duplicate type errors. Always use Envelop plugins for schema transformations.
+Simfinity adds `extensions` to the field map returned by `__Field.getFields()`. This works before or after GraphQL materializes introspection fields and reuses an existing extension field on repeated module evaluation, preserving metadata type identity. Do not capture or replace the private `_fields` thunk.
+
+The extension is still global to the shared GraphQL peer, and Simfinity's registries remain module-level state. Schemas constructed after import collect `FieldExtensionsType` and `RelationType` in their type maps. Pre-existing schemas retain their original type maps: ordinary operations and direct metadata introspection work, but named fragments on these new types require a schema constructed after import.
+
+Tools that clone types (`graphql-middleware`'s `applyMiddleware` / `mapSchema`) remain unsupported. `buildClientSchema()` on a post-import schema's introspection can also produce duplicate metadata types when run in the same process as Simfinity. Use Envelop plugins and in-place resolver wrapping; initialization safety does not provide schema isolation or schema-cloning compatibility.

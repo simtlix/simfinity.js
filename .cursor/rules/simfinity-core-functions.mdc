@@ -81,4 +81,6 @@ Handles: scalars, enums, relation fields (`IdInputType` for refs, nested input f
 
 ## Introspection Monkey-Patch
 
-Lines 52-85: `FieldExtensionsType` and `RelationType` are injected into `__Field._fields` globally. This enables introspection clients to discover relation metadata and state machine flags. **Never rebuild the schema** with tools that clone types (e.g., `mapSchema` from `@graphql-tools/utils`) -- it will duplicate these globally-injected types.
+Initialization adds `extensions` to `__Field.getFields()` once per shared GraphQL peer. It supports already materialized fields and reuses the extension field and its `FieldExtensionsType` / `RelationType` identities on repeated module evaluation. This exposes relation metadata, read-only flags, and state machine flags without replacing application metadata.
+
+The extension remains global. Newly constructed schemas collect the metadata types; schemas built before import retain their original type maps. **Never rebuild the schema** with tools that clone types (e.g., `mapSchema` from `@graphql-tools/utils`). A `buildClientSchema()` roundtrip of a post-import schema in the Simfinity process can likewise create duplicate metadata type names. See the architecture rule for import-order limits.
