@@ -14,7 +14,7 @@ const compat = new FlatCompat({
 
 export default [
     {
-        ignores: ["node_modules/*", "data/*", "eslint.config.mjs", ".claude/**"],
+        ignores: ["**/node_modules/**", "data/*", "eslint.config.mjs", ".claude/**", "docs/.vitepress/cache/**", "docs/.vitepress/dist/**", "docs/.vitepress/.temp/**"],
     },
     js.configs.recommended,
     {

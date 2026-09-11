@@ -2,6 +2,17 @@
 
 A powerful Node.js framework that automatically generates GraphQL schemas from your data models, bringing all the power and flexibility of MongoDB query language to GraphQL interfaces.
 
+Read the [documentation website](https://simtlix.github.io/simfinity.js/): start with the [quick start](https://simtlix.github.io/simfinity.js/guide/getting-started.html), explore the [guides](https://simtlix.github.io/simfinity.js/guide/schema.html), or consult the [API reference](https://simtlix.github.io/simfinity.js/reference/api.html). The website source is in [`docs/`](docs/).
+
+Run the documentation website locally with Node.js 22+:
+
+```sh
+npm run docs:install
+npm run docs:dev
+```
+
+For builds and hosting, see the [website maintainer guide](docs/.vitepress/README.md). The website documents the current source; some older examples later in this README retain historical conventions.
+
 ## 📑 Table of Contents
 
 - [Features](#-features)
@@ -96,94 +107,59 @@ npm install mongoose graphql @simtlix/simfinity-js
 
 ## 🚀 Quick Start
 
-### 1. Basic Setup
+The [complete quick start](docs/guide/getting-started.md) includes MongoDB setup, installation, and working create, read, update, and delete operations. Simfinity uses ES modules and named exports.
 
-```javascript
-const express = require('express');
-const { graphqlHTTP } = require('express-graphql');
-const mongoose = require('mongoose');
-const simfinity = require('@simtlix/simfinity-js');
-
-// Connect to MongoDB
-mongoose.connect('mongodb://localhost:27017/bookstore', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
-
-const app = express();
+```sh
+npm install @simtlix/simfinity-js graphql@^16.11.0 mongoose@^8.16.2 graphql-yoga@^5
 ```
 
-### 2. Define Your GraphQL Type
+Set `"type": "module"` in your application's `package.json`, then create `server.js`:
 
 ```javascript
-const { GraphQLObjectType, GraphQLString, GraphQLNonNull, GraphQLID } = require('graphql');
+import { createServer } from 'node:http';
+import { GraphQLID, GraphQLNonNull, GraphQLObjectType, GraphQLString } from 'graphql';
+import { createYoga } from 'graphql-yoga';
+import mongoose from 'mongoose';
+import * as simfinity from '@simtlix/simfinity-js';
 
-const BookType = new GraphQLObjectType({
-  name: 'Book',
-  fields: () => ({
-    id: { type: new GraphQLNonNull(GraphQLID) },
-    title: { type: new GraphQLNonNull(GraphQLString) },
-    author: { type: GraphQLString },
-  }),
+const SerieType = new GraphQLObjectType({
+  name: 'Serie',
+  fields: {
+    id: { type: GraphQLID },
+    name: { type: new GraphQLNonNull(GraphQLString) },
+  },
 });
-```
 
-### 3. Connect to Simfinity
-
-```javascript
-// Connect the type to Simfinity
-simfinity.connect(null, BookType, 'book', 'books');
-
-// Create the GraphQL schema
+await mongoose.connect(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/series?replicaSet=rs0&directConnection=true');
+simfinity.connect(null, SerieType, 'serie', 'series');
 const schema = simfinity.createSchema();
-```
-
-### 4. Setup GraphQL Endpoint
-
-```javascript
-app.use('/graphql', graphqlHTTP({
-  schema,
-  graphiql: true,
-  formatError: simfinity.buildErrorFormatter((err) => {
-    console.log(err);
-  })
-}));
-
-app.listen(4000, () => {
-  console.log('Server is running on port 4000');
+const yoga = createYoga({ schema });
+createServer(yoga).listen(4000, '127.0.0.1', () => {
+  console.log('GraphQL ready at http://127.0.0.1:4000/graphql');
 });
 ```
 
-### 5. Try It Out
+Generated mutations require a MongoDB replica set or sharded cluster. Follow the [local MongoDB setup](docs/guide/getting-started.md#2-start-mongodb), then run `node server.js` and open `http://127.0.0.1:4000/graphql`:
 
-Open [http://localhost:4000/graphql](http://localhost:4000/graphql) and try these queries:
-
-**Create a book:**
 ```graphql
 mutation {
-  addBook(input: {
-    title: "The Hitchhiker's Guide to the Galaxy"
-    author: "Douglas Adams"
-  }) {
+  addserie(input: { name: "The Expanse" }) {
     id
-    title
-    author
+    name
   }
 }
 ```
 
-**List all books:**
 ```graphql
 query {
-  books {
+  series {
     id
-    title
-    author
+    name
   }
 }
 ```
 
-> For a full working application, see the [Series Sample Project](https://github.com/simtlix/series-sample) -- a complete TV series microservice with types, relationships, state machines, controllers, and authorization.
+For a full working application, see the [Series Sample Project](https://github.com/simtlix/series-sample), with relationships, state machines, controllers, and authorization.
 
 ## 🔧 Core Concepts
 

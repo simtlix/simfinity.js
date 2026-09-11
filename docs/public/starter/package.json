@@ -1,0 +1,16 @@
+{
+  "name": "simfinity-series-starter",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "mcp": "node mcp.js"
+  },
+  "engines": { "node": ">=22" },
+  "dependencies": {
+    "@simtlix/simfinity-js": "3.0.1",
+    "graphql": "^16.11.0",
+    "graphql-yoga": "^5.0.0",
+    "mongoose": "^8.16.2"
+  }
+}
