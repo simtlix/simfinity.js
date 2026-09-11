@@ -82,7 +82,7 @@ Use `nameValidations` as the field's `extensions.validations` value. Validators 
 
 ## Write a custom field rule
 
-Custom field validators receive `(typeName, fieldName, value, session)`. Throw an error to reject the mutation:
+Custom field validators receive `(typeName, fieldName, value, session)`. Async validators are awaited before persistence. They receive empty strings unchanged, `undefined` for omitted fields, and `null` for explicit null input; these values are distinct. Throw an error to reject the mutation:
 
 ```javascript
 import { SimfinityError } from '@simtlix/simfinity-js';

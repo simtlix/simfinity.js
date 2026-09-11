@@ -429,7 +429,12 @@ export interface QueryLimitsOptions {
 /** Configure at startup. Invalid configuration throws INVALID_QUERY_LIMITS (400). */
 export function configureQueryLimits(options?: QueryLimitsOptions): void;
 
-/** Get the generated GraphQL input type registered for an object type. */
+/**
+ * Get the generated create input type, preserving field and list-item non-null
+ * wrappers. Update inputs remove only the outer wrapper (except entity id).
+ * References use IdInputType; embedded lists use nested inputs; referenced
+ * collections use added/updated/deleted operation inputs.
+ */
 export function getInputType(type: GraphQLObjectType | { name: string }): GraphQLInputObjectType;
 
 /** Persist an object of a connected type inside a transaction (runs controllers/validators). */

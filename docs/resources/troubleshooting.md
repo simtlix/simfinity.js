@@ -51,7 +51,7 @@ Check that:
 - Every related type was registered before `createSchema()`.
 - The field declares `extensions.relation`.
 - `embedded` matches how you intend to store the value.
-- `connectionField` names the correct reference field; provide it explicitly.
+- `connectionField` matches the stored link. Single-object references default to the GraphQL field name; referenced collections require the child back-reference explicitly.
 - An existing custom resolver returns the expected value. Simfinity preserves custom resolvers.
 
 See [relationships](../guide/relationships) for embedded, reference, and collection examples.
