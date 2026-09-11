@@ -80,7 +80,7 @@ For a connected `Serie` type:
 
 Scalar and enum fields become filters on the list query. Object and collection fields receive relation-aware inputs. State machines add their own action mutations.
 
-`GraphQLNonNull` on a scalar such as `name` makes it required in the creation input. Ordinary update fields have their non-null wrapper removed so a partial update can omit them. Use [validation](./validation) for rules that must hold during updates; input optionality is not a substitute for a domain rule.
+`GraphQLNonNull` makes scalar, enum, object, and list fields required in the creation input. Ordinary update fields have only their outer non-null wrapper removed so a partial update can omit them. List items keep their nullability: `[String!]!` becomes `[String!]` for updates. Supported validated scalars, date scalars, embedded lists, and referenced collections follow the same wrapper handling. Use [validation](./validation) for rules that must hold during updates; input optionality is not a substitute for a domain rule.
 
 ## Field metadata
 

@@ -39,7 +39,8 @@ fields: () => ({
 
 - **Non-embedded** (`embedded: false`): stored as ObjectId in MongoDB. Input types use `IdInputType` (`{ id: String! }`). List fields generate `OneToMany` input with `added`/`updated`/`deleted` sub-fields. Auto-generates `$lookup` resolvers.
 - **Embedded** (`embedded: true`): stored inline. Input types use the nested type's full input type. No `$lookup` needed.
-- **`connectionField`**: the actual MongoDB field name for the ObjectId reference. If omitted, defaults to the GraphQL field name.
+- **`connectionField`**: the actual MongoDB field name for a single ObjectId reference. If omitted, defaults to the GraphQL field name consistently during model generation, reads, writes, and nullable update clears. For referenced collections, explicitly configure the child's back-reference field.
+- **Non-null wrappers**: relation objects and lists retain outer non-null requirements in create inputs; updates remove the outer wrapper. Embedded list items and referenced `added`/`updated` items preserve item nullability.
 
 ### `extensions.readOnly`
 

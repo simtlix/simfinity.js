@@ -23,7 +23,7 @@ mutation {
 }
 ```
 
-`SerieInput` is generated from the type. It excludes the entity `id`, fields marked `readOnly`, and a `state` field managed by a state machine. Required scalar fields remain required on creation.
+`SerieInput` is generated from the type. It excludes the entity `id`, fields marked `readOnly`, and a `state` field managed by a state machine. Required scalar, enum, embedded-object, and list fields remain required on creation. Lists preserve item nullability: `[String!]!` becomes `[String!]!` on create and `[String!]` on update.
 
 Nested inputs follow the relationship's storage model: embedded objects accept their fields, references accept `{ id }`, and referenced collections accept `added`, `updated`, and `deleted`. See [relationships](./relationships).
 
@@ -42,9 +42,9 @@ mutation RenameSerie($id: ID!) {
 }
 ```
 
-For a type with `id: GraphQLID`, `SerieInputForUpdate` requires `id`. Send the fields you want to change; omitted fields are left unchanged. An update targeting a nonexistent ID returns `null`.
+For a type with `id: GraphQLID` or `id: GraphQLID!`, `SerieInputForUpdate` requires `id`. Other fields, including other ID fields, can be omitted. Send the fields you want to change; omitted fields are left unchanged. An update targeting a nonexistent ID returns `null`.
 
-For ordinary nullable scalar fields, explicit `null` unsets the stored field:
+For nullable scalar, embedded, and single-object reference fields, explicit `null` unsets the stored field. A reference uses its configured `connectionField`, or the GraphQL field name when no override exists. Multiple null fields are cleared together:
 
 ```graphql
 mutation ClearCategory($id: ID!) {
@@ -56,7 +56,7 @@ mutation ClearCategory($id: ID!) {
 ```
 
 ::: info Partial updates and values
-Generated update inputs relax required scalar fields so you can omit them. That does not enforce the original non-null constraint when an explicit `null` is supplied: use a custom update validator when clearing must be rejected. The materialization pipeline skips empty strings, so use `null` to clear a nullable scalar instead of relying on `""` being stored.
+Generated update inputs remove the outer non-null wrapper so you can omit required fields, while keeping list-item non-null constraints. An explicit `null` for an originally non-null field leaves its stored value unchanged; use a custom update validator to reject that input if needed. Empty strings, `false`, `0`, and empty arrays are persisted after validation. Use `""` to store an empty string and `null` to remove a nullable field.
 :::
 
 Embedded objects merge supplied fields with their stored value; supplied embedded arrays replace the array. Referenced collection updates run their child operations using the parent mutation's session.

@@ -50,6 +50,8 @@ Creates two input types per registered type:
 
 Handles: scalars, enums, relation fields (`IdInputType` for refs, nested input for embedded), `GraphQLList` fields (`OneToMany{A|U}{fieldName}` with `added`/`updated`/`deleted` sub-fields), self-referencing collections.
 
+Preserves outer non-null wrappers for creation and removes only the outer wrapper for updates. List item nullability is retained in scalar/enum/custom scalar lists, embedded inputs, and referenced collection `added`/`updated` items. Entity `id` is required on update for both `GraphQLID` and `GraphQLID!`; other ID fields are optional. Unwrap non-null wrappers before detecting lists, and unwrap list items before looking up their model/type or generating relation resolvers and filters.
+
 ## Query Pipeline
 
 `buildQuery(args, gqltype)` translates GraphQL filter arguments into a MongoDB aggregation pipeline:
@@ -73,6 +75,8 @@ Handles: scalars, enums, relation fields (`IdInputType` for refs, nested input f
 4. Auto-retries on `TransientTransactionError`
 
 `materializeModel()` transforms GraphQL input args into Mongoose-compatible documents, running field-level and type-level validators during the process.
+
+Only `undefined` and `null` skip value materialization; accepted empty strings, zero, false, and empty arrays must survive. Nullable embedded list items retain `null`; nullable referenced-collection operation items are ignored. Single-object references use `relation.connectionField || fieldName` for both writes and nullable update `$unset`. Merge all null clears into one `$unset` without clearing originally non-null fields. Validators continue receiving the original value and are awaited.
 
 ## Middleware and Scope
 

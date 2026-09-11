@@ -38,7 +38,7 @@ const field = {
 | `connectionField` | For a reference, the stored ObjectId field; for a reverse collection, the child field linking back to the parent. |
 | `displayField` | Descriptive field name exposed through introspection for client tooling. |
 
-Set `connectionField` explicitly on non-embedded relationships. Read-side model generation and resolvers have field-name fallbacks, but write materialization accesses `connectionField` directly. Explicit configuration keeps reads and writes aligned.
+For a single-object reference, `connectionField` defaults to the GraphQL field name for model generation, reads, writes, and explicit-null clears. Set it to use a different stored ObjectId field. For referenced collections, specify the child's back-reference explicitly.
 
 Scalar lists do not need relationship metadata. Object fields and object lists do. Embedded self-references are rejected by model generation. See [relationships](/guide/relationships) for complete forward and reverse examples.
 

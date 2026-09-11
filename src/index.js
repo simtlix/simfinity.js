@@ -262,7 +262,7 @@ const unwrapNonNull = (type) => (type instanceof GraphQLNonNull ? type.ofType : 
 
 const unwrapListAndNonNull = (type) => {
   if (type instanceof GraphQLList || type instanceof GraphQLNonNull) {
-    return type.ofType;
+    return unwrapListAndNonNull(type.ofType);
   }
   return type;
 };
@@ -430,7 +430,7 @@ const createTypeWithExcludedField = (inputNamePrefix, originalType, fieldToExclu
 };
 
 const createOneToManyInputType = (inputNamePrefix, fieldEntryName,
-  inputType, updateInputType, connectionField) => {
+  inputType, updateInputType, connectionField, requiredItems = false) => {
   let inputTypeForAdd = inputType;
 
   if (connectionField) {
@@ -441,10 +441,10 @@ const createOneToManyInputType = (inputNamePrefix, fieldEntryName,
     name: `OneToMany${inputNamePrefix}${fieldEntryName}`,
     fields: () => ({
       added: {
-        type: new GraphQLList(inputTypeForAdd),
+        type: new GraphQLList(requiredItems ? new GraphQLNonNull(inputTypeForAdd) : inputTypeForAdd),
       },
       updated: {
-        type: new GraphQLList(updateInputType),
+        type: new GraphQLList(requiredItems ? new GraphQLNonNull(updateInputType) : updateInputType),
       },
       deleted: {
         type: new GraphQLList(GraphQLID),
@@ -454,21 +454,24 @@ const createOneToManyInputType = (inputNamePrefix, fieldEntryName,
 };
 
 const graphQLListInputType = (dict, fieldEntry, fieldEntryName, inputNamePrefix, connectionField) => {
-  const { ofType } = fieldEntry.type;
+  const listType = unwrapNonNull(fieldEntry.type);
+  const ofType = unwrapNonNull(listType.ofType);
+  const requiredItems = listType.ofType instanceof GraphQLNonNull;
 
   if (ofType instanceof GraphQLObjectType && dict.types[ofType.name].inputType) {
     if (!fieldEntry.extensions || !fieldEntry.extensions.relation
       || !fieldEntry.extensions.relation.embedded) {
       const oneToMany = createOneToManyInputType(inputNamePrefix, fieldEntryName,
-        typesDict.types[ofType.name].inputType, typesDictForUpdate.types[ofType.name].inputType, connectionField);
+        typesDict.types[ofType.name].inputType, typesDictForUpdate.types[ofType.name].inputType, connectionField, requiredItems);
       return oneToMany;
     }
     if (fieldEntry.extensions && fieldEntry.extensions.relation
       && fieldEntry.extensions.relation.embedded) {
-      return new GraphQLList(dict.types[ofType.name].inputType);
+      const itemType = dict.types[ofType.name].inputType;
+      return new GraphQLList(requiredItems ? new GraphQLNonNull(itemType) : itemType);
     }
   } else if (ofType instanceof GraphQLScalarType || ofType instanceof GraphQLEnumType) {
-    return new GraphQLList(ofType);
+    return listType;
   }
   return null;
 };
@@ -499,7 +502,7 @@ const buildInputType = (gqltype) => {
           }
           fieldArgForUpdate.type = fieldEntry.type instanceof GraphQLNonNull
             ? fieldEntry.type.ofType : fieldEntry.type;
-          if (fieldEntry.type === GraphQLID) {
+          if (fieldEntryName === 'id' && unwrapNonNull(fieldEntry.type) === GraphQLID) {
             fieldArgForUpdate.type = new GraphQLNonNull(GraphQLID);
           }
         } else if (fieldEntry.type instanceof GraphQLObjectType
@@ -521,8 +524,8 @@ const buildInputType = (gqltype) => {
           } else {
             console.warn(`Configuration issue: Field ${fieldEntryName} does not define extensions.relation`);
           }
-        } else if (fieldEntry.type instanceof GraphQLList) {
-          if (fieldEntry.type.ofType === gqltype) {
+        } else if (unwrapNonNull(fieldEntry.type) instanceof GraphQLList) {
+          if (unwrapListAndNonNull(fieldEntry.type) === gqltype) {
             selfReferenceCollections[fieldEntryName] = fieldEntry;
           } else {
             const listInputTypeForAdd = graphQLListInputType(typesDict, fieldEntry, fieldEntryName, `${gqltype.name}A`, fieldEntry.extensions?.relation?.connectionField);
@@ -534,6 +537,10 @@ const buildInputType = (gqltype) => {
               return null;
             }
           }
+        }
+        if (fieldArg.type && fieldEntry.type instanceof GraphQLNonNull
+          && !(fieldArg.type instanceof GraphQLNonNull)) {
+          fieldArg.type = new GraphQLNonNull(fieldArg.type);
         }
         fieldArg.description = fieldEntry.description;
         fieldArgForUpdate.description = fieldEntry.description;
@@ -570,8 +577,12 @@ const buildInputType = (gqltype) => {
 
   Object.keys(selfReferenceCollections).forEach((fieldEntryName) => {
     if (Object.prototype.hasOwnProperty.call(selfReferenceCollections, fieldEntryName)) {
+      const fieldEntry = selfReferenceCollections[fieldEntryName];
+      const listType = unwrapNonNull(fieldEntry.type);
+      const inputType = createOneToManyInputType('A', fieldEntryName, inputTypeForAdd, inputTypeForUpdate,
+        fieldEntry.extensions?.relation?.connectionField, listType.ofType instanceof GraphQLNonNull);
       inputTypeForAddFields[fieldEntryName] = {
-        type: createOneToManyInputType('A', fieldEntryName, inputTypeForAdd, inputTypeForUpdate, selfReferenceCollections[fieldEntryName].extensions?.relation?.connectionField),
+        type: fieldEntry.type instanceof GraphQLNonNull ? new GraphQLNonNull(inputType) : inputType,
         name: fieldEntryName,
       };
     }
@@ -583,8 +594,10 @@ const buildInputType = (gqltype) => {
 
   Object.keys(selfReferenceCollections).forEach((fieldEntryName) => {
     if (Object.prototype.hasOwnProperty.call(selfReferenceCollections, fieldEntryName)) {
+      const fieldEntry = selfReferenceCollections[fieldEntryName];
       inputTypeForUpdateFields[fieldEntryName] = {
-        type: createOneToManyInputType('U', fieldEntryName, inputTypeForAdd, inputTypeForUpdate, selfReferenceCollections[fieldEntryName].extensions?.relation?.connectionField),
+        type: createOneToManyInputType('U', fieldEntryName, inputTypeForAdd, inputTypeForUpdate,
+          fieldEntry.extensions?.relation?.connectionField, unwrapNonNull(fieldEntry.type).ofType instanceof GraphQLNonNull),
         name: fieldEntryName,
       };
     }
@@ -632,8 +645,6 @@ const buildPendingInputTypes = (waitingForInputType) => {
   }
 };
 
-const isEmpty = (value) => !value && value !== false && value !== 0;
-
 const materializeModel = async (args, gqltype, linkToParent, operation, session) => {
   if (!args) {
     return null;
@@ -652,7 +663,7 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
       }
     }
 
-    if (!isEmpty(args[fieldEntryName])) {
+    if (args[fieldEntryName] !== undefined && args[fieldEntryName] !== null) {
       if (fieldEntry.type instanceof GraphQLScalarType
         || fieldEntry.type instanceof GraphQLEnumType
         || isNonNullOfType(fieldEntry.type, GraphQLScalarType)
@@ -662,7 +673,8 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
         || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
         if (fieldEntry.extensions && fieldEntry.extensions.relation) {
           if (!fieldEntry.extensions.relation.embedded) {
-            modelArgs[fieldEntry.extensions.relation.connectionField] = new mongoose.Types
+            const connectionField = fieldEntry.extensions.relation.connectionField || fieldEntryName;
+            modelArgs[connectionField] = new mongoose.Types
               .ObjectId(args[fieldEntryName].id);
           } else {
             const fieldType = fieldEntry.type instanceof GraphQLNonNull
@@ -677,8 +689,8 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
             500,
           );
         }
-      } else if (fieldEntry.type instanceof GraphQLList) {
-        const { ofType } = fieldEntry.type;
+      } else if (unwrapNonNull(fieldEntry.type) instanceof GraphQLList) {
+        const ofType = unwrapListAndNonNull(fieldEntry.type);
         if (ofType instanceof GraphQLObjectType && fieldEntry.extensions
           && fieldEntry.extensions.relation) {
           if (!fieldEntry.extensions.relation.embedded) {
@@ -687,6 +699,10 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
             const collectionEntries = [];
 
             for (const element of args[fieldEntryName]) {
+              if (element === null) {
+                collectionEntries.push(null);
+                continue;
+              }
               const collectionEntry = (await materializeModel(element, ofType,
                 null, operation, session)).modelArgs;
               if (collectionEntry) {
@@ -814,9 +830,13 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
 
   for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
     if (args[fieldEntryName] === null && !(fieldEntry.type instanceof GraphQLNonNull)) {
+      const relation = fieldEntry.extensions?.relation;
+      const storedFieldName = relation && !relation.embedded
+        && unwrapNonNull(fieldEntry.type) instanceof GraphQLObjectType
+        ? relation.connectionField || fieldEntryName : fieldEntryName;
       materializedModel.modelArgs = {
         ...materializedModel.modelArgs,
-        $unset: { ...materializedModel.modelArgs.$unset, [fieldEntryName]: '' },
+        $unset: { ...materializedModel.modelArgs.$unset, [storedFieldName]: '' },
       };
     }
   }
@@ -915,7 +935,7 @@ const executeOperation = (Model, gqltype, controller, args, operation, actionFie
 const executeItemFunction = async (gqltype, collectionField, objectId, session,
   collectionFieldsList, operationType, context) => {
   const argTypes = gqltype.getFields();
-  const collectionGQLType = argTypes[collectionField].type.ofType;
+  const collectionGQLType = unwrapListAndNonNull(argTypes[collectionField].type);
   const { connectionField } = argTypes[collectionField].extensions.relation;
 
   let operationFunction = async () => { };
@@ -945,7 +965,7 @@ const executeItemFunction = async (gqltype, collectionField, objectId, session,
   }
 
   for (const element of collectionFieldsList) {
-    await operationFunction(element);
+    if (element !== null) await operationFunction(element);
   }
 };
 
@@ -1114,9 +1134,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
 };
 
 const listItemMatchesScalar = (listType, target) => {
-  const ofType = listType.ofType;
-  return ofType === target
-    || (isCustomValidatedScalar(ofType) && ofType.baseScalarType === target);
+  return matchesScalar(unwrapNonNull(listType.ofType), target);
 };
 
 const withUnique = (fieldEntry, mongoType) => (fieldEntry.extensions && fieldEntry.extensions.unique
@@ -1128,7 +1146,7 @@ const generateSchemaDefinition = (gqlType) => {
   const schemaArg = {};
 
   for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
-    const { type } = fieldEntry;
+    const type = unwrapNonNull(fieldEntry.type);
 
     if (matchesScalar(type, GraphQLID)) {
       schemaArg[fieldEntryName] = mongoose.Schema.Types.ObjectId;
@@ -1154,20 +1172,23 @@ const generateSchemaDefinition = (gqlType) => {
         }
       }
     } else if (type instanceof GraphQLList) {
+      const itemType = unwrapNonNull(type.ofType);
       if (fieldEntry.extensions && fieldEntry.extensions.relation) {
         if (fieldEntry.extensions.relation.embedded) {
-          if (type.ofType === gqlType) {
+          if (itemType === gqlType) {
             throw new Error('A type cannot have a field of its same type and embedded');
           }
-          schemaArg[fieldEntryName] = [generateSchemaDefinition(type.ofType)];
+          schemaArg[fieldEntryName] = [generateSchemaDefinition(itemType)];
         }
-      } else if (listItemMatchesScalar(type, GraphQLString) || type.ofType instanceof GraphQLEnumType) {
+      } else if (listItemMatchesScalar(type, GraphQLID)) {
+        schemaArg[fieldEntryName] = [mongoose.Schema.Types.ObjectId];
+      } else if (listItemMatchesScalar(type, GraphQLString) || itemType instanceof GraphQLEnumType) {
         schemaArg[fieldEntryName] = [String];
       } else if (listItemMatchesScalar(type, GraphQLBoolean)) {
         schemaArg[fieldEntryName] = [Boolean];
       } else if (listItemMatchesScalar(type, GraphQLInt) || listItemMatchesScalar(type, GraphQLFloat)) {
         schemaArg[fieldEntryName] = [Number];
-      } else if (isGraphQLisoDate(getEffectiveTypeName(type.ofType))) {
+      } else if (isGraphQLisoDate(getEffectiveTypeName(itemType))) {
         schemaArg[fieldEntryName] = [Date];
       }
     } else if (isGraphQLisoDate(getEffectiveTypeName(unwrapNonNull(type)))) {
@@ -1252,7 +1273,7 @@ const buildMatchesClause = (fieldname, operator, value) => {
 const topLevelRelationLookup = (qlField, fieldType, fieldName) => {
   const { collectionName } = typesDict.types[fieldType.name].model.collection;
   const connField = qlField.extensions?.relation?.connectionField || fieldName;
-  const isList = qlField.type instanceof GraphQLList;
+  const isList = unwrapNonNull(qlField.type) instanceof GraphQLList;
   return buildRelationLookup({
     collectionName,
     localField: isList ? '_id' : connField,
@@ -1264,7 +1285,7 @@ const topLevelRelationLookup = (qlField, fieldType, fieldName) => {
 const nestedRelationLookup = (pathField, pathFieldType, currentPath, aliasPath, pathFieldName) => {
   const { collectionName } = typesDict.types[pathFieldType.name].model.collection;
   const connField = pathField.extensions?.relation?.connectionField || pathFieldName;
-  const isList = pathField.type instanceof GraphQLList;
+  const isList = unwrapNonNull(pathField.type) instanceof GraphQLList;
   return buildRelationLookup({
     collectionName,
     localField: isList ? `${currentPath}._id` : `${currentPath}.${connField}`,
@@ -1301,7 +1322,7 @@ const buildAggregationsForSort = (filterField, qlField, fieldName) => {
     term.path.split('.').forEach((pathFieldName) => {
       const pathField = currentGQLPathFieldType.getFields()[pathFieldName];
       if (pathField.type instanceof GraphQLObjectType
-        || pathField.type instanceof GraphQLList
+        || unwrapNonNull(pathField.type) instanceof GraphQLList
         || isNonNullOfType(pathField.type, GraphQLObjectType)) {
         const pathFieldType = unwrapListAndNonNull(pathField.type);
         currentGQLPathFieldType = pathFieldType;
@@ -1382,7 +1403,7 @@ const buildQueryTerms = async (filterField, qlField, fieldName) => {
         matchesClauses[`${aliasPath}_${pathFieldName}`] = buildMatchesClause(mongoPath, term.operator, term.value);
         embeddedPath = '';
       } else if (pathField.type instanceof GraphQLObjectType
-        || pathField.type instanceof GraphQLList
+        || unwrapNonNull(pathField.type) instanceof GraphQLList
         || isNonNullOfType(pathField.type, GraphQLObjectType)) {
         const pathFieldType = unwrapListAndNonNull(pathField.type);
         currentGQLPathFieldType = pathFieldType;
@@ -1858,8 +1879,8 @@ const autoGenerateResolvers = (gqltype) => {
     const relation = fieldEntry.extensions?.relation;
     if (!relation || relation.embedded) continue;
 
-    if (fieldEntry.type instanceof GraphQLList) {
-      const relatedType = fieldEntry.type.ofType;
+    if (unwrapNonNull(fieldEntry.type) instanceof GraphQLList) {
+      const relatedType = unwrapListAndNonNull(fieldEntry.type);
       const connectionField = relation.connectionField || fieldName;
       const relatedTypeInfo = typesDict.types[relatedType.name];
       const argsObject = createArgsForQuery(relatedTypeInfo.gqltype.getFields());
@@ -1921,7 +1942,7 @@ export const addNoEndpointType = (gqltype) => {
   for (const fieldEntry of Object.values(fields)) {
     if (fieldEntry.extensions?.relation
       && (fieldEntry.type instanceof GraphQLObjectType
-        || fieldEntry.type instanceof GraphQLList
+        || unwrapNonNull(fieldEntry.type) instanceof GraphQLList
         || (fieldEntry.type instanceof GraphQLNonNull && fieldEntry.type.ofType instanceof GraphQLObjectType))) {
       needsModel = true;
       break;
@@ -1966,8 +1987,8 @@ const createArgsForQuery = (argTypes) => {
       } else if (fieldEntry.type instanceof GraphQLObjectType
         || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
         argsObject[fieldEntryName].type = QLTypeFilterExpression;
-      } else if (fieldEntry.type instanceof GraphQLList) {
-        const listOfType = fieldEntry.type.ofType;
+      } else if (unwrapNonNull(fieldEntry.type) instanceof GraphQLList) {
+        const listOfType = unwrapListAndNonNull(fieldEntry.type);
         if (listOfType instanceof GraphQLScalarType
           || isNonNullOfType(listOfType, GraphQLScalarType)
           || listOfType instanceof GraphQLEnumType

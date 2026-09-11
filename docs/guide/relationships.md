@@ -74,6 +74,8 @@ mutation {
 
 For an embedded list, use `new GraphQLList(DirectorType)` with the same `embedded: true` metadata and supply an array of objects. Updating an embedded object merges its supplied fields with the stored object. Supplying an embedded array replaces that array.
 
+Both outer and item `GraphQLNonNull` wrappers are supported. An embedded `[Director!]!` field generates a required create list of non-null nested inputs, and an optional update list whose items are still non-null. Nullable embedded list items are stored as `null`. An empty list replaces the stored list with `[]`.
+
 ## Referenced objects and collections
 
 In this complete schema, each `Season` stores a reference to its `Serie`. The serie's `seasons` field reads back the matching child records:
@@ -134,13 +136,15 @@ The `fields: () => ({ ... })` functions defer access to the types, allowing both
 
 `connectionField` has two related roles: on `Season.serie`, it is the ObjectId storage field in a season; on `Serie.seasons`, it identifies the child's back-reference. Use the matching field name on both sides, as in this example, so nested creation and collection queries share the same link.
 
-::: tip Specify the connection field
-Always set `connectionField` explicitly for non-embedded relations. It is used during both materialization and resolution. `displayField` is a descriptive UI hint, not a uniqueness rule or a persistence field.
+::: tip Configure the stored link
+For a single-object reference, omitting `connectionField` uses the GraphQL field name consistently for model generation, creation, updates, clearing, and resolution. Set it when storage uses a different field name. For referenced collections, specify the child's back-reference explicitly. `displayField` is a descriptive UI hint, not a uniqueness rule or a persistence field.
 :::
 
 ## Create children with their parent
 
 The `added` input for a referenced collection omits its parent connection field. Simfinity fills in the newly created parent's ID:
+
+Required collection fields retain a required operation object on create and become optional on update. If the collection has non-null object items, its `added` and `updated` lists also require non-null items. Nullable operation items are ignored; use `deleted` with child IDs to remove records.
 
 ```graphql
 mutation {

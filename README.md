@@ -221,6 +221,19 @@ Simfinity automatically generates mutations for each connected type:
 // - deleteBook(id: ID): Book
 ```
 
+Creation inputs retain required scalar, enum, embedded-object, and list fields. Update inputs remove the outer non-null wrapper so fields can be omitted; the entity `id` remains required for `GraphQLID` and `GraphQLID!`. Other ID fields remain optional on update. List item nullability is preserved:
+
+| Output field | Create input | Update input |
+| --- | --- | --- |
+| `[String]` | `[String]` | `[String]` |
+| `[String]!` | `[String]!` | `[String]` |
+| `[String!]` | `[String!]` | `[String!]` |
+| `[String!]!` | `[String!]!` | `[String!]` |
+
+The same wrapper handling applies to enum lists, supported custom scalar lists, and embedded lists (using their nested input types). Referenced collections keep the `added` / `updated` / `deleted` input object: a required collection requires that object on create, and non-null object items make `added` and `updated` items non-null. Nullable collection-operation items are ignored. Use `deleted` to delete children.
+
+Empty strings, `false`, `0`, and empty arrays are persisted after validators accept them. Omitting an update field leaves its value unchanged. Explicit `null` clears a nullable scalar, embedded field, or single-object reference; references clear the actual stored `connectionField`, or the GraphQL field name when no override is configured. Multiple nullable fields can be cleared in one update. An explicit `null` for an originally non-null field leaves its stored value unchanged; use an update validator to reject that input if needed.
+
 ### Filtering and Querying
 
 Query with powerful filtering options:
@@ -636,7 +649,7 @@ const BookType = new GraphQLObjectType({
 
 ### Relationship Configuration
 
-- `connectionField`: **(Required for collections)** The field storing the related object's ID - only needed for one-to-many relationships (GraphQLList). For single object relationships, the field name is automatically inferred from the GraphQL field name.
+- `connectionField`: **(Required for referenced collections)** The child field linking back to the parent. For a single-object reference, this optionally overrides the stored ObjectId field; when omitted, model generation, writes, clears, and resolvers use the GraphQL field name.
 - `displayField`: **(Optional)** Field to use for display in UI components
 - `embedded`: **(Optional)** Whether the relation is embedded (default: false)
 

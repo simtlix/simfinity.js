@@ -404,7 +404,12 @@ export function buildErrorFormatter(
 /** Globally prevent Mongoose collection creation for generated models. */
 export function preventCreatingCollection(prevent: boolean): void;
 
-/** Get the generated GraphQL input type registered for an object type. */
+/**
+ * Get the generated create input type, preserving field and list-item non-null
+ * wrappers. Update inputs remove only the outer wrapper (except entity id).
+ * References use IdInputType; embedded lists use nested inputs; referenced
+ * collections use added/updated/deleted operation inputs.
+ */
 export function getInputType(type: GraphQLObjectType | { name: string }): GraphQLInputObjectType;
 
 /** Persist an object of a connected type inside a transaction (runs controllers/validators). */
