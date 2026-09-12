@@ -9,16 +9,18 @@ Use `extensions.relation` on fields whose value is another GraphQL object or a l
 
 <DomainDiagram kind="relationships" />
 
+Examples use the selected runtime from [database setup](./databases#runtime-setup-for-shared-examples). After `createSchema()`, PostgreSQL also requires awaited storage initialization before operations are served.
+
 ## Choose a storage model
 
 | Relationship | Storage | Mutation input |
 | --- | --- | --- |
-| Embedded object | Nested inside the parent document | The object's fields |
-| Embedded list | Array inside the parent document | An array of nested inputs |
-| Referenced object | ObjectId in the source document | `{ id: "..." }` |
-| Referenced collection | Child documents with a parent reference | `{ added, updated, deleted }` |
+| Embedded object | MongoDB nested document; PostgreSQL JSONB or a private owned table | The object's fields |
+| Embedded list | MongoDB nested array; PostgreSQL JSONB or ordered private rows | An array of nested inputs |
+| Referenced object | ObjectId or UUID reference in the source record | `{ id: "..." }` |
+| Referenced collection | Child records with a parent reference/FK | `{ added, updated, deleted }` |
 
-An embedded object belongs to its parent document. A referenced type can have its own collection, endpoints, and lifecycle.
+An embedded object belongs to its parent record. A referenced type can have its own storage model, endpoints, and lifecycle.
 
 ## Embedded objects
 
@@ -30,7 +32,7 @@ import {
   GraphQLObjectType,
   GraphQLString,
 } from 'graphql';
-import * as simfinity from '@simtlix/simfinity-js';
+import { simfinity } from './runtime.js';
 
 const DirectorType = new GraphQLObjectType({
   name: 'Director',
@@ -89,7 +91,7 @@ import {
   GraphQLObjectType,
   GraphQLString,
 } from 'graphql';
-import * as simfinity from '@simtlix/simfinity-js';
+import { simfinity } from './runtime.js';
 
 const SerieType = new GraphQLObjectType({
   name: 'Serie',
@@ -134,7 +136,7 @@ const schema = simfinity.createSchema();
 
 The `fields: () => ({ ... })` functions defer access to the types, allowing both sides of the relationship to reference each other.
 
-`connectionField` has two related roles: on `Season.serie`, it is the ObjectId storage field in a season; on `Serie.seasons`, it identifies the child's back-reference. Use the matching field name on both sides, as in this example, so nested creation and collection queries share the same link.
+`connectionField` has two related roles: on `Season.serie`, it is the ObjectId or UUID storage field in a season; on `Serie.seasons`, it identifies the child's back-reference. Use the matching field name on both sides, as in this example, so nested creation and collection queries share the same link.
 
 ::: tip Configure the stored link
 For a single-object reference, omitting `connectionField` uses the GraphQL field name consistently for model generation, creation, updates, clearing, and resolution. Set it when storage uses a different field name. For referenced collections, specify the child's back-reference explicitly. `displayField` is a descriptive UI hint, not a uniqueness rule or a persistence field.
@@ -222,10 +224,12 @@ mutation EditSeasons($serieId: ID!, $seasonId: ID!, $removedId: ID!) {
 }
 ```
 
-`added` creates records, `updated` changes records by ID, and `deleted` deletes child documents. These changes share the parent mutation's transaction. Each child runs global middleware for the target type with the same request context and root argument shape: `save` and `update` receive `{ input }`; `delete` receives `{ id }`.
+`added` creates records, `updated` changes records by ID, and `deleted` deletes child records. These changes share the parent mutation's transaction. Each child runs global middleware for the target type with the same request context and root argument shape: `save` and `update` receive `{ input }`; `delete` receives `{ id }`.
 
 After middleware, updated and deleted children are read in the transaction and must already belong to the current parent. A missing child raises `NOT_VALID_ID` (404); a child owned by another parent raises `FORBIDDEN` (403). Nested updates do not reparent foreign children. The required parent link is retained after child pre-write hooks, including ordinary field assignments and `$set`/`$unset` updates. A rejection aborts all changes in the parent mutation.
 
 Parent ownership does not replace application permissions. Use child operation middleware or [controller checks](./controllers) to authorize writes; query scope is a read restriction. Root mutation permissions in the [authorization plugin](./authorization) do not automatically authorize nested child mutation inputs.
 
 Deleting a parent does not automatically cascade through referenced collections. Implement the required deletion policy in your application. Existing field resolvers are preserved; Simfinity only generates a relation resolver when the field has none.
+
+PostgreSQL creates real `NO ACTION` foreign keys for single references, child-backed inverse collections, explicit link entities, and references inside private owned embedded tables. Only the private owner-to-embedded link cascades. See [PostgreSQL relationship foreign keys](./postgresql#relationship-foreign-keys) for the physical mapping and unsupported shapes.

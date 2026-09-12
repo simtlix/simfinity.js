@@ -1,0 +1,34 @@
+{
+  "version": "3.2.0",
+  "commit": "d98197387543d185fc79d5c31757b12e07ef2436",
+  "packages": [
+    {
+      "name": "@simtlix/simfinity-core",
+      "version": "3.2.0",
+      "filename": "simtlix-simfinity-core-3.2.0.tgz",
+      "integrity": "sha512-OqShx0R6OOOKSVdcdOqK8ZDbuwlDc5LD8qsmHM9rggr5iL2vVfrAg/WFd3+Gv3/0jWJ1Ag2jIcfYJTrH3jhALQ==",
+      "sha256": "856d3b471ec708416a6cb116ca0ac9a470adc87d3ed0aca6dd4165f2c190bc43"
+    },
+    {
+      "name": "@simtlix/simfinity-mcp",
+      "version": "3.2.0",
+      "filename": "simtlix-simfinity-mcp-3.2.0.tgz",
+      "integrity": "sha512-YA57FDimMZ174WEtooWO2nzClSRCaO6GWP0vUr4oK12TDNlzV1KYmZKYE52KkCepCJKOchsNoJGZ7M0BVn1yEQ==",
+      "sha256": "628f7351bb5d352f60bd4d5ad7a8da4dfc464aa35221ddfa5dd7882c77ad6778"
+    },
+    {
+      "name": "@simtlix/simfinity-postgres",
+      "version": "3.2.0",
+      "filename": "simtlix-simfinity-postgres-3.2.0.tgz",
+      "integrity": "sha512-BYWvxlXJAg5kL5/Cl5Y0sFD5K6SiB1azKYrBKJQPWvYVYEpgS9XJj3iKQB/aXRum9F+m7AtihKIqItvaxpfQEQ==",
+      "sha256": "ba9525440e0a30e67f452e6cc7093f9a9a869cdcbe9c45da4d63dab4cf3108ae"
+    },
+    {
+      "name": "@simtlix/simfinity-js",
+      "version": "3.2.0",
+      "filename": "simtlix-simfinity-js-3.2.0.tgz",
+      "integrity": "sha512-naPMLJZd1yZkB75JnPC0s5LlxVwq/na5XxJZZWM8gYr/Js7uxzV2x64ffvw+CVZ7MjEKeN4TDQpYROQRs98lZA==",
+      "sha256": "d734d486eda56fddb5f8b31cbf41e6e38338e4814f20304aeecef68ce341e6f8"
+    }
+  ]
+}

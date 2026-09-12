@@ -9,6 +9,8 @@ A state machine defines an entity's initial state and the actions that move it b
 
 <DomainDiagram kind="states" />
 
+Examples use the selected runtime from [database setup](./databases#runtime-setup-for-shared-examples). After `createSchema()`, PostgreSQL also requires awaited storage initialization before operations are served.
+
 ## Define the lifecycle
 
 For a season, use this progression:
@@ -27,7 +29,7 @@ import {
   GraphQLNonNull,
   GraphQLObjectType,
 } from 'graphql';
-import * as simfinity from '@simtlix/simfinity-js';
+import { simfinity } from './runtime.js';
 
 const SeasonState = new GraphQLEnumType({
   name: 'SeasonState',
@@ -162,6 +164,8 @@ activate: {
 Replace the `activate` entry in `stateMachine.actions` with this configuration before calling `connect()`. The callback receives the mutation input and transaction session. It does not receive GraphQL context; use [middleware](./middleware), [authorization](./authorization), or controller hooks for context-dependent policy.
 
 The callback runs after the source-state check and before the managed state is added to the update. Throwing aborts the transition. The resulting update also passes through update validators and the type's update controller hooks.
+
+The lookup above uses the MongoDB Model API. With PostgreSQL, use `await simfinity.getModel(SeasonType).findById(input.id, { session })`; it returns a plain record and joins the same transaction.
 
 ## Failure behavior
 

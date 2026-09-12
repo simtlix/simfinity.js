@@ -13,7 +13,7 @@ Simfinity reads standard GraphQL `extensions` metadata when building models, inp
 | --- | --- | --- |
 | `relation` | Relationship configuration | Declares how an object or object collection is stored and resolved. |
 | `readOnly` | Boolean | Omits the field from generated create and update inputs. |
-| `unique` | Boolean | Adds a Mongoose unique index for supported string/enum and numeric fields. |
+| `unique` | Boolean | Adds a backend uniqueness structure for supported fields. |
 | `validations` | Operation-keyed validators | Runs field validation during materialization. |
 | `stateMachine` | Boolean, generated | Marks a state field managed by a connected state machine. |
 
@@ -35,10 +35,10 @@ const field = {
 | Property | Description |
 | --- | --- |
 | `embedded` | `true` stores the object inline; `false` uses referenced records. |
-| `connectionField` | For a reference, the stored ObjectId field; for a reverse collection, the child field linking back to the parent. |
+| `connectionField` | For a reference, the stored ObjectId/UUID field; for a reverse collection, the child field linking back to the parent. |
 | `displayField` | Descriptive field name exposed through introspection for client tooling. |
 
-For a single-object reference, `connectionField` defaults to the GraphQL field name for model generation, reads, writes, and explicit-null clears. Set it to use a different stored ObjectId field. For referenced collections, specify the child's back-reference explicitly.
+For a single-object reference, `connectionField` defaults to the GraphQL field name for model generation, reads, writes, and explicit-null clears. Set it to use a different stored reference field. For referenced collections, specify the child's back-reference explicitly. PostgreSQL uses the metadata to create real FKs for single, inverse, explicit-link, and embedded references.
 
 Scalar lists do not need relationship metadata. Object fields and object lists do. Embedded self-references are rejected by model generation. See [relationships](/guide/relationships) for complete forward and reverse examples.
 
@@ -62,7 +62,7 @@ slug: {
 }
 ```
 
-Uniqueness is enforced by a MongoDB index when that index exists. It is not a pre-save validator. The generator applies this flag to string, enum, and numeric mappings; it does not apply it uniformly to every field kind. Manage index creation and existing duplicates through your application's database process.
+Uniqueness is a database constraint, not a pre-save validator. The MongoDB generator creates indexes for supported string, enum, and numeric mappings. PostgreSQL supports all mapped native scalar types, single references, scalar lists, and scalar/reference fields inside embedded trees. Root unique indexes use `NULLS NOT DISTINCT`; embedded and multikey declarations use typed owner-key tables so duplicate values within one root are allowed but another root cannot claim the same key. Whole embedded-object uniqueness is rejected. Manage existing duplicates and schema evolution through an explicit database process.
 
 ### validations
 
@@ -113,6 +113,6 @@ This is a Simfinity introspection extension, not a field in standard GraphQL int
 
 Initialization supports GraphQL fields that have already been materialized and schemas that already exist. Repeated evaluation of Simfinity with the same GraphQL peer preserves the existing extension field and metadata type identities. Your application field's `extensions` metadata remains intact.
 
-The extension is global to that GraphQL peer, including unrelated schemas; it does not isolate Simfinity's module-level type or middleware registries. Schemas constructed after import register `FieldExtensionsType` and `RelationType` in their type maps. Schemas constructed before import keep their original type maps: ordinary operations and direct selections such as the query above work, but named fragments on these metadata types require a schema constructed after import.
+The extension is global to that GraphQL peer, including unrelated schemas. Simfinity type and middleware registries belong to each runtime instance. Schemas constructed after import register `FieldExtensionsType` and `RelationType` in their type maps. Schemas constructed before import keep their original type maps: ordinary operations and direct selections such as the query above work, but named fragments on these metadata types require a schema constructed after import.
 
 In a process that has imported Simfinity, passing a post-import schema's introspection result to `buildClientSchema()` can still fail with duplicate `FieldExtensionsType` names. This is the same retained global-type limitation that affects schema-cloning middleware; import-order safety does not make schema cloning supported.

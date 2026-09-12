@@ -7,11 +7,23 @@ description: Expose your generated GraphQL API as MCP tools using the same schem
 
 Simfinity can turn a GraphQL schema into Model Context Protocol tools. Each exposed root query or mutation becomes a tool with generated input schema, descriptions, and a GraphQL operation behind it.
 
-Start with a working schema from [getting started](/guide/getting-started). MCP adds another way to invoke its operations; the same database and mutation transaction requirements apply.
+Start with a working schema from the [MongoDB](/guide/getting-started) or [PostgreSQL](/guide/postgresql) quick start. MCP adds another way to invoke its operations; the same database and mutation transaction requirements apply.
 
-## Continue from the Quick start
+The MongoDB facade retains MCP compatibility exports. For either database, the dependency-light integration is the opt-in `@simtlix/simfinity-mcp` package. Install `@modelcontextprotocol/sdk` only when using server or transport factories; `generateMCPTools` itself needs only GraphQL. PostgreSQL applications import MCP functions from this separate package, as shown in the [PostgreSQL quick start](/guide/postgresql#optional-mcp-integration).
 
-The [starter project](/guide/getting-started#download-the-starter) already separates `schema.js`, `server.js`, and `mcp.js`. Importing `schema.js` connects to MongoDB, registers the types and exports the built schema. Each entry point reuses that initialization.
+## Choose the MCP package
+
+In the 3.2.0 preview, the following examples import `@simtlix/simfinity-mcp`, which works with either adapter. From either extracted preview starter folder, install it with:
+
+```sh
+npm install ../packages/simtlix-simfinity-mcp-3.2.0.tgz
+```
+
+The MongoDB starter already includes it for compatibility. The published MongoDB 3.0.1 release instead exports these functions from `@simtlix/simfinity-js`.
+
+## Continue from the quick start
+
+The [starter project](/guide/getting-started#download-the-starter) already separates `schema.js`, `server.js`, and `mcp.js`. Importing `schema.js` connects to MongoDB, registers the types and exports the built schema. Each entry point reuses that initialization. For PostgreSQL, export the schema only after awaiting `initializeDatabase()`; close its pool when shutting down the MCP process.
 
 Run `node mcp.js` for the included read-tool example. If your existing project defines everything in `server.js`, move the type definitions, database connection and schema creation into `schema.js`, export `schema`, and import it from both entry points. Keep `server.listen()` in `server.js`.
 
@@ -20,10 +32,10 @@ Run `node mcp.js` for the included read-tool example. If your existing project d
 Tool generation and direct execution do not require the optional MCP SDK.
 
 ```javascript
-import * as simfinity from '@simtlix/simfinity-js';
+import * as mcp from '@simtlix/simfinity-mcp';
 import { schema } from './schema.js';
 
-const { tools, callTool, getOperation } = simfinity.generateMCPTools(schema, {
+const { tools, callTool, getOperation } = mcp.generateMCPTools(schema, {
   exclude: 'mutation',
   toolNamePrefix: 'catalog_',
   limits: {
@@ -59,10 +71,10 @@ npm install @modelcontextprotocol/sdk
 Create a standalone entry point that initializes your database and schema, then starts the transport:
 
 ```javascript
-import * as simfinity from '@simtlix/simfinity-js';
+import * as mcp from '@simtlix/simfinity-mcp';
 import { schema } from './schema.js';
 
-await simfinity.startStdioMCPServer(schema, {
+await mcp.startStdioMCPServer(schema, {
   serverName: 'series-catalog',
   serverVersion: '1.0.0',
   include: ['serie', 'series'],
@@ -81,20 +93,20 @@ Configure your MCP client to launch this Node entry point. Reserve stdout for th
 
 ```javascript
 import express from 'express';
-import * as simfinity from '@simtlix/simfinity-js';
+import { createAuthPlugin, requireAuth, allow } from '@simtlix/simfinity-core/auth';
+import * as mcp from '@simtlix/simfinity-mcp';
 import { schema } from './schema.js';
 import { authenticateRequest } from './authenticate.js';
 
 const app = express();
 app.use(express.json());
 
-const { createAuthPlugin, requireAuth, allow } = simfinity.auth;
 const permissions = {
   RootQueryType: { serie: requireAuth(), series: requireAuth() },
   Serie: { '*': allow() },
 };
 
-const handler = await simfinity.createHTTPMCPHandler(schema, {
+const handler = await mcp.createHTTPMCPHandler(schema, {
   include: ['serie', 'series'],
   context: (req) => ({ user: req.user }),
   schemaPlugins: [createAuthPlugin(permissions, { defaultPolicy: 'DENY' })],
@@ -131,7 +143,7 @@ If a call is cancelled while its context factory is pending, GraphQL execution d
 Generated tools have a fixed GraphQL selection for each tool. Set `selectionDepth` for nested output, or define a per-tool selection:
 
 ```javascript
-const generated = simfinity.generateMCPTools(schema, {
+const generated = mcp.generateMCPTools(schema, {
   toolOverrides: {
     series: {
       title: 'Search the series catalog',

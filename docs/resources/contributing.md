@@ -7,6 +7,10 @@ description: Work on Simfinity.js, improve the documentation, and run the projec
 
 Simfinity.js is maintained by Simtlix and released under the Apache 2.0 License. Contributions to the library, examples, and documentation are welcome.
 
+::: info Documentation and preview source
+The commands and release workflows on this page describe the current `master` checkout. The 3.2.0 MongoDB/PostgreSQL preview is distributed separately as [verified archives](../guide/databases#download-the-preview); publishing this site does not merge that runtime into `master` or release it to npm.
+:::
+
 ## Work on the library
 
 Clone the repository and install the locked dependencies:

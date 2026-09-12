@@ -1,16 +1,16 @@
 import { defineConfig } from 'vitepress';
 import { readFileSync } from 'node:fs';
 
-const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+const { version } = JSON.parse(readFileSync(new URL('../public/preview/manifest.json', import.meta.url), 'utf8'));
 const repository = 'https://github.com/simtlix/simfinity.js';
 const base = `/${(process.env.DOCS_BASE_PATH || '').replace(/^\/+|\/+$/g, '')}/`.replace('//', '/');
 const siteUrl = process.env.DOCS_SITE_URL;
 
 export default defineConfig({
   title: 'Simfinity.js',
-  description: 'Define your GraphQL types. Generate your MongoDB models, queries, mutations, and MCP tools with Simfinity.js.',
+  description: 'Define your GraphQL types. Generate MongoDB or PostgreSQL storage, queries, mutations, relationships, and optional MCP tools with Simfinity.js.',
   lang: 'en-US',
-  srcExclude: ['public/**'],
+  srcExclude: ['public/**', 'superpowers/**', 'preview/**'],
   base,
   lastUpdated: true,
   head: [
@@ -28,7 +28,7 @@ export default defineConfig({
     ];
     if (siteUrl) {
       const socialImage = new URL(`${base}social-cover.png`, siteUrl).href;
-      head.push(['meta', { property: 'og:image', content: socialImage }], ['meta', { name: 'twitter:image', content: socialImage }], ['meta', { property: 'og:image:width', content: '1200' }], ['meta', { property: 'og:image:height', content: '630' }], ['meta', { property: 'og:image:alt', content: 'Simfinity.js: GraphQL types connected to MongoDB, generated operations and MCP tools.' }]);
+      head.push(['meta', { property: 'og:image', content: socialImage }], ['meta', { name: 'twitter:image', content: socialImage }], ['meta', { property: 'og:image:width', content: '1200' }], ['meta', { property: 'og:image:height', content: '630' }], ['meta', { property: 'og:image:alt', content: 'Simfinity.js: GraphQL types connected to MongoDB or PostgreSQL, generated operations, and optional MCP tools.' }]);
       const pagePath = pageData.relativePath.replace(/index\.md$/, '').replace(/\.md$/, '.html');
       const url = new URL(`${base}${pagePath}`, siteUrl).href;
       head.push(['link', { rel: 'canonical', href: url }], ['meta', { property: 'og:url', content: url }]);
@@ -43,6 +43,11 @@ export default defineConfig({
     siteTitle: 'simfinity.js',
     nav: [
       { text: 'Documentation', link: '/guide/introduction', activeMatch: '/guide/' },
+      { text: 'Databases', items: [
+        { text: 'Choose a database', link: '/guide/databases' },
+        { text: 'MongoDB', link: '/guide/getting-started' },
+        { text: 'PostgreSQL', link: '/guide/postgresql' },
+      ] },
       { text: 'API reference', link: '/reference/api', activeMatch: '/reference/' },
       { text: 'Resources', items: [
         { text: 'Example project', link: 'https://github.com/simtlix/series-sample' },
@@ -50,7 +55,8 @@ export default defineConfig({
         { text: 'Contributing', link: '/resources/contributing' },
         { text: 'Troubleshooting', link: '/resources/troubleshooting' },
       ] },
-      { text: `v${version}`, items: [
+      { text: `v${version} preview`, items: [
+        { text: 'Download preview & compatibility', link: '/guide/databases#download-the-preview' },
         { text: 'Release history', link: `${repository}/releases` },
         { text: 'Package on npm', link: 'https://www.npmjs.com/package/@simtlix/simfinity-js' },
       ] },
@@ -58,8 +64,10 @@ export default defineConfig({
     sidebar: [
       { text: 'Start here', items: [
         { text: 'Introduction', link: '/guide/introduction' },
+        { text: 'Choose a database', link: '/guide/databases' },
         { text: 'Is Simfinity a fit?', link: '/guide/choosing-simfinity' },
-        { text: 'Quick start', link: '/guide/getting-started' },
+        { text: 'MongoDB quick start', link: '/guide/getting-started' },
+        { text: 'PostgreSQL quick start', link: '/guide/postgresql' },
       ] },
       { text: 'Build your API', collapsed: false, items: [
         { text: 'Schema & models', link: '/guide/schema' },

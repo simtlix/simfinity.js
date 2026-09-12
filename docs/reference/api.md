@@ -5,13 +5,15 @@ description: Public schema registration, model access, mutation, and configurati
 
 # Core API
 
-Import the public API as an ES module:
+Import the MongoDB facade as an ES module:
 
 ```javascript
 import * as simfinity from '@simtlix/simfinity-js';
 ```
 
-The package also provides named exports and TypeScript declarations. Schema registration and middleware configuration are held in module-level state; register your application types once during startup.
+For PostgreSQL, import `createPostgres` from `@simtlix/simfinity-postgres` and use the returned runtime instance. Both packages provide named exports and TypeScript declarations. Registrations and middleware belong to a runtime instance; register application types once during startup.
+
+Shared examples can import the selected instance from [your application’s runtime module](/guide/databases#runtime-setup-for-shared-examples). Build the schema once after registrations; PostgreSQL must initialize its generated storage before serving operations.
 
 ## Find an operation
 
@@ -21,7 +23,7 @@ The package also provides named exports and TypeScript declarations. Schema regi
 | Build the executable API | [createSchema](#createschema) | `GraphQLSchema` |
 | Register an application operation | [registerMutation](#registermutation) | Custom mutation registration |
 | Retrieve a registered type | [getType](#gettype) | Type, `undefined`, or `null` as described below |
-| Work with its model | [getModel](#getmodel) | Registered Mongoose model |
+| Work with its model | [getModel](#getmodel) | Registered backend-native Model |
 | Inspect a create input | [getInputType](#getinputtype) | Generated `GraphQLInputObjectType` |
 | Create in an owned or existing transaction | [saveObject](#saveobject) | Saved object |
 | Set the maximum query page size | [configureQueryLimits](#configurequerylimits) | Process-wide configuration |
@@ -52,7 +54,7 @@ Registers a `GraphQLObjectType` and its generated operations. Returns `undefined
 
 | Parameter | Type | Required | Behavior |
 | --- | --- | --- | --- |
-| `model` | Mongoose model or `null` | Yes | Pass `null` to generate a model during `createSchema()`. |
+| `model` | Mongoose model or `null` | Yes | MongoDB accepts an existing model; pass `null` to generate storage. PostgreSQL requires `null`. |
 | `gqltype` | `GraphQLObjectType` | Yes | The exact type instance to register. |
 | `simpleEntityEndpointName` | `string` | Yes | Single-record query name and CRUD suffix; no inferred default. |
 | `listEntitiesEndpointName` | `string` | Yes | List query name and aggregation prefix; no inferred default. |
@@ -64,7 +66,7 @@ Registers a `GraphQLObjectType` and its generated operations. Returns `undefined
 simfinity.connect(null, SerieType, 'serie', 'series');
 ```
 
-This creates `serie`, `series`, `series_aggregate`, `addserie`, `updateserie`, and `deleteserie`. Names are used as supplied; Simfinity does not pluralize them for you. Generated MongoDB models and collections use the GraphQL type name, such as `Serie`.
+This creates `serie`, `series`, `series_aggregate`, `addserie`, `updateserie`, and `deleteserie`. Names are used as supplied; Simfinity does not pluralize them for you. Generated models/tables use the GraphQL type name, such as `Serie`.
 
 ## addNoEndpointType
 
@@ -72,7 +74,7 @@ This creates `serie`, `series`, `series_aggregate`, `addserie`, `updateserie`, a
 simfinity.addNoEndpointType(gqltype);
 ```
 
-Registers a supporting object type without root CRUD endpoints. Use it for embedded or supporting types needed by connected types. Model creation is conditional: the implementation inspects the supporting type's relationship fields. A scalar-only supporting type does not automatically receive a Mongoose model. For a referenced collection that needs automatic database resolution, register an explicit model through `connect()` and use schema allowlists to control its endpoints.
+Registers a supporting object type without root CRUD endpoints. Use it for embedded or supporting types needed by connected types. Model creation is conditional on the persistent graph: a scalar-only value type embedded in an owner stays inline, while a supporting type referenced by a connected type receives backend storage without gaining root operations.
 
 ## createSchema
 
@@ -116,7 +118,7 @@ The callback runs as `callback(input, session, context)` inside the mutation tra
 
 ```javascript
 import { GraphQLInputObjectType, GraphQLNonNull, GraphQLString } from 'graphql';
-import * as simfinity from '@simtlix/simfinity-js';
+import { simfinity } from './runtime.js';
 
 const ImportSerieInput = new GraphQLInputObjectType({
   name: 'ImportSerieInput',
@@ -149,7 +151,7 @@ const SerieModel = simfinity.getModel(SerieType);
 
 Returns the model associated with a registered type. Retrieve generated models after `createSchema()`. The argument must have a `name` property; this function does not take a string name.
 
-Direct Mongoose calls bypass generated GraphQL permissions, scopes, middleware, validators, and controller pipelines.
+The MongoDB facade returns a Mongoose model. PostgreSQL returns a `PostgresModel` with `findById`, `find`, `create`, `update`, and `delete`; records are plain objects with one UUID exposed as both `id` and `_id`. It has no Mongoose query chaining or `.lean()`. Direct native calls on either backend bypass generated GraphQL permissions, scopes, middleware, validators, and controller pipelines.
 
 ## getInputType
 
@@ -167,21 +169,38 @@ await simfinity.saveObject('Serie', input, session, context);
 
 Runs create materialization, field/type validators, collection processing, state initialization, and create controller hooks for a registered type. The type name is a string. Generated models must already exist.
 
-Without `session`, `saveObject()` opens a session on the registered model's connection and owns the transaction, including bounded retries, commit/abort, and awaited cleanup. Parent and nested writes commit or roll back together. A transaction-capable MongoDB deployment is required.
+Without `session`, `saveObject()` owns the backend transaction, including bounded retries and cleanup. Parent and nested writes commit or roll back together. MongoDB requires a transaction-capable deployment; PostgreSQL uses repeatable-read isolation.
 
-With `session`, the caller must already have started a transaction on a session belonging to the same MongoDB client as the model. `saveObject()` only participates: it never starts, commits, aborts, retries, or ends the caller's transaction/session. The caller must handle errors and decide whether to commit or abort. An inactive supplied session throws `ACTIVE_TRANSACTION_REQUIRED` (400) before writes. Pass the provided session inside a controller or custom mutation to share its transaction.
+With `session`, the caller must already have an active session valid for the selected backend. `saveObject()` only participates: it never starts, commits, aborts, retries, or ends the caller's transaction/session. The caller must handle errors and decide whether to commit or abort. MongoDB requires an active native Mongoose session and throws `ACTIVE_TRANSACTION_REQUIRED` (400) for an inactive one. PostgreSQL requires an active Simfinity session from the same runtime and throws `INVALID_SESSION` for inactive sessions, arbitrary `pg.Client` objects, or sessions from another runtime. Pass the provided session inside a controller or custom mutation to share its transaction.
 
-Owned transactions retry transient failures up to five times after the first attempt. Uncertain commit results retry only commit up to five times; if still uncertain, the operation may already be committed. See [transaction boundaries](../guide/mutations#transaction-boundaries). Hooks run before commit and may repeat on a transient transaction retry. Calling `saveObject()` directly bypasses GraphQL input coercion, field authorization, and global middleware; validate and authorize programmatic callers accordingly.
+MongoDB-owned transactions retry transient failures up to five times after the first attempt; uncertain commit results retry only commit up to five times. PostgreSQL retries confirmed serialization failures and deadlocks, but never retries an unknown commit outcome. In either case an uncertain commit may already have succeeded. See [transaction boundaries](../guide/mutations#transaction-boundaries). Hooks run before commit and may repeat on a transient transaction retry. Calling `saveObject()` directly bypasses GraphQL input coercion, field authorization, and global middleware; validate and authorize programmatic callers accordingly.
 
 ## Configuration and helpers
 
 | Export | Purpose |
 | --- | --- |
 | `use(middleware)` | Register a global [pre-operation middleware](/guide/middleware). |
-| `preventCreatingCollection(prevent)` | Toggle Simfinity's explicit `model.createCollection()` calls globally; useful for schema-only inspection and tests. This does not disable model registration or all Mongoose database activity. |
+| `preventCreatingCollection(prevent)` | MongoDB toggles explicit collection creation. On PostgreSQL, call it before `createSchema()` to force read-only storage validation during initialization. |
 | `createValidatedScalar(name, description, baseScalarType, validate)` | Create a [validated scalar](/reference/scalars#createvalidatedscalar). |
 | `buildErrorFormatter(callback)` | Create an [error normalization function](/reference/errors#builderrorformatter). |
 | `buildQuery(input, gqltype, isCount = false)` | Build a MongoDB aggregation pipeline from list-query arguments. Does not execute scopes or middleware. |
 | `buildFilterGroupMatch(group, gqltype, clauses, included, depth = 0)` | Low-level recursive filter compiler; mutates the supplied lookup accumulators. |
 
-The `auth`, `validators`, `scalars`, `plugins`, and `mcp` namespaces group their respective helpers. MCP factories are also [named package exports](/reference/mcp).
+The `auth`, `validators`, `scalars`, and `plugins` helper objects are shared by both database facades. The MongoDB facade retains its `mcp` compatibility namespace. PostgreSQL applications import MCP factories from the opt-in `@simtlix/simfinity-mcp` package; see the [MCP API](/reference/mcp).
+
+## PostgreSQL initialization and transactions
+
+```javascript
+import pg from 'pg';
+import { createPostgres } from '@simtlix/simfinity-postgres';
+
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const postgres = createPostgres({ pool, schema: 'series_api' });
+postgres.connect(null, SerieType, 'serie', 'series');
+const schema = postgres.createSchema();
+await postgres.initializeDatabase({ mode: 'create' });
+```
+
+`initializeDatabase({ mode: 'create' | 'validate' })` must be awaited after `createSchema()` and before operations are served. Create mode adds missing generated objects without altering incompatible existing objects. Validate mode performs no DDL. Both detect catalog drift and leave schema migrations to the operator. The caller owns `pool` and closes it with `await pool.end()`.
+
+`postgres.withTransaction(session, callback)` joins an active supplied PostgreSQL session or owns a new repeatable-read transaction when `session` is null. The callback receives a `PostgresSession` with `query()`, `inTransaction()`, and a native `client` valid for the callback lifetime. Confirmed serialization failures and deadlocks are retried up to five times for owned transactions. See the [PostgreSQL quick start](/guide/postgresql) for a complete server and native API example.

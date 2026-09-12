@@ -15,6 +15,8 @@ npm run docs:dev
 
 For builds and hosting, see the [website maintainer guide](docs/.vitepress/README.md). The website documents the current source; some older examples later in this README retain historical conventions.
 
+> **Documentation for both databases:** The [public website](https://simtlix.github.io/simfinity.js/guide/databases.html) now covers MongoDB and PostgreSQL, including shared APIs, relationships, generated FKs, scopes, and MCP. The PostgreSQL adapter and the matching MongoDB adapter are available as a downloadable **3.2.0 preview**, not an npm release. The guides explain how to install the verified archives; this documentation update does not change the library version on `master`.
+
 ## 📑 Table of Contents
 
 - [Features](#-features)
