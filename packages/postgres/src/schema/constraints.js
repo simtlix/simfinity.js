@@ -1,5 +1,17 @@
 import { identifier as q, qualified, literal, generatedName, invalid } from './sql.js';
 
+// JavaScript uses astronomical ISO years (including zero and signed extended
+// years). Validate their Gregorian components without PostgreSQL's AD/BC parser
+// or timestamp range. Mapping years modulo 400 preserves leap-year rules.
+const dateTimeValidation = `DECLARE parts integer[]; BEGIN
+  IF jsonb_typeof($1) <> 'string' THEN RETURN false; END IF;
+  parts := regexp_match($1 #>> '{}', '^([0-9]{4}|[+-][0-9]{6})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})[.]([0-9]{3})Z$')::integer[];
+  IF parts IS NULL OR ($1 #>> '{}') LIKE '-000000-%' THEN RETURN false; END IF;
+  PERFORM make_date(2000 + ((parts[1] % 400 + 400) % 400), parts[2], parts[3]);
+  RETURN parts[4] BETWEEN 0 AND 23 AND parts[5] BETWEEN 0 AND 59 AND parts[6] BETWEEN 0 AND 59
+    AND parts >= ARRAY[-271821, 4, 20, 0, 0, 0, 0] AND parts <= ARRAY[275760, 9, 13, 0, 0, 0, 0];
+END;`;
+
 /** Database-side validation and multikey maintenance. All bodies resolve names in pg_catalog. */
 export const constraintBuilder = (schema, tables, { addTable, addColumn, addReference, addIndex, addCheck }) => {
   const functions = []; const triggers = []; const uniquePaths = [];
@@ -27,9 +39,8 @@ export const constraintBuilder = (schema, tables, { addTable, addColumn, addRefe
         ID: `jsonb_typeof($1) = 'string' AND ${value} ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'`,
         Int: `jsonb_typeof($1) = 'number' AND ${value}::numeric = trunc(${value}::numeric) AND ${value}::numeric BETWEEN -2147483648 AND 2147483647`,
         Float: `jsonb_typeof($1) = 'number' AND ${value}::double precision BETWEEN '-1.7976931348623157e308'::double precision AND '1.7976931348623157e308'::double precision`,
-        DateTime: `jsonb_typeof($1) = 'string' AND ${value} ~ '^[+-]?[0-9]{4,6}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$' AND isfinite(${value}::timestamp with time zone)`,
       };
-      test = `RETURN ${conditions[field.scalar]};`;
+      test = field.scalar === 'DateTime' ? dateTimeValidation : `RETURN ${conditions[field.scalar]};`;
     }
     return fn(name, ['jsonb'], 'boolean', `BEGIN
   IF $1 IS NULL OR $1 = 'null'::jsonb THEN RETURN ${!field.required}; END IF;

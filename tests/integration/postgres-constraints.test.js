@@ -26,7 +26,7 @@ const types = {
   Nested: new GraphQLObjectType({ name: 'ConstraintNested', fields: { branches: { type: new GraphQLList(Branch), extensions: embedded } } }),
   Arrays: new GraphQLObjectType({ name: 'ConstraintArrays', fields: { entries: { type: new GraphQLList(Codes), extensions: embedded } } }),
   Native: new GraphQLObjectType({ name: 'ConstraintNative', fields: { codes: { type: new GraphQLList(GraphQLString), extensions: unique } } }),
-  Shape: new GraphQLObjectType({ name: 'ConstraintShape', fields: { value: { type: Value, extensions: embedded }, values: { type: new GraphQLList(Value), extensions: embedded } } }),
+  Shape: new GraphQLObjectType({ name: 'ConstraintShape', fields: { nativeTime: { type: DateTime }, value: { type: Value, extensions: embedded }, values: { type: new GraphQLList(Value), extensions: embedded } } }),
   Singular: new GraphQLObjectType({ name: 'ConstraintSingular', fields: { entry: { type: Code, extensions: embedded } } }),
 };
 
@@ -67,6 +67,26 @@ describe.skipIf(!uri)('database-enforced embedded constraints', () => {
       await expect(pool.query(`INSERT INTO ${sqlTable('ConstraintShape')} (value) VALUES ($1::jsonb)`, [JSON.stringify(value)])).rejects.toMatchObject({ code: '23514' });
     }
     for (const value of [null, { required: 'x' }, { required: 'x', count: null, names: [], time: '2026-09-12T10:00:00.000Z' }]) await pool.query(`INSERT INTO ${sqlTable('ConstraintShape')} (value, values) VALUES ($1::jsonb, '[null]')`, [JSON.stringify(value)]);
+  });
+
+  it.each(['0000-01-01T00:00:00.000Z', '+010000-01-01T00:00:00.000Z', '-000001-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'])('accepts the same runtime DateTime in native and JSONB storage: %s', async (iso) => {
+    const time = new Date(iso);
+    const native = await model('Shape').create({ nativeTime: time });
+    expect(Number.isFinite(native.nativeTime.getTime())).toBe(true);
+    const json = await model('Shape').create({ value: { required: 'date', time } });
+    expect(json.value.time.toISOString()).toBe(iso);
+    expect((await model('Shape').findById(json.id)).value.time.toISOString()).toBe(iso);
+  });
+
+  it('validates ISO calendar components and the full finite JavaScript Date range in SQL', async () => {
+    for (const iso of ['0000-02-29T00:00:00.000Z', '+010000-02-29T23:59:59.999Z', '-271821-04-20T00:00:00.000Z', '+275760-09-13T00:00:00.000Z']) {
+      const value = { required: 'date', time: iso };
+      expect(Number.isFinite(new Date(iso).getTime())).toBe(true);
+      await pool.query(`INSERT INTO ${sqlTable('ConstraintShape')} (value) VALUES ($1::jsonb)`, [JSON.stringify(value)]);
+    }
+    for (const iso of ['today', '0000-02-30T00:00:00.000Z', '+010001-02-29T00:00:00.000Z', '2026-01-01T24:00:00.000Z', '2026-01-01T00:60:00.000Z', '2026-01-01T00:00:60.000Z', '-271821-04-19T23:59:59.999Z', '+275760-09-13T00:00:00.001Z', '-000000-01-01T00:00:00.000Z']) {
+      await expect(pool.query(`INSERT INTO ${sqlTable('ConstraintShape')} (value) VALUES ($1::jsonb)`, [JSON.stringify({ required: 'date', time: iso })])).rejects.toMatchObject({ code: '23514' });
+    }
   });
 
   it('rejects incomplete singular values at transaction end', async () => {
@@ -169,6 +189,32 @@ describe.skipIf(!uri)('database-enforced embedded constraints', () => {
     await pool.query(original.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION').replace(fn.body.replaceAll('\'', '\'\''), 'BEGIN RETURN NULL; END'));
     await expect(initializeDatabase(pool, db)).rejects.toMatchObject({ extensions: { code: 'SCHEMA_MISMATCH' } });
     await pool.query(original.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION'));
+  });
+
+  it('rebuilds stale keys from swapped sources and restores old keys on actual duplicate recovery failure', async () => {
+    const a = await model('Native').create({ codes: ['a'] });
+    const b = await model('Native').create({ codes: ['b'] });
+    const trigger = db.triggers.find((item) => item.table === 'ConstraintNative' && item.constraint);
+    const keys = sqlTable(db.tables.find((item) => item.uniqueKeys?.rootTable === 'ConstraintNative').name);
+    const keyRows = async () => (await pool.query(`SELECT * FROM ${keys} ORDER BY __owner_id, kind, value`)).rows;
+    const initialKeys = await keyRows();
+    await pool.query(`DROP TRIGGER "${trigger.name}" ON ${sqlTable('ConstraintNative')}`);
+    await pool.query(`UPDATE ${sqlTable('ConstraintNative')} SET codes = CASE WHEN id = $1 THEN ARRAY['b'] ELSE ARRAY['a'] END`, [a.id]);
+    await expect(initializeDatabase(pool, db, { mode: 'validate' })).rejects.toMatchObject({ extensions: { code: 'SCHEMA_MISMATCH' } });
+    expect(await keyRows()).toEqual(initialKeys);
+    await initializeDatabase(pool, db);
+    expect((await keyRows()).map(({ __owner_id: owner, value }) => ({ owner, value }))).toEqual([
+      { owner: a.id, value: 'b' }, { owner: b.id, value: 'a' },
+    ].sort((left, right) => left.owner.localeCompare(right.owner)));
+    const rebuiltKeys = await keyRows();
+    await pool.query(`DROP TRIGGER "${trigger.name}" ON ${sqlTable('ConstraintNative')}`);
+    await pool.query(`UPDATE ${sqlTable('ConstraintNative')} SET codes = ARRAY['duplicate']`);
+    await expect(initializeDatabase(pool, db)).rejects.toMatchObject({ code: '23505' });
+    expect(await keyRows()).toEqual(rebuiltKeys);
+    expect((await pool.query('SELECT 1 FROM pg_trigger WHERE tgrelid = $1::regclass AND tgname = $2', [sqlTable('ConstraintNative'), trigger.name])).rowCount).toBe(0);
+    await pool.query(`UPDATE ${sqlTable('ConstraintNative')} SET codes = CASE WHEN id = $1 THEN ARRAY['b'] ELSE ARRAY['a'] END`, [a.id]);
+    await initializeDatabase(pool, db);
+    expect(await initializeDatabase(pool, db, { mode: 'validate' })).toEqual({ mode: 'validate', created: [] });
   });
 
   it('rolls back generated objects and unique-key backfill on preexisting duplicate owners', async () => {

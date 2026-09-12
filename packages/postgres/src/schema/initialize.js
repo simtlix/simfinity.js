@@ -184,6 +184,12 @@ const backfill = async (client, description) => {
       if (invalid.rowCount) mismatch(`${description.schema}.${table.name}.${check.name}`, 'existing data violates generated check');
     }
   }
+  // Existing keys can be stale when missing maintenance triggers are recreated.
+  // All managed tables are already locked; rebuild the complete derived key set
+  // before testing owners against one another. Rollback restores the old set.
+  for (const table of description.tables.filter((item) => item.uniqueKeys)) {
+    await client.query(`DELETE FROM ${qualified(description.schema, table.name)}`);
+  }
   for (const item of description.maintenance || []) {
     await client.query(`INSERT INTO ${qualified(description.schema, item.guardTable)} (__owner_id)
       SELECT id FROM ${qualified(description.schema, item.rootTable)} ON CONFLICT (__owner_id) DO NOTHING`);
