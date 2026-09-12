@@ -1,6 +1,6 @@
 # PostgreSQL 3.2.0 delivery record
 
-This record captures verified work and its boundaries. Library implementation and task reviews are complete. The Barber application port is implemented and running; its task review and final combined review are in progress.
+This record captures verified work and its boundaries. Library and Barber implementation and task reviews are complete. The application is running; the final combined review is in progress.
 
 ## Library and package provenance
 
@@ -79,14 +79,14 @@ The original Barber `main` remains at `00718c0195374ab1baaefd32d8a24e21a238b4c3`
 
 A focused probe of the unchanged original application, using its real Yoga authorization plugin and synthetic MongoDB data, confirmed three missing permission checks: self-service privilege updates, modifications to another user, and modifications to another owner's service. A foreign-shop update control correctly returned `FORBIDDEN`. The disposable database was removed and the original source was unchanged. The PostgreSQL port must preserve legitimate flows while closing these reproduced gaps.
 
-The application implementation is committed as `e74571ed88377c075119d84f66c1271ae2a6c754` on `codex/postgresql`, in `/Users/claudiogonzalez/SCM/simfinity-barber/.worktrees/codex-postgresql`. It consumes the verified core/PostgreSQL/MCP archives above, committed with checksums in its `backend/vendor/`. The installed backend has one shared core and no Mongoose/MongoDB dependencies.
+The application implementation is committed as `e74571ed88377c075119d84f66c1271ae2a6c754`, with review fix `d8d6424cc662e40fc17c40202f9913d2411d1685`, on `codex/postgresql`, in `/Users/claudiogonzalez/SCM/simfinity-barber/.worktrees/codex-postgresql`. It consumes the verified core/PostgreSQL/MCP archives above, committed with checksums in its `backend/vendor/`. The installed backend has one shared core and no Mongoose/MongoDB dependencies.
 
 The port centralizes Pool and schema readiness for Yoga, scripts and MCP, forwards active sessions through custom writes and controllers, and enforces resource ownership for root and nested mutations. The three reproduced original authorization gaps are covered by denial regressions alongside legitimate self/owner/admin operations. Native paging covers more than 100 records. Bundle and booking updates recalculate derived values; review statistics commit or roll back with the review. An explicit `(state, (address->>'city'))` index supplements generated indexes because embedded paths are not supported by generated compound index metadata.
 
 | Application verification | Result |
 | --- | --- |
-| Backend unit suite | 11 files, 63 tests passed; all 59 original tests retained/adapted |
-| Isolated PostgreSQL API runner | 49 successful/denied operation checks, plus auth, scopes, paging, FK, rollback and MCP assertions |
+| Backend unit suite | 11 files, 63 tests passed before the review fix; 36 affected controller tests passed afterward; all 59 original tests retained/adapted |
+| Isolated PostgreSQL API runner | Final 67 successful/denied operation checks, plus auth, scopes, paging, FK, rollback and MCP assertions |
 | Dataset through GraphQL | Loaded and deleted 3 shops, 13 services, 8 categories, 6 professionals, 4 bundles, 4 bookings, 4 reviews and 4 favorites in a private schema |
 | SDL comparison | All 33 queries and 47 mutations retained; zero field/argument type differences |
 | Frontend | 3 unit tests, 4 browser tests including actual login/full booking, production build with 32 static pages |
@@ -94,6 +94,8 @@ The port centralizes Pool and schema readiness for Yoga, scripts and MCP, forwar
 | Infrastructure | New Compose volume, generated schema readiness, same-volume restart, repeated seeding and final health checks passed |
 
 Browser QA found two invalid existing frontend selections (`review.professional` and `barbershop.createdAt`), now corrected and covered against the real schema. The mobile detail overflow was also corrected. Other frontend changes are backend URL configuration and tests. The existing nonfatal Storybook warning about missing MDX stories remains; the unit run passes.
+
+The task reviewer reproduced stale derived fields when booking lines or bundle services were cleared to `[]` or `null`. Fix `d8d6424` applies unsets before calculating the effective record and resets the resulting charge/duration while retaining explicit null versus empty arrays. Omitted lists remain unchanged; the existing empty-bundle price exemption is preserved. Scoped re-review independently reproduced all four clear cases, omission controls and valid/invalid replacement behavior, then approved the fix with no new breakage. Task 6 is approved; the pre-existing Storybook warning is the only deferred minor observation.
 
 The application records the generated SQL, FK catalog, original/PostgreSQL SDL and empty API diff in `backend/schema/`. Its `docs/postgresql-port.md` and root/backend/frontend READMEs contain reproducible commands, native migration examples, archive provenance and explicit limitations. Test mutation runners use random schemas and remove them in `finally`; browser booking tests create synthetic future reservations in the local demo.
 
@@ -108,4 +110,4 @@ The Compose project is `simfinity-barber-postgres`, with its own database and up
 
 Demo accounts are `cliente@demo.com`, `propietario@demo.com` and `admin@demo.com`, all with password `demo1234`. The approved shop is `/b/postgres-demo`, with an active service/professional and all-week 09:00–18:00 hours. From the application worktree, `docker compose up --build -d` starts services; `docker compose exec backend npm run seed:admin` and `docker compose exec backend npm run seed:demo` create or retain the synthetic demo accounts/data. `docker compose restart` retains data; `docker compose down` stops this project while retaining its volumes.
 
-The application task review and final combined review remain pending. Their final verdicts, any fix commits and cleanup status will be recorded before delivery is marked complete.
+All six implementation task reviews are approved. The final combined review remains pending; its verdict, any final fixes and cleanup status will be recorded before delivery is marked complete.

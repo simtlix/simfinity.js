@@ -50,7 +50,7 @@
 
 ### Task 6: Port and exercise barber on PostgreSQL
 
-- [ ] Create an isolated local `codex/postgresql` worktree from barber main. Inventory GraphQL metadata/controllers/scripts/native persistence; preserve frontend API. Install actual library archives, replace native database operations, add PostgreSQL Docker/seed/startup configuration and migration notes. Run backend tests and real API scenarios, inspect generated FKs, check frontend, and review/commit the runnable application.
+- [x] Create an isolated local `codex/postgresql` worktree from barber main. Inventory GraphQL metadata/controllers/scripts/native persistence; preserve frontend API. Install actual library archives, replace native database operations, add PostgreSQL Docker/seed/startup configuration and migration notes. Run backend tests and real API scenarios, inspect generated FKs, check frontend, and review/commit the runnable application.
 
 ### Task 7: Final delivery verification
 
