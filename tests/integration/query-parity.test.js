@@ -92,14 +92,21 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL GraphQL parity', 
     'number:{value:null}', 'number:{operator:NE,value:null}', 'number:{operator:IN,value:[]}', 'number:{operator:NIN,value:[]}',
     'enabled:{value:false}', 'kind:{value:"one"}', 'checked:{operator:LIKE,value:"a.b"}',
     'date:{operator:GTE,value:"2021-01-01T00:00:00Z"}', 'dates:{operator:IN,value:["2020-01-01T00:00:00Z"]}',
-    'tags:{value:"x"}', 'tags:{operator:NE,value:"x"}', 'tags:{value:["x","y"]}',
-    'tags:{value:null}', 'tags:{operator:NIN,value:[null,"x"]}',
+    'tags:{value:"x"}', 'tags:{operator:NE,value:"x"}',
+    'tags:{value:null}',
     'detail:{terms:[{path:"number",operator:GT,value:2}]}',
     'entries:{terms:[{path:"number",operator:GT,value:3},{path:"number",operator:LT,value:2}]}',
     'entries:{terms:[{path:"number",value:null}]}',
     'OR:[{conditions:[{field:"number",value:1}]},{AND:[{conditions:[{field:"number",operator:GTE,value:3},{field:"number",operator:LTE,value:4}]}]}]',
   ])('matches filter %s', async (filter) => {
     await assertParity(`{parityItems(${filter},sort:{terms:[{field:"key",order:ASC}]}){key}}`);
+  });
+
+  it.each(['tags:{value:["x","y"]}', 'tags:{operator:NIN,value:[null,"x"]}'])('rejects invalid v3.1 filter %s on both backends', async (filter) => {
+    for (const backend of backends) {
+      const result = await execute(backend, `{parityItems(${filter}){key}}`);
+      expect(result.errors?.[0].extensions.code).toBe('INVALID_FILTER_VALUE');
+    }
   });
 
   it.each(['ASC', 'DESC'])('sorts nullable arrays consistently (%s)', async (order) => {

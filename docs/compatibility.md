@@ -1,6 +1,6 @@
 # Database compatibility contract
 
-This ledger records behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in `tests/integration/query-parity.test.js`, using the graph in `tests/contracts/model-fixtures.js`.
+This ledger records the v3.1.0 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in `tests/integration/query-parity.test.js`, using the graph in `tests/contracts/model-fixtures.js`.
 
 Set `SIMFINITY_MONGODB_URI` to a disposable replica-set database to run the integration suite. The database is dropped during setup, so the URI must never identify an application database. When the variable is absent, Vitest reports the integration suite as skipped.
 
@@ -13,11 +13,11 @@ Set `SIMFINITY_MONGODB_URI` to a disposable replica-set database to run the inte
 | A scalar-only no-endpoint type receives a model when another registered type references it. It still receives no root endpoint. | Fixed and shared | Unit regression and the real `ContractLabel` reference fixture. |
 | `onUpdated` receives the resolved updated record after the database operation completes. | Fixed and shared | Unit regression and live hook assertions. |
 | Multiple flat terms on one relation are all present in the generated match. | Fixed and shared | Unit regressions for `author.name` plus `author.id`, and two predicates on the same `author.name` path. |
-| Scope callbacks apply to root `find`, `get_by_id`, and `aggregate` operations. Generated child relation resolvers do not run child scopes. | Preserve current root-only boundary | Live root `find` combines a tenant scope with a caller-supplied OR group. |
+| Root reads and generated non-embedded relationships run target middleware and scopes. Relationship IDs and parent predicates cannot be redirected by mutable arguments. | v3.1.0 shared | Upstream authorization integration tests and cross-backend `runtime-v31.test.js`. |
 | A one-to-many filter uses `$lookup` plus `$unwind`; a root with two matching children appears twice. Count uses the same multiplicity. | Preserve current cardinality | Live collection-filter result contains the same root twice and sets `context.count` to `2`. |
 | Generated mutations own a transaction and pass its native session plus the GraphQL context to validation and controller hooks. A nested failure rolls back the parent write. | Preserve | Live nested validation failure leaves neither parent nor child records; hook assertions observe an active session and the original context. |
-| `saveObject(typeName, args, session, context)` participates in a supplied session; without one it does not wrap hooks and nested independent entities in a workflow transaction. | Preserve | PostgreSQL still commits an owner and its normalized embedded rows atomically. A failed embedded FK leaves no partial owner. |
-| Empty strings are treated as absent during materialization, while `false` and `0` are stored. | Preserve for this foundation | Existing MongoDB behavior; callers should not rely on an empty string being persisted. |
+| `saveObject(typeName, args, session, context)` owns the entire workflow transaction without a supplied session. Active supplied sessions remain caller-owned. | v3.1.0 shared | Standalone nested middleware/hook/FK failure rolls back parent, child and embedded writes. |
+| Accepted empty strings, `false`, `0` and empty arrays survive materialization. Nullable embedded list items retain null; null referenced-operation items are skipped. | v3.1.0 shared | Upstream materialization regressions and live standalone save/update checks on both backends. |
 | `GraphQLNonNull` controls GraphQL inputs but does not automatically add a Mongoose `required` validator. | Preserve for MongoDB | PostgreSQL schema metadata may use the declaration for `NOT NULL`; this is a documented storage-level difference. |
 | Lists preserve outer and item nullability (`[T]`, `[T!]`, `[T]!`, `[T!]!`). Update fields allow omission while retaining item wrappers. | Fixed and shared | Runtime input/schema regressions; real scalar/date/embedded list operations. |
 | Inverse relations may use a scalar ID or an alias for the child's reference storage field. | Fixed and shared | Explicit connection-field normalization and real nested create/read/update regressions. |
@@ -30,7 +30,7 @@ Set `SIMFINITY_MONGODB_URI` to a disposable replica-set database to run the inte
 
 The query parity corpus compares actual schemas and responses for operators, nested logical filters, dates, enums, scalar arrays, nullable values, array sorts, embedded paths, scopes, joined row multiplicity, pagination/counts and aggregate facts. Typed invalid values and unsupported paths produce explicit errors. PostgreSQL text comparisons use binary C collation, including on databases configured with an ICU language locale.
 
-PostgreSQL owner/embedded reads use one repeatable-read snapshot. Generated and custom mutations share one transaction for hooks, parent rows, owned embeddeds and independent nested writes. Supplied session handles are joined without commit/release; expired/foreign handles are rejected. Confirmed serialization/deadlock aborts retry up to five times. Standalone saveObject retains the workflow ownership distinction described above.
+PostgreSQL owner/embedded reads use one repeatable-read snapshot. Generated and custom mutations share one transaction for hooks, parent rows, owned embeddeds and independent nested writes. Supplied session handles are joined without commit/release; expired/foreign handles are rejected. Confirmed serialization/deadlock aborts retry up to five times. Standalone `saveObject` also wraps its full lifecycle, including hooks and nested writes, in that transaction.
 
 PostgreSQL identities are UUIDs and native models/sessions are not Mongoose objects. Optional scalar storage uses SQL NULL rather than preserving every Mongoose missing/default distinction; native hooks/code must adapt. Required typed database columns and real FKs are stronger storage constraints than the Mongo generator. Native methods and pipeline helpers are outside GraphQL API parity.
 
@@ -61,3 +61,11 @@ Runtime verification (2026-09-11):
 - `npm run lint` and the diff whitespace check passed.
 - `npm run test:packages` installed all three actual archives outside the workspace, exercised their runtimes/exports/introspection, and compiled strict TypeScript consumers with GraphQL 16. Core/PostgreSQL installed no MongoDB, Mongoose or MCP packages.
 - CI provisions MongoDB 7 and PostgreSQL 15/16/18; normal unit runs skip database suites explicitly when their URI is absent.
+
+## v3.1.0 authorization and query limits
+
+Nested child saves/updates/deletes run target middleware with root argument shapes. Update/delete ownership is checked from persisted records after middleware selects the effective ID. Missing records raise `NOT_VALID_ID`; foreign-parent records raise `FORBIDDEN`. Hooks cannot clear or replace the required parent connection. Query scopes authorize reads only; custom resolvers and native database access retain application-defined checks.
+
+`configureQueryLimits({ maxPageSize })` is available on MongoDB and PostgreSQL facades and runtime instances. Its shared process-wide default is 1000; unpaged lists use the smaller of 100 and the configured maximum. Explicit page/size and calculated skip must be positive/safe integers within the maximum; unpaged aggregates remain unbounded. Invalid sort/filter paths and malformed filter values fail with domain errors. v3.1.0 rejects whole-array EQ values and null elements in filter lists; these older permissive parity cases now assert rejection on both backends.
+
+MongoDB transactions use the registered model connection, retry transient bodies and uncertain commits separately, and await owned cleanup. Borrowed active sessions never commit, abort, retry or end inside the runtime. PostgreSQL validates instance-owned active handles, retains repeatable-read atomicity, and retries confirmed serialization/deadlock aborts only.

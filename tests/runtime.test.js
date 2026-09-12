@@ -500,6 +500,7 @@ describe('createRuntime', () => {
     const adapter = createMongoAdapter();
     adapter.bind({ getModel: () => null });
     const Model = {
+      schema: new mongoose.Schema({ serie_id: mongoose.Schema.Types.ObjectId }),
       aggregate: async (pipeline) => pipeline,
     };
 

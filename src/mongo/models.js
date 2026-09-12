@@ -94,6 +94,8 @@ const generateSchemaDefinition = (gqlType) => {
           }
           schemaArg[fieldEntryName] = [generateSchemaDefinition(itemType)];
         }
+      } else if (listItemMatchesScalar(type, GraphQLID)) {
+        schemaArg[fieldEntryName] = [mongoose.Schema.Types.ObjectId];
       } else if (listItemMatchesScalar(type, GraphQLString) || itemType instanceof GraphQLEnumType) {
         schemaArg[fieldEntryName] = [String];
       } else if (listItemMatchesScalar(type, GraphQLBoolean)) {

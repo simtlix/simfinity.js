@@ -27,7 +27,7 @@ alwaysApply: true
 - Initialization borrows one pool client, owns its transaction, awaits DDL/catalog validation and never destructively synchronizes existing storage. `validate` mode is read-only. PostgreSQL >=15 is required.
 - Await initialization before serving; failure marks the instance unavailable. `preventCreatingCollection(true)` before createSchema forces validation only. Text columns and typed query expressions use binary C collation.
 - PostgreSQL writes use repeatable-read transactions; supplied sessions are joined, owned sessions retry confirmed serialization/deadlock aborts. Shared typed input snapshots isolate attempts. Adapter stateValue supplies the canonical persisted representation for state writes/guards (names on Mongo, enum internal values on PostgreSQL).
-- Owner+embedded writes are atomic even under standalone saveObject; hooks and independent nested entities only share a workflow transaction when one is supplied. Owner+embedded reads use one snapshot. Only ownership FKs cascade.
+- Standalone saveObject owns a full workflow transaction including hooks and independent nested entities; active supplied sessions remain caller-owned. Owner+embedded reads use one snapshot. Only ownership FKs cascade.
 
 ## Core Flow
 

@@ -5,9 +5,10 @@ import {
   __Field,
 } from 'graphql';
 
-const patchKey = Symbol.for('@simtlix/simfinity-core/introspection-patch');
-
-if (!__Field[patchKey]) {
+// getFields() supports both lazy and already materialized introspection fields.
+// Reuse the shared field on repeated module evaluation to preserve type identity.
+const introspectionFields = __Field.getFields();
+if (!introspectionFields.extensions) {
   const RelationType = new GraphQLObjectType({
     name: 'RelationType',
     fields: () => ({
@@ -26,17 +27,11 @@ if (!__Field[patchKey]) {
     }),
   });
 
-  const fieldTypeDefinitions = __Field._fields;
-  __Field._fields = () => {
-    const originalFields = fieldTypeDefinitions();
-    originalFields.extensions = {
-      type: FieldExtensionsType,
-      name: 'extensions',
-      resolve: (obj) => obj.extensions,
-      args: [],
-      isDeprecated: false,
-    };
-    return originalFields;
+  introspectionFields.extensions = {
+    type: FieldExtensionsType,
+    name: 'extensions',
+    resolve: (obj) => obj.extensions,
+    args: [],
+    isDeprecated: false,
   };
-  __Field[patchKey] = true;
 }

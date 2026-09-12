@@ -94,7 +94,8 @@ describe.skipIf(!uri)('PostgreSQL GraphQL runtime contract', () => {
   it('keeps each owner and its embeddeds atomic even for standalone saveObject', async () => {
     await expect(api.saveObject(fixture.types.ContractSerie.name, { tenant: 'a', title: 'Standalone', credits: [{ role: 'Bad', star: { id: randomUUID() } }] })).rejects.toMatchObject({ extensions: { code: 'REFERENCE_CONSTRAINT_VIOLATION' } });
     expect(await api.getModel(fixture.types.ContractSerie).find()).toEqual([]);
-    expect(fixture.hookEvents.find((event) => event.hook === 'onSaving').session).toBeUndefined();
+    expect(fixture.hookEvents.find((event) => event.hook === 'onSaving').session.inTransaction()).toBe(false);
+    expect(fixture.hookEvents.find((event) => event.hook === 'onSaving').inTransaction).toBe(true);
   });
 
   it('retains null embedded items and restores a reference-bearing array after clearing it', async () => {

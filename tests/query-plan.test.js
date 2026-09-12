@@ -28,4 +28,12 @@ describe('database-independent query plans', () => {
     for (let i = 0; i < 7; i++) group = { AND: [group] };
     expect(() => createQueryPlan(models(), 'ContractSerie', { AND: [group] })).toThrow(/deep/i);
   });
+  it.each([
+    { seasons: { terms: [null] } },
+    { seasons: { terms: [42] } },
+    { seasons: { terms: [{}] } },
+  ])('rejects malformed relationship terms with a domain error: %j', (input) => {
+    expect(() => createQueryPlan(models(), 'ContractSerie', input)).toThrowError(expect.objectContaining({ extensions: expect.objectContaining({ code: expect.stringMatching(/^INVALID_FILTER/) }) }));
+  });
+
 });

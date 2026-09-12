@@ -93,7 +93,7 @@ export const createPostgresAdapter = (options) => {
     prepareUpdate(set, unset) { return { ...set, ...(Object.keys(unset).length ? { $unset: { ...unset } } : {}) }; },
     update: safe((model, id, update, session) => records.update(nameOf(model), id, update, session)),
     delete: safe((model, id, session) => records.remove(nameOf(model), id, session)),
-    find: safe((model, gqltype, args, session) => transactions.withTransaction(session, (transaction) => execute(model, gqltype, args, transaction, 'find'))),
+    find: safe((model, gqltype, args, session, { requiredId } = {}) => transactions.withTransaction(session, (transaction) => execute(model, gqltype, args, transaction, 'find', requiredId == null ? null : { column: 'id', id: castId(requiredId) }))),
     count: safe((model, gqltype, args, session) => execute(model, gqltype, args, session, 'count')),
     aggregate: safe((model, gqltype, args, session) => execute(model, gqltype, args, session, 'aggregate')),
     findChildren: safe((model, gqltype, connectionField, parentId, args, session) => {

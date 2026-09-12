@@ -2,9 +2,9 @@ import {
   GraphQLID, GraphQLList, GraphQLObjectType, GraphQLString,
 } from 'graphql';
 import mongoose from 'mongoose';
-import * as simfinity from '../../src/index.js';
+import * as defaultRuntime from '../../src/index.js';
 
-export const createRelationFixture = (prefix, customId = false, parentField = 'parent_id') => {
+export const createRelationFixture = (prefix, customId = false, parentField = 'parent_id', simfinity = defaultRuntime, customConnectionField = 'child_id') => {
   const child = new GraphQLObjectType({
     name: `${prefix}Child`,
     fields: () => ({
@@ -47,7 +47,7 @@ export const createRelationFixture = (prefix, customId = false, parentField = 'p
       },
       customChild: {
         type: child,
-        extensions: { readOnly: true, relation: { connectionField: 'child_id' } },
+        extensions: { readOnly: true, relation: { connectionField: customConnectionField } },
         resolve: customResolver,
       },
       children: {

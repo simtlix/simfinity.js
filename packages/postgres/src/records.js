@@ -142,9 +142,10 @@ export const createRecordStore = (models, database, query) => {
     if (!entity) throw new SimfinityError(`Type ${name} is not an entity`, 'INVALID_MODEL', 400);
     return hydrate(table(name), entity.fields, rows, entity.gqltype, session);
   };
-  const getById = async (name, value, session, { projection, lock } = {}) => {
+  const getById = async (name, value, session, { projection, lock, requiredId } = {}) => {
     if (value == null) return null;
     const id = castId(value);
+    if (requiredId != null && id !== castId(requiredId)) return null;
     const rows = (await query(`SELECT * FROM ${qualified(database.schema, name)} WHERE id = $1::uuid${lock ? ' FOR UPDATE' : ''}`, [id], session)).rows;
     const [record] = await hydrateRows(name, rows, session);
     if (!record) return null;

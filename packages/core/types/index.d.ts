@@ -96,6 +96,7 @@ export interface MiddlewareContext {
   [key: string]: any;
 }
 export interface Runtime<Model = any, Session = any> {
+  configureQueryLimits(options?: { maxPageSize?: number }): void;
   connect(model: Model | null, type: GraphQLObjectType, singular: string, plural: string, controller?: EntityController<Session> | null, onModelCreated?: ((model: Model) => void) | null, stateMachine?: StateMachine<Session> | null): void;
   addNoEndpointType(type: GraphQLObjectType): void;
   createSchema(includedQueryTypes?: GraphQLObjectType[] | null, includedMutationTypes?: GraphQLObjectType[] | null, includedCustomMutations?: string[] | null): GraphQLSchema;
@@ -106,7 +107,7 @@ export interface Runtime<Model = any, Session = any> {
   getRegistrations(): RuntimeRegistration<Model, Session>[];
   use(middleware: (params: MiddlewareContext, next: () => Promise<void>) => void | Promise<void>): void;
   registerMutation(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (args: any, session: Session, context: any) => any): void;
-  /** Participates in a supplied transaction; does not begin one by itself. */
+  /** Owns the full workflow transaction unless an active caller session is supplied. */
   saveObject(typeName: string, args: Record<string, any>, session?: Session, context?: any): Promise<any>;
   preventCreatingCollection(prevent: boolean): void;
 }
@@ -119,15 +120,15 @@ export interface DatabaseAdapter<Model = any, Session = any> {
   createModel(type: GraphQLObjectType, callback: ((model: Model) => void) | null | undefined, options: { createCollection: boolean }): Model;
   castId(value: any): any;
   stateValue?(state: { name: string; value: any }): any;
-  withTransaction<T>(session: Session | null | undefined, callback: (session: Session) => Promise<T> | T): Promise<T>;
+  withTransaction<T>(session: Session | null | undefined, callback: (session: Session) => Promise<T> | T, model?: Model): Promise<T>;
   newRecord(model: Model, data: any, session?: Session): any;
   saveRecord(model: Model, record: any, session?: Session): any;
   toObject(record: any): any;
-  getById(model: Model, id: any, session?: Session | null, options?: { projection?: Record<string, number>; plain?: boolean; lock?: boolean }): any;
+  getById(model: Model, id: any, session?: Session | null, options?: { projection?: Record<string, number>; plain?: boolean; lock?: boolean; requiredId?: any; context?: any }): any;
   prepareUpdate(set: Record<string, any>, unset: Record<string, string>): any;
   update(model: Model, id: any, changes: any, session?: Session): any;
   delete(model: Model, id: any, session?: Session): any;
-  find(model: Model, type: GraphQLObjectType, args: any, session?: Session | null): any;
+  find(model: Model, type: GraphQLObjectType, args: any, session?: Session | null, options?: { requiredId?: any; context?: any }): any;
   count(model: Model, type: GraphQLObjectType, args: any, session?: Session | null): Promise<number> | number;
   aggregate(model: Model, type: GraphQLObjectType, args: any, session?: Session | null): any;
   findChildren(model: Model, type: GraphQLObjectType, connectionField: string, parentId: any, args: any, session?: Session | null): any;
@@ -145,3 +146,6 @@ export interface QueryPlan {
 }
 export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode'] }): QueryPlan;
 export function resolveModelPath(models: ModelDescription, entityName: string, path: string | string[]): FieldDescription[];
+
+export function configureQueryLimits(options?: { maxPageSize?: number }): void;
+export function paginationStages(pagination: { page: number; size: number } | null | undefined, withDefault: boolean): Array<{ $skip: number } | { $limit: number }>;

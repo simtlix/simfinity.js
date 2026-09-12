@@ -69,8 +69,9 @@ export const createMongoAdapter = () => {
     toObject(record) {
       return typeof record?.toObject === 'function' ? record.toObject() : record;
     },
-    getById(Model, id, session, { projection, plain } = {}) {
-      let query = withSession(Model.findById(id, projection), session);
+    getById(Model, id, session, { projection, plain, requiredId } = {}) {
+      let query = withSession(requiredId == null ? Model.findById(id, projection)
+        : Model.findOne({ $and: [{ _id: requiredId }, { _id: id }] }, projection), session);
       if (plain) query = query.lean();
       return query;
     },
@@ -83,8 +84,9 @@ export const createMongoAdapter = () => {
     delete(Model, id, session) {
       return withSession(Model.findByIdAndDelete(id), session);
     },
-    async find(Model, gqltype, args, session) {
+    async find(Model, gqltype, args, session, { requiredId } = {}) {
       const pipeline = await queries.buildQuery(args, gqltype);
+      if (requiredId != null) pipeline.unshift({ $match: { _id: Model.schema.path('_id').cast(requiredId) } });
       if (pipeline.length === 0) return withSession(Model.find({}), session);
       return withSession(Model.aggregate(pipeline), session);
     },
@@ -99,7 +101,8 @@ export const createMongoAdapter = () => {
     },
     async findChildren(Model, gqltype, connectionField, parentId, args, session) {
       const pipeline = await queries.buildQuery(args, gqltype);
-      pipeline.unshift({ $match: { [connectionField]: adapter.castId(parentId) } });
+      const path = Model.schema.path(connectionField);
+      pipeline.unshift({ $match: { [connectionField]: path ? path.cast(parentId) : parentId } });
       return withSession(Model.aggregate(pipeline), session);
     },
   };

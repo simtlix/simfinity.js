@@ -11,6 +11,7 @@ import { createMongoAdapter } from './mongo/adapter.js';
 const mongoAdapter = createMongoAdapter();
 const runtime = createRuntime(mongoAdapter);
 
+export const configureQueryLimits = runtime.configureQueryLimits;
 export const connect = runtime.connect;
 export const addNoEndpointType = runtime.addNoEndpointType;
 export const createSchema = runtime.createSchema;

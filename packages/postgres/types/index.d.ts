@@ -109,3 +109,5 @@ export const preventCreatingCollection: PostgresRuntime['preventCreatingCollecti
 export const withTransaction: PostgresRuntime['withTransaction'];
 /** Initializes the default module instance, after configure/connect/createSchema. */
 export function initializeDatabase(options?: InitializationOptions): Promise<InitializationResult>;
+
+export const configureQueryLimits: Runtime['configureQueryLimits'];
