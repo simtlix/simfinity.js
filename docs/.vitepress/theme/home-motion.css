@@ -1,0 +1,103 @@
+/* A connection is drawn, then the surface responds. All motion is optional. */
+.sim-home {
+  --motion-ease: cubic-bezier(.22, .7, .2, 1);
+  --surface-light: #e8ba5920;
+}
+html:not(.dark) .sim-home { --surface-light: #b88c2310; }
+.chapter-line { position: relative; transform-origin: left center; }
+.chapter-line::after {
+  content: '';
+  position: absolute;
+  inset: -1px 0 -1px auto;
+  width: 42px;
+  background: linear-gradient(90deg, transparent, var(--vp-c-brand-1));
+  opacity: 0;
+}
+.sim-home .capability-item { border-top-color: transparent; isolation: isolate; }
+html:not(.dark) .sim-home .capability-item { border-top-color: transparent; }
+.sim-home .capability-item::after {
+  width: 100%;
+  background: var(--refined-line);
+  transform-origin: left center;
+  transition: background .35s, transform 1.2s var(--motion-ease);
+}
+.sim-home .capability-item:hover::after,
+.sim-home .capability-item:focus-visible::after { background: var(--vp-c-brand-1); }
+.learning-links { position: relative; border-top: 0; }
+.learning-links::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 1px;
+  background: var(--refined-line);
+  transform-origin: left center;
+}
+.code-content, .mcp-terminal { position: relative; isolation: isolate; }
+[data-spotlight]::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: radial-gradient(320px circle at var(--pointer-x, 50%) var(--pointer-y, 50%), var(--surface-light), transparent 75%);
+  opacity: 0;
+  transition: opacity .5s ease;
+  z-index: 2;
+}
+.capability-item[data-spotlight]::before { inset: 0 -18px; border-radius: 6px; z-index: -1; }
+.code-content[data-spotlight]::before { --surface-light: #93b5ff0b; }
+.mcp-terminal[data-spotlight]::before { --surface-light: #96b8ff15; }
+.sim-home .sim-button { position: relative; overflow: hidden; }
+.sim-home .sim-button::before {
+  content: '';
+  position: absolute;
+  inset: -70% auto -70% -50%;
+  width: 25%;
+  background: linear-gradient(90deg, transparent, #fff7, transparent);
+  transform: rotate(25deg);
+  pointer-events: none;
+  opacity: 0;
+}
+.workflow-tabs button .tab-arrow { transition: transform .35s var(--motion-ease), color .35s; }
+.workflow-tabs button[aria-selected='true'] .tab-arrow { color: var(--vp-c-brand-1); }
+.workflow-tabs button::before { transform-origin: center; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .motion-ready .chapter-label .chapter-line {
+    transform: scaleX(0);
+    transition: transform 1.4s var(--motion-ease) .18s;
+  }
+  .motion-ready .chapter-label.is-visible .chapter-line { transform: scaleX(1); }
+  .motion-ready .chapter-label.is-visible .chapter-line::after { animation: connection-tip 1.5s ease .18s both; }
+  .motion-ready .capability-item.reveal:not(.is-visible):not(:focus-within)::after { transform: scaleX(0); }
+  .motion-ready .learning-links[data-line-reveal]::before { transform: scaleX(0); transition: transform 1.6s var(--motion-ease); }
+  .motion-ready .learning-links[data-line-reveal].is-visible::before { transform: scaleX(1); }
+  .code-panel { animation: panel-arrive .4s var(--motion-ease); }
+  .workflow-tabs button[aria-selected='true']::before { animation: selection-grow .4s var(--motion-ease); }
+  .sim-home .sim-button:is(:hover, :focus-visible)::before { animation: button-light .7s var(--motion-ease); }
+  .sim-home .learning-links a > div { transition: translate .4s var(--motion-ease); }
+  .sim-home .learning-links a:is(:hover, :focus-visible) > div { translate: 0 -4px; }
+  .workflow-tabs button:is(:hover, :focus-visible) .tab-arrow { transform: translate(2px, -2px); }
+}
+@media (min-width: 801px) and (prefers-reduced-motion: no-preference) {
+  [data-parallax] { translate: 0 var(--parallax-y, 0px); }
+  .hero-horizon[data-parallax] { inset-block: -32px; }
+}
+@media (hover: hover) and (pointer: fine) {
+  [data-spotlight][data-engaged]::before { opacity: 1; }
+  .code-content { transition: border-color .4s, box-shadow .4s; }
+  .code-content:is(:hover, :focus-within) { border-color: #69788f; box-shadow: 0 35px 80px -32px #080e2459, inset 0 1px #c2d4ff26; }
+  .sim-home .mcp-terminal { transition: box-shadow .4s, border-color .4s; }
+  .mcp-terminal:is(:hover, :focus-within) { border-color: #7893c9; box-shadow: inset 0 1px #acbeed30, 0 45px 90px -35px #0008; }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-parallax] { translate: none; }
+  .chapter-line, .learning-links::before, .capability-item::after { transform: none; }
+  .sim-home *, .sim-home *::before, .sim-home *::after { transition-duration: 0s !important; }
+}
+@keyframes connection-tip { 0%, 100% { opacity: 0; } 25%, 65% { opacity: .6; } }
+@keyframes panel-arrive { from { opacity: .35; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes selection-grow { from { transform: scaleY(.2); } to { transform: scaleY(1); } }
+@keyframes button-light { 0% { left: -50%; opacity: 0; } 25% { opacity: .7; } 100% { left: 125%; opacity: 0; } }

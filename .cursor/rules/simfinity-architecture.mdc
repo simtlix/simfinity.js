@@ -75,7 +75,16 @@ simfinity.createSchema()
 | `src/errors/simfinity.error.js` | Base error class with `code` and `status` extensions |
 | `src/errors/internal-server.error.js` | Internal server error (extends `SimfinityError`) |
 
+### MCP contracts
+
+- Generated input schemas preserve nullability independently from requiredness, including list items and recursive `$defs`. Defaults use GraphQL AST serialization; enum literals use member names. Opaque defaults without a literal representation use the original field default when omitted.
+- `maxResultBytes` caps the serialized logical payload on success and on errors, including partial data. Limit diagnostics are exempt; envelope overhead, duplicate structured content, remote download size and middleware-created results are outside the cap.
+- Check cancellation again after awaiting an in-process context factory, before calling GraphQL. Do not promise to undo database work already started.
+- Remote attempt timeouts include reading the body. Queries alone may retry transport failures; client cancellation rejects during fetch or body reading. Validate the remote GraphQL envelope before creating a tool result.
+- `createHTTPMCPHandler` always creates a fresh stateless server/transport per request. Reject session generators, session callbacks and event stores at setup; applications needing sessions manage a transport with `createMCPServer`.
+
 ## Instance State (inside `createRuntime` in `packages/core/src/runtime.js`)
+
 
 - `typesDict` -- primary registry: `{ types: { [typeName]: { model, gqltype, simpleEntityEndpointName, listEntitiesEndpointName, endpoint, controller, stateMachine, inputType } } }`
 - `typesDictForUpdate` -- parallel registry with update-specific input types
@@ -85,4 +94,9 @@ simfinity.createSchema()
 
 ## Introspection Extension (Critical)
 
-`packages/core/src/introspection.js` patches `__Field._fields` once, guarded by a shared Symbol, to inject `FieldExtensionsType` and `RelationType` globally. These types exist outside the schema's type map. Tools that rebuild or copy the schema (like `graphql-middleware`'s `applyMiddleware` / `mapSchema`) can cause duplicate type errors. Use Envelop plugins for schema transformations. Use fresh GraphQL type instances for independent runtimes because generated resolvers are installed in place.
+Simfinity adds `extensions` to the field map returned by `__Field.getFields()`. This works before or after GraphQL materializes introspection fields and reuses an existing extension field on repeated module evaluation, preserving metadata type identity. Do not capture or replace the private `_fields` thunk.
+
+The extension is still global to the shared GraphQL peer, and Simfinity's registries belong to each runtime instance. Schemas constructed after import collect `FieldExtensionsType` and `RelationType` in their type maps. Pre-existing schemas retain their original type maps: ordinary operations and direct metadata introspection work, but named fragments on these new types require a schema constructed after import.
+
+Tools that clone types (`graphql-middleware`'s `applyMiddleware` / `mapSchema`) remain unsupported. `buildClientSchema()` on a post-import schema's introspection can also produce duplicate metadata types when run in the same process as Simfinity. Use Envelop plugins and in-place resolver wrapping; initialization safety does not provide schema isolation or schema-cloning compatibility.
+

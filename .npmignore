@@ -40,3 +40,6 @@ AGENTS.md
 # Editor files
 .vscode/
 .DS_Store
+
+# Documentation website (separate build tooling)
+docs/

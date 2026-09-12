@@ -1,0 +1,25 @@
+{
+  "name": "simfinity-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vitepress dev . --host 127.0.0.1",
+    "build": "vitepress build .",
+    "preview": "vitepress preview . --host 127.0.0.1"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "overrides": {
+    "vite": "^6.4.3"
+  },
+  "devDependencies": {
+    "@fontsource-variable/space-grotesk": "^5.3.0",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "vitepress": "1.6.4",
+    "vue": "^3.5.0"
+  },
+  "dependencies": {
+    "@simtlix/simfinity-js": "file:.."
+  }
+}

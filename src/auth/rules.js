@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { UnauthenticatedError, ForbiddenError } from './errors.js';
 
 /**
@@ -62,6 +63,9 @@ export const requireAuth = (userPath = 'user') => {
  */
 export const requireRole = (role, options = {}) => {
   const roles = Array.isArray(role) ? role : [role];
+  if (roles.length === 0 || Array.from(roles).some(value => typeof value !== 'string' || value.length === 0)) {
+    throw new TypeError('Required roles must be a nonempty string or array of nonempty strings');
+  }
   const { userPath = 'user', rolePath = 'role' } = options;
   
   return (_parent, _args, ctx) => {
@@ -97,6 +101,10 @@ export const requireRole = (role, options = {}) => {
  */
 export const requirePermission = (permission, options = {}) => {
   const requiredPermissions = Array.isArray(permission) ? permission : [permission];
+  if (requiredPermissions.length === 0
+    || Array.from(requiredPermissions).some(perm => typeof perm !== 'string' || perm.length === 0)) {
+    throw new TypeError('Required permissions must be a nonempty string or array of nonempty strings');
+  }
   const { userPath = 'user', permissionsPath = 'permissions' } = options;
   
   return (_parent, _args, ctx) => {
@@ -108,7 +116,11 @@ export const requirePermission = (permission, options = {}) => {
       throw new UnauthenticatedError('You must be logged in to access this resource');
     }
     
-    const userPermissions = resolvePath(user, permissionsPath) || [];
+    const userPermissions = resolvePath(user, permissionsPath);
+    if (!Array.isArray(userPermissions)
+      || Array.from(userPermissions).some(perm => typeof perm !== 'string' || perm.length === 0)) {
+      throw new ForbiddenError('User permissions must be an array of nonempty strings');
+    }
     
     // Check if user has wildcard permission
     if (userPermissions.includes('*')) {
@@ -132,11 +144,14 @@ export const requirePermission = (permission, options = {}) => {
  * @returns {Function} Composed rule function
  */
 export const composeRules = (...rules) => {
+  if (rules.some(rule => typeof rule !== 'function')) {
+    throw new TypeError('composeRules requires rule functions');
+  }
   return async (parent, args, ctx, info) => {
     for (const rule of rules) {
       const result = await rule(parent, args, ctx, info);
-      // If rule returns false, deny access
-      if (result === false) {
+      // Only true or void grants access, consistently with direct rules.
+      if (result !== true && result !== undefined) {
         return false;
       }
       // If rule throws, it will propagate
@@ -151,13 +166,16 @@ export const composeRules = (...rules) => {
  * @returns {Function} Combined rule function
  */
 export const anyRule = (...rules) => {
+  if (rules.some(rule => typeof rule !== 'function')) {
+    throw new TypeError('anyRule requires rule functions');
+  }
   return async (parent, args, ctx, info) => {
     let lastError = null;
     
     for (const rule of rules) {
       try {
         const result = await rule(parent, args, ctx, info);
-        if (result !== false) {
+        if (result === true || result === undefined) {
           return true; // At least one rule passed
         }
       } catch (error) {
@@ -172,6 +190,13 @@ export const anyRule = (...rules) => {
     }
     return false;
   };
+};
+
+const normalizeOwnerId = (value) => {
+  if (typeof value === 'string' && value.length > 0) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (value instanceof mongoose.Types.ObjectId) return value.toHexString();
+  return undefined;
 };
 
 /**
@@ -200,31 +225,34 @@ export const isOwner = (ownerField = 'userId', userIdField = 'id', options = {})
     }
 
     // Get ownerId from parent (using path or function)
-    const ownerId = resolvePath(parent, ownerField);
+    const ownerId = normalizeOwnerId(resolvePath(parent, ownerField));
 
     // Get userId from user object (using path or function)
-    const userId = resolvePath(user, userIdField);
+    const userId = normalizeOwnerId(resolvePath(user, userIdField));
 
     if (ownerId === undefined || userId === undefined) {
       return false;
     }
 
-    return String(ownerId) === String(userId);
+    return ownerId === userId;
   };
 };
 
 /**
  * Creates a custom rule from a predicate function
- * @param {Function} predicate - Function (parent, args, ctx, info) => boolean | Promise<boolean>
+ * @param {Function} predicate - Function returning true/void to allow, or throwing to deny
  * @param {string} errorMessage - Error message if rule fails
  * @param {string} errorCode - Error code (FORBIDDEN or UNAUTHENTICATED)
  * @returns {Function} Rule function
  */
 export const createRule = (predicate, errorMessage = 'Access denied', errorCode = 'FORBIDDEN') => {
+  if (typeof predicate !== 'function') {
+    throw new TypeError('createRule requires a predicate function');
+  }
   return async (parent, args, ctx, info) => {
     const result = await predicate(parent, args, ctx, info);
     
-    if (result === false) {
+    if (result !== true && result !== undefined) {
       if (errorCode === 'UNAUTHENTICATED') {
         throw new UnauthenticatedError(errorMessage);
       }

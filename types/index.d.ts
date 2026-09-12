@@ -70,7 +70,7 @@ export interface MCPTool {
   name: string;
   title: string;
   description: string;
-  /** JSON Schema for the tool arguments (full-fidelity conversion of the GraphQL args). */
+  /** JSON Schema for GraphQL arguments, preserving defaults and nullable input/list positions. */
   inputSchema: JSONSchema;
   /**
    * JSON Schema mirroring the generated selection set (nullable GraphQL
@@ -103,7 +103,7 @@ export interface MCPRemoteExecutionOptions {
   endpoint: string;
   /** Extra HTTP headers merged over `content-type: application/json`. */
   headers?: Record<string, string>;
-  /** Abort slow remote requests after this many milliseconds (AbortSignal.timeout). */
+  /** Abort each remote attempt, including response-body reading, after this many milliseconds. */
   timeoutMs?: number;
   /** Retry policy for transport failures, HTTP 5xx and 429 (queries only). */
   retry?: MCPRetryOptions;
@@ -144,13 +144,20 @@ export interface MCPLimits {
     count?: boolean;
     [key: string]: unknown;
   };
-  /** Reject (isError MCP_RESULT_TOO_LARGE) when the serialized data is larger than this. */
+  /**
+   * Cap pretty-printed UTF-8 JSON for data or { errors, data? } with MCP_RESULT_TOO_LARGE.
+   * Limit diagnostics, MCP envelope overhead, duplicate structuredContent and
+   * middleware-created results are exempt. Checking occurs after execution.
+   */
   maxResultBytes?: number;
 }
 
 /** Per-call metadata passed through to middleware and context factories (e.g. the SDK's RequestHandlerExtra). */
 export interface MCPCallExtra {
-  /** Already-aborted signals make `callTool` throw MCP_CALL_CANCELLED; remote fetches receive the combined signal. */
+  /**
+   * Aborted signals prevent execution, including after awaiting the context.
+   * Remote fetch/body reading receives the signal. Already-started database work is not undone.
+   */
   signal?: AbortSignal;
   [key: string]: unknown;
 }
@@ -223,7 +230,7 @@ export interface GenerateMCPToolsOptions {
   excludeTypes?: string | string[];
   /** Nesting depth for the auto-generated selection set and output schema. Default 1. */
   selectionDepth?: number;
-  /** Always select `id` when nothing else is selectable on an object type. Default true. */
+  /** Select a scalar/enum `id` as a fallback; otherwise use __typename. Default true. */
   includeId?: boolean;
   /** Prefix prepended to every published tool name (validated /^[a-zA-Z0-9_-]+$/). */
   toolNamePrefix?: string;
@@ -247,8 +254,13 @@ export interface MCPServerOptions extends GenerateMCPToolsOptions {
 
 /** Extra options accepted by {@link createHTTPMCPHandler}. */
 export interface HTTPMCPHandlerOptions extends MCPServerOptions {
-  /** Spread into the SDK's StreamableHTTPServerTransport options (e.g. enableDnsRebindingProtection, allowedHosts, allowedOrigins). */
-  transportOptions?: Record<string, unknown>;
+  /** Stateless SDK options; stateful settings raise MCP_INVALID_TRANSPORT_OPTIONS at setup. */
+  transportOptions?: Record<string, unknown> & {
+    sessionIdGenerator?: never;
+    onsessioninitialized?: never;
+    onsessionclosed?: never;
+    eventStore?: never;
+  };
   /** Invoked when the handler fails; the handler then responds 500 (JSON-RPC internal error) if headers were not sent. */
   onError?: (err: unknown, req: any, res: any) => void;
 }
@@ -260,7 +272,7 @@ export interface GeneratedMCPTools {
    * Execute a tool by its published name. Returns a {@link CallToolResult}
    * (GraphQL errors become `isError` results). Throws SimfinityError
    * MCP_TOOL_NOT_FOUND for unknown names and MCP_CALL_CANCELLED when
-   * `extra.signal` is already aborted.
+   * `extra.signal` is aborted before execution, including while awaiting context.
    */
   callTool: (
     name: string,
@@ -332,11 +344,12 @@ export const mcp: {
  * Core schema-building API (src/index.js)
  * ========================================================================== */
 
-/** Lifecycle hooks invoked around create / update / delete of an entity. */
+/** Lifecycle hooks run before commit and may repeat on a transient transaction retry. */
 export interface EntityController {
   onSaving?(doc: any, args: any, session: any, context: any): void | Promise<void>;
   onSaved?(result: any, args: any, session: any, context: any): void | Promise<void>;
   onUpdating?(id: any, args: any, session: any, context: any): void | Promise<void>;
+  /** Receives the updated Mongoose document after parent and nested writes complete. */
   onUpdated?(result: any, session: any, context: any): void | Promise<void>;
   onDelete?(doc: any, session: any, context: any): void | Promise<void>;
 }
@@ -382,7 +395,7 @@ export function registerMutation(
   callback: (input: any, session: any, context: any) => any,
 ): void;
 
-/** Operation context passed to Simfinity middlewares registered via {@link use}. */
+/** Operation context for root operations, generated non-embedded relation reads, and nested collection writes. */
 export interface SimfinityMiddlewareContext {
   args: any;
   operation: string;
@@ -392,7 +405,11 @@ export interface SimfinityMiddlewareContext {
   [key: string]: any;
 }
 
-/** Register a koa-style middleware run around every Simfinity operation. */
+/**
+ * Register middleware before generated operations, including related-type reads and nested child writes.
+ * Nested operations keep root argument shapes and the GraphQL request context.
+ * Await next() to advance the middleware chain; throw to reject before the operation executes.
+ */
 export function use(
   middleware: (
     context: SimfinityMiddlewareContext,
@@ -408,12 +425,31 @@ export function buildErrorFormatter(
 /** Globally prevent Mongoose collection creation for generated models. */
 export function preventCreatingCollection(prevent: boolean): void;
 
-/** Get the generated GraphQL input type registered for an object type. */
-export function getInputType(
-  type: GraphQLObjectType | { name: string },
-): GraphQLInputObjectType | undefined;
+/** Process-wide limits for generated list and paginated aggregate queries. */
+export interface QueryLimitsOptions {
+  /** Positive safe integer; defaults to 1000. Unpaged lists use min(100, maxPageSize). */
+  maxPageSize?: number;
+}
 
-/** Persist an object, running controllers/validators. Joins a supplied session; does not start a transaction. */
+/** Configure at startup. Invalid configuration throws INVALID_QUERY_LIMITS (400). */
+export function configureQueryLimits(options?: QueryLimitsOptions): void;
+
+/**
+ * Get the generated create input type, preserving field and list-item non-null
+ * wrappers. Update inputs remove only the outer wrapper (except entity id).
+ * References use IdInputType; embedded lists use nested inputs; referenced
+ * collections use added/updated/deleted operation inputs.
+ */
+export function getInputType(type: GraphQLObjectType | { name: string }): GraphQLInputObjectType;
+
+/**
+ * Persist an object and its nested writes inside a transaction (runs controllers/validators).
+ * Without a session, owns a transaction on the model's connection and awaits cleanup.
+ * A supplied session must have an active transaction and belong to the model's MongoDB client.
+ * The caller then owns retries, commit, abort, and cleanup; inactive sessions are rejected.
+ * Owned transactions retry transient failures and uncertain commits separately, up to five times each.
+ */
+
 export function saveObject(
   typeName: string,
   args: Record<string, any>,
@@ -527,7 +563,7 @@ export const scalars: {
  * Auth (src/auth/index.js default export)
  * ========================================================================== */
 
-/** A rule function: return true/void to allow, false to deny (or throw). */
+/** A rule function: only true/void allows; all other values deny (or throw). */
 export type AuthRuleFunction = (
   parent: any,
   args: any,
@@ -535,11 +571,11 @@ export type AuthRuleFunction = (
   info: any,
 ) => boolean | void | Promise<boolean | void>;
 
-/** Declarative policy expression (JSON AST). */
-export type PolicyExpression = Record<string, unknown>;
+/** Declarative policy expression (JSON AST or boolean). The complete AST is validated at runtime. */
+export type PolicyExpression = boolean | Record<string, unknown>;
 
-/** A rule: function, array of functions (AND), or a policy expression. */
-export type AuthRule = AuthRuleFunction | AuthRuleFunction[] | PolicyExpression;
+/** A rule: function, nonempty nested array of rules (AND), or a policy expression. */
+export type AuthRule = AuthRuleFunction | AuthRule[] | PolicyExpression;
 
 /** Field-name (or '*') to rule mapping for one GraphQL type. */
 export type TypePermissions = Record<string, AuthRule>;
@@ -564,7 +600,7 @@ declare class ForbiddenError extends SimfinityError {
 
 /** Authorization utilities (RBAC/ABAC rules, plugin factories and auth errors). */
 export const auth: {
-  /** Envelop-compatible plugin that wraps schema resolvers in-place via `onSchemaChange`. */
+  /** Wraps schema resolvers in-place. Throws TypeError for invalid rules, maps, or defaultPolicy. */
   createAuthPlugin(permissions: PermissionSchema, options?: AuthPluginOptions): EnvelopSchemaPlugin;
   /** @deprecated Use createAuthPlugin instead. graphql-middleware compatible middleware. */
   createAuthMiddleware(
@@ -578,19 +614,24 @@ export const auth: {
   ): Record<string, Record<string, any>>;
   resolvePath(obj: any, pathOrFn: string | ((obj: any) => any)): any;
   requireAuth(userPath?: string): AuthRuleFunction;
+  /** Required roles must be nonempty strings; invalid configuration throws TypeError. */
   requireRole(role: string | string[], options?: { userPath?: string; rolePath?: string }): AuthRuleFunction;
+  /** Exact array membership; only a standalone '*' claim grants all permissions. */
   requirePermission(
     permission: string | string[],
     options?: { userPath?: string; permissionsPath?: string },
   ): AuthRuleFunction;
   composeRules(...rules: AuthRuleFunction[]): AuthRuleFunction;
   anyRule(...rules: AuthRuleFunction[]): AuthRuleFunction;
+  /** Compares nonempty string, finite number, or Mongoose ObjectId identities; missing IDs deny. */
   isOwner(ownerField?: string, userIdField?: string, options?: { userPath?: string }): AuthRuleFunction;
   createRule(predicate: AuthRuleFunction, errorMessage?: string, errorCode?: string): AuthRuleFunction;
   allow(): AuthRuleFunction;
   deny(message?: string): AuthRuleFunction;
-  evaluateExpression(expression: PolicyExpression, context: any): boolean;
+  /** Invalid ASTs and unresolved comparisons deny, including under negation. */
+  evaluateExpression(expression: unknown, context: any): boolean;
   isPolicyExpression(value: unknown): boolean;
+  /** Throws TypeError for a malformed expression. */
   createRuleFromExpression(expression: PolicyExpression): AuthRuleFunction;
   UnauthenticatedError: typeof UnauthenticatedError;
   ForbiddenError: typeof ForbiddenError;

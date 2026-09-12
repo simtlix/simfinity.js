@@ -1,6 +1,19 @@
+![Simfinity.js — Define once. Build beyond. GraphQL, MongoDB, and MCP.](.github/assets/readme-cover.png)
+
 # Simfinity.js
 
 A powerful Node.js framework that automatically generates GraphQL schemas from your data models, bringing all the power and flexibility of MongoDB query language to GraphQL interfaces.
+
+Read the [documentation website](https://simtlix.github.io/simfinity.js/): start with the [quick start](https://simtlix.github.io/simfinity.js/guide/getting-started.html), explore the [guides](https://simtlix.github.io/simfinity.js/guide/schema.html), or consult the [API reference](https://simtlix.github.io/simfinity.js/reference/api.html). The website source is in [`docs/`](docs/).
+
+Run the documentation website locally with Node.js 22+:
+
+```sh
+npm run docs:install
+npm run docs:dev
+```
+
+For builds and hosting, see the [website maintainer guide](docs/.vitepress/README.md). The website documents the current source; some older examples later in this README retain historical conventions.
 
 ## 📑 Table of Contents
 
@@ -105,94 +118,59 @@ Compatibility tests run the same GraphQL schemas and query corpus against both d
 
 ## 🚀 Quick Start
 
-### 1. Basic Setup
+The [complete quick start](docs/guide/getting-started.md) includes MongoDB setup, installation, and working create, read, update, and delete operations. Simfinity uses ES modules and named exports.
 
-```javascript
-const express = require('express');
-const { graphqlHTTP } = require('express-graphql');
-const mongoose = require('mongoose');
-const simfinity = require('@simtlix/simfinity-js');
-
-// Connect to MongoDB
-mongoose.connect('mongodb://localhost:27017/bookstore', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
-
-const app = express();
+```sh
+npm install @simtlix/simfinity-js graphql@^16.11.0 mongoose@^8.16.2 graphql-yoga@^5
 ```
 
-### 2. Define Your GraphQL Type
+Set `"type": "module"` in your application's `package.json`, then create `server.js`:
 
 ```javascript
-const { GraphQLObjectType, GraphQLString, GraphQLNonNull, GraphQLID } = require('graphql');
+import { createServer } from 'node:http';
+import { GraphQLID, GraphQLNonNull, GraphQLObjectType, GraphQLString } from 'graphql';
+import { createYoga } from 'graphql-yoga';
+import mongoose from 'mongoose';
+import * as simfinity from '@simtlix/simfinity-js';
 
-const BookType = new GraphQLObjectType({
-  name: 'Book',
-  fields: () => ({
-    id: { type: new GraphQLNonNull(GraphQLID) },
-    title: { type: new GraphQLNonNull(GraphQLString) },
-    author: { type: GraphQLString },
-  }),
+const SerieType = new GraphQLObjectType({
+  name: 'Serie',
+  fields: {
+    id: { type: GraphQLID },
+    name: { type: new GraphQLNonNull(GraphQLString) },
+  },
 });
-```
 
-### 3. Connect to Simfinity
-
-```javascript
-// Connect the type to Simfinity
-simfinity.connect(null, BookType, 'book', 'books');
-
-// Create the GraphQL schema
+await mongoose.connect(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/series?replicaSet=rs0&directConnection=true');
+simfinity.connect(null, SerieType, 'serie', 'series');
 const schema = simfinity.createSchema();
-```
-
-### 4. Setup GraphQL Endpoint
-
-```javascript
-app.use('/graphql', graphqlHTTP({
-  schema,
-  graphiql: true,
-  formatError: simfinity.buildErrorFormatter((err) => {
-    console.log(err);
-  })
-}));
-
-app.listen(4000, () => {
-  console.log('Server is running on port 4000');
+const yoga = createYoga({ schema });
+createServer(yoga).listen(4000, '127.0.0.1', () => {
+  console.log('GraphQL ready at http://127.0.0.1:4000/graphql');
 });
 ```
 
-### 5. Try It Out
+Generated mutations require a MongoDB replica set or sharded cluster. Follow the [local MongoDB setup](docs/guide/getting-started.md#2-start-mongodb), then run `node server.js` and open `http://127.0.0.1:4000/graphql`:
 
-Open [http://localhost:4000/graphql](http://localhost:4000/graphql) and try these queries:
-
-**Create a book:**
 ```graphql
 mutation {
-  addBook(input: {
-    title: "The Hitchhiker's Guide to the Galaxy"
-    author: "Douglas Adams"
-  }) {
+  addserie(input: { name: "The Expanse" }) {
     id
-    title
-    author
+    name
   }
 }
 ```
 
-**List all books:**
 ```graphql
 query {
-  books {
+  series {
     id
-    title
-    author
+    name
   }
 }
 ```
 
-> For a full working application, see the [Series Sample Project](https://github.com/simtlix/series-sample) -- a complete TV series microservice with types, relationships, state machines, controllers, and authorization.
+For a full working application, see the [Series Sample Project](https://github.com/simtlix/series-sample), with relationships, state machines, controllers, and authorization.
 
 ## 🔧 Core Concepts
 
@@ -224,6 +202,12 @@ const schema = simfinity.createSchema(
 );
 ```
 
+Importing Simfinity initializes its global `__Field.extensions` introspection field safely whether GraphQL's fields have already been materialized or a schema already exists. Repeated module evaluation with the same GraphQL peer reuses the existing extension field and metadata types. Application field metadata is preserved.
+
+The extension remains shared by every schema using that GraphQL peer; Simfinity's type and middleware registries also remain module-level state. Schemas constructed after import include `FieldExtensionsType` and `RelationType` in their type maps. Earlier schemas keep their original type maps: ordinary operations and direct metadata selections work, but named fragments on the new metadata types require a schema constructed after import.
+
+Schema-cloning tools remain unsupported. In a process that has imported Simfinity, `buildClientSchema()` on a post-import schema's introspection result can also fail with duplicate metadata type names. Use Envelop plugins and in-place resolver wrapping; see the [introspection metadata reference](docs/reference/extensions.md).
+
 ### Global Configuration
 
 ```javascript
@@ -254,7 +238,24 @@ Simfinity automatically generates mutations for each connected type:
 // - deleteBook(id: ID): Book
 ```
 
+Creation inputs retain required scalar, enum, embedded-object, and list fields. Update inputs remove the outer non-null wrapper so fields can be omitted; the entity `id` remains required for `GraphQLID` and `GraphQLID!`. Other ID fields remain optional on update. List item nullability is preserved:
+
+| Output field | Create input | Update input |
+| --- | --- | --- |
+| `[String]` | `[String]` | `[String]` |
+| `[String]!` | `[String]!` | `[String]` |
+| `[String!]` | `[String!]` | `[String!]` |
+| `[String!]!` | `[String!]!` | `[String!]` |
+
+The same wrapper handling applies to enum lists, supported custom scalar lists, and embedded lists (using their nested input types). Referenced collections keep the `added` / `updated` / `deleted` input object: a required collection requires that object on create, and non-null object items make `added` and `updated` items non-null. Nullable collection-operation items are ignored. Use `deleted` to delete children.
+
+Empty strings, `false`, `0`, and empty arrays are persisted after validators accept them. Omitting an update field leaves its value unchanged. Explicit `null` clears a nullable scalar, embedded field, or single-object reference; references clear the actual stored `connectionField`, or the GraphQL field name when no override is configured. Multiple nullable fields can be cleared in one update. An explicit `null` for an originally non-null field leaves its stored value unchanged; use an update validator to reject that input if needed.
+
 ### Filtering and Querying
+
+Every relationship or embedded `terms` entry is combined with AND, including repeated paths such as `age GTE 18` and `age LTE 30`. These conditions remain ANDed with top-level logical groups and scope filters. Filter and list-sort paths must resolve to declared scalar or enum fields. `id` paths refer to the stored `_id`; comparisons use the connected Mongoose model's schema, so supplied string or numeric ID models retain their identifier representation.
+
+Filter values must use the field's JSON scalar type. `IN` and `NIN` require flat lists, `BTW` requires exactly two non-null bounds, and `LIKE` requires a string search fragment. Literal objects, nested lists, null list elements, invalid operators, unknown paths, and malformed groups are rejected with a structured 400 error instead of being ignored. Explicit `null` remains supported by `EQ` and `NE`. Enum names or declared internal enum values are converted to the stored representation; state-machine `state` filters preserve stored state names. Date filters convert valid date values without mutating the query input. Validated string scalars support partial `LIKE` searches, and range filters use their base scalar type rather than the field's create/update validation constraints.
 
 Query with powerful filtering options:
 
@@ -669,7 +670,7 @@ const BookType = new GraphQLObjectType({
 
 ### Relationship Configuration
 
-- `connectionField`: **(Required for collections)** The field storing the related object's ID - only needed for one-to-many relationships (GraphQLList). For single object relationships, the field name is automatically inferred from the GraphQL field name.
+- `connectionField`: **(Required for referenced collections)** The child field linking back to the parent. For a single-object reference, this optionally overrides the stored ObjectId field; when omitted, model generation, writes, clears, and resolvers use the GraphQL field name.
 - `displayField`: **(Optional)** Field to use for display in UI components
 - `embedded`: **(Optional)** Whether the relation is embedded (default: false)
 
@@ -989,6 +990,8 @@ mutation {
   }
 }
 ```
+
+For non-embedded collections, each `added`, `updated`, or `deleted` child runs the target type's global middleware with the request context. The operation and argument shapes match root mutations: `save`/`update` receive `{ input }`, and `delete` receives `{ id }`. Updated and deleted children must already belong to the current parent in the transaction; a missing child raises `NOT_VALID_ID`, and a different parent raises `FORBIDDEN`. Nested updates cannot move a child between parents. A rejection aborts the parent mutation and its child changes.
 
 ## ✅ Validations
 
@@ -1452,7 +1455,7 @@ const bookController = {
   onSaved: async (doc, args, session, context) => {
     // After saving - doc is a plain object
     console.log(`Book saved: ${doc._id}`);
-    // Can access context.user for post-save operations like notifications
+    // Use context.user for transactional audit/outbox records on this session
   },
 
   onUpdating: async (id, doc, session, context) => {
@@ -1504,7 +1507,7 @@ simfinity.connect(null, BookType, 'book', 'books', bookController);
 - `context`: GraphQL context object (includes request info, user data, etc.)
 
 **`onUpdated(doc, session, context)`**:
-- `doc`: Full updated Mongoose document
+- `doc`: Full updated Mongoose document, after the parent update and nested collection writes have completed
 - `session`: Mongoose session for transaction
 - `context`: GraphQL context object (includes request info, user data, etc.)
 
@@ -1512,6 +1515,10 @@ simfinity.connect(null, BookType, 'book', 'books', bookController);
 - `doc`: Plain object of document to be deleted
 - `session`: Mongoose session for transaction
 - `context`: GraphQL context object (includes request info, user data, etc.)
+
+The parent update executes before nested child operations. An update with no matching parent throws `NOT_VALID_ID` (404), without running child operations or `onUpdated`.
+
+Lifecycle hooks, including `onSaved` and `onUpdated`, run before the transaction commits. They can run again after a transient transaction failure, with up to five retries after the first attempt. Keep additional database writes on the supplied session. For email or webhooks, write an outbox record in that transaction and deliver it after commit; external calls inside hooks cannot be rolled back. An uncertain commit result retries only the commit, up to five times, without repeating hooks. If the result remains uncertain, the error is returned and the database may already have committed; reconcile the outcome before repeating the operation.
 
 ### Using Context in Controllers
 
@@ -1855,6 +1862,8 @@ const EpisodeType = new GraphQLObjectType({
 - **Modify Args In Place**: Scope functions should modify the `args` object directly
 - **Filter Structure**: Use the correct filter structure (`QLFilter` for scalars, `QLTypeFilterExpression` for relations)
 - **All Query Operations**: Scope applies to `find`, `aggregate`, and `get_by_id` operations
+- **Generated Relationships**: Non-embedded single relations run the target type's `get_by_id` middleware and scope; collection relations run its `find` middleware and scope with the same request context. A separate database predicate preserves the referenced ID or parent connection even when filters are changed, including by scope functions. A scoped-out single relation returns `null`; a collection omits scoped-out children.
+- **Custom Resolvers and Writes**: Existing relationship resolvers remain unchanged. Query scope does not authorize mutations; use global middleware or controller checks for write permissions, including permissions on nested children.
 - **Automatic Merging**: For `get_by_id`, the id filter is automatically combined with scope filters
 - **Context Access**: Use `context.user`, `context.ip`, or other context properties to determine scope
 
@@ -1925,13 +1934,19 @@ const permissions = {
 
 **Rule Types:**
 - **Function**: `(parent, args, ctx, info) => boolean | void | Promise<boolean | void>`
-- **Array of functions**: All rules must pass (AND logic)
-- **Policy expression**: JSON AST object (see below)
+- **Nonempty array of rules**: All rules must pass (AND logic); functions, expressions, and nested nonempty arrays can be mixed
+- **Policy expression**: JSON AST object or boolean literal (see below)
+
+Permission maps must be plain objects (including objects with a null prototype). Only their own type and field entries are used. The default policy applies only when an exact field entry and wildcard are both absent. `defaultPolicy` must be exactly `'ALLOW'` or `'DENY'`; omitting it defaults to `'DENY'`.
+
+`createAuthPlugin`, `createAuthMiddleware`, and `createFieldMiddleware` throw `TypeError` when configured with an invalid rule, empty rule array, malformed policy expression, permission map, or default policy. A configured `null`, `undefined`, or unknown object never falls back to `ALLOW`. Use `allow()` or `true` to grant access explicitly, or omit the entry to use the default policy.
 
 **Rule Semantics:**
 - `return true` or `return void` → allow
 - `return false` → deny
 - `throw Error` → deny with error
+
+Only `true` and `undefined` allow access. Other results, including `null`, `0`, an empty string, objects, and other truthy values, deny access. This contract is identical for direct rules, `composeRules`, `anyRule`, and `createRule`, including async results. `composeRules`, `anyRule`, and `createRule` require function arguments. `anyRule` may continue after a denial or error to a different granting rule.
 
 ### Rule Helpers
 
@@ -1977,6 +1992,8 @@ const permissions = {
 
 Requires the user to have a specific role. Supports custom paths:
 
+The required role must be a nonempty string or nonempty array of nonempty strings; invalid configuration throws `TypeError`. The user's single role value must match an allowed string exactly.
+
 ```javascript
 const permissions = {
   Query: {
@@ -1996,6 +2013,8 @@ const permissions = {
 #### requirePermission(permission, options?)
 
 Requires the user to have specific permission(s). Supports custom paths:
+
+The required permission must be a nonempty string or nonempty array of nonempty strings; invalid configuration throws `TypeError`. The user's claim must be an array of nonempty strings. Entries match exactly; only a standalone `'*'` entry grants every permission. A claim such as `'posts:read'` must be supplied as `['posts:read']`. String claims, substrings, and embedded wildcard characters do not grant access.
 
 ```javascript
 const permissions = {
@@ -2048,6 +2067,8 @@ const permissions = {
 
 Checks if the authenticated user owns the resource:
 
+IDs must be nonempty strings, finite numbers (including zero), or Mongoose `ObjectId` instances. Numbers compare by their string representation, and ObjectIds compare by hexadecimal value. Missing/null IDs, empty strings, arrays, booleans, and arbitrary objects deny access. Use the path or extractor arguments to obtain a supported ID from a custom identity object.
+
 ```javascript
 const permissions = {
   Post: {
@@ -2095,7 +2116,13 @@ Use `{ ref: 'path' }` to reference values:
 
 **Security:**
 - Only `parent`, `args`, and `ctx` roots are allowed
-- Unknown operators fail closed (deny)
+- Reference paths support root values, dotted fields, document getters, and numeric array indices. Empty path segments and `__proto__`, `prototype`, or `constructor` segments are invalid
+- `eq` and `in` require exactly two operands; `in` requires an array or a reference resolving to an array. `allOf` and `anyOf` require arrays of valid expressions; `not` requires a valid expression
+- Unknown operators or malformed nested expressions invalidate the entire configured policy, even inside an otherwise granting `anyOf`
+- Factories reject malformed expressions with `TypeError`; `isPolicyExpression` validates the complete AST, and direct `evaluateExpression` calls return `false` for malformed ASTs
+- Missing references and invalid runtime membership operands cannot grant access, including under `not` or repeated negation. They propagate through `allOf` and implicit AND. A separate valid `anyOf` branch can still grant access, such as a published post without an authenticated user
+- Explicit `null`, `false`, `0`, and empty-string comparison values remain valid; equality is strict. Use `requireAuth()` or `isOwner()` for identity checks rather than treating two explicit null IDs as ownership
+- Boolean expressions and logical identities remain valid: `{ allOf: [] }` is true, `{ anyOf: [] }` is false, and `{ not: false }` is true. Multiple operator keys form an implicit AND
 - No `eval()` or `Function()` - pure object traversal
 
 ### Integration with GraphQL Yoga / Envelop
@@ -2254,6 +2281,8 @@ simfinity.use((params, next) => {
 ### Middleware Parameters
 
 Each middleware receives a `params` object containing:
+
+Generated non-embedded relationship reads and nested collection mutations also invoke middleware for the related type. Middleware and scope callbacks are awaited. Nested child operations use the same argument shapes and request context as their root equivalents; review middleware that previously assumed it ran only once per root operation.
 
 ```javascript
 simfinity.use((params, next) => {
@@ -2600,8 +2629,8 @@ Each generated tool follows MCP best practices so an agent can use it without ex
 
 - **`description`**: reuses the GraphQL type/field descriptions and adds an actionable summary. List and aggregate tools spell out the available filter operators (`EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE`), `AND`/`OR` groups, pagination and sorting; aggregate tools additionally document the `SUM/COUNT/AVG/MIN/MAX` operations and the `aggregation` argument.
 - **`title`**: a human-readable label (e.g. `List Book`, `Create Book`, `Aggregate Book`).
-- **`inputSchema`**: JSON Schema derived with full fidelity from the GraphQL arguments (scalars, enums, input objects, lists, non-null wrappers, and recursive filter types such as `QLFilterGroup` via `$defs`/`$ref`). GraphQL type and field descriptions are propagated, with curated descriptions for the synthetic filter/pagination/sort/aggregation types. `Date`/`DateTime`/`Time` scalars map to `string` with the matching JSON Schema `format` (`date` / `date-time` / `time`), and arguments with a GraphQL default value carry a JSON Schema `default` and are never listed as `required`.
-- **`outputSchema`**: JSON Schema describing the returned data (mirroring the auto-generated selection set), with type/field descriptions. Every nullable GraphQL position also accepts `null` (e.g. `type: ['string', 'null']`; enums get `null` appended), so validating MCP clients accept the `null`s GraphQL legitimately returns in `structuredContent` (get-by-id misses, unset optional fields). Non-null positions stay single-typed, and input schemas are never null-widened.
+- **`inputSchema`**: JSON Schema derived from the GraphQL arguments (scalars, enums, input objects, lists, non-null wrappers, and recursive filter types such as `QLFilterGroup` via `$defs`/`$ref`). Nullable arguments, input fields and list items accept explicit `null`; non-null positions reject it. Nullable references use `anyOf` with a null alternative. GraphQL type and field descriptions are propagated, with curated descriptions for synthetic types. `Date`/`DateTime`/`Time` scalars use the matching JSON Schema `format`. Defaulted arguments are optional; representable defaults appear in the schema and generated GraphQL variables, with enum member names rather than internal values. Omitted opaque scalar defaults that have no GraphQL literal representation use the field's original default.
+- **`outputSchema`**: JSON Schema describing the returned data (mirroring the auto-generated selection set), with type/field descriptions. Every nullable GraphQL position also accepts `null` (e.g. `type: ['string', 'null']`; enums get `null` appended), so validating MCP clients accept the `null`s GraphQL legitimately returns in `structuredContent` (get-by-id misses, unset optional fields).
 - **`annotations`**: behavioral hints — queries are `readOnlyHint: true`, `delete*` is `destructiveHint: true`, `update*` is `idempotentHint: true`. Generated CRUD mutations are recognized by the placeholder descriptions Simfinity stamps on them, so a custom mutation that happens to be named `updateReport` (and carries its own description) keeps that description and gets no inferred hints.
 
 On execution, each tool returns both a serialized JSON `text` content block and a machine-readable `structuredContent` (the GraphQL `data`) that conforms to the `outputSchema`. When the caller requests `pagination: { count: true }` on a **list** tool, the total record count is delivered in the tool result `_meta.count` (aggregate tools ignore the flag — their resolver never computes a total).
@@ -2698,14 +2727,14 @@ The handler catches all errors itself: `onError` is for logging/metrics, and a J
 | `include` / `exclude` | — | String or array: raw GraphQL field names, prefixed tool names, or the categories `'query'` / `'mutation'`. `exclude` wins over `include`. |
 | `includeTypes` / `excludeTypes` | — | String or array of entity (return) type names — one entry covers every tool for that entity (`'Book'` matches `book`, `books`, `books_aggregate`, `addbook`, ...). `excludeTypes` wins. |
 | `selectionDepth` | `1` | Nesting depth for the auto-generated output selection set (and the mirrored `outputSchema`). |
-| `includeId` | `true` | Always select `id` when nothing else is selectable on an object type. |
+| `includeId` | `true` | Select a scalar or enum `id` as a fallback when nothing else is selectable; otherwise use `__typename`. |
 | `toolNamePrefix` | — | Prefix prepended to every published tool name (e.g. `'catalog_'`). Must match `/^[a-zA-Z0-9_-]+$/`; the resulting names must match `/^[a-zA-Z0-9_-]{1,128}$/` (`MCP_INVALID_TOOL_NAME` otherwise). |
 | `toolOverrides` | `{}` | Per-tool overrides keyed by tool (or unprefixed field) name: `{ description, title, annotations, selectionDepth, includeId, selection }`. See [Customizing tools](#customizing-tools). |
 | `toolMiddleware` | — | Array of koa-style `async (call, next)` functions run around every tool call. See [Tool middleware](#tool-middleware). |
 | `limits` | — | Guardrails: `{ maxPageSize, defaultPagination, maxResultBytes }`. See [Limits](#limits). |
 | `schemaPlugins` | — | Envelop-style plugins whose `onSchemaChange` hook is applied once before serving (in-process execution only). See [Authentication](#authentication). |
 | `serverName` / `serverVersion` | `'simfinity-mcp'` / `'1.0.0'` | Identity reported by the MCP server. |
-| `transportOptions` | — | `createHTTPMCPHandler` only: extra options spread into the SDK's `StreamableHTTPServerTransport` (e.g. `enableDnsRebindingProtection`, `allowedHosts`, `allowedOrigins`). |
+| `transportOptions` | — | `createHTTPMCPHandler` only: stateless SDK transport options (e.g. `enableDnsRebindingProtection`, `allowedHosts`, `allowedOrigins`). Setting `sessionIdGenerator`, `onsessioninitialized`, `onsessionclosed` or `eventStore` raises `MCP_INVALID_TRANSPORT_OPTIONS` at setup. |
 | `onError` | — | `createHTTPMCPHandler` only: `(err, req, res)` callback invoked when a request fails; the handler still responds with a JSON-RPC internal error (HTTP 500) if headers were not sent. |
 
 Selection sets always fall back to `id` and then `__typename` when nothing else is selectable (interface/union return types select `__typename`), so the generated documents are always statically valid — and the output schemas mirror the same fallbacks.
@@ -2771,7 +2800,7 @@ const { callTool } = simfinity.generateMCPTools(schema, {
 
 - `maxPageSize`: rejects calls whose `pagination.size` exceeds the cap.
 - `defaultPagination`: injected only for tools that have a `pagination` argument, and only when the caller did not send one. `page` and `size` are both required (QLPagination declares them non-null), and `size` must not exceed `maxPageSize` — that misconfiguration throws `MCP_INVALID_LIMITS` at setup.
-- `maxResultBytes`: rejects results whose serialized `data` is larger than the cap (the error message suggests narrowing the query, lowering `selectionDepth` or paginating).
+- `maxResultBytes`: caps the UTF-8 byte length of the pretty-printed logical payload: `data` on success, or `{ errors, data? }` on failure. Oversized errors and partial data are replaced by `MCP_RESULT_TOO_LARGE`. This diagnostic and pagination-limit diagnostics are exempt from the cap, so even a tiny cap can return an actionable error. The cap excludes MCP envelope overhead, the duplicate `structuredContent`, and middleware-created results; it runs after execution and does not limit database work or remote download size.
 
 ### Tool middleware
 
@@ -2818,9 +2847,9 @@ const { callTool } = simfinity.generateMCPTools(schema, {
 });
 ```
 
-- `timeoutMs` aborts slow requests (`AbortSignal.timeout`); the timeout signal is combined with the MCP client's cancellation signal.
+- `timeoutMs` aborts slow attempts, including reading the response body (`AbortSignal.timeout`); the timeout signal is combined with the MCP client's cancellation signal. Client cancellation rejects during either fetch or body reading and is never retried.
 - `retry` re-issues failed **queries only — never mutations** — after network errors/timeouts, HTTP 5xx and 429 responses. Backoff is linear: the first retry waits `backoffMs`, the second `2 × backoffMs`, and so on (default `backoffMs`: 250).
-- Transport failures do not throw: they surface as `isError` tool results carrying GraphQL-shaped errors with the codes `MCP_REMOTE_HTTP_ERROR` (non-2xx response, includes `extensions.status`), `MCP_REMOTE_REQUEST_FAILED` (network error/timeout) and `MCP_REMOTE_INVALID_RESPONSE` (non-JSON body, or JSON with neither `data` nor `errors`).
+- Transport failures surface as `isError` tool results carrying GraphQL-shaped errors with the codes `MCP_REMOTE_HTTP_ERROR` (non-2xx response without a valid GraphQL body, includes `extensions.status`), `MCP_REMOTE_REQUEST_FAILED` (network error/timeout, including body-read failures) and `MCP_REMOTE_INVALID_RESPONSE` (non-JSON body or invalid GraphQL response shape). A valid body has object `data` or a nonempty `errors` array with string messages; `data: null` requires errors. Invalid successful HTTP responses are not retried. Client cancellation rejects instead of returning an error tool result.
 - If the remote response carries a numeric `extensions.count` (e.g. exposed via `simfinity.plugins.envelopCountPlugin()`), it is surfaced as `_meta.count` on the tool result.
 
 `schemaPlugins` is not applied in remote mode — the remote GraphQL server enforces its own plugins.
@@ -2830,9 +2859,9 @@ const { callTool } = simfinity.generateMCPTools(schema, {
 Successful calls return `{ content: [textJSON], structuredContent: data, isError: false }`. Failures and edge cases behave as follows:
 
 - **Total count**: with `pagination: { count: true }` on a **list** tool, the count lands in `_meta.count` on the tool result — in-process it is read back from a per-call context layer (Simfinity's find resolver writes it there; counts never leak across calls), in remote mode from the response `extensions.count`. Aggregate tools never deliver a count.
-- **Execution errors**: `isError: true` with a `text` payload of `{ errors, data? }` — partial data is preserved alongside the errors when GraphQL returned any. `structuredContent` is omitted on errors.
+- **Execution errors**: `isError: true` with a `text` payload of `{ errors, data? }` — partial data is preserved alongside errors when it fits `maxResultBytes`. `structuredContent` is omitted on errors.
 - **Remote transport failures** and **limit violations** are also `isError` results (see [Remote execution](#remote-execution) and [Limits](#limits) for the codes).
-- **Unknown tool names** are the exception: `callTool` and `getOperation` throw `MCP_TOOL_NOT_FOUND`. A call whose `extra.signal` is already aborted throws `MCP_CALL_CANCELLED` before executing.
+- **Unknown tool names** are the exception: `callTool` and `getOperation` throw `MCP_TOOL_NOT_FOUND`. An aborted `extra.signal` throws `MCP_CALL_CANCELLED` before execution, including cancellation while awaiting an asynchronous context factory. This prevents starting the GraphQL operation after cancellation; it does not undo or cancel database work already started.
 
 ### Authentication
 
@@ -3065,9 +3094,10 @@ The `groupId` and `path` parameters support:
 
 ### Pagination Notes
 
-- The `page` and `size` parameters work as expected
+- Explicit `page` and `size` must be positive safe integers, and `size` must fit the configured maximum (1000 by default). Invalid input produces `INVALID_PAGINATION` with status 400.
 - The `count` parameter is **ignored** for aggregation queries
 - Pagination is applied **after** grouping and sorting
+- Aggregation queries remain unbounded when pagination is omitted; they do not inherit the list default limit.
 
 ### MongoDB Translation
 
@@ -3510,6 +3540,16 @@ query {
 
 Simfinity.js supports built-in pagination with optional total count:
 
+Configure the process-wide maximum once during application startup:
+
+```javascript
+import * as simfinity from '@simtlix/simfinity-js';
+
+simfinity.configureQueryLimits({ maxPageSize: 500 });
+```
+
+The default maximum is **1000**. Explicit `page` and `size` must be positive safe integers, `size` must not exceed the maximum, and the computed skip must remain a safe integer. Invalid pagination throws `INVALID_PAGINATION` (400); invalid configuration throws `INVALID_QUERY_LIMITS` (400). With no pagination, a list returns at most `Math.min(100, maxPageSize)` records. Any positive safe-integer maximum is allowed, including values below 100. Call `configureQueryLimits()` to restore the default maximum. This deliberately tightens previously unbounded explicit page sizes; applications needing larger pages can configure an appropriate maximum. Unpaginated aggregate queries retain their existing behavior.
+
 ```graphql
 query {
   series(
@@ -3596,6 +3636,8 @@ See the [Plugins for Count in Extensions](#-plugins-for-count-in-extensions) sec
 ```
 
 ### 11. Sorting
+
+List sort fields must resolve to declared scalar or enum paths, and every term requires `ASC` or `DESC`. Root `id` and related `author.id` sort by their stored `_id` paths. Embedded paths remain dotted, and repeated sort terms through one relationship reuse the same lookup. Supply at least one term; invalid sort input is rejected before executing the list query.
 
 Simfinity.js supports sorting with multiple fields and sort orders:
 
@@ -4214,16 +4256,20 @@ console.log(BookInput.getFields()); // Input fields for mutations
 
 ### `saveObject(typeName, args, session?, context?)`
 
-Programmatically save an object outside of GraphQL mutations.
+Programmatically save an object through the creation pipeline, including validation, controllers, and nested writes.
 
 **Parameters:**
 - `typeName` (string): The name of the GraphQL type
 - `args` (object): The data to save
-- `session` (MongooseSession, optional): Database session for transactions
+- `session` (MongooseSession, optional): Caller-owned session with an active transaction, from the same MongoDB client as the registered model
 - `context` (object, optional): GraphQL context object (includes request info, user data, etc.)
 
 **Returns:**
 - `Promise<object>`: The saved object
+
+Without a session, `saveObject()` starts a transaction on the registered model's connection, commits the parent and nested writes together, and awaits session cleanup. The same bounded transaction and commit retries described above apply. This requires a transaction-capable MongoDB deployment, such as a replica set.
+
+With a session, it participates in the caller's active transaction. It never starts, commits, aborts, retries, or ends that caller-owned transaction/session; the caller must handle failures and finish the transaction. An inactive supplied session is rejected with `ACTIVE_TRANSACTION_REQUIRED` (400) before writes. Pass the provided session when calling from a controller or custom mutation so the writes share its transaction. Direct calls bypass GraphQL input coercion, field authorization, and global middleware.
 
 **Example:**
 

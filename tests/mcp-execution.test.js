@@ -214,7 +214,7 @@ describe('MCP callTool remote execution', () => {
       ok: true,
       status: 200,
       json: async () => {
-        throw new Error('Unexpected token < in JSON');
+        throw new SyntaxError('Unexpected token < in JSON');
       },
     });
 

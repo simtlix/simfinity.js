@@ -1,65 +1,88 @@
-name: Generate Release
+name: Create GitHub release
 
 on:
-  push:
-    branches:
-      - release/*
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version increment
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      draft:
+        description: Create a draft release
+        type: boolean
+        default: false
+      dry_run:
+        description: Validate and preview without creating a commit, tag, or release
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: github-release
+  cancel-in-progress: false
 
 jobs:
-  generate_release:
+  release:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - name: Inject slug/short variables
-        uses: rlespinasse/github-slug-action@3.1.0
-      - uses: actions/checkout@v2.3.4
-      - uses: actions/setup-node@v1.4.4
+      - name: Check release branch
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$GITHUB_REF" != refs/heads/master ] && [ "$DRY_RUN" != true ]; then
+            echo 'Create releases from master. Other branches support dry runs only.' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v7
         with:
-          node-version: 14
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
       - run: npm ci
-      - run: npx json -f package.json peerDependencies | npx json -ka | xargs -i{} bash -c 'echo $0@$(npx json -f package.json peerDependencies.$0)' {} | xargs -i{}  npm install --save-optional {}
       - run: npm run lint
       - run: npm test
-      - run: npm version --no-git-tag-version $(echo ${{ env.GITHUB_REF_SLUG }} | cut -d"-" -f 2)
-      - name: Set release version
-        uses: stefanzweifel/git-auto-commit-action@v4
-        with:
-          commit_message: "Set Release version to ${{ env.GITHUB_REF_SLUG }}"
-      - name: Push changes to master
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ env.GITHUB_REF_SLUG }}
-      - name: Create tag
-        uses: Klemensas/action-autotag@stable
-        id: update_tag
-        with:
-          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-          tag_prefix: "v"
-      - name: Create Release
-        if: steps.update_tag.outputs.tagname
-        id: create_release
-        uses: actions/create-release@v1
+      - name: Prepare release version
+        id: version
         env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-            tag_name: ${{ steps.update_tag.outputs.tagname }}
-            release_name: Release ${{ steps.update_tag.outputs.tagname }}
-            body: |
-              Changes in this Release
-            draft: false
-            prerelease: false
-
-      - name: "Set next development version"
-        uses: actions/setup-node@v1.4.4
-        with:
-          node-version: 14
-      - run: npm version --no-git-tag-version preminor --preid alpha
-      - name: "Push next development version to master"
-        uses: stefanzweifel/git-auto-commit-action@v4
-        with:
-          commit_message: "Set next development version"
-      - name: Push changes
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: master
+          VERSION_BUMP: ${{ inputs.version }}
+        run: |
+          case "$VERSION_BUMP" in
+            patch|minor|major) ;;
+            *) echo 'Choose patch, minor, or major.' >&2; exit 1 ;;
+          esac
+          npm version "$VERSION_BUMP" --no-git-tag-version --ignore-scripts
+          release_tag="v$(node --input-type=module -e 'import { readFileSync } from "node:fs"; console.log(JSON.parse(readFileSync("package.json", "utf8")).version)')"
+          if git show-ref --verify --quiet "refs/tags/$release_tag"; then
+            echo "Tag $release_tag already exists; it will not be overwritten." >&2
+            exit 1
+          fi
+          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
+          npm pack --dry-run --ignore-scripts
+      - name: Preview release
+        if: inputs.dry_run
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          echo "Release preview: $RELEASE_TAG. No commit, tag, release, or package was published." >> "$GITHUB_STEP_SUMMARY"
+      - name: Create version commit, tag, and GitHub release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json package-lock.json
+          git commit -m "chore: release $RELEASE_TAG"
+          git tag -a "$RELEASE_TAG" -m "$RELEASE_TAG"
+          git push --atomic origin HEAD:refs/heads/master "refs/tags/$RELEASE_TAG"
+          release_url=$(gh release create "$RELEASE_TAG" --verify-tag --generate-notes \
+            --title "$RELEASE_TAG" --draft="$DRAFT")
+          echo "Created [$RELEASE_TAG]($release_url). Package publication is a separate manual workflow." >> "$GITHUB_STEP_SUMMARY"

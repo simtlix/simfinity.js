@@ -1,6 +1,6 @@
 {
   "name": "@simtlix/simfinity-js",
-  "version": "3.0.1",
+  "version": "3.1.0",
   "description": "",
   "main": "src/index.js",
   "types": "./types/index.d.ts",
@@ -9,10 +9,14 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest --coverage",
-    "lint": "eslint '**/*.js'",
-    "lint-fix": "eslint --fix '**/*.js'",
+    "lint": "eslint \"**/*.js\"",
+    "lint-fix": "eslint --fix \"**/*.js\"",
     "test:integration": "vitest run tests/integration",
-    "test:packages": "node scripts/test-packages.js"
+    "test:packages": "node scripts/test-packages.js",
+    "docs:install": "npm ci --prefix docs",
+    "docs:dev": "npm run dev --prefix docs --",
+    "docs:build": "npm run build --prefix docs",
+    "docs:preview": "npm run preview --prefix docs --"
   },
   "engines": {
     "node": ">=18.18.0"

@@ -167,22 +167,22 @@ describe('MCP generation', () => {
       const add = tools.find((tool) => tool.name === 'addmcpbook');
       const bookInput = add.inputSchema.$defs.McpBookInput;
       expect(bookInput.properties.title).toMatchObject({ type: 'string' });
-      expect(bookInput.properties.rating).toEqual({ type: 'number' });
-      expect(bookInput.properties.pages).toEqual({ type: 'integer' });
+      expect(bookInput.properties.rating).toEqual({ type: ['number', 'null'] });
+      expect(bookInput.properties.pages).toEqual({ type: ['integer', 'null'] });
       expect(bookInput.required).toContain('title');
     });
 
     it('exposes full-fidelity filter/pagination/sort arguments on list queries', () => {
       const list = tools.find((tool) => tool.name === 'mcpbooks');
-      expect(list.inputSchema.properties.pagination.$ref).toBe('#/$defs/QLPagination');
-      expect(list.inputSchema.properties.sort.$ref).toBe('#/$defs/QLSortExpression');
+      expect(list.inputSchema.properties.pagination.anyOf).toEqual([{ $ref: '#/$defs/QLPagination' }, { type: 'null' }]);
+      expect(list.inputSchema.properties.sort.anyOf).toEqual([{ $ref: '#/$defs/QLSortExpression' }, { type: 'null' }]);
       expect(list.inputSchema.properties.AND).toMatchObject({
-        type: 'array',
-        items: { $ref: '#/$defs/QLFilterGroup' },
+        type: ['array', 'null'],
+        items: { anyOf: [{ $ref: '#/$defs/QLFilterGroup' }, { type: 'null' }] },
       });
       expect(list.inputSchema.properties.OR).toMatchObject({
-        type: 'array',
-        items: { $ref: '#/$defs/QLFilterGroup' },
+        type: ['array', 'null'],
+        items: { anyOf: [{ $ref: '#/$defs/QLFilterGroup' }, { type: 'null' }] },
       });
     });
 
@@ -191,8 +191,8 @@ describe('MCP generation', () => {
       const group = list.inputSchema.$defs.QLFilterGroup;
       expect(group).toBeDefined();
       expect(group.properties.AND).toEqual({
-        type: 'array',
-        items: { $ref: '#/$defs/QLFilterGroup' },
+        type: ['array', 'null'],
+        items: { anyOf: [{ $ref: '#/$defs/QLFilterGroup' }, { type: 'null' }] },
       });
     });
 
