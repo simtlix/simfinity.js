@@ -1,6 +1,6 @@
 import { SimfinityError } from '@simtlix/simfinity-core';
-import { identifier } from './sql.js';
-import { createTableSQL, createForeignKeySQL, createIndexSQL } from './ddl.js';
+import { identifier, qualified } from './sql.js';
+import { createTableSQL, createForeignKeySQL, createIndexSQL, createFunctionSQL, createTriggerSQL } from './ddl.js';
 
 const mismatch = (object, reason) => {
   throw new SimfinityError(`Schema mismatch at ${object}: ${reason}. Apply an explicit migration before startup.`, 'SCHEMA_MISMATCH', 409);
@@ -71,7 +71,7 @@ const readTable = async (client, schema, name) => {
   return { columns, constraints, indexes };
 };
 
-const validateBase = (schema, table, actual) => {
+const validateBase = (schema, table, actual, triggers = []) => {
   const name = `${schema}.${table.name}`;
   if (!actual) mismatch(name, 'table is missing');
   if (actual.columns.length !== table.columns.length) mismatch(name, 'column set differs');
@@ -94,7 +94,7 @@ const validateBase = (schema, table, actual) => {
       mismatch(`${name}.${check.name}`, `check constraint differs (expected ${check.expression}; found ${stored?.expression || 'missing'})`);
     }
   }
-  const expectedNames = new Set([table.primaryKey.name, ...table.checks.map((c) => c.name), ...table.foreignKeys.map((c) => c.name)]);
+  const expectedNames = new Set([table.primaryKey.name, ...table.checks.map((c) => c.name), ...table.foreignKeys.map((c) => c.name), ...triggers.filter((t) => t.table === table.name && t.constraint).map((t) => t.name)]);
   for (const constraint of actual.constraints) {
     // PostgreSQL 18 also catalogs table NOT NULL constraints (already checked via pg_attribute).
     if (constraint.type === 'n') {
@@ -122,6 +122,75 @@ const validateIndex = (schema, table, index, actual) => {
   }
 };
 
+const ensureFunctions = async (client, description, mode, created) => {
+  for (const fn of description.functions || []) {
+    const { rows } = await client.query(`SELECT p.oid, pg_get_function_identity_arguments(p.oid) AS arguments,
+      pg_get_function_result(p.oid) AS returns, p.prosrc AS body, l.lanname AS language, p.provolatile AS volatility,
+      p.proconfig AS configuration, p.prosecdef, p.proisstrict, p.proleakproof, p.proparallel, p.prokind,
+      p.proretset, p.pronargdefaults, p.procost, p.prorows, p.prosupport::oid AS support
+      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+      WHERE n.nspname = $1 AND p.proname = $2`, [description.schema, fn.name]);
+    if (!rows.length) {
+      if (mode === 'validate') mismatch(`${description.schema}.${fn.name}`, 'function is missing');
+      await client.query(createFunctionSQL(description.schema, fn));
+      created.push(`function:${description.schema}.${fn.name}`);
+      continue;
+    }
+    const stored = rows[0];
+    if (rows.length !== 1 || stored.arguments !== fn.arguments.join(', ') || stored.returns !== fn.returns
+      || stored.body !== fn.body || stored.language !== fn.language || stored.volatility !== fn.volatility[0].toLowerCase()
+      || !same(stored.configuration, fn.configuration) || stored.prosecdef || stored.proisstrict || stored.proleakproof
+      || stored.proparallel !== 'u' || stored.prokind !== 'f' || stored.proretset || stored.pronargdefaults
+      || stored.procost !== 100 || stored.prorows !== 0 || stored.support !== 0) {
+      mismatch(`${description.schema}.${fn.name}`, 'function identity, body, signature or configuration differs');
+    }
+  }
+};
+
+const ensureTriggers = async (client, description, mode, created) => {
+  for (const trigger of description.triggers || []) {
+    const { rows } = await client.query(`SELECT t.tgtype, t.tgenabled, t.tgisinternal, t.tgdeferrable, t.tginitdeferred,
+      t.tgnargs, t.tgqual IS NULL AS no_when, t.tgattr::text AS columns, p.proname AS function, n.nspname AS function_schema,
+      p.pronargs, t.tgconstraint <> 0 AS constraint, t.tgconstrrelid::oid AS constraint_relation,
+      t.tgparentid::oid AS parent, c.condeferrable, c.condeferred, c.convalidated,
+      COALESCE((to_jsonb(c)->>'conenforced')::boolean, true) AS enforced,
+      t.tgoldtable, t.tgnewtable
+      FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace n ON n.oid = p.pronamespace
+      LEFT JOIN pg_constraint c ON c.oid = t.tgconstraint
+      WHERE t.tgrelid = to_regclass($1) AND t.tgname = $2`, [qualified(description.schema, trigger.table), trigger.name]);
+    if (!rows.length) {
+      if (mode === 'validate') mismatch(`${description.schema}.${trigger.name}`, 'trigger is missing');
+      const collision = await client.query('SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass($1) AND conname = $2', [qualified(description.schema, trigger.table), trigger.name]);
+      if (collision.rowCount) mismatch(`${description.schema}.${trigger.table}.${trigger.name}`, 'constraint name is already in use');
+      await client.query(createTriggerSQL(description.schema, trigger));
+      created.push(`trigger:${description.schema}.${trigger.table}.${trigger.name}`);
+      continue;
+    }
+    const stored = rows[0];
+    if (stored.tgtype !== 29 || stored.tgenabled !== 'O' || stored.tgisinternal || stored.tgdeferrable !== trigger.deferrable
+      || stored.tginitdeferred !== trigger.initiallyDeferred || stored.tgnargs || !stored.no_when || stored.columns !== ''
+      || stored.function !== trigger.function || stored.function_schema !== description.schema || stored.pronargs
+      || stored.constraint !== trigger.constraint || stored.constraint_relation || stored.parent || stored.tgoldtable || stored.tgnewtable
+      || (trigger.constraint && (!stored.condeferrable || !stored.condeferred || !stored.convalidated || !stored.enforced))) {
+      mismatch(`${description.schema}.${trigger.table}.${trigger.name}`, 'trigger definition or enforcement differs');
+    }
+  }
+};
+
+const backfill = async (client, description) => {
+  for (const table of description.tables) {
+    for (const check of table.checks) {
+      const invalid = await client.query(`SELECT 1 FROM ${qualified(description.schema, table.name)} WHERE NOT (${check.expression}) LIMIT 1`);
+      if (invalid.rowCount) mismatch(`${description.schema}.${table.name}.${check.name}`, 'existing data violates generated check');
+    }
+  }
+  for (const item of description.maintenance || []) {
+    await client.query(`INSERT INTO ${qualified(description.schema, item.guardTable)} (__owner_id)
+      SELECT id FROM ${qualified(description.schema, item.rootTable)} ON CONFLICT (__owner_id) DO NOTHING`);
+    await client.query(`SELECT ${qualified(description.schema, item.refreshFunction)}(id) FROM ${qualified(description.schema, item.rootTable)} ORDER BY id`);
+  }
+};
+
 /** Create missing objects or validate an existing schema; never alter/drop existing storage. */
 export const initializeDatabase = async (pool, description, { mode = 'create' } = {}) => {
   if (!['create', 'validate'].includes(mode)) throw new SimfinityError(`Unknown initialization mode: ${mode}`, 'INVALID_INITIALIZATION_MODE', 400);
@@ -143,6 +212,7 @@ export const initializeDatabase = async (pool, description, { mode = 'create' } 
       await client.query(`CREATE SCHEMA ${identifier(schema)}`);
       created.push(`schema:${schema}`);
     }
+    await ensureFunctions(client, description, mode, created);
     const catalog = new Map();
     for (const table of tables) {
       let actual = await readTable(client, schema, table.name);
@@ -152,7 +222,8 @@ export const initializeDatabase = async (pool, description, { mode = 'create' } 
         created.push(`table:${schema}.${table.name}`);
         actual = await readTable(client, schema, table.name);
       }
-      validateBase(schema, table, actual);
+      if (mode === 'create') await client.query(`LOCK TABLE ${qualified(schema, table.name)} IN SHARE ROW EXCLUSIVE MODE`);
+      validateBase(schema, table, actual, description.triggers);
       catalog.set(table.name, actual);
     }
     for (const table of tables) {
@@ -171,6 +242,8 @@ export const initializeDatabase = async (pool, description, { mode = 'create' } 
         if (stored) validateIndex(schema, table, index, stored);
         else {
           if (mode === 'validate') mismatch(`${schema}.${table.name}.${index.name}`, 'index is missing');
+          const collision = await client.query('SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2', [schema, index.name]);
+          if (collision.rowCount) mismatch(`${schema}.${index.name}`, 'relation name is already in use');
           await client.query(createIndexSQL(schema, table, index));
           created.push(`index:${schema}.${index.name}`);
         }
@@ -179,6 +252,8 @@ export const initializeDatabase = async (pool, description, { mode = 'create' } 
         if (index.unique && !index.primary && !table.indexes.some((item) => item.name === index.name)) mismatch(`${schema}.${table.name}.${index.name}`, 'unexpected unique index');
       }
     }
+    await ensureTriggers(client, description, mode, created);
+    if (mode === 'create' && created.length) await backfill(client, description);
     await client.query('COMMIT');
     return { mode, created };
   } catch (error) {

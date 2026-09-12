@@ -124,7 +124,7 @@ npm install @simtlix/simfinity-mcp @modelcontextprotocol/sdk
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
 
-Compatibility tests run the same GraphQL schemas and query corpus against both databases. IDs use UUIDs on PostgreSQL, native model/session APIs differ, and some mappings remain explicitly unsupported, including embedded/multikey uniqueness and grouping by paths inside embedded lists. MongoDB fixes also cover list nullability wrappers, scalar-ID inverse relations, inverse aggregation paths, embedded array replacement after clearing, and isolation of mutation input across transaction retries. Existing API signatures remain unchanged.
+Compatibility tests run the same GraphQL schemas and query corpus against both databases. IDs use UUIDs on PostgreSQL, native model/session APIs differ, and some mappings remain explicitly unsupported, including whole embedded-object uniqueness and grouping by paths inside embedded lists. PostgreSQL enforces scalar/list multikey uniqueness within embedded trees through typed owner-key tables, validates JSONB embedded shapes, and checks owned marker/row consistency with deferred database triggers. MongoDB fixes also cover list nullability wrappers, scalar-ID inverse relations, inverse aggregation paths, embedded array replacement after clearing, and isolation of mutation input across transaction retries. Existing API signatures remain unchanged.
 
 ## 🚀 Quick Start
 

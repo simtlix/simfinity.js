@@ -1,9 +1,9 @@
 import { describeModels } from '@simtlix/simfinity-core';
+import { constraintBuilder } from './constraints.js';
 import { identifier, literal, generatedName, invalid } from './sql.js';
 
 const scalarTypes = { ID: 'uuid', String: 'text', Enum: 'text', Int: 'integer', Float: 'double precision', Boolean: 'boolean', DateTime: 'timestamp with time zone' };
 const hasOwnedFields = (fields) => fields.some((field) => field.kind === 'reference' || field.unique || (field.fields && hasOwnedFields(field.fields)));
-const hasUniqueFields = (fields) => fields.some((field) => field.unique || (field.fields && hasUniqueFields(field.fields)));
 
 /** Compile GraphQL storage metadata into a serializable PostgreSQL description. */
 export const describeDatabase = (registrations, { schema = 'public' } = {}) => {
@@ -45,11 +45,11 @@ export const describeDatabase = (registrations, { schema = 'public' } = {}) => {
     });
     addIndex(table, [column]);
   };
-  const fieldsInto = (table, fields, path = [], insideList = false) => {
+  const constraints = constraintBuilder(schema, tables, { addTable, addColumn, addReference, addIndex, addCheck });
+  const fieldsInto = (table, fields, path = []) => {
     for (const field of fields) {
       if (field.kind === 'collection') continue;
-      if (field.kind === 'embedded' && (field.unique || hasUniqueFields(field.fields))) invalid(`Embedded uniqueness requires absent-owner and multikey handling and is not supported yet: ${table.name}.${field.name}`);
-      if (field.unique && (field.list || insideList)) invalid(`Multikey uniqueness requires owner-aware storage and is not supported yet: ${table.name}.${field.name}`);
+      if (field.kind === 'embedded' && field.unique) invalid(`Whole embedded-object uniqueness is not supported: ${table.name}.${field.name}`);
       if (!table.ownership && ['id', '_id'].includes(field.name)) {
         if (field.kind !== 'scalar' || field.list || !['ID', 'String'].includes(field.scalar)) invalid(`Reserved identity field ${table.name}.${field.name} must be a scalar ID or String`);
         continue;
@@ -62,6 +62,7 @@ export const describeDatabase = (registrations, { schema = 'public' } = {}) => {
         const stateColumn = `__${field.name}_state`;
         addColumn(table, { name: stateColumn, type: 'text', nullable: false, default: '\'missing\'::text' });
         const values = field.required && !conditional ? ['present'] : ['missing', 'null', 'present'];
+        if (conditional && field.required) addCheck(table, stateColumn, 'required', `(NOT ${identifier('__item_present')}) OR (${identifier(stateColumn)} = 'present'::text)`);
         addCheck(table, stateColumn, 'state', `${identifier(stateColumn)} = ANY (ARRAY[${values.map((v) => `${literal(v)}::text`).join(', ')}])`);
         const owned = addTable(generatedName(table.name, field.name), {
           ownerTable: table.name, ownerColumn: table.primaryKey.columns[0], field: field.name,
@@ -76,7 +77,7 @@ export const describeDatabase = (registrations, { schema = 'public' } = {}) => {
           addIndex(owned, ['__owner_id', '__position'], true);
           if (!field.itemRequired) addColumn(owned, { name: '__item_present', type: 'boolean', nullable: false, default: 'true' });
         } else addIndex(owned, ['__owner_id'], true);
-        fieldsInto(owned, field.fields, [...path, field.name], insideList || field.list);
+        fieldsInto(owned, field.fields, [...path, field.name]);
         continue;
       }
       const type = field.kind === 'embedded' ? 'jsonb' : field.kind === 'reference' ? 'uuid' : `${scalarTypes[field.scalar]}${field.list ? '[]' : ''}`;
@@ -85,7 +86,11 @@ export const describeDatabase = (registrations, { schema = 'public' } = {}) => {
       if (conditional && field.required) addCheck(table, field.storageName, 'required', `(NOT ${identifier('__item_present')}) OR (${identifier(field.storageName)} IS NOT NULL)`);
       if (field.kind === 'reference') addReference(table, field.storageName, field.target);
       if (field.scalar === 'ID') addIndex(table, [field.storageName]);
-      if (field.unique) addIndex(table, [field.storageName], true);
+      if (field.kind === 'embedded') constraints.addJSON(table, field);
+      if (field.unique) {
+        if (field.list || table.ownership) constraints.addUnique(table, field, type);
+        else addIndex(table, [field.storageName], true);
+      }
       if (field.scalar === 'Enum') {
         const values = `ARRAY[${field.values.map((value) => `${literal(value)}::text`).join(', ')}]`;
         const expression = field.list
@@ -111,6 +116,7 @@ export const describeDatabase = (registrations, { schema = 'public' } = {}) => {
       addIndex(table, columns, index.unique);
     }
   }
+  const generated = constraints.finish();
   // PostgreSQL shares one namespace for table and index names.
   const relationNames = new Set(tables.map((table) => table.name));
   for (const table of tables) {
@@ -124,5 +130,5 @@ export const describeDatabase = (registrations, { schema = 'public' } = {}) => {
       relationNames.add(index.name);
     }
   }
-  return { schema, tables: tables.sort((a, b) => a.name.localeCompare(b.name)) };
+  return { schema, tables: tables.sort((a, b) => a.name.localeCompare(b.name)), ...generated };
 };

@@ -38,18 +38,41 @@ describe('PostgreSQL schema compiler', () => {
     expect(owned.indexes).toContainEqual(expect.objectContaining({ columns: ['tag_id'], unique: false }));
   });
 
-  it('quotes identifiers, shortens generated names and rejects unsupported unique lists', () => {
+  it('quotes identifiers, shortens generated names and supports native unique lists', () => {
     const type = new GraphQLObjectType({ name: 'A'.repeat(60), fields: { select: { type: GraphQLID } } });
     const db = describeDatabase([{ gqltype: type }], { schema: 'an"odd schema' });
     expect(compileDatabaseSchema(db)[0]).toBe('CREATE SCHEMA IF NOT EXISTS "an""odd schema"');
     expect(db.tables[0].indexes.every((index) => Buffer.byteLength(index.name) <= 63)).toBe(true);
-    const bad = new GraphQLObjectType({ name: 'Bad', fields: { names: { type: new GraphQLList(GraphQLString), extensions: { unique: true } } } });
-    expect(() => describeDatabase([{ gqltype: bad }])).toThrow(/multikey/i);
+    const list = new GraphQLObjectType({ name: 'UniqueList', fields: { names: { type: new GraphQLList(GraphQLString), extensions: { unique: true } } } });
+    expect(describeDatabase([{ gqltype: list }]).tables.some((table) => table.uniqueKeys)).toBe(true);
   });
 
-  it('rejects embedded uniqueness until absent owners participate in the unique contract', () => {
+  it('materializes embedded unique keys with native values and owner FKs', () => {
     const Detail = new GraphQLObjectType({ name: 'Detail', fields: { code: { type: GraphQLString, extensions: { unique: true } } } });
     const Owner = new GraphQLObjectType({ name: 'Owner', fields: { detail: { type: Detail, extensions: { relation: { embedded: true } } } } });
-    expect(() => describeDatabase([{ gqltype: Owner }])).toThrow(/embedded uniqueness/i);
+    const db = describeDatabase([{ gqltype: Owner }]);
+    const keys = db.tables.find((table) => table.uniqueKeys);
+    expect(keys.columns).toContainEqual(expect.objectContaining({ name: 'value', type: 'text' }));
+    expect(keys.foreignKeys).toContainEqual(expect.objectContaining({ targetTable: 'Owner', onDelete: 'CASCADE' }));
+    expect(db.triggers.some((trigger) => trigger.deferrable && trigger.initiallyDeferred)).toBe(true);
   });
+  it('orders generated functions before CHECKs and triggers after indexes', () => {
+    const db = describeDatabase(schemaFixture());
+    const ddl = compileDatabaseSchema(db);
+    const firstTable = ddl.findIndex((sql) => sql.startsWith('CREATE TABLE'));
+    expect(ddl.slice(1, firstTable).every((sql) => sql.startsWith('CREATE FUNCTION'))).toBe(true);
+    const firstTrigger = ddl.findIndex((sql) => /CREATE (CONSTRAINT )?TRIGGER/.test(sql));
+    expect(firstTrigger).toBeGreaterThan(ddl.findLastIndex((sql) => sql.startsWith('CREATE INDEX') || sql.startsWith('CREATE UNIQUE INDEX')));
+    expect(db.functions.every((fn) => fn.configuration.includes('search_path=pg_catalog'))).toBe(true);
+  });
+
+  it('rejects whole embedded-object uniqueness and generated private relation collisions', () => {
+    const Detail = new GraphQLObjectType({ name: 'UniqueDetail', fields: { code: { type: GraphQLString } } });
+    const Owner = new GraphQLObjectType({ name: 'UniqueOwner', fields: { detail: { type: Detail, extensions: { unique: true, relation: { embedded: true } } } } });
+    expect(() => describeDatabase([{ gqltype: Owner }])).toThrow(/whole embedded-object uniqueness/i);
+    const Root = new GraphQLObjectType({ name: 'Root', fields: { codes: { type: new GraphQLList(GraphQLString), extensions: { unique: true } } } });
+    const Collision = new GraphQLObjectType({ name: 'Root__guard', fields: { value: { type: GraphQLString } } });
+    expect(() => describeDatabase([{ gqltype: Root }, { gqltype: Collision }])).toThrow(/collision/i);
+  });
+
 });

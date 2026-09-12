@@ -152,7 +152,7 @@ describe.skipIf(!uri)('generated PostgreSQL schema on a real server', () => {
     await initializeDatabase(pool, description, { mode: 'validate' });
     const owner = randomUUID();
     const contact = `"${contractSchema}"."ContractSerie__credits"`;
-    await pool.query(`INSERT INTO "${contractSchema}"."ContractSerie" (id, tenant, title) VALUES ($1, $2, $3)`, [owner, 'T', 'Series']);
+    await pool.query(`INSERT INTO "${contractSchema}"."ContractSerie" (id, tenant, title, __credits_state) VALUES ($1, $2, $3, 'present')`, [owner, 'T', 'Series']);
     await pool.query(`INSERT INTO ${contact} (__owner_id, __position, __item_present) VALUES ($1, 0, false)`, [owner]);
     await expect(pool.query(`INSERT INTO ${contact} (__owner_id, __position) VALUES ($1, 1)`, [owner])).rejects.toMatchObject({ code: '23514' });
     await expect(pool.query(`INSERT INTO ${contact} (__owner_id, __position, role, star) VALUES ($1, 2, $2, $3)`, [owner, 'Role', randomUUID()])).rejects.toMatchObject({ code: '23503' });

@@ -56,6 +56,8 @@ export interface DatabaseTable {
   foreignKeys: DatabaseForeignKey[];
   indexes: DatabaseIndex[];
   checks: Array<{ name: string; expression: string }>;
+  auxiliary?: { rootTable: string; kind: 'guard' | 'uniqueKeys' };
+  uniqueKeys?: { rootTable: string; sourceTable: string; field: string };
   ownership?: {
     ownerTable: string;
     ownerColumn: string;
@@ -67,7 +69,36 @@ export interface DatabaseTable {
     stateColumn: string;
   };
 }
-export interface DatabaseDescription { schema: string; tables: DatabaseTable[] }
+export interface DatabaseFunction {
+  name: string;
+  arguments: string[];
+  returns: 'boolean' | 'void' | 'trigger';
+  language: 'plpgsql';
+  volatility: 'IMMUTABLE' | 'VOLATILE';
+  configuration: string[];
+  body: string;
+}
+export interface DatabaseTrigger {
+  name: string;
+  table: string;
+  function: string;
+  constraint: boolean;
+  deferrable: boolean;
+  initiallyDeferred: boolean;
+}
+export interface DatabaseMaintenance {
+  rootTable: string;
+  guardTable: string;
+  validateFunction: string;
+  refreshFunction: string;
+}
+export interface DatabaseDescription {
+  schema: string;
+  tables: DatabaseTable[];
+  functions: DatabaseFunction[];
+  triggers: DatabaseTrigger[];
+  maintenance: DatabaseMaintenance[];
+}
 export interface DatabasePool {
   connect(): Promise<{
     query(sql: string, values?: unknown[]): Promise<{ rows: any[]; rowCount: number | null }>;

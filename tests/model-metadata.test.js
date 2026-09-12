@@ -45,6 +45,18 @@ describe('driver-free model metadata', () => {
     expect(entry.indexes).toEqual([{ fields: ['tenant', 'code'], unique: true }]);
   });
 
+  it('retains uniqueness and independent nullability throughout embedded list trees', () => {
+    const Leaf = new GraphQLObjectType({ name: 'UniqueLeaf', fields: {
+      keys: { type: new GraphQLNonNull(new GraphQLList(GraphQLString)), extensions: { unique: true } },
+    } });
+    const Root = new GraphQLObjectType({ name: 'UniqueRoot', fields: {
+      leaves: { type: new GraphQLList(new GraphQLNonNull(Leaf)), extensions: relation(undefined, true) },
+    } });
+    const [root] = describeModels([{ gqltype: Root }]).entities;
+    expect(root.fields[0]).toMatchObject({ kind: 'embedded', list: true, required: false, itemRequired: true });
+    expect(root.fields[0].fields[0]).toMatchObject({ scalar: 'String', unique: true, list: true, required: true, itemRequired: false });
+  });
+
   it('rejects conflicting inverse targets and storage collisions', () => {
     const Other = new GraphQLObjectType({ name: 'Other', fields: { name: { type: GraphQLString } } });
     const Child = new GraphQLObjectType({ name: 'Child', fields: { parent: { type: Other, extensions: relation('parent_id') } } });

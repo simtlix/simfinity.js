@@ -11,7 +11,11 @@ export const identifier = (value) => {
   }
   return `"${value.replaceAll('"', '""')}"`;
 };
-export const literal = (value) => `'${String(value).replaceAll('\'', '\'\'')}'`;
+export const literal = (value) => {
+  const text = String(value);
+  const escaped = text.replaceAll('\\', '\\\\').replaceAll('\'', '\'\'');
+  return `${text.includes('\\') ? 'E' : ''}'${escaped}'`;
+};
 export const qualified = (schema, table) => `${identifier(schema)}.${identifier(table)}`;
 export const columnsSQL = (columns) => columns.map(identifier).join(', ');
 export const generatedName = (...parts) => {
