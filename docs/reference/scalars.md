@@ -79,7 +79,7 @@ const HTTPSURLScalar = createValidatedScalar(
 
 The resulting GraphQL name is `HTTPSURL_String`. The supplied base must be a `GraphQLScalarType`. The synchronous validation callback should throw on invalid input; returning `false` does not reject a value.
 
-The scalar exposes `baseScalarType`, which lets Simfinity map it to an appropriate Mongoose storage type. Validation also runs during output serialization, so invalid stored values can produce GraphQL response errors.
+The scalar exposes `baseScalarType`, which lets Simfinity map it to an appropriate backend storage type. PostgreSQL accepts custom scalars only when this chain resolves to a recognized native scalar. Validation also runs during output serialization, so invalid stored values can produce GraphQL response errors.
 
 ### Literal behavior
 

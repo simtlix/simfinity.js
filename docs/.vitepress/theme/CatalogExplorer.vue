@@ -3,6 +3,8 @@ import { computed, ref } from 'vue';
 import { withBase } from 'vitepress';
 import CodeSnippet from './CodeSnippet.vue';
 
+const props = defineProps({ database: { type: String, default: 'mongodb' } });
+const isPostgres = computed(() => props.database === 'postgres');
 const stage = defineModel('stage', { default: 'schema' });
 const related = defineModel('related', { default: false });
 const stages = [
@@ -14,7 +16,12 @@ const selected = computed(() => stages.find(item => item.id === stage.value) || 
 const outputView = ref('response');
 const schemaCode = computed(() => `import { GraphQLObjectType, GraphQLID,
   GraphQLString${related.value ? ', GraphQLList, GraphQLInt' : ''} } from 'graphql';
-import * as simfinity from '@simtlix/simfinity-js';
+${isPostgres.value ? `import pg from 'pg';
+import { createPostgres } from '@simtlix/simfinity-postgres';
+
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const simfinity = createPostgres({ pool, schema: 'series_api' });` : `import * as simfinity from '@simtlix/simfinity-js';
+// Connect Mongoose before registering types (see the quick start).`}
 ${related.value ? `
 const Season = new GraphQLObjectType({
   name: 'Season',
@@ -35,7 +42,7 @@ const Serie = new GraphQLObjectType({
 });
 
 simfinity.connect(null, Serie, 'serie', 'series');
-export const schema = simfinity.createSchema();`);
+export const schema = simfinity.createSchema();${isPostgres.value ? '\nawait simfinity.initializeDatabase({ mode: \'create\' });' : ''}`);
 const queryCode = computed(() => `query BrowseCatalog {
   series(
     name: { operator: LIKE, value: "Expanse" }
@@ -45,7 +52,7 @@ const queryCode = computed(() => `query BrowseCatalog {
     name${related.value ? '\n    seasons { number }' : ''}
   }
 }`);
-const mcpCode = `import { generateMCPTools } from '@simtlix/simfinity-js';
+const mcpCode = `import { generateMCPTools } from '@simtlix/simfinity-mcp';
 import { schema } from './schema.js';
 
 const { tools, callTool } = generateMCPTools(schema, {
@@ -57,7 +64,7 @@ const result = await callTool('series', {
   pagination: { page: 1, size: 10 },
 });`;
 const code = computed(() => stage.value === 'schema' ? schemaCode.value : stage.value === 'query' ? queryCode.value : mcpCode);
-const response = computed(() => JSON.stringify({ data: { series: [{ id: '507f1f77bcf86cd799439011', name: 'The Expanse', ...(related.value ? { seasons: [{ number: 1 }, { number: 2 }] } : {}) }] } }, null, 2));
+const response = computed(() => JSON.stringify({ data: { series: [{ id: isPostgres.value ? 'b7c3b71c-4c5a-49a2-bfc8-7451e4f6408a' : '507f1f77bcf86cd799439011', name: 'The Expanse', ...(related.value ? { seasons: [{ number: 1 }, { number: 2 }] } : {}) }] } }, null, 2));
 const fields = computed(() => `type Serie {
   id: ID
   name: String${related.value ? '\n  seasons: [Season]' : ''}
@@ -84,7 +91,7 @@ function navigate(event, index) {
       <label class="relation-control"><input v-model="related" type="checkbox"><span class="relation-toggle" aria-hidden="true"></span>Include seasons</label>
     </div>
     <div id="catalog-panel" role="tabpanel" :aria-labelledby="`catalog-tab-${selected.id}`">
-      <div class="explorer-intro"><div><span class="explorer-eyebrow">SERIES CATALOG / {{ related ? 'CONNECTED TYPES' : 'ONE TYPE' }}</span><h3>{{ selected.title }}</h3></div><p>{{ selected.note }}</p></div>
+      <div class="explorer-intro"><div><span class="explorer-eyebrow">{{ isPostgres ? 'POSTGRESQL' : 'MONGODB' }} / {{ related ? 'CONNECTED TYPES' : 'ONE TYPE' }}</span><h3>{{ selected.title }}</h3></div><p>{{ selected.note }}</p></div>
       <div class="explorer-panes">
         <CodeSnippet :key="`${stage}-${related}`" :code="code" :file="selected.file" class="explorer-source" />
         <div class="explorer-result">
@@ -95,7 +102,7 @@ function navigate(event, index) {
         </div>
       </div>
     </div>
-    <div class="explorer-footer"><span>Explore sample data here. Run the API with your own database.</span><a :href="withBase('/guide/getting-started.html')">Build this catalog <span aria-hidden="true">↗</span></a></div>
+    <div class="explorer-footer"><span>Sample data · 3.2.0 preview. MCP is an optional package for both databases.</span><a :href="withBase(isPostgres ? '/guide/postgresql.html' : '/guide/getting-started.html')">{{ isPostgres ? 'PostgreSQL' : 'MongoDB' }} quick start <span aria-hidden="true">↗</span></a></div>
   </div>
 </template>
 

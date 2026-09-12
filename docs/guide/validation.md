@@ -138,7 +138,7 @@ const seasonExtensions = {
 Assign `seasonExtensions` to the `GraphQLObjectType`'s `extensions`. This rule validates creation. On update, `modelArgs` is a partial change, not the complete stored document. To validate an invariant against existing values, read the record using the supplied session and merge the incoming changes before checking it, or enforce it in `onUpdating`.
 
 ::: tip Database checks belong to the transaction
-If a validator reads another record, pass the supplied session to the Mongoose query. When uniqueness is required, keep a database unique index as well; a separate existence check alone cannot prevent concurrent writes.
+If a validator reads another record, pass the supplied session to the Mongoose query or PostgreSQL Model method. When uniqueness is required, keep a database uniqueness constraint as well; a separate existence check alone cannot prevent concurrent writes.
 :::
 
 ## Validated scalars

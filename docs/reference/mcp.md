@@ -5,7 +5,7 @@ description: Tool generation, transport factories, execution options, limits, an
 
 # MCP API
 
-The MCP functions are named exports and also available on `simfinity.mcp`. For a complete integration walkthrough, start with the [MCP guide](/guide/mcp).
+The MCP functions are named exports of the opt-in `@simtlix/simfinity-mcp` package. The root MongoDB facade also retains them through named exports and `simfinity.mcp` for compatibility. PostgreSQL applications import from the MCP package so core/PostgreSQL do not install its SDK chain. For a complete integration walkthrough, start with the [MCP guide](/guide/mcp).
 
 ## Functions
 

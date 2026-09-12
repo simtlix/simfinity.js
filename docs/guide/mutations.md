@@ -5,7 +5,7 @@ description: Create, update, and delete records, understand transaction boundari
 
 # Mutations
 
-Simfinity generates creation, update, and deletion mutations for every connected type. It materializes GraphQL inputs, runs validation and controller hooks, and persists the operation in a MongoDB transaction.
+Simfinity generates creation, update, and deletion mutations for every connected type. It materializes GraphQL inputs, runs validation and controller hooks, and persists each operation in the selected backend's transaction.
 
 ## Create a record
 
@@ -59,7 +59,7 @@ mutation ClearCategory($id: ID!) {
 Generated update inputs remove the outer non-null wrapper so you can omit required fields, while keeping list-item non-null constraints. The entity `id` remains required for `GraphQLID` and `GraphQLID!`; other ID fields are optional. An explicit `null` for an originally non-null field leaves its stored value unchanged; use a custom update validator to reject that input if needed. Empty strings, `false`, `0`, and empty arrays are persisted after validation. Use `""` to store an empty string and `null` to remove a nullable field.
 :::
 
-Embedded objects merge supplied fields with their stored value; supplied embedded arrays replace the array. The parent update executes before referenced collection operations, which share the parent mutation's session. `onUpdated` then receives the updated Mongoose document.
+Embedded objects merge supplied fields with their stored value; supplied embedded arrays replace the array. The parent update executes before referenced collection operations, which share the parent mutation's session. `onUpdated` then receives the updated backend record (a Mongoose document on MongoDB or a plain PostgreSQL record).
 
 ## Delete a record
 
@@ -78,9 +78,9 @@ Deleting a parent does not automatically delete referenced children. Choose an a
 
 ## Transaction boundaries
 
-Each generated root mutation field runs in its own transaction on the registered model's connection. Its parent and nested child writes share that transaction. A write or hook failure aborts those writes; a transient transaction error can retry the operation, up to five retries after the initial attempt. A custom mutation uses the default Mongoose connection.
+Each generated root mutation field runs in its own backend transaction. Its parent and nested child writes share that transaction. A write or hook failure aborts those writes; a confirmed retryable transaction error can retry the operation, up to five retries after the initial attempt. MongoDB uses the registered model connection; PostgreSQL uses the configured pool and repeatable-read isolation.
 
-An `UnknownTransactionCommitResult` retries only the commit, up to five retries, without repeating writes or hooks. An expired commit (`MaxTimeMSExpired`) is not retried. If uncertainty remains after the limit, the original error is returned; the data may already have committed. Reconcile that outcome before repeating the mutation. Session cleanup is awaited, and abort/cleanup failures do not replace an earlier operation error. A cleanup failure after a successful commit is reported, but does not undo the committed data.
+On MongoDB, an `UnknownTransactionCommitResult` retries only the commit, up to five times, without repeating writes or hooks. An expired commit (`MaxTimeMSExpired`) is not retried. PostgreSQL retries confirmed serialization/deadlock aborts as complete transaction attempts. If a driver reports an uncertain outcome, reconcile it before repeating an operation. Session cleanup is awaited, and cleanup failures do not replace an earlier operation error.
 
 Multiple root mutation fields in a GraphQL request are not one shared transaction. If a later field fails, an earlier field may already have committed. Use a custom mutation when a business operation needs a single transaction spanning several writes.
 
@@ -136,6 +136,6 @@ mutation {
 }
 ```
 
-`saveObject()` owns a transaction when no session is supplied. Pass the supplied active session when using it inside a registered mutation: it shares that transaction without starting, committing, aborting, retrying, or ending it. An inactive supplied session is rejected with `ACTIVE_TRANSACTION_REQUIRED` (400). Direct Mongoose calls must also use that session and do not automatically run Simfinity validators, hooks, or authorization rules.
+`saveObject()` owns a transaction when no session is supplied. Pass the supplied active session when using it inside a registered mutation: it shares that transaction without starting, committing, aborting, retrying, or ending it. An inactive supplied session is rejected with `ACTIVE_TRANSACTION_REQUIRED` (400). Direct Mongoose or PostgreSQL Model calls must also use the matching session and do not automatically run Simfinity validators, hooks, or authorization rules.
 
 Continue with [validation](./validation) to reject invalid data and [authorization](./authorization) to control who can perform an operation.
