@@ -1,6 +1,6 @@
 # PostgreSQL 3.2.0 delivery record
 
-This record captures verified work and its boundaries. Library and Barber implementation and task reviews are complete. The application is running. The final combined review requested an enum-filter compatibility correction; that correction and its consumer handoff are implemented, with scoped final review still pending.
+Library and Barber implementation, verification and independent reviews are complete. The final enum-filter correction and its source-to-application package handoff are approved, with no open findings. The application is running locally.
 
 ## Library and package provenance
 
@@ -79,7 +79,7 @@ Required PostgreSQL storage constraints remain stronger than Mongoose. An option
 
 The original Barber `main` remains at `00718c0195374ab1baaefd32d8a24e21a238b4c3`. Work is isolated on `codex/postgresql`. Baselines include 59 backend tests, 3 frontend unit tests, a production frontend build and the original 33-query/47-mutation SDL.
 
-A focused probe of the unchanged original application, using its real Yoga authorization plugin and synthetic MongoDB data, confirmed three missing permission checks: self-service privilege updates, modifications to another user, and modifications to another owner's service. A foreign-shop update control correctly returned `FORBIDDEN`. The disposable database was removed and the original source was unchanged. The PostgreSQL port must preserve legitimate flows while closing these reproduced gaps.
+A focused probe of the unchanged original application, using its real Yoga authorization plugin and synthetic MongoDB data, confirmed three missing permission checks: self-service privilege updates, modifications to another user, and modifications to another owner's service. A foreign-shop update control correctly returned `FORBIDDEN`. The disposable database was removed and the original source was unchanged. The PostgreSQL port preserves legitimate flows and closes these reproduced gaps.
 
 The application implementation is committed as `e74571ed88377c075119d84f66c1271ae2a6c754`, with review fix `d8d6424cc662e40fc17c40202f9913d2411d1685`, on `codex/postgresql`, in `/Users/claudiogonzalez/SCM/simfinity-barber/.worktrees/codex-postgresql`. The final archive refresh and Storybook cleanup are committed as `d149c625100178f412b792d961a8ac4f42dc78b8`. It consumes the verified core/PostgreSQL/MCP archives above, committed with checksums in its `backend/vendor/`. The installed backend has one shared core and no Mongoose/MongoDB dependencies.
 
@@ -112,7 +112,7 @@ The Compose project is `simfinity-barber-postgres`, with its own database and up
 
 Demo accounts are `cliente@demo.com`, `propietario@demo.com` and `admin@demo.com`, all with password `demo1234`. The approved shop is `/b/postgres-demo`, with an active service/professional and all-week 09:00–18:00 hours. From the application worktree, `docker compose up --build -d` starts services; `docker compose exec backend npm run seed:admin` and `docker compose exec backend npm run seed:demo` create or retain the synthetic demo accounts/data. `docker compose restart` retains data; `docker compose down` stops this project while retaining its volumes.
 
-All six implementation task reviews are approved. The final combined review found F1 (enum query compatibility) and M1 (whitespace hygiene). Their correction is implemented below; scoped final review and Task 7 completion remain with the coordinator.
+All six implementation task reviews are approved. The final combined review found F1 (enum query compatibility) and M1 (whitespace hygiene). The scoped final review approved their corrections, Storybook cleanup and package handoff, with no new breakage or remaining findings.
 
 ## Final correction verification
 
@@ -126,4 +126,12 @@ Release manifest verification and the local-only npm publication dry run passed.
 
 After archive replacement, Barber passed **11 backend files / 69 tests**, the **67-operation private-schema API runner** plus auth/scopes/FK/rollback/derived-value and real MCP assertions, unchanged **33-query/47-mutation SDL** with zero field/argument differences, and both dashboard schema selections. The warning-free frontend unit run passed **3 tests**. The backend was rebuilt from the exact archives, all three Compose services remain healthy on loopback bindings 4300/4301/55440, and an actual Chromium login/full-booking smoke passed (**1 test**) against that rebuilt backend. Its synthetic future reservation was confirmed with a UUID. No production frontend rebuild was needed for the Storybook configuration-only change. The coordinator then independently repeated all three actual logins, UUID checks, search/detail and dashboards against the rebuilt backend: zero GraphQL/JavaScript errors, with mobile width 390/390.
 
-Detailed commands, disposable URIs and logs are recorded in the task scratch `final-fix-report.md`. Final review approval has not been asserted by this correction record.
+Detailed commands, disposable URIs and logs are preserved in the [final verification record](2026-09-12-postgresql-final-verification.md). The [final review record](2026-09-12-postgresql-review.md) preserves both the original whole-branch findings and the subsequent approval of every correction. The final reviewed library HEAD is `a311134df2d9b8273466b80ad509828b7f9c6313`; the application HEAD is `d149c625100178f412b792d961a8ac4f42dc78b8`. Later delivery-record commits do not alter package contents or their source provenance.
+
+## Final local handoff
+
+Both feature branches and the Barber worktree are retained for local use. The original Barber `main` was finally verified clean at `00718c0195374ab1baaefd32d8a24e21a238b4c3`; its PostgreSQL worktree is clean at `d149c625100178f412b792d961a8ac4f42dc78b8`. The library retains only the six original untracked user tarballs outside its committed work.
+
+The five task-owned MongoDB/PostgreSQL test containers and their anonymous volumes were stopped and removed after final review. The Barber Compose project and its persistent volumes remain available, with all three services healthy on loopback ports 4300, 4301 and 55440. Final HTTP checks of the API health endpoint and frontend returned 200. Unrelated Docker services were left running.
+
+All plan steps are complete. Permanent records preserve the verification evidence, final review and all eight implementation decisions before removal of this plan's temporary scratch workspace. No remote publication, push, merge to the original main, production deployment or data migration was performed.

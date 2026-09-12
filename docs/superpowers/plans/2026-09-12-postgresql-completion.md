@@ -54,4 +54,4 @@
 
 ### Task 7: Final delivery verification
 
-- [ ] Re-run checks affected by final fixes, verify clean task branches and documented startup from fresh local data. Provide branch/worktree paths, test results, any remaining declared limitations, and commands to use the completed library and application.
+- [x] Re-run checks affected by final fixes, verify clean task branches and documented startup from fresh local data. Provide branch/worktree paths, test results, any remaining declared limitations, and commands to use the completed library and application.
