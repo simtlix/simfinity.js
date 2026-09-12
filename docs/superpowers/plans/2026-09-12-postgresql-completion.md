@@ -42,7 +42,7 @@
 
 ### Task 4: Complete embedded and scalar-list query parity
 
-- [ ] Differentially test scalar lists within embedded lists, array facts and grouping projections with absent/null values. Add typed presence representation/compiler support required for equal results. Preserve cardinality, order, filters, enum/date values and bounded query inputs; retain explicit errors for documented unsupported whole-object operations.
+- [x] Differentially test scalar lists within embedded lists, array facts and grouping projections with absent/null values. Add typed presence representation/compiler support required for equal results. Preserve cardinality, order, filters, enum/date values and bounded query inputs; retain explicit errors for documented unsupported whole-object operations.
 
 ### Task 5: Deliver library packages, documentation and release preparation
 
