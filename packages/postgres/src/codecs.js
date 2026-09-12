@@ -58,3 +58,13 @@ export const normalizeDatabaseError = (error) => {
   };
   return new SimfinityError(...(errors[error.code] || ['Database operation failed', 'DATABASE_ERROR', 500]));
 };
+
+/** pg's local Date formatting truncates historical offset seconds; use UTC per parameter. */
+export const encodeParameter = (value) => {
+  if (Array.isArray(value)) return value.map(encodeParameter);
+  if (!(value instanceof Date)) return value;
+  const year = value.getUTCFullYear();
+  const iso = value.toISOString();
+  const rest = iso.slice(iso.indexOf('-', iso.startsWith('-') || iso.startsWith('+') ? 1 : 0));
+  return `${String(year <= 0 ? 1 - year : year).padStart(4, '0')}${rest.slice(0, -1)}+00:00${year <= 0 ? ' BC' : ''}`;
+};

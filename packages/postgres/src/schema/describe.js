@@ -1,4 +1,5 @@
 import { describeModels } from '@simtlix/simfinity-core';
+import { queryFunctions } from '../query/functions.js';
 import { constraintBuilder } from './constraints.js';
 import { identifier, literal, generatedName, invalid } from './sql.js';
 
@@ -82,7 +83,9 @@ export const describeDatabase = (registrations, { schema = 'public' } = {}) => {
       }
       const type = field.kind === 'embedded' ? 'jsonb' : field.kind === 'reference' ? 'uuid' : `${scalarTypes[field.scalar]}${field.list ? '[]' : ''}`;
       if (!type || type.startsWith('undefined')) invalid(`Unsupported scalar at ${table.name}.${field.name}`);
-      addColumn(table, { name: field.storageName, type, nullable: !required });
+      const presenceColumn = table.ownership || field.kind === 'embedded' ? generatedName('__field', field.name, 'present') : null;
+      addColumn(table, { name: field.storageName, type, nullable: !required, ...(presenceColumn ? { presenceColumn } : {}) });
+      if (presenceColumn) addColumn(table, { name: presenceColumn, type: 'boolean', nullable: false, default: 'false' });
       if (conditional && field.required) addCheck(table, field.storageName, 'required', `(NOT ${identifier('__item_present')}) OR (${identifier(field.storageName)} IS NOT NULL)`);
       if (field.kind === 'reference') addReference(table, field.storageName, field.target);
       if (field.scalar === 'ID') addIndex(table, [field.storageName]);
@@ -117,6 +120,7 @@ export const describeDatabase = (registrations, { schema = 'public' } = {}) => {
     }
   }
   const generated = constraints.finish();
+  generated.functions.push(...queryFunctions(schema));
   // PostgreSQL shares one namespace for table and index names.
   const relationNames = new Set(tables.map((table) => table.name));
   for (const table of tables) {

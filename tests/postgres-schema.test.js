@@ -47,6 +47,18 @@ describe('PostgreSQL schema compiler', () => {
     expect(describeDatabase([{ gqltype: list }]).tables.some((table) => table.uniqueKeys)).toBe(true);
   });
 
+  it.each(['item', 'f'.repeat(60)])('keeps presence markers separate from item markers and shortens long names: %s', (name) => {
+    const Leaf = new GraphQLObjectType({ name: 'PresenceLeaf', fields: { [name]: { type: GraphQLString, extensions: { unique: true } } } });
+    const Root = new GraphQLObjectType({ name: 'PresenceRoot', fields: { entries: { type: new GraphQLList(Leaf), extensions: { relation: { embedded: true } } } } });
+    const db = describeDatabase([{ gqltype: Root }]);
+    const owned = db.tables.find((table) => table.ownership);
+    const marker = owned.columns.find((column) => column.name === name).presenceColumn;
+    expect(marker).not.toBe('__item_present');
+    expect(Buffer.byteLength(marker)).toBeLessThanOrEqual(63);
+    expect(owned.columns.find((column) => column.name === marker)).toMatchObject({ type: 'boolean', nullable: false, default: 'false' });
+    expect(() => compileDatabaseSchema(db)).not.toThrow();
+  });
+
   it('materializes embedded unique keys with native values and owner FKs', () => {
     const Detail = new GraphQLObjectType({ name: 'Detail', fields: { code: { type: GraphQLString, extensions: { unique: true } } } });
     const Owner = new GraphQLObjectType({ name: 'Owner', fields: { detail: { type: Detail, extensions: { relation: { embedded: true } } } } });

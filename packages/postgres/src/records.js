@@ -36,6 +36,31 @@ export const createRecordStore = (models, database, query) => {
     }
     return mapper(field.fields, value, gqltype);
   };
+  // Mongoose inline objects materialize descendant array defaults and minimize
+  // scalar-only empty objects. Embedded array items themselves are retained.
+  const normalize = (fields, data, full = true) => {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) shapeError('embedded object');
+    const result = { ...data };
+    for (const field of fields) {
+      if (field.kind === 'collection' || (!full && !Object.hasOwn(data, field.storageName))) continue;
+      let value = data[field.storageName];
+      if (value === undefined && !full) continue;
+      if (value === undefined && full && field.list) value = [];
+      if (field.kind === 'embedded' && value !== null) {
+        if (field.list) {
+          if (!Array.isArray(value)) shapeError(field.name);
+          value = value.map((item) => item == null ? item : normalize(field.fields, item));
+        } else {
+          value = normalize(field.fields, value ?? {});
+          if (!Object.keys(value).length) value = undefined;
+        }
+      }
+      if (value !== undefined) result[field.storageName] = value;
+      else if (full) delete result[field.storageName];
+      else result[field.storageName] = undefined;
+    }
+    return result;
+  };
   const encodeFields = (fields, data) => {
     if (!data || typeof data !== 'object' || Array.isArray(data)) shapeError('embedded object');
     const result = {};
@@ -61,7 +86,9 @@ export const createRecordStore = (models, database, query) => {
   };
   const hydrate = async (storage, fields, rows, gqltype, session) => {
     const result = rows.map((row) => {
-      const value = decodeFields(fields, row, gqltype);
+      const visible = { ...row };
+      for (const column of storage.columns) if (column.presenceColumn && row[column.name] == null && !row[column.presenceColumn]) delete visible[column.name];
+      const value = decodeFields(fields, visible, gqltype);
       if (!storage.ownership) { value._id = row.id; value.id = row.id; }
       return value;
     });
@@ -103,10 +130,12 @@ export const createRecordStore = (models, database, query) => {
         result[owned.ownership.stateColumn] = value === undefined ? 'missing' : value === null ? 'null' : 'present';
       } else {
         if (value == null && field.required && !nullItem) missing(field.name);
+        const presenceColumn = storage.columns.find((column) => column.name === field.storageName)?.presenceColumn;
+        if (presenceColumn) result[presenceColumn] = value !== undefined && !nullItem;
         if (value !== undefined) {
           const encoded = encodeValue(field, value);
           result[field.storageName] = field.kind === 'embedded' && encoded != null ? JSON.stringify(encoded) : encoded;
-        } else if (full) result[field.storageName] = null;
+        } else if (full || field.kind === 'embedded') result[field.storageName] = null;
       }
     }
     return result;
@@ -155,15 +184,16 @@ export const createRecordStore = (models, database, query) => {
     const entity = model(name);
     if (!entity) throw new SimfinityError(`Type ${name} is not an entity`, 'INVALID_MODEL', 400);
     const storage = table(name);
-    const data = { id: castId(record._id || record.id), ...columnValues(storage, entity.fields, record, true) };
+    const normalized = normalize(entity.fields, record);
+    const data = { id: castId(normalized._id || normalized.id), ...columnValues(storage, entity.fields, normalized, true) };
     const row = await insertRow(storage, data, session);
-    await persistOwned(storage, entity.fields, row.id, record, session);
+    await persistOwned(storage, entity.fields, row.id, normalized, session);
     return (await hydrateRows(name, [row], session))[0];
   };
   const update = async (name, value, changes, session) => {
     const id = castId(value);
     const entity = model(name); const storage = table(name);
-    const source = { ...changes };
+    const source = normalize(entity.fields, changes, false);
     delete source.$unset;
     for (const field of Object.keys(changes.$unset || {})) source[field] = undefined;
     const data = columnValues(storage, entity.fields, source, false);

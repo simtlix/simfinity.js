@@ -71,11 +71,22 @@ describe.skipIf(!uri)('database-enforced embedded constraints', () => {
 
   it.each(['0000-01-01T00:00:00.000Z', '+010000-01-01T00:00:00.000Z', '-000001-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'])('accepts the same runtime DateTime in native and JSONB storage: %s', async (iso) => {
     const time = new Date(iso);
-    const native = await model('Shape').create({ nativeTime: time });
-    expect(Number.isFinite(native.nativeTime.getTime())).toBe(true);
+    const native = await model('Shape').create({ nativeTime: time, value: null });
+    expect(native.nativeTime.toISOString()).toBe(iso);
     const json = await model('Shape').create({ value: { required: 'date', time } });
     expect(json.value.time.toISOString()).toBe(iso);
     expect((await model('Shape').findById(json.id)).value.time.toISOString()).toBe(iso);
+  });
+
+  it('enforces required descendants when inline array defaults materialize an optional parent', async () => {
+    await expect(model('Shape').create({})).rejects.toMatchObject({ extensions: { code: 'REQUIRED_VALUE' } });
+    for (const input of ['{}', '{value:null}']) {
+      const result = await graphql({ schema, source: `mutation{addshape(input:${input}){nativeTime}}` });
+      expect(result.errors?.[0].extensions.code).toBe('REQUIRED_VALUE');
+    }
+    const valid = await graphql({ schema, source: 'mutation{addshape(input:{value:{required:"provided"}}){value{required names}}}' });
+    expect(valid.errors).toBeUndefined();
+    expect(valid.data.addshape.value).toEqual({ required: 'provided', names: [] });
   });
 
   it('validates ISO calendar components and the full finite JavaScript Date range in SQL', async () => {

@@ -1,3 +1,4 @@
+import { GraphQLObjectType, GraphQLString, GraphQLList } from 'graphql';
 import { describe, it, expect } from 'vitest';
 import { describeModels } from '../packages/core/src/metadata.js';
 import { createQueryPlan } from '../packages/core/src/query-plan.js';
@@ -27,7 +28,26 @@ describe('PostgreSQL query compilation', () => {
     expect(compile({ title: { operator: 'IN', value: [] } }).text).toContain('FALSE');
     expect(compile({ title: { operator: 'NIN', value: [] } }).text).toContain('TRUE');
   });
-  it('rejects embedded-list grouping whose missing-value projection cannot be preserved', () => {
-    expect(() => compile({ aggregation: { groupId: 'credits.role', facts: [{ path: 'id', operation: 'COUNT', factName: 'count' }] } }, { mode: 'aggregate' })).toThrow('Grouping by a scalar path inside an embedded list');
+  it('projects embedded-list group keys with presence and stable child order', () => {
+    const result = compile({ aggregation: { groupId: 'credits.role', facts: [{ path: 'id', operation: 'COUNT', factName: 'count' }] } }, { mode: 'aggregate' });
+    expect(result.text).toContain('jsonb_agg');
+    expect(result.text).toContain('__field__role__present');
+    expect(result.text).toContain('__position');
+    expect(result.text).toContain('__simfinity_sort_key');
   });
+  it('parameterizes nested list values and rejects malformed sort paths before SQL compilation', () => {
+    const Leaf = new GraphQLObjectType({ name: 'CompileLeaf', fields: { texts: { type: new GraphQLList(GraphQLString) } } });
+    const Root = new GraphQLObjectType({ name: 'CompileRoot', fields: { entries: { type: new GraphQLList(Leaf), extensions: { relation: { embedded: true } } } } });
+    const registrations = [{ gqltype: Root }];
+    const models = describeModels(registrations);
+    const database = describeDatabase(registrations);
+    const injected = '\'; DROP TABLE private_data; --';
+    const result = compileQuery(models, database, createQueryPlan(models, 'CompileRoot', { entries: { terms: [{ path: 'texts', operator: 'LIKE', value: injected }] } }));
+    expect(result.values).toContain(injected);
+    expect(result.text).not.toContain(injected);
+    for (const field of ['entries..texts', 'entries.texts;DROP', 'entries.missing']) expect(() => createQueryPlan(models, 'CompileRoot', { sort: { terms: [{ field, order: 'ASC' }] } })).toThrow();
+    expect(() => createQueryPlan(models, 'CompileRoot', { sort: { terms: [{ field: 'entries.texts', order: 'BAD' }] } })).toThrow();
+    expect(() => compileQuery(models, database, createQueryPlan(models, 'CompileRoot', { aggregation: { groupId: 'entries', facts: [{ path: 'entries.texts', operation: 'COUNT', factName: 'n' }] } }, { mode: 'aggregate' }))).toThrow('Whole embedded objects');
+  });
+
 });

@@ -75,14 +75,15 @@ END`, true);
       for (const table of ownedTables) {
         const parentPath = chain(table).slice(0, -1); const parent = parentPath.at(-1); const alias = `t${parentPath.length - 1}`;
         const children = `SELECT * FROM ${qualified(schema, table.name)} c WHERE c.__owner_id = ${alias}.${q(parent.primaryKey.columns[0])}`;
-        const invalidCount = table.ownership.list ? 'n > 0 AND (lo <> 0 OR hi <> n - 1)' : 'n <> 1';
+        const invalidCount = table.ownership.list ? 'counts.n > 0 AND (counts.lo <> 0 OR counts.hi <> counts.n - 1)' : 'counts.n <> 1';
         checks += `
   IF EXISTS (SELECT 1 FROM ${joins(parentPath)} CROSS JOIN LATERAL (SELECT count(*) n, ${table.ownership.list ? 'min(c.__position) lo, max(c.__position) hi' : '0 lo, 0 hi'} FROM (${children}) c) counts
-    WHERE t0.id = $1 AND ((${alias}.${q(table.ownership.stateColumn)} <> 'present' AND n <> 0) OR (${alias}.${q(table.ownership.stateColumn)} = 'present' AND (${invalidCount})))) THEN
+    WHERE t0.id = $1 AND ((${alias}.${q(table.ownership.stateColumn)} <> 'present' AND counts.n <> 0) OR (${alias}.${q(table.ownership.stateColumn)} = 'present' AND (${invalidCount})))) THEN
     RAISE EXCEPTION 'Invalid owned shape: %', ${literal(table.name)} USING ERRCODE = '23514'; END IF;`;
         if (table.ownership.nullableItems) {
           const nested = ownedTables.filter((item) => item.ownership.ownerTable === table.name);
           const payload = table.columns.filter((column) => !column.name.startsWith('__')).map((column) => `c.${q(column.name)} IS NOT NULL`);
+          for (const column of table.columns.filter((item) => item.presenceColumn)) payload.push(`c.${q(column.presenceColumn)}`);
           for (const child of nested) payload.push(`c.${q(child.ownership.stateColumn)} <> 'missing'`, `EXISTS (SELECT 1 FROM ${qualified(schema, child.name)} x WHERE x.__owner_id = c.__id)`);
           if (payload.length) checks += `
   IF EXISTS (SELECT 1 FROM ${joins(chain(table))} JOIN ${qualified(schema, table.name)} c ON c.__id = t${parentPath.length}.__id WHERE t0.id = $1 AND NOT c.__item_present AND (${payload.join(' OR ')})) THEN

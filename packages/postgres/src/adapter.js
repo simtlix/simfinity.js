@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import { getNamedType } from 'graphql';
 import { describeModels, createQueryPlan, SimfinityError } from '@simtlix/simfinity-core';
 import { describeDatabase } from './schema/describe.js';
 import { initializeDatabase } from './schema/initialize.js';
 import { compileQuery } from './query/compiler.js';
 import { createRecordStore } from './records.js';
 import { createTransactions } from './transactions.js';
-import { castId, normalizeDatabaseError } from './codecs.js';
+import { castId, encodeParameter, normalizeDatabaseError } from './codecs.js';
 
 export const createPostgresAdapter = (options) => {
   let configured = options ? Object.freeze({ ...options }) : null;
@@ -23,7 +24,7 @@ export const createPostgresAdapter = (options) => {
     assertReady();
     // Retryable errors must reach withTransaction unchanged, so normalize only at operation boundaries.
     const client = session ? transactions.requireSession(session) : getPool();
-    return client.query(text, values);
+    return client.query(text, values?.map(encodeParameter));
   };
   const safe = (operation) => async (...args) => {
     try { return await operation(...args); } catch (error) {
@@ -42,11 +43,12 @@ export const createPostgresAdapter = (options) => {
     const compiled = compileQuery(models, database, plan, extra);
     const { rows } = await query(compiled.text, compiled.values, session);
     if (mode === 'count') return Number(rows[0]?.size || 0);
+    const decodeAggregate = (value, field) => Array.isArray(value) ? value.map((item) => decodeAggregate(item, field)) : value != null && field.scalar === 'DateTime' ? new Date(value) : value;
     if (mode === 'aggregate') return rows.map((row) => ({
-      groupId: row.groupId,
+      groupId: decodeAggregate(row.groupId, compiled.aggregateFields[0]),
       facts: Object.fromEntries(plan.aggregation.facts.map((fact, index) => {
         const value = row[`fact_${index}`];
-        return [fact.factName, value == null ? null : ['SUM', 'COUNT', 'AVG'].includes(fact.operation) ? Number(value) : value];
+        return [fact.factName, value == null ? null : ['SUM', 'COUNT', 'AVG'].includes(fact.operation) ? Number(value) : decodeAggregate(value, compiled.aggregateFields[index + 1])];
       })),
     }));
     return records.hydrateRows(name, rows, session);
@@ -65,6 +67,10 @@ export const createPostgresAdapter = (options) => {
       if (prepared) return;
       if (!configured?.pool?.connect || !configured.pool.query) throw new SimfinityError('Configure a pg.Pool before creating the schema', 'DATABASE_NOT_CONFIGURED', 500);
       models = describeModels(registrations);
+      for (const registration of registrations.filter((item) => item.stateMachine)) {
+        const state = models.entities.find((item) => item.name === registration.gqltype.name)?.fields.find((item) => item.name === 'state');
+        if (state) state.stateNames = getNamedType(registration.gqltype.getFields().state.type).getValues().map((item) => ({ value: String(item.value), name: item.name }));
+      }
       database = describeDatabase(registrations, { schema: configured.schema || 'public' });
       allowSchemaCreation = createCollection;
       records = createRecordStore(models, database, query);

@@ -32,6 +32,8 @@ export interface DatabaseColumn {
   collation?: 'C';
   nullable: boolean;
   default?: string;
+  /** Private boolean marker; SQL NULL without this marker represents an absent embedded field. */
+  presenceColumn?: string;
 }
 export interface DatabaseForeignKey {
   name: string;
@@ -72,7 +74,7 @@ export interface DatabaseTable {
 export interface DatabaseFunction {
   name: string;
   arguments: string[];
-  returns: 'boolean' | 'void' | 'trigger';
+  returns: 'boolean' | 'void' | 'trigger' | 'jsonb' | 'bytea';
   language: 'plpgsql';
   volatility: 'IMMUTABLE' | 'VOLATILE';
   configuration: string[];
