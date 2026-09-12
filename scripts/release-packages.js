@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -29,8 +29,12 @@ const readInputs = (root) => {
   if (![2, 3].includes(lock.lockfileVersion) || entries.some(({ directory }) => !lock.packages?.[directory])) {
     throw new Error('Release requires a complete npm v2 or v3 workspace lockfile');
   }
+  if (lock.lockfileVersion === 2 && entries.some(({ directory, name }) => directory && (!lock.dependencies?.[name] || lock.dependencies[name].version !== `file:${directory}`))) {
+    throw new Error('Incomplete npm v2 lockfile legacy workspace metadata');
+  }
   return { entries, lock };
 };
+const runtimeInternal = (manifest) => Object.fromEntries(Object.entries({ ...manifest.dependencies, ...manifest.optionalDependencies }).filter(([name]) => names.has(name)));
 const updateInternal = (dependencies, version) => {
   for (const name of Object.keys(dependencies || {})) if (names.has(name)) dependencies[name] = version;
 };
@@ -53,6 +57,14 @@ export const readRelease = (root) => {
       }
       if (JSON.stringify(locked[group] || {}) !== JSON.stringify(manifest[group] || {})) throw new Error(`Lockfile ${group} differs for ${name}`);
     }
+    if (directory && lock.lockfileVersion === 2) {
+      for (const [dependency, range] of Object.entries(runtimeInternal(manifest))) {
+        if (lock.dependencies[name].requires?.[dependency] !== range) throw new Error(`Lockfile internal dependency is missing or differs for ${name}`);
+      }
+      for (const dependency of Object.keys(lock.dependencies[name].requires || {})) {
+        if (names.has(dependency) && !Object.hasOwn(runtimeInternal(manifest), dependency)) throw new Error(`Lockfile has an unexpected internal dependency for ${name}`);
+      }
+    }
     precedingPackages.add(name);
     for (const [dependency, range] of Object.entries(lock.dependencies?.[name]?.requires || {})) {
       if (names.has(dependency) && range !== version) throw new Error(`Lockfile internal dependency version differs for ${name}`);
@@ -74,7 +86,10 @@ export const setReleaseVersion = (root, version) => {
       if (manifest[group]) lock.packages[directory][group] = structuredClone(manifest[group]);
       else delete lock.packages[directory][group];
     }
-    updateInternal(lock.dependencies?.[name]?.requires, version);
+    if (directory && lock.lockfileVersion === 2) {
+      const externalRequires = Object.fromEntries(Object.entries(lock.dependencies[name].requires || {}).filter(([dependency]) => !names.has(dependency)));
+      lock.dependencies[name].requires = { ...externalRequires, ...runtimeInternal(manifest) };
+    }
     changes.set(join(root, directory, 'package.json'), manifest);
   }
   lock.version = version;
@@ -107,8 +122,9 @@ export const packRelease = (root, destination, { commit } = {}) => {
   const release = readRelease(root);
   const sourceCommit = commit || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
   assertCommit(sourceCommit);
-  if (existsSync(destination)) throw new Error(`Artifact destination already exists: ${destination}`);
-  mkdirSync(destination, { recursive: true });
+  mkdirSync(dirname(destination), { recursive: true });
+  // Only a successful exclusive leaf creation grants this invocation cleanup ownership.
+  mkdirSync(destination);
   try {
     const packed = release.packages.map(({ directory, name, version }) => {
       const output = JSON.parse(execFileSync('npm', ['pack', '--json', '--ignore-scripts', '--workspaces=false', '--pack-destination', resolve(destination)], {
@@ -138,6 +154,7 @@ export const readReleaseManifest = (path) => {
   for (const [index, item] of manifest.packages.entries()) {
     if (item.name !== packages[index][1] || item.version !== manifest.version || !validFilename(item.filename)) throw new Error('Invalid release manifest package order, version, or filename');
     const archive = join(dirname(path), item.filename);
+    if (!lstatSync(archive).isFile()) throw new Error(`Archive must be a regular file, not a symlink: ${item.filename}`);
     const hashes = archiveHashes(archive);
     if (hashes.integrity !== item.integrity || hashes.sha256 !== item.sha256) throw new Error(`Archive integrity mismatch for ${item.name}`);
     const metadata = JSON.parse(execFileSync('tar', ['-xOf', archive, 'package/package.json'], { encoding: 'utf8' }));

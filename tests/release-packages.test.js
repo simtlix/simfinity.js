@@ -1,7 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { packRelease, readRelease, readReleaseManifest, setReleaseVersion } from '../scripts/release-packages.js';
@@ -34,7 +36,7 @@ const fixture = () => {
   writeFileSync(join(root, 'package-lock.json'), `${JSON.stringify(lock, null, 2)}\n`.replaceAll('\n', '\r\n'));
   return root;
 };
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); syncBuiltinESMExports(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 describe('workspace release preparation', () => {
   it('updates every internal package and v2 lock dependency together without changing external resolutions', () => {
@@ -69,6 +71,42 @@ describe('workspace release preparation', () => {
     expect(readFileSync(join(root, 'package.json'))).toEqual(before);
   });
 
+  it('rejects a v2 lock with missing legacy workspace metadata before writing any versions', () => {
+    const root = fixture();
+    const path = join(root, 'package-lock.json');
+    const lock = json(path);
+    delete lock.dependencies['@simtlix/simfinity-mcp'];
+    writeFileSync(path, JSON.stringify(lock));
+    const before = readFileSync(join(root, 'package.json'));
+    expect(() => setReleaseVersion(root, '3.2.0')).toThrow(/lockfile/i);
+    expect(readFileSync(join(root, 'package.json'))).toEqual(before);
+  });
+
+  it('detects and repairs an omitted internal v2 requires edge', () => {
+    const root = fixture();
+    setReleaseVersion(root, '3.2.0');
+    const path = join(root, 'package-lock.json');
+    const lock = json(path);
+    delete lock.dependencies['@simtlix/simfinity-mcp'].requires['@simtlix/simfinity-core'];
+    writeFileSync(path, JSON.stringify(lock));
+    expect(() => readRelease(root)).toThrow(/lockfile/i);
+    setReleaseVersion(root, '3.2.1');
+    expect(json(path).dependencies['@simtlix/simfinity-mcp'].requires).toEqual({ '@simtlix/simfinity-core': '3.2.1' });
+  });
+
+  it('updates and validates v3 locks without adding a legacy dependencies section', () => {
+    const root = fixture();
+    const path = join(root, 'package-lock.json');
+    const lock = json(path);
+    lock.lockfileVersion = 3;
+    delete lock.dependencies;
+    writeFileSync(path, JSON.stringify(lock));
+    setReleaseVersion(root, '3.2.0');
+    expect(readRelease(root).version).toBe('3.2.0');
+    expect(json(path).dependencies).toBeUndefined();
+    expect(json(path).packages['packages/mcp'].dependencies).toEqual({ '@simtlix/simfinity-core': '3.2.0' });
+  });
+
   it('rejects drifting manifests and exact internal dependency versions before packing', () => {
     const root = fixture();
     setReleaseVersion(root, '3.2.0');
@@ -100,7 +138,14 @@ describe('workspace release preparation', () => {
       expect(item.sha256).toBe(createHash('sha256').update(readFileSync(archive)).digest('hex'));
     }
     expect(readReleaseManifest(join(destination, 'manifest.json'))).toEqual(manifest);
-    writeFileSync(join(destination, manifest.packages[0].filename), 'tampered');
+    const firstArchive = join(destination, manifest.packages[0].filename);
+    const outside = join(root, 'outside.tgz');
+    renameSync(firstArchive, outside);
+    symlinkSync(outside, firstArchive);
+    expect(() => readReleaseManifest(join(destination, 'manifest.json'))).toThrow(/symlink|regular file|containment/i);
+    rmSync(firstArchive);
+    renameSync(outside, firstArchive);
+    writeFileSync(firstArchive, 'tampered');
     expect(() => readReleaseManifest(join(destination, 'manifest.json'))).toThrow(/integrity/i);
   }, 30000);
 
@@ -122,6 +167,26 @@ describe('workspace release preparation', () => {
     writeFileSync(join(destination, 'keep.txt'), 'user file');
     expect(() => packRelease(root, destination, { commit: 'a'.repeat(40) })).toThrow(/exist/i);
     expect(readFileSync(join(destination, 'keep.txt'), 'utf8')).toBe('user file');
+  });
+
+  it('preserves another process directory when it appears at the exclusive creation boundary', () => {
+    const root = fixture();
+    setReleaseVersion(root, '3.2.0');
+    const destination = join(root, 'artifacts');
+    const originalMkdir = fs.mkdirSync;
+    let injected = false;
+    vi.spyOn(fs, 'mkdirSync').mockImplementation((path, options) => {
+      if (path === destination && !injected) {
+        injected = true;
+        originalMkdir(destination);
+        writeFileSync(join(destination, 'keep.txt'), 'other process');
+      }
+      return originalMkdir(path, options);
+    });
+    syncBuiltinESMExports();
+    expect(() => packRelease(root, destination, { commit: 'a'.repeat(40) })).toThrow(/exist/i);
+    expect(readFileSync(join(destination, 'keep.txt'), 'utf8')).toBe('other process');
+    expect(readdirSync(destination)).toEqual(['keep.txt']);
   });
 
   it('rejects manifest paths escaping the artifact directory before reading files', () => {
