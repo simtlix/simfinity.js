@@ -205,8 +205,10 @@ export const compileQuery = (models, database, plan, extra = null) => {
   if (plan.mode === 'count') select = 'count(*) AS size';
   else if (plan.mode === 'aggregate') {
     const groupPath = path(plan.aggregation.groupId, 'aggregate');
-    select = `${groupPath.sql} AS "groupId"`;
-    group = ` GROUP BY ${groupPath.sql}`;
+    // Mongo merges missing and explicit-null group keys, but retains nulls inside arrays.
+    const groupSQL = groupPath.json ? `NULLIF(${groupPath.sql}, 'null'::jsonb)` : groupPath.sql;
+    select = `${groupSQL} AS "groupId"`;
+    group = ` GROUP BY ${groupSQL}`;
     const outputs = [groupPath];
     plan.aggregation.facts.forEach((fact, index) => {
       const expression = path(fact.path, 'aggregate');

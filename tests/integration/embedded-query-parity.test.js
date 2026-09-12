@@ -257,4 +257,38 @@ describe.skipIf(!mongoUri || !postgresUri)('embedded query differential parity',
     await parity(`{items${i}_aggregate(bucket:{value:"date-only"},aggregation:{groupId:"a.dates",facts:[{operation:MIN,factName:"min",path:"dates"},{operation:MAX,factName:"max",path:"dates"}]}){groupId facts}}`);
   });
 
+  it.each([0, 1])('merges top-level null scalar-list group keys without collapsing nested array nulls (%s)', async (i) => {
+    const bucket = `null-groups-${i}`;
+    for (const b of backends) {
+      const type = b.fixture.roots[i];
+      const model = b.api.getModel(type);
+      await model.create({ key: 'null-parent', bucket, w: null });
+      await model.create({ key: 'null-terminal', bucket, w: { x: null, n: 1 } });
+      const terminal = await model.create({ key: 'missing-terminal', bucket, w: { n: 1 } });
+      const parent = await model.create({ key: 'missing-parent', bucket, w: null });
+      if (!b.api.initializeDatabase) {
+        await model.collection.updateOne({ _id: terminal._id }, { $unset: { 'w.x': '' } });
+        await model.collection.updateOne({ _id: parent._id }, { $unset: { w: '' } });
+      } else if (i === 0) {
+        await pool.query(`UPDATE "${namespace}"."${type.name}" SET w = w - 'x' WHERE id = $1`, [terminal.id]);
+        await pool.query(`UPDATE "${namespace}"."${type.name}" SET w = NULL, __field__w__present = false WHERE id = $1`, [parent.id]);
+      } else {
+        await pool.query(`UPDATE "${namespace}"."${type.name}__w" SET x = NULL, __field__x__present = false WHERE __owner_id = $1`, [terminal.id]);
+        await pool.query(`UPDATE "${namespace}"."${type.name}" SET __w_state = 'missing' WHERE id = $1`, [parent.id]);
+      }
+      for (const [index, x] of [[], [null], [1]].entries()) await model.create({ key: `array-${index}`, bucket, w: { x } });
+      const arrays = [null, [], [{ x: null }], [{ x: [] }], [{ x: [null] }], [{ x: [1, 2] }], [{ x: [1] }, { x: [2] }]];
+      for (const [index, a] of arrays.entries()) await model.create({ key: `nested-${index}`, bucket: `${bucket}-nested`, a });
+    }
+    const aggregate = (selectedBucket, path) => `{items${i}_aggregate(bucket:{value:"${selectedBucket}"},aggregation:{groupId:"${path}",facts:[{operation:COUNT,factName:"count",path:"id"},{operation:MIN,factName:"first",path:"key"}]},sort:{terms:[{field:"groupId",order:ASC},{field:"first",order:ASC}]}){groupId facts}}`;
+    const groups = (await parity(aggregate(bucket, 'w.x')))[`items${i}_aggregate`];
+    expect(groups).toHaveLength(4);
+    expect(groups.filter((row) => row.groupId === null)).toEqual([{ groupId: null, facts: { count: 4, first: 'missing-parent' } }]);
+    expect(groups.filter((row) => row.groupId !== null).map((row) => row.groupId)).toEqual([[], [null], [1]]);
+    const nested = (await parity(aggregate(`${bucket}-nested`, 'a.x')))[`items${i}_aggregate`];
+    expect(nested).toHaveLength(7);
+    expect(nested.map((row) => row.groupId)).toEqual(expect.arrayContaining([null, [], [null], [[]], [[null]], [[1, 2]], [[1], [2]]]));
+    expect(nested.every((row) => row.facts.count === 1)).toBe(true);
+  });
+
 });
