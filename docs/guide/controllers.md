@@ -7,12 +7,14 @@ description: Add application behavior around record creation, updates, and delet
 
 A controller attaches application behavior to a connected type. Use it to populate server-managed fields, validate ownership, or coordinate database writes in the mutation's transaction.
 
+Examples use the selected runtime from [database setup](./databases#runtime-setup-for-shared-examples). After `createSchema()`, PostgreSQL also requires awaited storage initialization before operations are served.
+
 ## Attach a controller
 
 This example assumes `SerieType` has read-only `createdAt` and `updatedAt` string fields. It sets timestamps without accepting those values from clients:
 
 ```javascript
-import * as simfinity from '@simtlix/simfinity-js';
+import { simfinity } from './runtime.js';
 
 const serieController = {
   onSaving: async (document) => {

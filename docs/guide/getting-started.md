@@ -1,9 +1,9 @@
 ---
-title: Quick start
+title: MongoDB quick start
 description: Build and run a complete Simfinity API with GraphQL Yoga, Mongoose, and a MongoDB replica set.
 ---
 
-# Quick start
+# MongoDB quick start
 
 Build a small series catalog with a working GraphQL endpoint. By the end, you will be able to create, query, update, and delete a serie, then call the same catalog through an MCP tool.
 
@@ -12,7 +12,9 @@ This page is the MongoDB starter. For UUID identities, generated PostgreSQL tabl
 
 ## Download the starter
 
-[Download the complete starter](/simfinity-series-starter.zip) and run `npm install` in the extracted folder. Then configure MongoDB in step 2 and run `npm start`. The files below are the same files included in the download.
+[Download the 3.2.0 preview kit](/preview/simfinity-3.2.0-preview.zip) and extract it. The `mongodb` starter contains the files shown below. Keep the adjacent `packages` directory, which supplies the verified Simfinity archives. See [package availability and checksums](./databases#download-the-preview).
+
+For the published MongoDB release, the [original 3.0.1 starter](/simfinity-series-starter.zip) remains available; its schema and server support this page's operations. The rest of this site documents 3.2.0 preview, which is not yet on npm.
 
 | Before you begin | You will build |
 | --- | --- |
@@ -26,15 +28,11 @@ This page is the MongoDB starter. For UUID identities, generated PostgreSQL tabl
 Use a supported Node.js LTS release and npm. The library itself requires Node.js `>=18.18.0`.
 
 ```sh
-mkdir series-api
-cd series-api
-npm init -y
-npm pkg set type=module
-npm pkg set scripts.start="node server.js"
-npm install @simtlix/simfinity-js graphql@^16.11.0 mongoose@^8.16.2 graphql-yoga@^5
+cd simfinity-3.2.0-preview/mongodb
+npm install
 ```
 
-GraphQL and Mongoose are peer dependencies. This guide uses Yoga as the HTTP server; Simfinity generates the schema supplied to it.
+The included `package.json` installs Simfinity core, MongoDB facade and MCP compatibility package from the local archives. GraphQL and Mongoose are peer dependencies. This guide uses Yoga as the HTTP server; Simfinity generates the schema supplied to it. Then configure MongoDB below and run `npm start`.
 
 ## 2. Start MongoDB
 
@@ -69,7 +67,7 @@ This Docker example binds MongoDB to your machine's loopback interface and does 
 Keep database initialization and schema registration in `schema.js`. Both the HTTP server and MCP entry point import this same file. The embedded `Season` type adds a nested array inside each serie document.
 
 ```text
-series-api/
+mongodb/
   package.json
   schema.js   # database + types + generated schema
   server.js   # GraphQL HTTP endpoint

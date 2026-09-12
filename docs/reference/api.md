@@ -13,6 +13,8 @@ import * as simfinity from '@simtlix/simfinity-js';
 
 For PostgreSQL, import `createPostgres` from `@simtlix/simfinity-postgres` and use the returned runtime instance. Both packages provide named exports and TypeScript declarations. Registrations and middleware belong to a runtime instance; register application types once during startup.
 
+Shared examples can import the selected instance from [your application’s runtime module](/guide/databases#runtime-setup-for-shared-examples). Build the schema once after registrations; PostgreSQL must initialize its generated storage before serving operations.
+
 ## Find an operation
 
 | Task | API | Result |
@@ -116,7 +118,7 @@ The callback runs as `callback(input, session, context)` inside the mutation tra
 
 ```javascript
 import { GraphQLInputObjectType, GraphQLNonNull, GraphQLString } from 'graphql';
-import * as simfinity from '@simtlix/simfinity-js';
+import { simfinity } from './runtime.js';
 
 const ImportSerieInput = new GraphQLInputObjectType({
   name: 'ImportSerieInput',
@@ -169,9 +171,9 @@ Runs create materialization, field/type validators, collection processing, state
 
 Without `session`, `saveObject()` owns the backend transaction, including bounded retries and cleanup. Parent and nested writes commit or roll back together. MongoDB requires a transaction-capable deployment; PostgreSQL uses repeatable-read isolation.
 
-With `session`, the caller must already have an active Simfinity session belonging to the same backend instance. `saveObject()` only participates: it never starts, commits, aborts, retries, or ends the caller's transaction/session. The caller must handle errors and decide whether to commit or abort. An inactive supplied session throws `ACTIVE_TRANSACTION_REQUIRED` (400) before writes. PostgreSQL also rejects arbitrary `pg.Client` objects and sessions from another runtime. Pass the provided session inside a controller or custom mutation to share its transaction.
+With `session`, the caller must already have an active session valid for the selected backend. `saveObject()` only participates: it never starts, commits, aborts, retries, or ends the caller's transaction/session. The caller must handle errors and decide whether to commit or abort. MongoDB requires an active native Mongoose session and throws `ACTIVE_TRANSACTION_REQUIRED` (400) for an inactive one. PostgreSQL requires an active Simfinity session from the same runtime and throws `INVALID_SESSION` for inactive sessions, arbitrary `pg.Client` objects, or sessions from another runtime. Pass the provided session inside a controller or custom mutation to share its transaction.
 
-Owned transactions retry transient failures up to five times after the first attempt. Uncertain commit results retry only commit up to five times; if still uncertain, the operation may already be committed. See [transaction boundaries](../guide/mutations#transaction-boundaries). Hooks run before commit and may repeat on a transient transaction retry. Calling `saveObject()` directly bypasses GraphQL input coercion, field authorization, and global middleware; validate and authorize programmatic callers accordingly.
+MongoDB-owned transactions retry transient failures up to five times after the first attempt; uncertain commit results retry only commit up to five times. PostgreSQL retries confirmed serialization failures and deadlocks, but never retries an unknown commit outcome. In either case an uncertain commit may already have succeeded. See [transaction boundaries](../guide/mutations#transaction-boundaries). Hooks run before commit and may repeat on a transient transaction retry. Calling `saveObject()` directly bypasses GraphQL input coercion, field authorization, and global middleware; validate and authorize programmatic callers accordingly.
 
 ## Configuration and helpers
 

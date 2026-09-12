@@ -1,8 +1,15 @@
+---
+title: Database compatibility contract
+description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.2.0 preview.
+---
+
 # Database compatibility contract
 
 This ledger records the v3.2.0 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
 
-Set `SIMFINITY_MONGODB_URI` and `SIMFINITY_POSTGRES_URI` to disposable databases for the cross-backend suites. Set `SIMFINITY_TEST_MONGODB_URI` to a separate disposable MongoDB database for upstream opt-in regressions. Mongo setup drops its configured databases, so these URIs must never identify application data. When a variable is absent, its integration suites are reported as skipped.
+The test paths below refer to preview source commit `d98197387543d185fc79d5c31757b12e07ef2436`, not the current public `master` checkout. To try the API, use the [verified preview starters](guide/databases.md#download-the-preview).
+
+When working with that preview source, set `SIMFINITY_MONGODB_URI` and `SIMFINITY_POSTGRES_URI` to disposable databases for the cross-backend suites. Set `SIMFINITY_TEST_MONGODB_URI` to a separate disposable MongoDB database for upstream opt-in regressions. Mongo setup drops its configured databases, so these URIs must never identify application data. When a variable is absent, its integration suites are reported as skipped.
 
 ## MongoDB contract
 

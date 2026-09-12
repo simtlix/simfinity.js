@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitepress';
 import { readFileSync } from 'node:fs';
 
-const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+const { version } = JSON.parse(readFileSync(new URL('../public/preview/manifest.json', import.meta.url), 'utf8'));
 const repository = 'https://github.com/simtlix/simfinity.js';
 const base = `/${(process.env.DOCS_BASE_PATH || '').replace(/^\/+|\/+$/g, '')}/`.replace('//', '/');
 const siteUrl = process.env.DOCS_SITE_URL;
@@ -10,7 +10,7 @@ export default defineConfig({
   title: 'Simfinity.js',
   description: 'Define your GraphQL types. Generate MongoDB or PostgreSQL storage, queries, mutations, relationships, and optional MCP tools with Simfinity.js.',
   lang: 'en-US',
-  srcExclude: ['public/**', 'superpowers/**'],
+  srcExclude: ['public/**', 'superpowers/**', 'preview/**'],
   base,
   lastUpdated: true,
   head: [
@@ -43,6 +43,11 @@ export default defineConfig({
     siteTitle: 'simfinity.js',
     nav: [
       { text: 'Documentation', link: '/guide/introduction', activeMatch: '/guide/' },
+      { text: 'Databases', items: [
+        { text: 'Choose a database', link: '/guide/databases' },
+        { text: 'MongoDB', link: '/guide/getting-started' },
+        { text: 'PostgreSQL', link: '/guide/postgresql' },
+      ] },
       { text: 'API reference', link: '/reference/api', activeMatch: '/reference/' },
       { text: 'Resources', items: [
         { text: 'Example project', link: 'https://github.com/simtlix/series-sample' },
@@ -50,7 +55,8 @@ export default defineConfig({
         { text: 'Contributing', link: '/resources/contributing' },
         { text: 'Troubleshooting', link: '/resources/troubleshooting' },
       ] },
-      { text: `v${version}`, items: [
+      { text: `v${version} preview`, items: [
+        { text: 'Download preview & compatibility', link: '/guide/databases#download-the-preview' },
         { text: 'Release history', link: `${repository}/releases` },
         { text: 'Package on npm', link: 'https://www.npmjs.com/package/@simtlix/simfinity-js' },
       ] },
@@ -58,6 +64,7 @@ export default defineConfig({
     sidebar: [
       { text: 'Start here', items: [
         { text: 'Introduction', link: '/guide/introduction' },
+        { text: 'Choose a database', link: '/guide/databases' },
         { text: 'Is Simfinity a fit?', link: '/guide/choosing-simfinity' },
         { text: 'MongoDB quick start', link: '/guide/getting-started' },
         { text: 'PostgreSQL quick start', link: '/guide/postgresql' },

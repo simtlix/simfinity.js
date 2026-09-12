@@ -9,11 +9,17 @@ Simfinity turns JavaScript `GraphQLObjectType` definitions into a GraphQL API ba
 
 You keep the GraphQL schema as the center of your application. Validation, lifecycle hooks, authorization, and state transitions provide places to add the behavior that makes your API specific to your product.
 
+::: tip Choose your database
+Start with [MongoDB](./getting-started) or [PostgreSQL](./postgresql). These guides cover the 3.2.0 preview; [download the packages and compare storage semantics](./databases). Shared examples use `simfinity` for the selected runtime: the MongoDB namespace or the instance returned by `createPostgres()`.
+:::
+
+Examples use the selected runtime from [database setup](./databases#runtime-setup-for-shared-examples). After `createSchema()`, PostgreSQL also requires awaited storage initialization before operations are served.
+
 ## From a type to an API
 
 ```javascript
 import { GraphQLID, GraphQLObjectType, GraphQLString } from 'graphql';
-import * as simfinity from '@simtlix/simfinity-js';
+import { simfinity } from './runtime.js';
 
 const SerieType = new GraphQLObjectType({
   name: 'Serie',

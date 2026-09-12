@@ -9,6 +9,8 @@ A GraphQL object type is the starting point for both your API and generated stor
 
 <DomainDiagram kind="schema" />
 
+Examples use the selected runtime from [database setup](./databases#runtime-setup-for-shared-examples). After `createSchema()`, PostgreSQL also requires awaited storage initialization before operations are served.
+
 ## Define an entity
 
 ```javascript
@@ -20,7 +22,7 @@ import {
   GraphQLObjectType,
   GraphQLString,
 } from 'graphql';
-import * as simfinity from '@simtlix/simfinity-js';
+import { simfinity } from './runtime.js';
 
 const SerieType = new GraphQLObjectType({
   name: 'Serie',

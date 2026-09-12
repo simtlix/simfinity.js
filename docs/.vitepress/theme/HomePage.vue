@@ -27,6 +27,10 @@ const activeCapability = ref('01');
 let capabilityObserver;
 let heroResizeObserver;
 const activeTool = ref('series');
+const database = ref('mongodb');
+const databaseGuide = computed(() => database.value === 'postgres' ? '/guide/postgresql.html' : '/guide/getting-started.html');
+const databaseName = computed(() => database.value === 'postgres' ? 'PostgreSQL' : 'MongoDB');
+const installCommand = computed(() => `cd simfinity-3.2.0-preview/${database.value} && npm install`);
 const toolExamples = [
   { name: 'series', kind: 'QUERY', description: 'Search your catalog with typed filters, sorting, and pagination.', link: '/guide/queries.html' },
   { name: 'series_aggregate', kind: 'AGGREGATE', description: 'Group your data and calculate counts, sums, and averages.', link: '/reference/aggregation.html' },
@@ -34,6 +38,11 @@ const toolExamples = [
 ];
 const copyState = ref('Copy install command');
 let copyTimer;
+function selectDatabase(value) {
+  database.value = value;
+  clearTimeout(copyTimer);
+  copyState.value = 'Copy install command';
+}
 const capabilities = [
   { id: '01', category: 'MODEL', title: 'Relationships, already connected.', description: 'Embedded documents. References. Collections. Describe the connections in your domain and let Simfinity generate the resolvers.', link: '/guide/relationships.html', cta: 'Connect your data', symbol: 'relation' },
   { id: '02', category: 'QUERY', title: 'Questions without the boilerplate.', description: 'Compose nested filters, logical expressions, sorting, pagination, and aggregations through a familiar GraphQL interface.', link: '/guide/queries.html', cta: 'Explore queries', symbol: 'query' },
@@ -43,7 +52,7 @@ const capabilities = [
 
 async function copyInstall() {
   try {
-    await navigator.clipboard.writeText('npm i @simtlix/simfinity-js graphql mongoose');
+    await navigator.clipboard.writeText(installCommand.value);
     copyState.value = 'Copied!';
   } catch {
     copyState.value = 'Select the command to copy';
@@ -171,20 +180,27 @@ onUnmounted(() => {
         <div class="hero-copy" :inert="heroFocused" :aria-hidden="heroFocused">
           <p class="hero-overline"><span class="hero-wordmark">simfinity<span>.js</span></span><span class="overline-separator">/</span><span>THE GRAPHQL FRAMEWORK</span></p>
           <h1 id="hero-title"><span>Define once.</span><span class="hero-title-accent">Build beyond<span class="title-period">.</span></span></h1>
-          <p class="hero-description">Define your GraphQL types. Generate database storage,<br class="desktop-break"> queries, mutations, and optional MCP tools from one schema.</p>
+          <p class="hero-description">Define your GraphQL types. Build on MongoDB or PostgreSQL<br class="desktop-break"> with generated queries, mutations, and optional MCP tools.</p>
+          <div class="database-choice" role="group" aria-label="Choose a database guide">
+            <button type="button" :aria-pressed="database === 'mongodb'" @click="selectDatabase('mongodb')">MongoDB</button>
+            <button type="button" :aria-pressed="database === 'postgres'" @click="selectDatabase('postgres')">PostgreSQL</button>
+            <a :href="withBase('/guide/databases.html')">Compare databases <span aria-hidden="true">&#8599;</span></a>
+          </div>
           <div class="hero-actions">
-            <a class="sim-button primary" :href="withBase('/guide/getting-started.html')">Start building <span aria-hidden="true">&#8599;</span></a>
+            <a class="sim-button primary" :href="withBase(databaseGuide)">Start with {{ databaseName }} <span aria-hidden="true">&#8599;</span></a>
             <a class="text-link" :href="withBase('/guide/introduction.html')">Read the docs <span aria-hidden="true">&#8599;</span></a>
           </div>
+          <p class="preview-download"><a :href="withBase('/preview/simfinity-3.2.0-preview.zip')" download>Download 3.2.0 preview</a><span>Unzip, then run:</span></p>
           <div class="install-command">
             <span class="terminal-prompt" aria-hidden="true">$</span>
-            <code>npm i @simtlix/simfinity-js graphql mongoose</code>
+            <code>{{ installCommand }}</code>
             <button type="button" :aria-label="copyState" :title="copyState" @click="copyInstall">
               <svg v-if="copyState !== 'Copied!'" viewBox="0 0 20 20" width="16" height="16" fill="none" aria-hidden="true"><rect x="7" y="7" width="9" height="10" rx="2" stroke="currentColor" stroke-width="1.4"/><path d="M12 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" stroke="currentColor" stroke-width="1.4"/></svg>
               <span v-else aria-hidden="true">&#10003;</span>
             </button>
             <span class="copy-feedback" role="status">{{ copyState === 'Copy install command' ? '' : copyState }}</span>
           </div>
+          <p class="database-note">Choose once when setting up your app. <a :href="withBase('/resources/compatibility.html')">Preview packages are not yet on npm.</a></p>
         </div>
         <div class="hero-system"><div class="hero-camera"><SchemaGraph ref="heroGraph" :active="activeNode" :focused="heroFocused" :phase="heroPhase" :light="!isDark" @select="selectNode" /></div></div>
         <div class="hero-explorer-controls" :inert="!heroFocused" :aria-hidden="!heroFocused">
@@ -216,7 +232,7 @@ onUnmounted(() => {
           <h2 id="workflow-title">A type is just<br><span class="muted-heading">the beginning.</span></h2>
           <p>One series catalog. Three ways to work with it.<br><span>Add a relationship and follow what changes.</span></p>
         </div>
-        <CatalogExplorer v-model:stage="activeTab" v-model:related="includeSeasons" />
+        <CatalogExplorer v-model:stage="activeTab" v-model:related="includeSeasons" :database="database" />
       </div>
     </section>
 
@@ -244,7 +260,7 @@ onUnmounted(() => {
 
     <section class="mcp-section" aria-labelledby="mcp-title">
       <div class="sim-section mcp-inner">
-        <div class="mcp-copy reveal"><p class="section-eyebrow"><span class="blue-dot"></span> 03 / A NEW WAY TO CONNECT</p><h2 id="mcp-title">Your API.<br><span class="mcp-title-line">Meet <span class="mcp-ai">AI.</span></span></h2><p>Your schema already knows your data.<br>Now your AI tools can, too. Generate typed MCP<br class="desktop-break"> tools from the same GraphQL API.</p><a class="text-link" :href="withBase('/guide/mcp.html')">Explore MCP integration <span aria-hidden="true">&#8599;</span></a></div>
+        <div class="mcp-copy reveal"><p class="section-eyebrow"><span class="blue-dot"></span> 03 / A NEW WAY TO CONNECT</p><h2 id="mcp-title">Your API.<br><span class="mcp-title-line">Meet <span class="mcp-ai">AI.</span></span></h2><p>Your schema already knows your data.<br>Now your AI tools can, too. Generate typed MCP<br class="desktop-break"> tools from the same GraphQL API, on either database.</p><a class="text-link" :href="withBase('/guide/mcp.html')">Explore MCP integration <span aria-hidden="true">&#8599;</span></a></div>
         <div class="mcp-terminal reveal" data-parallax="24" data-spotlight>
           <div class="terminal-heading"><span class="blue-dot"></span><span>schema &rarr; tools</span><span>MCP</span></div>
           <div class="terminal-source"><span class="terminal-label">YOUR EXISTING SCHEMA</span><code>generateMCPTools(schema)</code></div>
@@ -261,7 +277,7 @@ onUnmounted(() => {
         <div class="chapter-label reveal"><span>04 / FIND YOUR NEXT CONNECTION</span><span class="chapter-line"></span><span>THE DOCUMENTATION</span></div>
         <div class="section-heading reveal"><h2 id="learning-title">A clear path.<br><span class="muted-heading">At every step.</span></h2><p>From the first query to the finer details.<br>Everything you need to keep building.</p></div>
         <div class="learning-links" data-line-reveal>
-          <a class="reveal" :href="withBase('/guide/getting-started.html')"><span class="learning-number">01</span><div><span class="learning-label">START HERE</span><h3>Your first API</h3><p>A downloadable starter, a working query,<br>and the response to expect.</p></div><span class="learning-arrow" aria-hidden="true">&#8599;</span></a>
+          <a class="reveal" :href="withBase('/guide/databases.html')"><span class="learning-number">01</span><div><span class="learning-label">START HERE</span><h3>Your first API</h3><p>A downloadable starter, a working query,<br>and the response to expect.</p></div><span class="learning-arrow" aria-hidden="true">&#8599;</span></a>
           <a class="reveal" :href="withBase('/reference/api.html')"><span class="learning-number">02</span><div><span class="learning-label">GET SPECIFIC</span><h3>Know the details</h3><p>Every function, every option.<br>Find the exact API.</p></div><span class="learning-arrow" aria-hidden="true">&#8599;</span></a>
           <a class="reveal" href="https://github.com/simtlix/series-sample" target="_blank" rel="noreferrer"><span class="learning-number">03</span><div><span class="learning-label">SEE IT WORK</span><h3>A real application</h3><p>Explore the Series sample.<br>Connect the dots.</p></div><span class="learning-arrow" aria-hidden="true">&#8599;</span></a>
         </div>
@@ -270,7 +286,7 @@ onUnmounted(() => {
 
     <section class="final-section" aria-labelledby="final-title">
       <div class="final-connection" aria-hidden="true"><span></span><span></span><span></span></div>
-      <div class="sim-section final-inner reveal"><p class="section-eyebrow">YOUR NEXT IDEA STARTS WITH A CONNECTION.</p><h2 id="final-title">What will you<br><span>connect next?</span></h2><a class="sim-button primary" :href="withBase('/guide/getting-started.html')">Build with Simfinity <span aria-hidden="true">&#8599;</span></a><div class="final-meta"><span>OPEN SOURCE</span><span>JAVASCRIPT</span><span>APACHE 2.0</span></div><div class="adoption-links"><a :href="withBase('/guide/choosing-simfinity.html')">Is Simfinity a fit?</a><a :href="withBase('/resources/compatibility.html')">Compatibility & releases</a><a :href="withBase('/guide/getting-started.html#download-the-starter')">Download the starter</a></div></div>
+      <div class="sim-section final-inner reveal"><p class="section-eyebrow">YOUR NEXT IDEA STARTS WITH A CONNECTION.</p><h2 id="final-title">What will you<br><span>connect next?</span></h2><a class="sim-button primary" :href="withBase('/guide/databases.html')">Build with Simfinity <span aria-hidden="true">&#8599;</span></a><div class="final-meta"><span>OPEN SOURCE</span><span>JAVASCRIPT</span><span>APACHE 2.0</span></div><div class="adoption-links"><a :href="withBase('/guide/choosing-simfinity.html')">Is Simfinity a fit?</a><a :href="withBase('/resources/compatibility.html')">Compatibility & releases</a><a :href="withBase('/guide/databases.html#download-the-preview')">Download the starter</a></div></div>
       <div class="brand-watermark" data-parallax="38" aria-hidden="true">simfinity.js</div>
     </section>
   </main>

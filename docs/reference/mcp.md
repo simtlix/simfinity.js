@@ -21,8 +21,13 @@ Only the transport/server factories require `@modelcontextprotocol/sdk`. Definit
 
 ### Generated result
 
+The examples use the optional MCP package with an initialized schema from either backend:
+
 ```javascript
-const { tools, callTool, getOperation } = simfinity.generateMCPTools(schema);
+import * as mcp from '@simtlix/simfinity-mcp';
+import { schema } from './schema.js';
+
+const { tools, callTool, getOperation } = mcp.generateMCPTools(schema);
 
 const source = getOperation('series');
 const result = await callTool('series', {
@@ -59,7 +64,7 @@ An `includeTypes` allowlist also excludes tools without an object entity type. E
 ## Tool overrides
 
 ```javascript
-const generated = simfinity.generateMCPTools(schema, {
+const generated = mcp.generateMCPTools(schema, {
   toolNamePrefix: 'catalog_',
   toolOverrides: {
     catalog_series: {
@@ -100,7 +105,7 @@ The size cap covers the logical payload, including errors and partial data. It e
 MCP middleware receives `call = { name, args, extra, kind, operation }`. It may mutate or replace `call.args`, return a tool result directly, or surround the executor using `next()`.
 
 ```javascript
-const generated = simfinity.generateMCPTools(schema, {
+const generated = mcp.generateMCPTools(schema, {
   toolMiddleware: [
     async (call, next) => {
       const started = Date.now();
@@ -125,7 +130,7 @@ Pass [authorization plugins](/guide/authorization) in `schemaPlugins` for standa
 ### Remote execution
 
 ```javascript
-const generated = simfinity.generateMCPTools(schema, {
+const generated = mcp.generateMCPTools(schema, {
   execution: {
     mode: 'remote',
     endpoint: 'https://api.example.com/graphql',

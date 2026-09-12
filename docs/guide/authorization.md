@@ -11,14 +11,15 @@ Use the authorization plugin to decide who may execute an operation or read a fi
 
 ## Add the Envelop plugin
 
-This example exposes the series catalog to authenticated users and restricts writes to editors. It assumes a connected `Serie` type with the endpoints `serie` and `series`.
+This example exposes the series catalog to authenticated users and restricts writes to editors. It assumes a connected `Serie` type with the endpoints `serie` and `series`. Export the initialized schema from `schema.js` for either database. For PostgreSQL, await `initializeDatabase()` before serving requests, as in the [PostgreSQL quick start](./postgresql).
 
 ```javascript
 import { createYoga } from 'graphql-yoga';
-import * as simfinity from '@simtlix/simfinity-js';
+import * as auth from '@simtlix/simfinity-core/auth';
+import { schema } from './schema.js';
 import { authenticate } from './authenticate.js';
 
-const { allow, requireAuth, requireRole, createAuthPlugin } = simfinity.auth;
+const { allow, requireAuth, requireRole, createAuthPlugin } = auth;
 
 const permissions = {
   RootQueryType: {
@@ -37,7 +38,7 @@ const permissions = {
 };
 
 const yoga = createYoga({
-  schema: simfinity.createSchema(),
+  schema,
   context: async ({ request }) => ({
     user: await authenticate(request),
   }),
@@ -63,7 +64,7 @@ Permission maps must be plain objects or objects with a null prototype; only own
 
 ## Rule helpers
 
-All helpers below are available on `simfinity.auth`.
+All helpers below are exported by `@simtlix/simfinity-core/auth` and are also available on the selected runtime’s `auth` namespace.
 
 | Helper | Behavior |
 | --- | --- |
@@ -81,7 +82,7 @@ All helpers below are available on `simfinity.auth`.
 Invalid required roles or permissions (including `null`, `undefined`, empty strings, empty arrays, or non-string entries) throw `TypeError` when the helper is created. Malformed permission claims deny access: use `['posts:read']`, not the string `'posts:read'`. Substrings and embedded wildcard characters such as `'posts:*'` do not grant other permissions. Composition helpers and `createRule` require function arguments; `anyRule` may continue after a denied result or error to another granting rule.
 
 ```javascript
-const canEdit = simfinity.auth.requireRole(['admin', 'editor'], {
+const canEdit = auth.requireRole(['admin', 'editor'], {
   userPath: 'auth.user',
   rolePath: 'profile.role',
 });

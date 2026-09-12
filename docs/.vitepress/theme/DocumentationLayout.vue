@@ -1,7 +1,7 @@
 <script setup>
 import { computed } from 'vue';
 import DefaultTheme from 'vitepress/theme';
-import { useData } from 'vitepress';
+import { useData, withBase } from 'vitepress';
 
 const { page } = useData();
 const issueLink = computed(() => {
@@ -15,6 +15,9 @@ const issueLink = computed(() => {
 
 <template>
   <DefaultTheme.Layout>
+    <template #doc-before>
+      <p class="docs-version-note">3.2.0 preview · MongoDB & PostgreSQL. <a :href="withBase('/guide/databases.html#download-the-preview')">Download packages and check availability.</a></p>
+    </template>
     <template #doc-footer-before>
       <div class="docs-feedback"><span>Help improve this page.</span><a :href="issueLink" target="_blank" rel="noreferrer">Report a documentation issue <span aria-hidden="true">↗</span></a></div>
     </template>
@@ -22,6 +25,7 @@ const issueLink = computed(() => {
 </template>
 
 <style scoped>
+.docs-version-note { margin: 0 0 24px; padding: 12px 16px; border: 1px solid var(--vp-c-divider); border-radius: 8px; background: var(--vp-c-bg-soft); color: var(--vp-c-text-2); font-size: 13px; line-height: 1.6; }
 .docs-feedback { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; border-top: 1px solid var(--reading-rule); padding-top: 22px; margin-top: 40px; font-size: 12px; color: var(--reading-muted); }
 a { color: var(--reading-blue); }
 a:hover { text-decoration: underline; text-underline-offset: 4px; }

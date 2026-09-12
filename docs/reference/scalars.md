@@ -8,15 +8,15 @@ description: Built-in validated scalars and factories for reusable domain-specif
 Use validated scalars when a constraint belongs to the GraphQL value itself, such as an email address or a bounded rating. They validate variables, inline literals, and serialized output. Use [field validators](/guide/validation) when the constraint belongs to an operation or field.
 
 ```javascript
-import * as simfinity from '@simtlix/simfinity-js';
+import { scalars } from '@simtlix/simfinity-core';
 
-const { EmailScalar, createBoundedFloatScalar } = simfinity.scalars;
+const { EmailScalar, createBoundedFloatScalar } = scalars;
 const RatingScalar = createBoundedFloatScalar('Rating', 0, 10);
 ```
 
 ## Built-in scalars
 
-| Export on `simfinity.scalars` | GraphQL name | Validation |
+| Export on `scalars` | GraphQL name | Validation |
 | --- | --- | --- |
 | `EmailScalar` | `Email_String` | Basic email shape: non-whitespace text around `@` and a dotted domain. |
 | `URLScalar` | `URL_String` | Accepted by JavaScript's `URL` constructor. |
@@ -38,10 +38,10 @@ Pass `undefined` for a bound you do not need. Reuse a single scalar instance for
 
 ```javascript
 import { GraphQLObjectType, GraphQLID } from 'graphql';
-import * as simfinity from '@simtlix/simfinity-js';
+import { scalars } from '@simtlix/simfinity-core';
 
-const TitleScalar = simfinity.scalars.createBoundedStringScalar('Title', 2, 120);
-const SlugScalar = simfinity.scalars.createPatternStringScalar(
+const TitleScalar = scalars.createBoundedStringScalar('Title', 2, 120);
+const SlugScalar = scalars.createPatternStringScalar(
   'Slug',
   /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
   'Use lowercase words separated by hyphens',
@@ -63,7 +63,7 @@ This factory is a named package export:
 
 ```javascript
 import { GraphQLString } from 'graphql';
-import { createValidatedScalar } from '@simtlix/simfinity-js';
+import { createValidatedScalar } from '@simtlix/simfinity-core';
 
 const HTTPSURLScalar = createValidatedScalar(
   'HTTPSURL',

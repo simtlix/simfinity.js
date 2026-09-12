@@ -9,13 +9,15 @@ Scope functions add server-controlled filters before generated root queries and 
 
 <DomainDiagram kind="access" />
 
+Examples use the selected runtime from [database setup](./databases#runtime-setup-for-shared-examples). After `createSchema()`, PostgreSQL also requires awaited storage initialization before operations are served.
+
 ## Define a shared scope
 
 This example declares a `tenantId` field and applies the same restriction to all three root query operations. The tenant ID must come from authenticated server context.
 
 ```javascript
 import { GraphQLObjectType, GraphQLID, GraphQLString } from 'graphql';
-import * as simfinity from '@simtlix/simfinity-js';
+import { simfinity } from './runtime.js';
 
 const tenantScope = async ({ args, context }) => {
   if (!context?.user?.tenantId) {

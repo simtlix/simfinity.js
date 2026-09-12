@@ -151,7 +151,7 @@ html:not(.dark) .sim-hero[data-node='mcp'] { --hero-focus: #4266b3; --hero-mater
 @keyframes orbit-current { to { rotate: 360deg; } }
 /* A single stage owns the height in overview, focus, and both transitions. */
 @media (min-width: 901px) {
-  .sim-hero { height: max(520px, calc(100svh - var(--vp-nav-height))); }
+  .sim-hero { height: max(660px, calc(100svh - var(--vp-nav-height))); }
   .sim-hero .hero-inner { height: 100%; grid-template-rows: minmax(0, 1fr); align-items: center; }
   .sim-hero .hero-copy { padding-top: 0; }
   .sim-hero .hero-system { align-self: center; margin-block: 0; }
@@ -166,7 +166,7 @@ html:not(.dark) .sim-hero[data-node='mcp'] { --hero-focus: #4266b3; --hero-mater
 @media (max-width: 900px) {
   .sim-hero { min-height: 0; }
   .sim-hero .hero-inner { min-height: 0; padding-top: 40px; padding-bottom: 0; }
-  .sim-hero .hero-system { grid-area: 2 / 1; transform-origin: top left; }
+  .sim-hero .hero-system { grid-area: 2 / 1; margin-top: 24px; transform-origin: top left; }
   .sim-hero.hero-focused .hero-inner { grid-template-columns: minmax(0, 1fr); padding-top: 62px; padding-bottom: 22px; }
   .sim-hero.hero-focused .hero-copy { display: none; }
   .sim-hero.hero-focused .hero-system { grid-area: 1 / 1; transform: none; width: 100%; max-width: 360px; margin: 0 auto; justify-self: center; }

@@ -50,7 +50,7 @@ export const heroCapabilities = [
     description: 'Turn selected GraphQL operations into typed tools for AI clients, using your existing schema.',
     features: ['Typed tool inputs', 'Operation selection', 'Shared GraphQL schema'],
     file: 'mcp.js · expose read tools',
-    code: 'const { tools, callTool } =\n  simfinity.generateMCPTools(schema, {\n    exclude: \'mutation\',\n  });',
+    code: 'import { generateMCPTools } from \'@simtlix/simfinity-mcp\';\n\nconst { tools, callTool } =\n  generateMCPTools(schema, {\n    exclude: \'mutation\',\n  });',
     link: '/guide/mcp.html', cta: 'Explore MCP integration',
   },
 ];
