@@ -1,6 +1,11 @@
+---
+title: PostgreSQL storage reference
+description: PostgreSQL types, generated foreign keys, embedded storage, schema validation, native APIs, and compatibility boundaries in Simfinity 3.2.0 preview.
+---
+
 # PostgreSQL support
 
-Simfinity 3.2.0 adds PostgreSQL schema generation and GraphQL execution through the shared runtime. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.2.0 is prepared as an unpublished local release; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
+Simfinity 3.2.0 adds PostgreSQL schema generation and GraphQL execution through the shared runtime. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.2.0 is distributed as an unpublished preview; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
 
 Start with the canonical [PostgreSQL quick start](guide/postgresql.md) for a complete Yoga server, initialization choice, controller/session example, and pool shutdown. This page is the detailed storage and compatibility reference.
 
@@ -8,7 +13,7 @@ The intended backend choice is permanent application configuration. There is no 
 
 ## Packages and local setup
 
-Run `npm install` at the repository root to install the workspaces:
+Use the [preview kit](guide/databases.md#download-the-preview) and run `npm install` in its `postgres` starter folder. The public `master` checkout does not yet contain the preview runtime workspaces. The kit installs these packages from its verified archives:
 
 | Package | Current exports and dependencies |
 | --- | --- |
@@ -17,11 +22,11 @@ Run `npm install` at the repository root to install the workspaces:
 | `@simtlix/simfinity-postgres` | `createPostgres`, default-module runtime facade, schema description/DDL/initialization, shared scalar factory and errors. Depends on core and `pg`; GraphQL peer. No MongoDB, Mongoose or MCP dependency. |
 | `@simtlix/simfinity-mcp` | Optional database-independent tool generation and transports. Depends on core; the MCP SDK is an optional peer. |
 
-All four packages are versioned together at local version `3.2.0` with exact internal dependencies and have not been published. Release archives and publication use the order core, MCP, PostgreSQL, then the root MongoDB facade. `npm run test:packages` packs and installs five standalone consumer cases, including MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; development and CI use Node.js 24 for Vitest 4. PostgreSQL requires version 15 or later.
+All four packages are versioned together at local version `3.2.0` with exact internal dependencies and have not been published. The verified package set includes five standalone consumer checks, covering MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; the starter requires Node.js 22+. PostgreSQL 15, 16, and 18 are covered by the preview verification.
 
 ## Executable example
 
-Run this from a file in the repository after `npm install`. Set `DATABASE_URL` to a development PostgreSQL instance. Register every object type used by generated GraphQL inputs and relations. `AuthorType` has a model even though it is registered without a root endpoint.
+Run this from a new file in the extracted `postgres` starter folder after `npm install`. Set `DATABASE_URL` to a development PostgreSQL instance. Register every object type used by generated GraphQL inputs and relations. `AuthorType` has a model even though it is registered without a root endpoint.
 
 ```javascript
 import pg from 'pg';
@@ -183,19 +188,9 @@ Startup validation describes the catalog at that time. It is not continuous moni
 
 ## Verification and remaining boundaries
 
-```bash
-npm run lint
-npm test
-npm run test:packages
-TZ='America/New_York' \
-SIMFINITY_MONGODB_URI='mongodb://.../disposable_contract_db?replicaSet=rs0&directConnection=true' \
-SIMFINITY_TEST_MONGODB_URI='mongodb://.../disposable_upstream_db?replicaSet=rs0&directConnection=true' \
-SIMFINITY_POSTGRES_URI='postgresql://.../disposable_db' npm test
-```
+The preview archives were verified against real databases and standalone package consumers. The test names in the [compatibility ledger](compatibility.md) identify evidence from the preview source revision; they are not test commands available in the current `master` checkout.
 
-MongoDB tests drop the configured databases; PostgreSQL tests create and remove private random schemas. Use separate disposable MongoDB names for the shared contract and upstream regression suites. Without the corresponding environment variables, integration suites are reported as skipped. CI provisions real databases.
-
-The shared fixture covers Serie/Season/Episode, Star/Assignment, embedded directors and reference-bearing credits, no-endpoint labels, inverse scalar IDs, scopes, hooks and validators. Tests compare actual GraphQL schemas/results across both databases and check PostgreSQL constraints directly, alongside custom mutations, retries, concurrency, state guards and rollback. CI covers PostgreSQL 15, 16, and 18 with MongoDB 7/8 replica sets and separate databases for upstream MongoDB regressions.
+The shared fixture covers Serie/Season/Episode, Star/Assignment, embedded directors and reference-bearing credits, no-endpoint labels, inverse scalar IDs, scopes, hooks and validators. Tests compare actual GraphQL schemas/results across both databases and check PostgreSQL constraints directly, alongside custom mutations, retries, concurrency, state guards and rollback. Preview verification covers PostgreSQL 15, 16, and 18 with MongoDB 7/8 replica sets and separate databases for upstream MongoDB regressions.
 
 Existing schemas generated before these constraints or presence columns require an explicit migration where their table/check layouts differ; initialization does not alter columns or replace checks. Generated ordering/date helpers are also catalog-checked for drift.
 

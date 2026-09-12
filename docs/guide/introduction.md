@@ -13,11 +13,13 @@ You keep the GraphQL schema as the center of your application. Validation, lifec
 Start with [MongoDB](./getting-started) or [PostgreSQL](./postgresql). These guides cover the 3.2.0 preview; [download the packages and compare storage semantics](./databases). Shared examples use `simfinity` for the selected runtime: the MongoDB namespace or the instance returned by `createPostgres()`.
 :::
 
+Examples use the selected runtime from [database setup](./databases#runtime-setup-for-shared-examples). After `createSchema()`, PostgreSQL also requires awaited storage initialization before operations are served.
+
 ## From a type to an API
 
 ```javascript
 import { GraphQLID, GraphQLObjectType, GraphQLString } from 'graphql';
-import * as simfinity from '@simtlix/simfinity-js';
+import { simfinity } from './runtime.js';
 
 const SerieType = new GraphQLObjectType({
   name: 'Serie',

@@ -8,7 +8,7 @@ description: Inspect and prepare generated operations with Simfinity's global mi
 Register global middleware with `simfinity.use()` to inspect arguments, enforce prerequisites, or attach request metadata before a generated operation executes.
 
 ```javascript
-import * as simfinity from '@simtlix/simfinity-js';
+// simfinity is your selected runtime, initialized during application setup.
 
 simfinity.use(async ({ operation, type, context }, next) => {
   if (operation === 'delete' && context?.user?.role !== 'admin') {
@@ -23,7 +23,9 @@ simfinity.use(async ({ operation, type, context }, next) => {
 });
 ```
 
-Register middleware once during application startup. Registrations are global to the loaded Simfinity module and apply to its generated operations.
+Register middleware once during application startup. Registrations belong to the selected runtime and apply to its generated operations. The MongoDB facade and PostgreSQL module facade each expose a default runtime; a `createPostgres()` instance owns its own registrations. Register middleware on the same runtime used to register your types.
+
+For MongoDB, `simfinity` is the namespace imported from `@simtlix/simfinity-js`. For PostgreSQL, use the instance returned by `createPostgres()` in the [PostgreSQL quick start](./postgresql). Both expose `use()` and the shared `auth.ForbiddenError`.
 
 ## Execution order
 

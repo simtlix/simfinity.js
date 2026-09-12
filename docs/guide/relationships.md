@@ -9,6 +9,8 @@ Use `extensions.relation` on fields whose value is another GraphQL object or a l
 
 <DomainDiagram kind="relationships" />
 
+Examples use the selected runtime from [database setup](./databases#runtime-setup-for-shared-examples). After `createSchema()`, PostgreSQL also requires awaited storage initialization before operations are served.
+
 ## Choose a storage model
 
 | Relationship | Storage | Mutation input |
@@ -30,7 +32,7 @@ import {
   GraphQLObjectType,
   GraphQLString,
 } from 'graphql';
-import * as simfinity from '@simtlix/simfinity-js';
+import { simfinity } from './runtime.js';
 
 const DirectorType = new GraphQLObjectType({
   name: 'Director',
@@ -89,7 +91,7 @@ import {
   GraphQLObjectType,
   GraphQLString,
 } from 'graphql';
-import * as simfinity from '@simtlix/simfinity-js';
+import { simfinity } from './runtime.js';
 
 const SerieType = new GraphQLObjectType({
   name: 'Serie',

@@ -19,7 +19,7 @@ import {
   GraphQLObjectType,
   GraphQLString,
 } from 'graphql';
-import { validators } from '@simtlix/simfinity-js';
+import { validators } from '@simtlix/simfinity-core';
 
 const SerieType = new GraphQLObjectType({
   name: 'Serie',
@@ -85,7 +85,7 @@ Use `nameValidations` as the field's `extensions.validations` value. Validators 
 Custom field validators receive `(typeName, fieldName, value, session)`. Async validators are awaited before persistence. They receive empty strings unchanged, `undefined` for omitted fields, and `null` for explicit null input; these values are distinct. Throw an error to reject the mutation:
 
 ```javascript
-import { SimfinityError } from '@simtlix/simfinity-js';
+import { SimfinityError } from '@simtlix/simfinity-core';
 
 const cannotClearName = {
   validate: async (typeName, fieldName, value) => {
@@ -146,7 +146,7 @@ If a validator reads another record, pass the supplied session to the Mongoose q
 For reusable value types, Simfinity also provides scalar helpers:
 
 ```javascript
-import { scalars } from '@simtlix/simfinity-js';
+import { scalars } from '@simtlix/simfinity-core';
 
 const ContactType = new GraphQLObjectType({
   name: 'Contact',

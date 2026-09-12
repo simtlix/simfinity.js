@@ -5,7 +5,7 @@ description: Integrate authorization and pagination counts with GraphQL Yoga, En
 
 # Plugins
 
-The `simfinity.plugins` namespace contains `createAuthPlugin`, `envelopCountPlugin`, and `apolloCountPlugin`.
+The shared `plugins` export from `@simtlix/simfinity-core`, also exposed as `simfinity.plugins` by either runtime, contains `createAuthPlugin`, `envelopCountPlugin`, and `apolloCountPlugin`.
 
 ## Authorization plugin
 
@@ -20,16 +20,19 @@ This is the same factory exposed as `simfinity.auth.createAuthPlugin`. It wraps 
 
 `defaultPolicy` accepts only `'ALLOW'` or `'DENY'` (the default). Invalid permission maps, configured rules, or policy ASTs throw `TypeError` when the plugin is created. Default policy applies only to fields without an exact or wildcard entry.
 
+The examples below import an already initialized `schema` from your application. For PostgreSQL, await storage initialization before exporting it; see the [PostgreSQL quick start](/guide/postgresql).
+
 ## Envelop count plugin
 
 ```javascript
 import { createYoga } from 'graphql-yoga';
-import * as simfinity from '@simtlix/simfinity-js';
+import { plugins } from '@simtlix/simfinity-core';
+import { schema } from './schema.js';
 
 const yoga = createYoga({
-  schema: simfinity.createSchema(),
+  schema,
   context: () => ({}),
-  plugins: [simfinity.plugins.envelopCountPlugin()],
+  plugins: [plugins.envelopCountPlugin()],
 });
 ```
 
@@ -57,11 +60,12 @@ The count describes matching records before pagination, not the number returned 
 
 ```javascript
 import { ApolloServer } from '@apollo/server';
-import * as simfinity from '@simtlix/simfinity-js';
+import { plugins } from '@simtlix/simfinity-core';
+import { schema } from './schema.js';
 
 const server = new ApolloServer({
-  schema: simfinity.createSchema(),
-  plugins: [simfinity.plugins.apolloCountPlugin()],
+  schema,
+  plugins: [plugins.apolloCountPlugin()],
 });
 ```
 

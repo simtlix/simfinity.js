@@ -62,6 +62,34 @@ shasum -a 256 -c simfinity-3.2.0-preview.zip.sha256.txt
 
 The included [package manifest](/preview/manifest.json) records SHA-256, npm SHA-512 integrity, and source commit `d98197387543d185fc79d5c31757b12e07ef2436` for all four verified archives. Their package metadata is `3.2.0`; the download remains a preview until a registry release is made. Keep installed Simfinity packages at the same version.
 
+## Runtime setup for shared examples
+
+The topic guides use `import { simfinity } from './runtime.js'`. This is an application-owned module that exports your chosen runtime. Create one of the following files and register your types on that same instance:
+
+::: code-group
+
+```javascript [MongoDB · runtime.js]
+import mongoose from 'mongoose';
+import * as simfinity from '@simtlix/simfinity-js';
+
+await mongoose.connect(process.env.MONGODB_URI);
+export { simfinity };
+```
+
+```javascript [PostgreSQL · runtime.js]
+import pg from 'pg';
+import { createPostgres } from '@simtlix/simfinity-postgres';
+
+export const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+export const simfinity = createPostgres({ pool, schema: 'series_api' });
+```
+
+:::
+
+After all registrations, call `simfinity.createSchema()` once. **PostgreSQL then requires `await simfinity.initializeDatabase({ mode: 'create' })` before serving operations**; use `mode: 'validate'` to check already provisioned storage without DDL. Close the PostgreSQL pool or disconnect Mongoose during shutdown.
+
+The quick starts include their connection and runtime setup inline. When splitting them into modules, move that setup into `runtime.js`, keep schema registration in `schema.js`, and export `schema` only after initialization. Helper-only imports such as validators, scalars, errors, and auth come directly from `@simtlix/simfinity-core`; MCP functions come from `@simtlix/simfinity-mcp`.
+
 ## Published MongoDB version
 
 For an application using the published 3.0.1 MongoDB release, the [original MongoDB starter](/simfinity-series-starter.zip) remains available. It pins `@simtlix/simfinity-js` to `3.0.1` and supports the MongoDB quick start's operations. The wider API reference documents the 3.2.0 preview and may include APIs or fixes absent from 3.0.1.

@@ -10,7 +10,7 @@ Simfinity errors attach structured metadata to GraphQL errors through `extension
 ## SimfinityError
 
 ```javascript
-import { SimfinityError } from '@simtlix/simfinity-js';
+import { SimfinityError } from '@simtlix/simfinity-core';
 
 throw new SimfinityError(
   'A series with active seasons cannot be deleted',
@@ -46,7 +46,7 @@ These classes are available on `simfinity.auth`:
 ## InternalServerError
 
 ```javascript
-import { InternalServerError } from '@simtlix/simfinity-js';
+import { InternalServerError } from '@simtlix/simfinity-core';
 
 const wrapped = new InternalServerError('Catalog lookup failed', originalError);
 console.error(wrapped.getCause());
@@ -57,7 +57,7 @@ This subclass uses code `INTERNAL_SERVER_ERROR` and retains the cause. It does n
 ## buildErrorFormatter
 
 ```javascript
-import { buildErrorFormatter } from '@simtlix/simfinity-js';
+import { buildErrorFormatter } from '@simtlix/simfinity-core';
 
 const normalizeError = buildErrorFormatter((error) => {
   console.error(error.getCode(), error.message);

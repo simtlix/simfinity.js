@@ -38,6 +38,11 @@ const toolExamples = [
 ];
 const copyState = ref('Copy install command');
 let copyTimer;
+function selectDatabase(value) {
+  database.value = value;
+  clearTimeout(copyTimer);
+  copyState.value = 'Copy install command';
+}
 const capabilities = [
   { id: '01', category: 'MODEL', title: 'Relationships, already connected.', description: 'Embedded documents. References. Collections. Describe the connections in your domain and let Simfinity generate the resolvers.', link: '/guide/relationships.html', cta: 'Connect your data', symbol: 'relation' },
   { id: '02', category: 'QUERY', title: 'Questions without the boilerplate.', description: 'Compose nested filters, logical expressions, sorting, pagination, and aggregations through a familiar GraphQL interface.', link: '/guide/queries.html', cta: 'Explore queries', symbol: 'query' },
@@ -177,8 +182,8 @@ onUnmounted(() => {
           <h1 id="hero-title"><span>Define once.</span><span class="hero-title-accent">Build beyond<span class="title-period">.</span></span></h1>
           <p class="hero-description">Define your GraphQL types. Build on MongoDB or PostgreSQL<br class="desktop-break"> with generated queries, mutations, and optional MCP tools.</p>
           <div class="database-choice" role="group" aria-label="Choose a database guide">
-            <button type="button" :aria-pressed="database === 'mongodb'" @click="database = 'mongodb'">MongoDB</button>
-            <button type="button" :aria-pressed="database === 'postgres'" @click="database = 'postgres'">PostgreSQL</button>
+            <button type="button" :aria-pressed="database === 'mongodb'" @click="selectDatabase('mongodb')">MongoDB</button>
+            <button type="button" :aria-pressed="database === 'postgres'" @click="selectDatabase('postgres')">PostgreSQL</button>
             <a :href="withBase('/guide/databases.html')">Compare databases <span aria-hidden="true">&#8599;</span></a>
           </div>
           <div class="hero-actions">

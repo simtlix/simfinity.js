@@ -7,6 +7,8 @@ description: Create, update, and delete records, understand transaction boundari
 
 Simfinity generates creation, update, and deletion mutations for every connected type. It materializes GraphQL inputs, runs validation and controller hooks, and persists each operation in the selected backend's transaction.
 
+Examples use the selected runtime from [database setup](./databases#runtime-setup-for-shared-examples). After `createSchema()`, PostgreSQL also requires awaited storage initialization before operations are served.
+
 ## Create a record
 
 ```graphql
@@ -96,7 +98,7 @@ import {
   GraphQLNonNull,
   GraphQLString,
 } from 'graphql';
-import * as simfinity from '@simtlix/simfinity-js';
+import { simfinity } from './runtime.js';
 
 const LaunchSerieInput = new GraphQLInputObjectType({
   name: 'LaunchSerieInput',
@@ -136,6 +138,6 @@ mutation {
 }
 ```
 
-`saveObject()` owns a transaction when no session is supplied. Pass the supplied active session when using it inside a registered mutation: it shares that transaction without starting, committing, aborting, retrying, or ending it. An inactive supplied session is rejected with `ACTIVE_TRANSACTION_REQUIRED` (400). Direct Mongoose or PostgreSQL Model calls must also use the matching session and do not automatically run Simfinity validators, hooks, or authorization rules.
+`saveObject()` owns a transaction when no session is supplied. Pass the supplied active session when using it inside a registered mutation: it shares that transaction without starting, committing, aborting, retrying, or ending it. MongoDB rejects an inactive native Mongoose session with `ACTIVE_TRANSACTION_REQUIRED` (400). PostgreSQL rejects an inactive or foreign Simfinity session with `INVALID_SESSION`. Direct Mongoose or PostgreSQL Model calls must also use the matching session and do not automatically run Simfinity validators, hooks, or authorization rules.
 
 Continue with [validation](./validation) to reject invalid data and [authorization](./authorization) to control who can perform an operation.
