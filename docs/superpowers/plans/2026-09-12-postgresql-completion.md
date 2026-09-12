@@ -46,7 +46,7 @@
 
 ### Task 5: Deliver library packages, documentation and release preparation
 
-- [ ] Integrate PostgreSQL into VitePress guides/reference/navigation and startup examples. Adapt upstream manual release workflow to the workspace dependency order. Run full MongoDB/PG15/16/18, package installation/types, lint and docs build checks, then independent review and commits.
+- [x] Integrate PostgreSQL into VitePress guides/reference/navigation and startup examples. Adapt upstream manual release workflow to the workspace dependency order. Run full MongoDB/PG15/16/18, package installation/types, lint and docs build checks, then independent review and commits.
 
 ### Task 6: Port and exercise barber on PostgreSQL
 
