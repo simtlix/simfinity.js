@@ -264,6 +264,32 @@ describe.skipIf(!uri)('database-enforced embedded constraints', () => {
     } finally { await client.query('ROLLBACK'); client.release(); await pool.query(`DROP SCHEMA IF EXISTS ${quoted} CASCADE`); }
   });
 
+  it.each(['READ COMMITTED', 'REPEATABLE READ'])('prevents shape-only write skew without any unique leaf under %s', async (isolation) => {
+    const name = `${namespace}_skew`;
+    const Target = new GraphQLObjectType({ name: 'ShapeTarget', fields: { value: { type: GraphQLString } } });
+    const Item = new GraphQLObjectType({ name: 'ShapeItem', fields: { target: { type: Target, extensions: { relation: {} } } } });
+    const Owner = new GraphQLObjectType({ name: 'ShapeOwner', fields: { items: { type: new GraphQLList(Item), extensions: embedded } } });
+    const description = describeDatabase([{ gqltype: Owner }], { schema: name });
+    expect(description.tables.some((table) => table.uniqueKeys)).toBe(false);
+    const entries = `"${name}"."ShapeOwner__items"`;
+    const [a, b] = await Promise.all([pool.connect(), pool.connect()]);
+    try {
+      await initializeDatabase(pool, description);
+      const owner = (await pool.query(`INSERT INTO "${name}"."ShapeOwner" (__items_state) VALUES ('present') RETURNING id`)).rows[0].id;
+      await pool.query(`INSERT INTO ${entries} (__owner_id, __position) VALUES ($1, 0), ($1, 1)`, [owner]);
+      await a.query(`BEGIN ISOLATION LEVEL ${isolation}`); await b.query(`BEGIN ISOLATION LEVEL ${isolation}`);
+      await b.query(`SELECT * FROM ${entries}`);
+      await a.query(`INSERT INTO ${entries} (__owner_id, __position) VALUES ($1, 2)`, [owner]);
+      // Each change alone has consecutive positions; their union would leave [0, 2].
+      const waiting = b.query(`DELETE FROM ${entries} WHERE __owner_id = $1 AND __position = 1`, [owner]).then(() => ({ ok: true }), (error) => ({ error }));
+      await a.query('COMMIT');
+      const result = await waiting;
+      if (isolation === 'REPEATABLE READ') expect(result.error?.code).toBe('40001');
+      else { expect(result.ok).toBe(true); await expect(b.query('COMMIT')).rejects.toMatchObject({ code: '23514' }); }
+      expect((await pool.query(`SELECT __position FROM ${entries} ORDER BY __position`)).rows.map((row) => row.__position)).toEqual([0, 1, 2]);
+    } finally { await a.query('ROLLBACK'); await b.query('ROLLBACK'); a.release(); b.release(); await pool.query(`DROP SCHEMA IF EXISTS "${name}" CASCADE`); }
+  });
+
   it('describes generated functions and triggers deterministically and validates them', async () => {
     expect(db.functions.length).toBeGreaterThan(0);
     expect(db.triggers.length).toBeGreaterThan(0);
