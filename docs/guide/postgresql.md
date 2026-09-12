@@ -96,7 +96,7 @@ PostgreSQL derives physical relationships from the same `extensions.relation` me
 
 | GraphQL shape | Generated storage |
 | --- | --- |
-| Single reference, such as `Season.serie` | A UUID column at `connectionField || fieldName`, a referencing index, and a real FK to the target `id`. |
+| Single reference, such as `Season.serie` | A UUID column at `connectionField` (or the GraphQL field name when omitted), a referencing index, and a real FK to the target `id`. |
 | Inverse collection, such as `Serie.seasons` | No parent array column; the child reference supplies the FK used by the generated collection resolver. |
 | Explicit link entity, such as `Assignment { serie, star }` | Its own table and identity with one FK for each reference. Add `extensions.indexes` when a pair must be unique. |
 | Embedded object/list containing a reference, such as `Serie.credits[].star` | Private owned tables with an owner FK using `ON DELETE CASCADE`, plus a real `NO ACTION` FK to the external entity. |

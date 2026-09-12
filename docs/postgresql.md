@@ -134,7 +134,7 @@ Foreign-key, uniqueness, required-value and other PostgreSQL execution errors ar
 | Required persisted scalar/reference | `NOT NULL`. Stronger than the current Mongo generator, which does not map every GraphQL required marker to Mongoose `required`. |
 | `readOnly` | Excluded from generated mutation inputs. The stored field remains writable by hooks/native code. |
 | `unique: true` on a root scalar/single reference | Unique index with `NULLS NOT DISTINCT`. A single optional unique value permits at most one SQL NULL. |
-| Single non-embedded object | FK in `connectionField || fieldName`. A singular field alone does not imply one-to-one; `unique: true` supplies that constraint. |
+| Single non-embedded object | FK in `connectionField` (or the GraphQL field name when omitted). A singular field alone does not imply one-to-one; `unique: true` supplies that constraint. |
 | Non-embedded list | FK on the child; resolve `connectionField` as a child GraphQL name or storage name. Reuse its declared reference, infer a target for an existing scalar ID, or add a private child reference. |
 | Many-to-many | Explicit linking entity with its own identity and two FKs. Use a declarative composite unique index if duplicate pairs are forbidden. |
 | Embedded subtree without references or unique fields | JSONB in the owner row. Generated immutable validation functions and CHECKs enforce declared nested object/list shapes, required fields/items, scalar types and enum values. Optional parents and nullable items remain valid; unknown object keys are allowed. JSONB DateTime values use the runtime UTC ISO timestamp encoding. |
