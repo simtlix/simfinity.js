@@ -11,6 +11,7 @@
     "./auth/errors": "./src/auth/errors.js",
     "./auth/expressions": "./src/auth/expressions.js",
     "./auth/rules": "./src/auth/rules.js",
+    "./internal/object-id": "./src/auth/object-id.js",
     "./plugins": "./src/plugins.js",
     "./scalars": "./src/scalars.js",
     "./validators": "./src/validators.js"

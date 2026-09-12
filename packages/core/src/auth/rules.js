@@ -1,4 +1,5 @@
 import { UnauthenticatedError, ForbiddenError } from './errors.js';
+import { normalizeObjectId } from './object-id.js';
 
 /**
  * Resolves a value from an object using a dotted path string or function.
@@ -194,10 +195,7 @@ export const anyRule = (...rules) => {
 const normalizeOwnerId = (value) => {
   if (typeof value === 'string' && value.length > 0) return value;
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  if (value?._bsontype === 'ObjectId' && typeof value.toHexString === 'function') {
-    return value.toHexString();
-  }
-  return undefined;
+  return normalizeObjectId(value);
 };
 
 /**

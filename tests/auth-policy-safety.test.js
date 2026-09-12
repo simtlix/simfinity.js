@@ -2,6 +2,7 @@ import { describe, test, expect } from 'vitest';
 import { GraphQLObjectType, GraphQLSchema, GraphQLString, graphql } from 'graphql';
 import mongoose from 'mongoose';
 import auth from '../src/auth/index.js';
+import { isOwner as deepIsOwner } from '../src/auth/rules.js';
 
 const {
   createAuthPlugin, createAuthMiddleware, createFieldMiddleware,
@@ -230,12 +231,40 @@ describe('Authorization policy safety', () => {
     });
 
     test.each([
+      ['own brand and method', () => ({
+        _bsontype: 'ObjectId',
+        toHexString: () => '507f1f77bcf86cd799439011',
+      })],
+      ['forged prototype brand and method', () => Object.create({
+        _bsontype: 'ObjectId',
+        toHexString: () => '507f1f77bcf86cd799439011',
+      })],
+      ['authentic prototype without ObjectId state', () => Object.create(mongoose.Types.ObjectId.prototype)],
+    ])('denies objects with %s', async (_description, createValue) => {
+      expectDenied(await executePolicy(
+        isOwner('authorId'),
+        { authorId: createValue() },
+        { user: { id: createValue() } },
+      ));
+    });
+
+    test.each([
       ['user-1', 'user-1'], [0, 0], [123, '123'],
       [new mongoose.Types.ObjectId('507f1f77bcf86cd799439011'), '507f1f77bcf86cd799439011'],
       ['507f1f77bcf86cd799439011', new mongoose.Types.ObjectId('507f1f77bcf86cd799439011')],
       [new mongoose.Types.ObjectId('507f1f77bcf86cd799439011'), new mongoose.Types.ObjectId('507f1f77bcf86cd799439011')],
     ])('preserves scalar and ObjectId ownership %#', async (ownerId, userId) => {
       const { result } = await executePolicy(isOwner('authorId'), { authorId: ownerId }, { user: { id: userId } });
+      expect(result.errors).toBeUndefined();
+    });
+
+    test('preserves authentic ObjectIds through the deep root rules import', async () => {
+      const id = new mongoose.Types.ObjectId('507f1f77bcf86cd799439011');
+      const { result } = await executePolicy(
+        deepIsOwner('authorId'),
+        { authorId: id },
+        { user: { id: id.toHexString() } },
+      );
       expect(result.errors).toBeUndefined();
     });
 
