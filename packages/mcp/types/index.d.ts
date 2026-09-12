@@ -293,4 +293,3 @@ declare const mcp: {
 };
 
 export default mcp;
-

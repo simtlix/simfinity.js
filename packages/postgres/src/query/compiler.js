@@ -155,11 +155,20 @@ export const compileQuery = (models, database, plan, extra = null) => {
   };
   const predicate = (expression, operator, value) => {
     const { sql, field, type, list, vector } = expression;
-    const scalarBind = (item) => { const value = encodeScalar(field, item); return bind(expression.dateNumeric && value ? value.getTime() : value, type); };
+    // Filters accept member names first; writes already receive internal enum values.
+    const encodeFilter = (item) => {
+      if (field.scalar !== 'Enum' || item == null) return encodeScalar(field, item);
+      const entry = field.enumValues.find((candidate) => candidate.name === item)
+        || field.enumValues.find((candidate) => candidate.value === item);
+      if (!entry) invalidValue(`Invalid enum value for ${field.name}`);
+      return encodeScalar(field, entry.value);
+    };
+    if (operator === 'LIKE' && field.scalar !== 'String') invalidValue('LIKE requires a string field');
+    const scalarBind = (item) => { const value = encodeFilter(item); return bind(expression.dateNumeric && value ? value.getTime() : value, type); };
     const equality = (item) => {
       if (Array.isArray(item)) {
         if (!field.list || vector) invalidValue('Array equality requires a scalar-list field');
-        return `${sql} IS NOT DISTINCT FROM ${bind(item.map((v) => encodeScalar(field, v)), `${type}[]`)}`;
+        return `${sql} IS NOT DISTINCT FROM ${bind(item.map(encodeFilter), `${type}[]`)}`;
       }
       if (list) {
         const contains = `array_position(${sql}, ${scalarBind(item)}) IS NOT NULL`;
@@ -181,7 +190,6 @@ export const compileQuery = (models, database, plan, extra = null) => {
     const parameter = scalarBind(value);
     const compare = (left) => {
       if (operator === 'LIKE') {
-        if (!['String', 'Enum'].includes(field.scalar)) invalidValue('LIKE requires a string field');
         return `strpos(${left}, ${parameter}) > 0`;
       }
       return `${left} ${{ LT: '<', LTE: '<=', GT: '>', GTE: '>=' }[operator]} ${parameter}`;

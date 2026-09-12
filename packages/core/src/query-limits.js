@@ -24,4 +24,3 @@ export const paginationStages = (pagination, withDefault) => {
   }
   return [{ $skip: skip }, { $limit: size }];
 };
-

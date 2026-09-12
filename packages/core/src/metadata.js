@@ -26,7 +26,7 @@ const scalarDescription = (type) => {
       if (storedValues.has(stored) && !Object.is(storedValues.get(stored), entry.value)) invalid(`Enum storage collision in ${type.name}: distinct internal values serialize to ${stored}`);
       storedValues.set(stored, entry.value);
     }
-    return { scalar: 'Enum', values: [...storedValues.keys()] };
+    return { scalar: 'Enum', values: [...storedValues.keys()], enumValues: type.getValues().map(({ name, value }) => ({ name, value })) };
   }
   let base = type;
   const visited = new Set();

@@ -67,7 +67,7 @@ export const requireRole = (role, options = {}) => {
     throw new TypeError('Required roles must be a nonempty string or array of nonempty strings');
   }
   const { userPath = 'user', rolePath = 'role' } = options;
-  
+
   return (_parent, _args, ctx) => {
     if (!ctx) {
       throw new UnauthenticatedError('You must be logged in to access this resource');
@@ -76,13 +76,13 @@ export const requireRole = (role, options = {}) => {
     if (!user) {
       throw new UnauthenticatedError('You must be logged in to access this resource');
     }
-    
+
     const userRole = resolvePath(user, rolePath);
-    
+
     if (!roles.includes(userRole)) {
       throw new ForbiddenError(`Requires role: ${roles.join(' or ')}`);
     }
-    
+
     return true;
   };
 };
@@ -106,7 +106,7 @@ export const requirePermission = (permission, options = {}) => {
     throw new TypeError('Required permissions must be a nonempty string or array of nonempty strings');
   }
   const { userPath = 'user', permissionsPath = 'permissions' } = options;
-  
+
   return (_parent, _args, ctx) => {
     if (!ctx) {
       throw new UnauthenticatedError('You must be logged in to access this resource');
@@ -115,25 +115,25 @@ export const requirePermission = (permission, options = {}) => {
     if (!user) {
       throw new UnauthenticatedError('You must be logged in to access this resource');
     }
-    
+
     const userPermissions = resolvePath(user, permissionsPath);
     if (!Array.isArray(userPermissions)
       || Array.from(userPermissions).some(perm => typeof perm !== 'string' || perm.length === 0)) {
       throw new ForbiddenError('User permissions must be an array of nonempty strings');
     }
-    
+
     // Check if user has wildcard permission
     if (userPermissions.includes('*')) {
       return true;
     }
-    
+
     // All required permissions must be present
     for (const perm of requiredPermissions) {
       if (!userPermissions.includes(perm)) {
         throw new ForbiddenError(`Missing permission: ${perm}`);
       }
     }
-    
+
     return true;
   };
 };
@@ -171,7 +171,7 @@ export const anyRule = (...rules) => {
   }
   return async (parent, args, ctx, info) => {
     let lastError = null;
-    
+
     for (const rule of rules) {
       try {
         const result = await rule(parent, args, ctx, info);
@@ -183,7 +183,7 @@ export const anyRule = (...rules) => {
         // Continue to next rule
       }
     }
-    
+
     // No rule passed - throw the last error or return false
     if (lastError) {
       throw lastError;
@@ -250,14 +250,14 @@ export const createRule = (predicate, errorMessage = 'Access denied', errorCode 
   }
   return async (parent, args, ctx, info) => {
     const result = await predicate(parent, args, ctx, info);
-    
+
     if (result !== true && result !== undefined) {
       if (errorCode === 'UNAUTHENTICATED') {
         throw new UnauthenticatedError(errorMessage);
       }
       throw new ForbiddenError(errorMessage);
     }
-    
+
     return true;
   };
 };

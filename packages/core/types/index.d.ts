@@ -27,6 +27,7 @@ export interface FieldDescription {
   readOnly: boolean;
   scalar?: 'ID' | 'String' | 'Int' | 'Float' | 'Boolean' | 'DateTime' | 'Enum';
   values?: string[];
+  enumValues?: { name: string; value: unknown }[];
   target?: string;
   connectionField?: string;
   fields?: FieldDescription[];

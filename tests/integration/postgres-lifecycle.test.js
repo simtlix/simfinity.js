@@ -121,12 +121,14 @@ describe.skipIf(!uri)('PostgreSQL mutation lifecycle', () => {
     expect(read.data.item.state).toBe('PUBLISHED');
   });
 
-  it('uses enum internal values consistently when they overlap another state name', async () => {
+  it('keeps internal state storage while filters prefer overlapping member names', async () => {
     const result = await add({ name: 'Overlapping state' });
     expect(result.errors).toBeUndefined();
     const filtered = await execute('{items(state:{value:"PUBLISHED"}){name state}}');
     expect(filtered.errors).toBeUndefined();
-    expect(filtered.data.items).toEqual([{ name: 'Overlapping state', state: 'DRAFT' }]);
+    expect(filtered.data.items).toEqual([]);
+    expect((await execute('{items(state:{value:"DRAFT"}){name state}}')).data.items).toEqual([{ name: 'Overlapping state', state: 'DRAFT' }]);
+    expect((await api.getModel(Item).findById(result.data.additem.id)).state).toBe('PUBLISHED');
     const denied = await execute('mutation($input:LifecycleItemInputForUpdate!){finish_item(input:$input){state}}', { input: { id: result.data.additem.id } });
     expect(denied.errors?.[0].extensions.code).toBe('BAD_REQUEST');
   });

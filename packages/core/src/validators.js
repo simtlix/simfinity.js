@@ -30,7 +30,7 @@ const createValidator = (validatorFn, required = false) => {
 
   const validatorCreate = { validate: validateCreate };
   const validatorUpdate = { validate: validateUpdate };
-  
+
   // Return validations for both CREATE and UPDATE operations
   // Also support 'save'/'update' for backward compatibility (though code uses CREATE/UPDATE)
   return {
@@ -49,11 +49,11 @@ export const stringLength = (name, min, max) => {
     if (typeof value !== 'string') {
       throw new SimfinityError(`${name} must be a string`, 'VALIDATION_ERROR', 400);
     }
-    
+
     if (min !== undefined && value.length < min) {
       throw new SimfinityError(`${name} must be at least ${min} characters`, 'VALIDATION_ERROR', 400);
     }
-    
+
     if (max !== undefined && value.length > max) {
       throw new SimfinityError(`${name} must be at most ${max} characters`, 'VALIDATION_ERROR', 400);
     }
@@ -65,7 +65,7 @@ export const maxLength = (name, max) => {
     if (typeof value !== 'string') {
       throw new SimfinityError(`${name} must be a string`, 'VALIDATION_ERROR', 400);
     }
-    
+
     if (value.length > max) {
       throw new SimfinityError(`${name} must be at most ${max} characters`, 'VALIDATION_ERROR', 400);
     }
@@ -75,12 +75,12 @@ export const maxLength = (name, max) => {
 export const pattern = (name, regex, message) => {
   const regexObj = typeof regex === 'string' ? new RegExp(regex) : regex;
   const errorMessage = message || `${name} format is invalid`;
-  
+
   return createValidator(async (typeName, fieldName, value) => {
     if (typeof value !== 'string') {
       throw new SimfinityError(`${name} must be a string`, 'VALIDATION_ERROR', 400);
     }
-    
+
     if (!regexObj.test(value)) {
       throw new SimfinityError(errorMessage, 'VALIDATION_ERROR', 400);
     }
@@ -89,12 +89,12 @@ export const pattern = (name, regex, message) => {
 
 export const email = () => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  
+
   return createValidator(async (typeName, fieldName, value) => {
     if (typeof value !== 'string') {
       throw new SimfinityError('Email must be a string', 'VALIDATION_ERROR', 400);
     }
-    
+
     if (!emailRegex.test(value)) {
       throw new SimfinityError('Invalid email format', 'VALIDATION_ERROR', 400);
     }
@@ -106,7 +106,7 @@ export const url = () => {
     if (typeof value !== 'string') {
       throw new SimfinityError('URL must be a string', 'VALIDATION_ERROR', 400);
     }
-    
+
     try {
       // Use URL constructor for better validation
       new URL(value);
@@ -125,11 +125,11 @@ export const numberRange = (name, min, max) => {
     if (typeof value !== 'number' || isNaN(value)) {
       throw new SimfinityError(`${name} must be a number`, 'VALIDATION_ERROR', 400);
     }
-    
+
     if (min !== undefined && value < min) {
       throw new SimfinityError(`${name} must be at least ${min}`, 'VALIDATION_ERROR', 400);
     }
-    
+
     if (max !== undefined && value > max) {
       throw new SimfinityError(`${name} must be at most ${max}`, 'VALIDATION_ERROR', 400);
     }
@@ -141,7 +141,7 @@ export const positive = (name) => {
     if (typeof value !== 'number' || isNaN(value)) {
       throw new SimfinityError(`${name} must be a number`, 'VALIDATION_ERROR', 400);
     }
-    
+
     if (value <= 0) {
       throw new SimfinityError(`${name} must be positive`, 'VALIDATION_ERROR', 400);
     }
@@ -156,11 +156,11 @@ export const arrayLength = (name, maxItems, itemValidator) => {
     if (!Array.isArray(value)) {
       throw new SimfinityError(`${name} must be an array`, 'VALIDATION_ERROR', 400);
     }
-    
+
     if (maxItems !== undefined && value.length > maxItems) {
       throw new SimfinityError(`${name} must have at most ${maxItems} items`, 'VALIDATION_ERROR', 400);
     }
-    
+
     // If itemValidator is provided, validate each item
     if (itemValidator && Array.isArray(itemValidator)) {
       for (let i = 0; i < value.length; i++) {
@@ -188,11 +188,11 @@ export const dateFormat = (name, format) => {
     } else {
       throw new SimfinityError(`${name} must be a valid date`, 'VALIDATION_ERROR', 400);
     }
-    
+
     if (isNaN(date.getTime())) {
       throw new SimfinityError(`${name} must be a valid date`, 'VALIDATION_ERROR', 400);
     }
-    
+
     // If format is provided, validate format
     if (format && typeof value === 'string') {
       // Simple format validation - can be enhanced
@@ -217,11 +217,11 @@ export const futureDate = (name) => {
     } else {
       throw new SimfinityError(`${name} must be a valid date`, 'VALIDATION_ERROR', 400);
     }
-    
+
     if (isNaN(date.getTime())) {
       throw new SimfinityError(`${name} must be a valid date`, 'VALIDATION_ERROR', 400);
     }
-    
+
     if (date <= new Date()) {
       throw new SimfinityError(`${name} must be a future date`, 'VALIDATION_ERROR', 400);
     }

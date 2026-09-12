@@ -1,4 +1,4 @@
-import { GraphQLObjectType, GraphQLString, GraphQLList } from 'graphql';
+import { GraphQLEnumType, GraphQLObjectType, GraphQLString, GraphQLList } from 'graphql';
 import { describe, it, expect } from 'vitest';
 import { describeModels } from '../packages/core/src/metadata.js';
 import { createQueryPlan } from '../packages/core/src/query-plan.js';
@@ -50,4 +50,28 @@ describe('PostgreSQL query compilation', () => {
     expect(() => compileQuery(models, database, createQueryPlan(models, 'CompileRoot', { aggregation: { groupId: 'entries', facts: [{ path: 'entries.texts', operation: 'COUNT', factName: 'n' }] } }, { mode: 'aggregate' }))).toThrow('Whole embedded objects');
   });
 
+});
+
+const compileEnum = (field, operator, value) => {
+  const Kind = new GraphQLEnumType({ name: 'CompileEnum', values: { ONE: { value: 'TWO' }, TWO: { value: 'two' } } });
+  const Numeric = new GraphQLEnumType({ name: 'CompileNumeric', values: { ONE: { value: 1 }, TWO: { value: 2 } } });
+  const Root = new GraphQLObjectType({ name: 'CompileEnumRoot', fields: { kind: { type: Kind }, numeric: { type: Numeric }, kinds: { type: new GraphQLList(Kind) } } });
+  const registrations = [{ gqltype: Root }];
+  const models = describeModels(registrations);
+  return compileQuery(models, describeDatabase(registrations), createQueryPlan(models, Root.name, { [field]: { operator, value } }));
+};
+describe('enum query value normalization', () => {
+  it.each(['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN'])('resolves member names before internal values for %s', (operator) => {
+    const collection = ['BTW', 'IN', 'NIN'].includes(operator);
+    for (const field of ['kind', 'kinds']) {
+      expect(compileEnum(field, operator, collection ? ['ONE', 'TWO'] : 'TWO').values.slice(0, collection ? 2 : 1)).toEqual(collection ? ['TWO', 'two'] : ['two']);
+    }
+    expect(compileEnum('numeric', operator, collection ? ['ONE', 2] : 'ONE').values.slice(0, collection ? 2 : 1)).toEqual(collection ? ['1', '2'] : ['1']);
+  });
+  it.each(['1', 'unknown', false, {}])('rejects undeclared numeric internal values with strict equality: %j', (value) => {
+    expect(() => compileEnum('numeric', 'EQ', value)).toThrow('Invalid enum value');
+  });
+  it('rejects LIKE on enums even when the value is a valid internal string', () => {
+    expect(() => compileEnum('kind', 'LIKE', 'two')).toThrow('LIKE requires a string');
+  });
 });

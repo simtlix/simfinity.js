@@ -50,4 +50,3 @@ export function createValidatedScalar(name, description, baseScalarType, validat
   scalar.baseScalarType = baseScalarType;
   return scalar;
 }
-
