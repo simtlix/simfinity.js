@@ -47,6 +47,21 @@ describe('workspace release preparation', () => {
     expect(() => readRelease(root)).toThrow(/documentation lockfile/i);
   });
 
+  it('stages every version file changed by the release workflow', () => {
+    const root = fixture();
+    execFileSync('git', ['init', '--quiet'], { cwd: root });
+    execFileSync('git', ['add', '.'], { cwd: root });
+    execFileSync('git', ['-c', 'user.name=Release Test', '-c', 'user.email=release@example.test', 'commit', '--quiet', '-m', 'fixture'], { cwd: root });
+
+    setReleaseVersion(root, '3.2.0');
+    const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
+    const stagingArguments = workflow.match(/^\s+git add (.+)$/m)?.[1].trim().split(/\s+/);
+    expect(stagingArguments).toBeDefined();
+    execFileSync('git', ['add', ...stagingArguments], { cwd: root });
+
+    expect(execFileSync('git', ['diff', '--name-only'], { cwd: root, encoding: 'utf8' })).toBe('');
+  });
+
   it.each(['../3.2.0', '3.2', 'v3.2.0', '03.2.0', '3.2.0-01', '3.2.0\n', '3.2.0\r'])('rejects unsafe or invalid release version %j before writing files', (version) => {
     const root = fixture();
     const before = readFileSync(join(root, 'package.json'));
