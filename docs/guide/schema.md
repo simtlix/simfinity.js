@@ -5,7 +5,7 @@ description: Define GraphQL object types, register models, configure field metad
 
 # Schema definition
 
-A GraphQL object type is the starting point for both your API and your generated MongoDB model. Simfinity reads its fields and extensions to create input types, queries, mutations, and relationship resolvers.
+A GraphQL object type is the starting point for both your API and generated storage. Simfinity reads its fields and extensions to create input types, queries, mutations, relationship resolvers, and either Mongoose models or PostgreSQL tables.
 
 <DomainDiagram kind="schema" />
 
@@ -44,7 +44,7 @@ simfinity.connect(null, SerieType, 'serie', 'series');
 const schema = simfinity.createSchema();
 ```
 
-Use `id: { type: GraphQLID }` for the entity identifier. Simfinity supplies an `id` resolver for connected types that reads MongoDB's `_id`. The generated creation input omits `id`; the update input requires it.
+Use `id: { type: GraphQLID }` for the entity identifier. Simfinity supplies an `id` resolver for connected types. MongoDB reads `_id`; PostgreSQL exposes `id` and `_id` as the same UUID. The generated creation input omits `id`; the update input requires it.
 
 Descriptions are part of your public API. Write them for the people using autocomplete, introspection, and [generated MCP tools](./mcp).
 
@@ -59,10 +59,10 @@ simfinity.connect(null, SeasonType, 'season', 'seasons');
 const schema = simfinity.createSchema();
 ```
 
-Here `SeasonType` is another `GraphQLObjectType`, such as the one in the [relationships guide](./relationships). The first argument is an existing Mongoose model, or `null` to generate one. The optional arguments attach a controller, a model callback, and a state machine; see the [core API reference](../reference/api).
+Here `SeasonType` is another `GraphQLObjectType`, such as the one in the [relationships guide](./relationships). With the MongoDB facade, the first argument can be an existing Mongoose model or `null` to generate one. PostgreSQL registrations pass `null`. The optional arguments attach a controller, a model callback, and a state machine; see the [core API reference](../reference/api).
 
-::: info Registration is process-wide
-Type registrations and middleware live in module-level state. Register your application's types once during startup and reuse the built schema. Do not register types or create a new application schema for each request.
+::: info Registration belongs to a runtime
+Type registrations and middleware belong to the selected runtime instance. The default MongoDB and PostgreSQL module facades each expose one instance; `createPostgres()` creates an isolated PostgreSQL runtime. Register the application's types during startup and reuse the built schema. Do not register types or create a new schema for each request.
 :::
 
 ## What gets generated
@@ -74,7 +74,7 @@ For a connected `Serie` type:
 | Output type | Your `Serie` object type |
 | Creation input | `SerieInput` |
 | Update input | `SerieInputForUpdate` |
-| Mongoose model | Named `Serie`, using the `Serie` collection |
+| Storage model | Mongoose model/collection or PostgreSQL table named from `Serie` |
 | Root queries | `serie`, `series`, `series_aggregate` |
 | Root mutations | `addserie`, `updateserie`, `deleteserie` |
 
@@ -125,9 +125,11 @@ simfinity.addNoEndpointType(DirectorType);
 
 Then reference it from `SerieType` with `extensions.relation.embedded: true`. See the [embedded object example](./relationships#embedded-objects) for the complete definition.
 
-Use `connect()` when a type needs its own collection and direct CRUD operations. A simple supporting type containing only scalar fields does not receive a standalone model from `addNoEndpointType()`.
+Use `connect()` when a type needs its own root CRUD operations. A supporting type receives persistent storage when another registered type references it; a value-only embedded type stays inside its owner.
 
 ## Use an existing Mongoose model
+
+This option applies to `@simtlix/simfinity-js`. PostgreSQL generates its storage description from GraphQL metadata and requires `null` as the model argument.
 
 You can retain an existing Mongoose schema, indexes, and collection mapping:
 
@@ -146,6 +148,8 @@ simfinity.connect(SerieModel, SerieType, 'serie', 'series');
 ```
 
 Place the import at the top of your module. Supply the model instead of `null`, before calling `createSchema()`. Keep the GraphQL fields and MongoDB storage fields aligned, particularly each relation's `connectionField`.
+
+PostgreSQL applications call and await `initializeDatabase()` after `createSchema()`. See the [PostgreSQL quick start](./postgresql) for create and read-only validation modes.
 
 ## Work with the built schema
 

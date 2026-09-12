@@ -7,6 +7,8 @@ description: Build and run a complete Simfinity API with GraphQL Yoga, Mongoose,
 
 Build a small series catalog with a working GraphQL endpoint. By the end, you will be able to create, query, update, and delete a serie, then call the same catalog through an MCP tool.
 
+This page is the MongoDB starter. For UUID identities, generated PostgreSQL tables, and real foreign keys, follow the [PostgreSQL quick start](./postgresql).
+
 
 ## Download the starter
 

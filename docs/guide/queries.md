@@ -19,7 +19,7 @@ query GetSerie($id: ID!) {
 }
 ```
 
-Supply a MongoDB document ID. The generated argument is `id: ID`; declaring your operation variable as `ID!` makes it required for that operation. An ID with no matching record returns `null`.
+Supply an entity ID: a MongoDB ObjectId for the Mongo facade or a UUID for PostgreSQL. The generated argument is `id: ID`; declaring your operation variable as `ID!` makes it required for that operation. An ID with no matching record returns `null`.
 
 ## Filter a list
 
@@ -141,10 +141,10 @@ query {
 
 Logical groups can describe the same path with `{ field: "serie", path: "name", ... }` or the dotted field form `{ field: "serie.name", ... }`. Do not combine the dotted form and a separate `path` in one condition.
 
-All `terms` are ANDed, including multiple conditions on the same path. For example, `[{ path: "year", operator: GTE, value: 2020 }, { path: "year", operator: LTE, value: 2025 }]` preserves both bounds. These conditions remain ANDed with logical groups and scope filters. Paths must terminate at a declared scalar or enum field. ID comparisons use the actual Mongoose schema path, including supplied models with string or numeric `_id` fields.
+All `terms` are ANDed, including multiple conditions on the same path. For example, `[{ path: "year", operator: GTE, value: 2020 }, { path: "year", operator: LTE, value: 2025 }]` preserves both bounds. These conditions remain ANDed with logical groups and scope filters. Paths must terminate at a declared scalar or enum field. MongoDB ID comparisons use the actual Mongoose schema path, including supplied models with string or numeric `_id` fields; PostgreSQL entity and reference IDs are UUIDs.
 
 ::: info Referenced collection joins
-Root filters that traverse a one-to-many relation use MongoDB lookups and unwinds. A parent can appear more than once when multiple child records match; the generated list pipeline does not add a distinct-parent grouping stage. Account for this when designing result lists and counts.
+Root filters that traverse a one-to-many relation preserve one result row per matching child. A parent can appear more than once when multiple child records match, on both supported backends. Account for this when designing result lists and counts.
 :::
 
 ## Pagination and total count
@@ -220,7 +220,7 @@ query {
 
 Referenced fields can use dotted paths, for example `serie.name` when sorting seasons. Provide at least one sort term when supplying `sort`.
 
-List sort paths are checked against the declared fields. `id` sorts by `_id`, and `serie.id` sorts by the related `_id`; embedded paths stay dotted. Multiple terms through the same relationship reuse its lookup.
+List sort paths are checked against the declared fields. `id` and related `.id` paths resolve to the backend identity column; embedded paths stay dotted. Multiple terms through the same relationship reuse its join.
 
 ## Aggregate records
 
@@ -249,5 +249,7 @@ query {
 Each result contains a `groupId` and a JSON `facts` object, such as `{ "total": 12, "firstYear": 2004 }`. Select `facts` directly without a sub-selection.
 
 Supported operations are `SUM`, `COUNT`, `AVG`, `MIN`, and `MAX`. Every fact requires `path`, including `COUNT`; use an existing field such as `id` for counting. Filters run before grouping. Aggregate sorting accepts a fact name or `groupId`, and pagination applies to groups. Unlike list queries, aggregates have no default 100-result limit when pagination is omitted. See the [aggregation reference](../reference/aggregation) for input and result details.
+
+PostgreSQL also supports scalar-list leaves inside nested embedded lists for filters, sorts, ragged group keys, and array-valued facts. Array `MIN`/`MAX` compares the complete array, while result sorting selects the immediate extrema. Whole embedded objects cannot be sorted or grouped. The [PostgreSQL query boundaries](./postgresql#query-support-and-boundaries) list the exact remaining limits.
 
 To constrain which records a caller may query, continue with [query scope](./query-scope).

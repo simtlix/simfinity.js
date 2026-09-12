@@ -8,9 +8,9 @@ const siteUrl = process.env.DOCS_SITE_URL;
 
 export default defineConfig({
   title: 'Simfinity.js',
-  description: 'Define your GraphQL types. Generate your MongoDB models, queries, mutations, and MCP tools with Simfinity.js.',
+  description: 'Define your GraphQL types. Generate MongoDB or PostgreSQL storage, queries, mutations, relationships, and optional MCP tools with Simfinity.js.',
   lang: 'en-US',
-  srcExclude: ['public/**'],
+  srcExclude: ['public/**', 'superpowers/**'],
   base,
   lastUpdated: true,
   head: [
@@ -28,7 +28,7 @@ export default defineConfig({
     ];
     if (siteUrl) {
       const socialImage = new URL(`${base}social-cover.png`, siteUrl).href;
-      head.push(['meta', { property: 'og:image', content: socialImage }], ['meta', { name: 'twitter:image', content: socialImage }], ['meta', { property: 'og:image:width', content: '1200' }], ['meta', { property: 'og:image:height', content: '630' }], ['meta', { property: 'og:image:alt', content: 'Simfinity.js: GraphQL types connected to MongoDB, generated operations and MCP tools.' }]);
+      head.push(['meta', { property: 'og:image', content: socialImage }], ['meta', { name: 'twitter:image', content: socialImage }], ['meta', { property: 'og:image:width', content: '1200' }], ['meta', { property: 'og:image:height', content: '630' }], ['meta', { property: 'og:image:alt', content: 'Simfinity.js: GraphQL types connected to MongoDB or PostgreSQL, generated operations, and optional MCP tools.' }]);
       const pagePath = pageData.relativePath.replace(/index\.md$/, '').replace(/\.md$/, '.html');
       const url = new URL(`${base}${pagePath}`, siteUrl).href;
       head.push(['link', { rel: 'canonical', href: url }], ['meta', { property: 'og:url', content: url }]);
@@ -59,7 +59,8 @@ export default defineConfig({
       { text: 'Start here', items: [
         { text: 'Introduction', link: '/guide/introduction' },
         { text: 'Is Simfinity a fit?', link: '/guide/choosing-simfinity' },
-        { text: 'Quick start', link: '/guide/getting-started' },
+        { text: 'MongoDB quick start', link: '/guide/getting-started' },
+        { text: 'PostgreSQL quick start', link: '/guide/postgresql' },
       ] },
       { text: 'Build your API', collapsed: false, items: [
         { text: 'Schema & models', link: '/guide/schema' },

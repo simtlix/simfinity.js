@@ -88,4 +88,4 @@ The helper checks the error instance it receives. If your server wraps an applic
 | `NOT_VALID_ID` | A state action targets a record that does not exist. |
 | `BAD_REQUEST` | A state action is not allowed from the record's current state. |
 
-This table covers intentional core errors; GraphQL coercion, Mongoose, and MongoDB can also produce their own errors. MCP returns execution failures as tool results and throws some setup/dispatch errors; see [MCP error handling](/reference/mcp#results-and-errors).
+This table covers intentional core errors; GraphQL coercion and backend drivers can also produce their own errors. PostgreSQL constraint errors are normalized without leaking SQL or constraint details. MCP returns execution failures as tool results and throws some setup/dispatch errors; see [MCP error handling](/reference/mcp#results-and-errors).

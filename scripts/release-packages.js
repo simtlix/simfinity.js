@@ -32,16 +32,25 @@ const readInputs = (root) => {
   if (lock.lockfileVersion === 2 && entries.some(({ directory, name }) => directory && (!lock.dependencies?.[name] || lock.dependencies[name].version !== `file:${directory}`))) {
     throw new Error('Incomplete npm v2 lockfile legacy workspace metadata');
   }
-  return { entries, lock };
+  const docsLock = parseJSON(join(root, 'docs/package-lock.json'));
+  if (docsLock.lockfileVersion !== 3
+    || docsLock.packages?.['']?.dependencies?.['@simtlix/simfinity-js'] !== 'file:..'
+    || docsLock.packages?.['node_modules/@simtlix/simfinity-js']?.resolved !== '..'
+    || docsLock.packages?.['node_modules/@simtlix/simfinity-js']?.link !== true
+    || docsLock.packages?.['..']?.name !== '@simtlix/simfinity-js') {
+    throw new Error('Release requires the documentation lockfile root workspace link');
+  }
+  return { entries, lock, docsLock };
 };
 const runtimeInternal = (manifest) => Object.fromEntries(Object.entries({ ...manifest.dependencies, ...manifest.optionalDependencies }).filter(([name]) => names.has(name)));
+const internalDependencies = (dependencies) => Object.fromEntries(Object.entries(dependencies || {}).filter(([name]) => names.has(name)));
 const updateInternal = (dependencies, version) => {
   for (const name of Object.keys(dependencies || {})) if (names.has(name)) dependencies[name] = version;
 };
 
 /** Validate a release before packing, tagging, or publishing it. */
 export const readRelease = (root) => {
-  const { entries, lock } = readInputs(root);
+  const { entries, lock, docsLock } = readInputs(root);
   const version = entries.find((item) => item.directory === '').manifest.version;
   assertVersion(version);
   if (lock.version !== version) throw new Error('Root lockfile version differs from the release');
@@ -70,13 +79,21 @@ export const readRelease = (root) => {
       if (names.has(dependency) && range !== version) throw new Error(`Lockfile internal dependency version differs for ${name}`);
     }
   }
+  const rootManifest = entries.find((item) => item.directory === '').manifest;
+  const docsRoot = docsLock.packages['..'];
+  if (docsRoot.version !== version) throw new Error('Documentation lockfile root version differs from the release');
+  for (const group of dependencyGroups) {
+    if (JSON.stringify(internalDependencies(docsRoot[group])) !== JSON.stringify(internalDependencies(rootManifest[group]))) {
+      throw new Error(`Documentation lockfile ${group} internal dependencies differ from the release`);
+    }
+  }
   return { version, packages: entries.map(({ directory, name, manifest }) => ({ directory, name, version, dependencies: manifest.dependencies || {} })) };
 };
 
 /** Update every package and internal lock entry without installing or contacting a registry. */
 export const setReleaseVersion = (root, version) => {
   assertVersion(version);
-  const { entries, lock } = readInputs(root);
+  const { entries, lock, docsLock } = readInputs(root);
   const changes = new Map();
   for (const { directory, name, manifest } of entries) {
     manifest.version = version;
@@ -94,6 +111,16 @@ export const setReleaseVersion = (root, version) => {
   }
   lock.version = version;
   changes.set(join(root, 'package-lock.json'), lock);
+  const rootManifest = entries.find((item) => item.directory === '').manifest;
+  const docsRoot = docsLock.packages['..'];
+  docsRoot.version = version;
+  for (const group of dependencyGroups) {
+    const external = Object.fromEntries(Object.entries(docsRoot[group] || {}).filter(([dependency]) => !names.has(dependency)));
+    const internal = internalDependencies(rootManifest[group]);
+    if (Object.keys(external).length || Object.keys(internal).length) docsRoot[group] = { ...external, ...internal };
+    else delete docsRoot[group];
+  }
+  changes.set(join(root, 'docs/package-lock.json'), docsLock);
   const originals = new Map([...changes.keys()].map((path) => [path, readFileSync(path, 'utf8')]));
   try {
     for (const [path, value] of changes) {

@@ -2,6 +2,8 @@
 
 Database-independent MCP tool generation and transports for Simfinity GraphQL schemas. It requires GraphQL 16 and Node.js 18.18 or later.
 
+Version 3.2.0 is prepared locally with the other Simfinity packages and is not yet published. Source: [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js).
+
 Tool generation and execution use only GraphQL:
 
 ```javascript
@@ -25,4 +27,4 @@ const server = await createMCPServer(schema);
 await server.close();
 ```
 
-The package works with schemas produced by either `@simtlix/simfinity-js` or `@simtlix/simfinity-postgres`. Server constructors report `MCP_SDK_NOT_INSTALLED` when the optional SDK is unavailable.
+The package works with schemas produced by either `@simtlix/simfinity-js` or `@simtlix/simfinity-postgres`. `generateMCPTools` needs no SDK. Server and transport constructors report `MCP_SDK_NOT_INSTALLED` when the optional SDK is unavailable.

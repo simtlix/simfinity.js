@@ -2,6 +2,8 @@
 
 PostgreSQL 15 or later support for the Simfinity GraphQL runtime. The package requires GraphQL 16 and Node.js 18.18 or later, depends on `pg` and `@simtlix/simfinity-core`, and has no Mongoose or MongoDB dependency.
 
+Version 3.2.0 is prepared locally with the other Simfinity packages and is not yet published. Source and the complete startup guide: [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js), [`docs/guide/postgresql.md`](https://github.com/simtlix/simfinity.js/blob/master/docs/guide/postgresql.md).
+
 ## Runtime
 
 Create an instance, register the same GraphQL object types used by Simfinity, build the schema, and await database initialization before serving operations:
@@ -62,7 +64,11 @@ Entity identities and references use UUIDs. Scalars use native PostgreSQL types,
 
 Queries support nested scalar/reference paths, logical filter groups, scopes, sort, pagination, count, and grouped `SUM`, `COUNT`, `AVG`, `MIN`, and `MAX` facts. The PostgreSQL implementation preserves root multiplicity when joining collection paths.
 
-The following mappings remain unsupported and fail explicitly: implicit many-to-many reciprocal lists, non-embedded collections inside embedded objects, embedded cycles, nested lists, embedded uniqueness, scalar-list/multikey uniqueness, and custom scalars without a recognized base scalar. Query paths cannot sort or aggregate whole embedded objects, group by values inside an embedded list, aggregate array-valued facts, or query scalar lists nested inside embedded lists.
+PostgreSQL enforces required values, real FKs, JSONB/owned embedded shapes, root and embedded scalar/reference uniqueness, and scalar-list multikey uniqueness. Root unique indexes use `NULLS NOT DISTINCT`; private typed owner-key tables allow repeated keys within one owner but reject the same key across owners. Presence markers preserve missing versus explicit null fields. This is stronger and broader than generated Mongoose storage.
+
+Scalar-list leaves inside nested embedded lists support filters, sorts, ragged group projections, and array-valued facts. Array `MIN`/`MAX` compares complete arrays; result sorting uses immediate extrema. Date parameters use per-query UTC encoding without changing global `pg` behavior.
+
+The following mappings remain unsupported and fail explicitly: implicit many-to-many reciprocal lists, non-embedded collections inside embedded objects, embedded cycles, nested list wrappers, whole embedded-object uniqueness, conflicting relationship metadata, enum values that collide after text conversion, and custom scalars without a recognized base scalar. Query paths cannot sort or group whole embedded objects. Arbitrary MongoDB pipelines and Mongoose-native methods are outside the PostgreSQL contract.
 
 ## Low-level schema API
 

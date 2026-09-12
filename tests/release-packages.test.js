@@ -31,7 +31,20 @@ describe('workspace release preparation', () => {
     expect(lock.packages['packages/postgres'].dependencies).toEqual({ '@simtlix/simfinity-core': '3.2.0', pg: '^8.16.3' });
     expect(lock.dependencies['@simtlix/simfinity-mcp']).toEqual({ version: 'file:packages/mcp', requires: { '@simtlix/simfinity-core': '3.2.0' } });
     expect(lock.packages['node_modules/pg']).toEqual({ version: '8.16.3', integrity: 'preserve-external-entry' });
+    const docsLock = json(join(root, 'docs/package-lock.json'));
+    expect(docsLock.packages['..'].version).toBe('3.2.0');
+    expect(docsLock.packages['..'].dependencies).toEqual({ '@simtlix/simfinity-core': '3.2.0', '@simtlix/simfinity-mcp': '3.2.0' });
     expect(readFileSync(join(root, 'package.json'), 'utf8').replaceAll('\r\n', '')).not.toContain('\n');
+  });
+
+  it('rejects a stale root workspace snapshot in the documentation lockfile', () => {
+    const root = fixture();
+    setReleaseVersion(root, '3.2.0');
+    const path = join(root, 'docs/package-lock.json');
+    const lock = json(path);
+    lock.packages['..'].version = '3.1.0';
+    writeFileSync(path, JSON.stringify(lock));
+    expect(() => readRelease(root)).toThrow(/documentation lockfile/i);
   });
 
   it.each(['../3.2.0', '3.2', 'v3.2.0', '03.2.0', '3.2.0-01', '3.2.0\n', '3.2.0\r'])('rejects unsafe or invalid release version %j before writing files', (version) => {

@@ -1,6 +1,8 @@
 # PostgreSQL support
 
-This branch implements PostgreSQL schema generation and GraphQL execution through the shared runtime. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. The packages are experimental; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
+Simfinity 3.2.0 adds PostgreSQL schema generation and GraphQL execution through the shared runtime. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.2.0 is prepared as an unpublished local release; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
+
+Start with the canonical [PostgreSQL quick start](guide/postgresql.md) for a complete Yoga server, initialization choice, controller/session example, and pool shutdown. This page is the detailed storage and compatibility reference.
 
 The intended backend choice is permanent application configuration. There is no runtime switching, dual writing, or MongoDB-to-PostgreSQL data migration.
 
@@ -10,11 +12,12 @@ Run `npm install` at the repository root to install the workspaces:
 
 | Package | Current exports and dependencies |
 | --- | --- |
-| `@simtlix/simfinity-js` | Existing MongoDB facade and native adapter, plus existing auth/MCP/scalar/validator/plugin exports. Mongoose dependencies remain here. |
+| `@simtlix/simfinity-js` | MongoDB facade and native adapter, plus compatibility auth/MCP/scalar/validator/plugin exports. Mongoose dependencies remain here. |
 | `@simtlix/simfinity-core` | `createRuntime`, model metadata, typed query plans, scalar factory and error classes. GraphQL peer only; no drivers or MCP. |
 | `@simtlix/simfinity-postgres` | `createPostgres`, default-module runtime facade, schema description/DDL/initialization, shared scalar factory and errors. Depends on core and `pg`; GraphQL peer. No MongoDB, Mongoose or MCP dependency. |
+| `@simtlix/simfinity-mcp` | Optional database-independent tool generation and transports. Depends on core; the MCP SDK is an optional peer. |
 
-The new packages are experimental version `0.1.0` workspaces and have not been published. Before a release, update the existing release/publish workflows for the new packages and publish core before either dependent package; publishing the root package alone would leave its new core dependency unavailable. `npm run test:packages` packs all three, installs them into separate temporary applications, verifies exports and checks dependency isolation. Library code requires Node.js >=18.18.0; development and CI use Node.js 24 for Vitest 4. PostgreSQL requires version 15 or later.
+All four packages are versioned together at local version `3.2.0` with exact internal dependencies and have not been published. Release archives and publication use the order core, MCP, PostgreSQL, then the root MongoDB facade. `npm run test:packages` packs and installs five standalone consumer cases, including MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; development and CI use Node.js 24 for Vitest 4. PostgreSQL requires version 15 or later.
 
 ## Executable example
 
@@ -178,20 +181,22 @@ Unsupported shapes fail before DDL generation: reciprocal lists representing imp
 
 Startup validation describes the catalog at that time. It is not continuous monitoring of subsequent administrator changes. PostgreSQL's catalog representation changes by version, including [table NOT NULL constraints in PostgreSQL 18](https://www.postgresql.org/docs/18/catalog-pg-constraint.html); integration coverage must accompany support for a new server version.
 
-## Verification and remaining work
+## Verification and remaining boundaries
 
 ```bash
 npm run lint
 npm test
 npm run test:packages
-SIMFINITY_MONGODB_URI='mongodb://.../disposable_db?replicaSet=rs0&directConnection=true' \
-SIMFINITY_POSTGRES_URI='postgresql://.../disposable_db' npm run test:integration
+TZ='America/New_York' \
+SIMFINITY_MONGODB_URI='mongodb://.../disposable_contract_db?replicaSet=rs0&directConnection=true' \
+SIMFINITY_TEST_MONGODB_URI='mongodb://.../disposable_upstream_db?replicaSet=rs0&directConnection=true' \
+SIMFINITY_POSTGRES_URI='postgresql://.../disposable_db' npm test
 ```
 
-MongoDB tests drop the configured database; PostgreSQL tests create and remove private random schemas. Use disposable instances. Without the corresponding environment variables, integration suites are reported as skipped. CI provisions real databases.
+MongoDB tests drop the configured databases; PostgreSQL tests create and remove private random schemas. Use separate disposable MongoDB names for the shared contract and upstream regression suites. Without the corresponding environment variables, integration suites are reported as skipped. CI provisions real databases.
 
-The shared fixture covers Serie/Season/Episode, Star/Assignment, embedded directors and reference-bearing credits, no-endpoint labels, inverse scalar IDs, scopes, hooks and validators. Tests compare actual GraphQL schemas/results across both databases and check PostgreSQL constraints directly, alongside custom mutations, retries, concurrency, state guards and rollback. CI covers PostgreSQL 15, 16 and 18 with MongoDB 7 replica sets.
+The shared fixture covers Serie/Season/Episode, Star/Assignment, embedded directors and reference-bearing credits, no-endpoint labels, inverse scalar IDs, scopes, hooks and validators. Tests compare actual GraphQL schemas/results across both databases and check PostgreSQL constraints directly, alongside custom mutations, retries, concurrency, state guards and rollback. CI covers PostgreSQL 15, 16, and 18 with MongoDB 7/8 replica sets and separate databases for upstream MongoDB regressions.
 
 Existing schemas generated before these constraints or presence columns require an explicit migration where their table/check layouts differ; initialization does not alter columns or replace checks. Generated ordering/date helpers are also catalog-checked for drift.
 
-Remaining work includes broader parity fixtures for legacy Mongo edge behavior, schema migrations and release automation. Auth/MCP/prebuilt scalar/validator/count-plugin helpers remain exports of the original MongoDB package; extracting those optional helpers without importing its dependency chain is a separate packaging phase. This version does not claim complete compatibility with arbitrary MongoDB models, native code or query pipelines.
+This version does not claim compatibility with arbitrary Mongoose models, native Mongoose code, MongoDB aggregation pipelines, automatic schema migration, or runtime backend switching. PostgreSQL's Model and Session APIs are intentionally native to its adapter. Shared auth, scalar, validator, and count-plugin helpers live in core; MCP lives in its opt-in package while the MongoDB facade retains compatibility exports.

@@ -163,6 +163,8 @@ Replace the `activate` entry in `stateMachine.actions` with this configuration b
 
 The callback runs after the source-state check and before the managed state is added to the update. Throwing aborts the transition. The resulting update also passes through update validators and the type's update controller hooks.
 
+The lookup above uses the MongoDB Model API. With PostgreSQL, use `await simfinity.getModel(SeasonType).findById(input.id, { session })`; it returns a plain record and joins the same transaction.
+
 ## Failure behavior
 
 | Condition | Result |

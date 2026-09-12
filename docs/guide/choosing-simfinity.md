@@ -1,11 +1,11 @@
 ---
 title: Is Simfinity a fit?
-description: Evaluate the GraphQL and MongoDB architecture, what Simfinity generates, and what your application owns.
+description: Evaluate Simfinity's GraphQL, MongoDB, and PostgreSQL architecture, what it generates, and what your application owns.
 ---
 
 # Is Simfinity a fit?
 
-Simfinity connects GraphQL object types to MongoDB models and generated operations. It is useful when your application has a connected domain, repeated CRUD behavior, and application rules you want to keep close to its schema.
+Simfinity connects GraphQL object types to MongoDB models or PostgreSQL tables and generated operations. It is useful when your application has a connected domain, repeated CRUD behavior, and application rules you want to keep close to its schema.
 
 <DomainDiagram kind="schema" />
 
@@ -13,7 +13,7 @@ Simfinity connects GraphQL object types to MongoDB models and generated operatio
 
 | Simfinity generates | Your application provides |
 | --- | --- |
-| Mongoose models from registered GraphQL types | A MongoDB deployment, credentials and indexes appropriate to the workload |
+| Mongoose models or PostgreSQL tables from registered GraphQL types | One supported database deployment, credentials and workload-specific indexes |
 | Detail, list, aggregation and CRUD operations | Endpoint names and decisions about which operations to expose |
 | Relationship inputs and resolvers | Storage choices, ownership checks and deletion policy |
 | Integration points for permissions, validation and lifecycle hooks | Authentication, authorization policy and domain-specific behavior |
@@ -33,11 +33,11 @@ Follow the same domain as it grows:
 
 ## Architectural boundaries
 
-- Persistence uses MongoDB and Mongoose. A SQL-backed application needs a different persistence approach.
-- Generated mutations use transactions. A standalone MongoDB server is insufficient; use a replica set or sharded cluster.
+- Choose MongoDB/Mongoose or PostgreSQL when the application starts. Runtime switching and automatic data migration are outside the package contract.
+- Generated mutations use transactions. MongoDB needs a replica set or sharded cluster; PostgreSQL needs version 15 or later.
 - Authentication belongs to your application. Query scopes restrict supported reads; write ownership checks require explicit application policy.
-- Direct Mongoose calls bypass the generated GraphQL pipelines.
-- Type registration is global to the running process. Register your types and build the schema during application startup.
+- Direct Mongoose calls and PostgreSQL native Model calls bypass the generated GraphQL pipelines.
+- Registrations and middleware belong to a runtime instance. Register your types and build each schema during application startup; reuse the resulting schema rather than rebuilding it per request.
 - Supporting types, custom mutations and lifecycle hooks let you adapt the generated behavior. Review the [Core API](../reference/api) when deciding where to extend it.
 
 For requirements and version information, see [compatibility and releases](../resources/compatibility).

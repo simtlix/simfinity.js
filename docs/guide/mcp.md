@@ -9,6 +9,8 @@ Simfinity can turn a GraphQL schema into Model Context Protocol tools. Each expo
 
 Start with a working schema from [getting started](/guide/getting-started). MCP adds another way to invoke its operations; the same database and mutation transaction requirements apply.
 
+The MongoDB facade retains MCP compatibility exports. For either database, the dependency-light integration is the opt-in `@simtlix/simfinity-mcp` package. Install `@modelcontextprotocol/sdk` only when using server or transport factories; `generateMCPTools` itself needs only GraphQL. PostgreSQL applications import MCP functions from this separate package, as shown in the [PostgreSQL quick start](/guide/postgresql#optional-mcp-integration).
+
 ## Continue from the Quick start
 
 The [starter project](/guide/getting-started#download-the-starter) already separates `schema.js`, `server.js`, and `mcp.js`. Importing `schema.js` connects to MongoDB, registers the types and exports the built schema. Each entry point reuses that initialization.

@@ -2,6 +2,8 @@
 
 Driver-free GraphQL runtime, model metadata, and shared GraphQL helpers for Simfinity. It requires GraphQL 16 and Node.js 18.18 or later, and does not import Mongoose, MongoDB, PostgreSQL, or MCP packages.
 
+Version 3.2.0 is prepared locally with the other Simfinity packages and is not yet published. Source: [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js).
+
 ## Runtime
 
 `createRuntime(adapter)` creates an isolated Simfinity runtime. Each instance owns its registrations, generated input types, middleware, scopes, hooks, custom mutations, and state machines. It exposes:

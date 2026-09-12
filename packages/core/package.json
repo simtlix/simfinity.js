@@ -1,12 +1,15 @@
 {
   "name": "@simtlix/simfinity-core",
-  "version": "0.1.0",
+  "version": "3.2.0",
   "description": "Driver-free GraphQL runtime and model metadata for Simfinity",
   "type": "module",
   "main": "./src/index.js",
   "types": "./types/index.d.ts",
   "exports": {
-    ".": { "types": "./types/index.d.ts", "default": "./src/index.js" },
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.js"
+    },
     "./auth": "./src/auth/index.js",
     "./auth/errors": "./src/auth/errors.js",
     "./auth/expressions": "./src/auth/expressions.js",
@@ -16,8 +19,22 @@
     "./scalars": "./src/scalars.js",
     "./validators": "./src/validators.js"
   },
-  "files": ["src", "types", "README.md", "LICENSE"],
-  "engines": { "node": ">=18.18.0" },
+  "files": [
+    "src",
+    "types",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.18.0"
+  },
   "license": "Apache-2.0",
-  "peerDependencies": { "graphql": "^16.11.0" }
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/simtlix/simfinity.js",
+    "directory": "packages/core"
+  },
+  "peerDependencies": {
+    "graphql": "^16.11.0"
+  }
 }

@@ -23,5 +23,16 @@ export const writeReleaseFixture = (root) => {
   }
   lock.packages['node_modules/pg'] = { version: '8.16.3', integrity: 'preserve-external-entry' };
   writeFileSync(join(root, 'package-lock.json'), `${JSON.stringify(lock, null, 2)}\n`.replaceAll('\n', '\r\n'));
+  mkdirSync(join(root, 'docs'), { recursive: true });
+  const docsLock = {
+    name: 'simfinity-docs',
+    lockfileVersion: 3,
+    packages: {
+      '': { name: 'simfinity-docs', dependencies: { '@simtlix/simfinity-js': 'file:..' } },
+      '..': structuredClone(lock.packages['']),
+      'node_modules/@simtlix/simfinity-js': { resolved: '..', link: true },
+    },
+  };
+  writeFileSync(join(root, 'docs/package-lock.json'), `${JSON.stringify(docsLock, null, 2)}\n`);
   return root;
 };

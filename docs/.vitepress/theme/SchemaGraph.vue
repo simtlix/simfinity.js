@@ -12,7 +12,7 @@ const emit = defineEmits(['select']);
 const inspected = ref(null);
 const graphRoot = ref(null);
 const nodes = [
-  { id: 'models', label: 'MongoDB models', eyebrow: 'PERSISTENCE', position: 'models', index: '01', detail: 'Mongoose models, shaped by your types.', path: 'M287 226 C219 210 282 114 162 110', color: 'amber' },
+  { id: 'models', label: 'Database models', eyebrow: 'PERSISTENCE', position: 'models', index: '01', detail: 'MongoDB or PostgreSQL storage, shaped by your types.', path: 'M287 226 C219 210 282 114 162 110', color: 'amber' },
   { id: 'query', label: 'GraphQL queries', eyebrow: 'READ', position: 'query', index: '02', detail: 'Filter, sort, and paginate your data.', path: 'M369 220 C439 194 427 103 543 103', color: 'amber' },
   { id: 'mutation', label: 'Mutations', eyebrow: 'WRITE', position: 'mutation', index: '03', detail: 'Create, update, and delete through GraphQL.', path: 'M379 267 C449 265 450 341 563 341', color: 'amber' },
   { id: 'relations', label: 'Relationships', eyebrow: 'CONNECT', position: 'relations', index: '04', detail: 'Connected types become queryable relationships.', path: 'M277 265 C206 264 234 354 142 354', color: 'amber' },
@@ -47,7 +47,7 @@ defineExpose({ focusNode });
       <div :key="active" class="focus-node-caption" aria-hidden="true"><span>{{ active === 'schema' ? '00 / THE SOURCE' : `${nodes.find(node => node.id === active)?.index} / GENERATED FROM YOUR SCHEMA` }}</span><strong>{{ active === 'schema' ? 'GraphQL schema' : nodes.find(node => node.id === active)?.label }}</strong></div>
       <svg class="system-topology" viewBox="0 0 700 540" fill="none" role="img" aria-labelledby="sim-graph-title sim-graph-description" focusable="false">
         <title id="sim-graph-title">One schema becomes a connected system</title>
-        <desc id="sim-graph-description">A central GraphQL schema connects to MongoDB models, GraphQL queries, mutations, relationships, and MCP tools. Traveling signals show the connections between the schema and each generated capability.</desc>
+        <desc id="sim-graph-description">A central GraphQL schema connects to database models, GraphQL queries, mutations, relationships, and optional MCP tools. Traveling signals show the connections between the schema and each generated capability.</desc>
         <defs>
           <pattern id="sim-graph-grid" width="28" height="28" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".65" fill="var(--graph-grid)" opacity=".28"/></pattern>
           <radialGradient id="sim-graph-grid-mask"><stop offset=".1" stop-color="white"/><stop offset="1" stop-color="black"/></radialGradient>

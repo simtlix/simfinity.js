@@ -82,13 +82,15 @@ type QLTypeAggregationResult {
 | `MIN` | Returns the smallest value at `path`. |
 | `MAX` | Returns the largest value at `path`. |
 
-Choose unique, simple `factName` values because they become fields in the generated MongoDB group stage and keys of the returned `facts` object.
+Choose unique, simple `factName` values because they become fields in the generated backend aggregation and keys of the returned `facts` object.
 
 ## Related paths
 
 `groupId` and fact `path` values accept direct fields and dot-separated relationship paths, such as `country.name` or `country.region.name`. Relations must be defined in your schema.
 
-Simfinity adds MongoDB lookups for non-embedded references and resolves embedded paths inline. Grouping occurs over the resulting pipeline rows. When joins expand a source record into multiple rows, counts and sums reflect those rows; check the cardinality of the relationship for your metric.
+Simfinity adds backend joins for non-embedded references and resolves embedded paths inline. Grouping occurs over the resulting rows. When joins expand a source record into multiple rows, counts and sums reflect those rows; check the cardinality of the relationship for your metric.
+
+PostgreSQL preserves nested scalar-list arrays in group keys, including ragged lists, duplicates, explicit nulls, and empty arrays. Array facts use `SUM = 0` and `AVG = null`; `MIN` and `MAX` compare complete arrays with typed/null ordering. Result sorting by an array-valued group or fact selects its immediate minimum/maximum element. Whole embedded objects remain unsupported as group or fact paths.
 
 ## Filtering, sorting, and pagination
 

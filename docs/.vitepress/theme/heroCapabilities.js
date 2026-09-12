@@ -9,13 +9,13 @@ export const heroCapabilities = [
     link: '/guide/schema.html', cta: 'Explore schema definition',
   },
   {
-    id: 'models', label: 'MongoDB models', short: 'Models', index: '01', eyebrow: 'PERSISTENCE',
+    id: 'models', label: 'Database models', short: 'Models', index: '01', eyebrow: 'PERSISTENCE',
     title: 'Your types.', accent: 'Made persistent.',
-    description: 'Generate Mongoose models from your GraphQL fields, or connect an existing model. Your types stay at the center.',
-    features: ['Generated models', 'Existing models', 'Field metadata'],
-    file: 'schema.js · generate a model',
-    code: '// Pass null to generate the Mongoose model.\nsimfinity.connect(\n  null, SerieType, \'serie\', \'series\'\n);',
-    link: '/guide/schema.html', cta: 'Explore MongoDB models',
+    description: 'Generate MongoDB models or PostgreSQL tables from your GraphQL fields. Your types stay at the center.',
+    features: ['MongoDB or PostgreSQL', 'Generated storage', 'Field metadata'],
+    file: 'schema.js · generate storage',
+    code: '// Choose the database facade at startup.\nsimfinity.connect(\n  null, SerieType, \'serie\', \'series\'\n);',
+    link: '/guide/schema.html', cta: 'Explore database models',
   },
   {
     id: 'query', label: 'GraphQL queries', short: 'Queries', index: '02', eyebrow: 'READ',
@@ -29,7 +29,7 @@ export const heroCapabilities = [
   {
     id: 'mutation', label: 'Mutations', short: 'Mutations', index: '03', eyebrow: 'WRITE',
     title: 'Make changes.', accent: 'Keep your rules.',
-    description: 'Create, update, and delete with typed inputs, validation, lifecycle hooks, and MongoDB transactions.',
+    description: 'Create, update, and delete with typed inputs, validation, lifecycle hooks, and database transactions.',
     features: ['Typed inputs', 'Validation & hooks', 'Transactions'],
     file: 'catalog.graphql · generated mutation',
     code: 'mutation {\n  addserie(input: { name: "The Expanse" }) {\n    id\n    name\n  }\n}',

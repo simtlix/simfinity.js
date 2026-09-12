@@ -4,9 +4,9 @@ This file helps coding agents (and humans) work productively and safely in this 
 
 ## What this project is
 
-- **Package**: `@simtlix/simfinity-js` — GraphQL schema/model generation from `GraphQLObjectType`, MongoDB via Mongoose, Vitest for tests, ESLint 9 (flat config), ES modules (`"type": "module"`).
+- **Packages**: `@simtlix/simfinity-js` is the MongoDB/Mongoose facade; `@simtlix/simfinity-core` is the driver-free runtime; `@simtlix/simfinity-postgres` is the PostgreSQL 15+ facade; `@simtlix/simfinity-mcp` is the optional database-independent MCP integration. All generate a GraphQL API from `GraphQLObjectType` definitions.
 - **Runtime**: Node.js `>=18.18.0`.
-- **Peers**: `graphql` ^16, `mongoose` ^8.
+- **Peers**: every package uses `graphql` ^16. The Mongo facade alone has a `mongoose` ^8 peer; MCP has an optional `@modelcontextprotocol/sdk` peer. PostgreSQL depends on `pg` and core, without MongoDB, Mongoose, or MCP.
 
 ## Authoritative rules (read these)
 
@@ -41,7 +41,7 @@ Use `npm run test:watch` while iterating; `npm run test:coverage` when coverage 
 
 ## Layout hints
 
-- **Implementation**: `src/` (`index.js` is the main engine; `src/mcp.js` generates MCP tools/servers from the GraphQL schema; `src/auth/`, `src/errors/`, `src/const/`, etc.).
+- **Implementation**: `packages/core/src/` owns the shared runtime and helpers; `src/` owns the MongoDB facade/adapter and compatibility shims; `packages/postgres/src/` owns PostgreSQL storage and execution; `packages/mcp/src/` owns MCP generation and transports.
 - **Tests**: `tests/*.test.js` — mirror modules; see `.cursor/rules/simfinity-testing.mdc` for `simfinity.preventCreatingCollection(true)` in `beforeAll`.
 
 ## When editing

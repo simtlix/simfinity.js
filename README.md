@@ -1,8 +1,8 @@
-![Simfinity.js — Define once. Build beyond. GraphQL, MongoDB, and MCP.](.github/assets/readme-cover.png)
+![Simfinity.js — Define once. Build beyond. GraphQL, MongoDB, PostgreSQL, and optional MCP.](.github/assets/readme-cover.png)
 
 # Simfinity.js
 
-A powerful Node.js framework that automatically generates GraphQL schemas from your data models, bringing all the power and flexibility of MongoDB query language to GraphQL interfaces.
+A Node.js framework that turns GraphQL object types into generated queries, mutations, relationships, and database storage. Use the established MongoDB/Mongoose facade or the PostgreSQL 15+ facade with real tables and foreign keys.
 
 Read the [documentation website](https://simtlix.github.io/simfinity.js/): start with the [quick start](https://simtlix.github.io/simfinity.js/guide/getting-started.html), explore the [guides](https://simtlix.github.io/simfinity.js/guide/schema.html), or consult the [API reference](https://simtlix.github.io/simfinity.js/reference/api.html). The website source is in [`docs/`](docs/).
 
@@ -19,7 +19,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 
 - [Features](#-features)
 - [Installation](#-installation)
-- [PostgreSQL development status](#postgresql-development-status)
+- [PostgreSQL support](#postgresql-support)
 - [Quick Start](#-quick-start)
 - [Core Concepts](#-core-concepts)
   - [Connecting Models](#connecting-models)
@@ -88,8 +88,8 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## ✨ Features
 
 - **Automatic Schema Generation**: Define your object model, and Simfinity.js generates all queries and mutations
-- **MongoDB Integration**: Seamless translation between GraphQL and MongoDB
-- **Powerful Querying**: Any query that can be executed in MongoDB can be executed in GraphQL
+- **MongoDB or PostgreSQL**: Choose the database facade once during application startup
+- **Powerful Querying**: Typed filters, nested paths, pagination, sorting, and aggregations across the supported contract
 - **Aggregation Queries**: Built-in support for GROUP BY queries with aggregation operations (SUM, COUNT, AVG, MIN, MAX)
 - **Auto-Generated Resolvers**: Automatically generates resolve methods for relationship fields
 - **Automatic Index Creation**: Automatically creates MongoDB indexes for all ObjectId fields, including nested embedded objects and relationship fields
@@ -108,13 +108,13 @@ npm install mongoose graphql @simtlix/simfinity-js
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies.
 
-## PostgreSQL development status
+## PostgreSQL support
 
-The repository includes experimental `@simtlix/simfinity-core` and `@simtlix/simfinity-postgres` workspaces. PostgreSQL now runs the shared GraphQL query/mutation engine, including scopes, controllers, validators, state transitions and nested writes. It generates and validates tables, indexes, and **real foreign keys**, including inverse relations, explicit many-to-many linking entities, and references inside embedded objects. PostgreSQL installation does not pull Mongoose or the MongoDB driver.
+Version 3.2.0 prepares `@simtlix/simfinity-core`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-postgres`, and the root MongoDB facade in lockstep. This is an unpublished local feature version; do not assume the workspace packages are available from a public registry. PostgreSQL runs the shared GraphQL query/mutation engine, including scopes, controllers, validators, state transitions and nested writes. It generates and validates tables, indexes, and **real foreign keys**, including inverse relations, explicit many-to-many linking entities, and references inside embedded objects. PostgreSQL installation does not pull Mongoose, MongoDB, or MCP dependencies.
 
-The shared runtime follows v3.1.0: generated relationships run target middleware/scopes with protected identity and parent filters; nested mutations enforce child middleware and persisted ownership; standalone `saveObject()` wraps the complete workflow in a transaction. Accepted empty strings are preserved. Both facades expose `configureQueryLimits()` for bounded pagination.
+The shared runtime preserves the v3.1 contract: generated relationships run target middleware/scopes with protected identity and parent filters; nested mutations enforce child middleware and persisted ownership; standalone `saveObject()` wraps the complete workflow in a transaction. Accepted empty strings are preserved. Both facades expose `configureQueryLimits()` for bounded pagination.
 
-Choose the backend at application setup. The existing package continues to use MongoDB; PostgreSQL uses `createPostgres({ pool, schema })`, the same `connect(null, Type, ...)`/`createSchema()` signatures, and an awaited `initializeDatabase()` before serving requests. The new workspace packages have not been published. See the executable [PostgreSQL setup, mappings, and limits](docs/postgresql.md) and [compatibility contract](docs/compatibility.md) before adopting this version.
+Choose the backend at application setup. The existing package continues to use MongoDB; PostgreSQL uses `createPostgres({ pool, schema })`, the same `connect(null, Type, ...)`/`createSchema()` signatures, and an awaited `initializeDatabase()` before serving requests. See the canonical [PostgreSQL quick start](docs/guide/postgresql.md), detailed [storage reference](docs/postgresql.md), and [compatibility contract](docs/compatibility.md) before adopting this version.
 
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
@@ -214,7 +214,7 @@ const schema = simfinity.createSchema(
 
 Importing Simfinity initializes its global `__Field.extensions` introspection field safely whether GraphQL's fields have already been materialized or a schema already exists. Repeated module evaluation with the same GraphQL peer reuses the existing extension field and metadata types. Application field metadata is preserved.
 
-The extension remains shared by every schema using that GraphQL peer; Simfinity's type and middleware registries also remain module-level state. Schemas constructed after import include `FieldExtensionsType` and `RelationType` in their type maps. Earlier schemas keep their original type maps: ordinary operations and direct metadata selections work, but named fragments on the new metadata types require a schema constructed after import.
+The extension remains shared by every schema using that GraphQL peer; Simfinity's type and middleware registries belong to each runtime instance. Schemas constructed after import include `FieldExtensionsType` and `RelationType` in their type maps. Earlier schemas keep their original type maps: ordinary operations and direct metadata selections work, but named fragments on the new metadata types require a schema constructed after import.
 
 Schema-cloning tools remain unsupported. In a process that has imported Simfinity, `buildClientSchema()` on a post-import schema's introspection result can also fail with duplicate metadata type names. Use Envelop plugins and in-place resolver wrapping; see the [introspection metadata reference](docs/reference/extensions.md).
 

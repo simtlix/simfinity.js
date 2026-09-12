@@ -32,9 +32,9 @@ If an operation is missing entirely, check the filters passed to `createSchema()
 
 ## Reads work but mutations fail with a transaction error
 
-Generated mutations use MongoDB transactions. A standalone MongoDB server does not support them. Connect to a replica set or a sharded deployment and wait for a writable primary. The [quick start](../guide/getting-started#_2-start-mongodb) includes a local replica-set setup.
+MongoDB mutations require a replica set or sharded deployment; wait for a writable primary. PostgreSQL mutations require successful awaited initialization and run in repeatable-read transactions. The [MongoDB quick start](../guide/getting-started#_2-start-mongodb) and [PostgreSQL quick start](../guide/postgresql) include local setup.
 
-Pass the supplied active session from a custom mutation to `saveObject()` to share its transaction. Without a session, `saveObject()` owns a separate transaction. See [mutations](../guide/mutations) and the [core API](../reference/api).
+Pass the supplied active backend session from a custom mutation to `saveObject()` to share its transaction. Without a session, `saveObject()` owns a separate transaction. See [mutations](../guide/mutations) and the [core API](../reference/api).
 
 ## Duplicate introspection types
 

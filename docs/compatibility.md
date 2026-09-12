@@ -1,8 +1,8 @@
 # Database compatibility contract
 
-This ledger records the v3.1.0 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in `tests/integration/query-parity.test.js`, using the graph in `tests/contracts/model-fixtures.js`.
+This ledger records the v3.2.0 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
 
-Set `SIMFINITY_MONGODB_URI` to a disposable replica-set database to run the integration suite. The database is dropped during setup, so the URI must never identify an application database. When the variable is absent, Vitest reports the integration suite as skipped.
+Set `SIMFINITY_MONGODB_URI` and `SIMFINITY_POSTGRES_URI` to disposable databases for the cross-backend suites. Set `SIMFINITY_TEST_MONGODB_URI` to a separate disposable MongoDB database for upstream opt-in regressions. Mongo setup drops its configured databases, so these URIs must never identify application data. When a variable is absent, its integration suites are reported as skipped.
 
 ## MongoDB contract
 
@@ -60,7 +60,7 @@ Runtime verification (2026-09-11):
 - PostgreSQL 15 and 18: **68 schema/runtime/parity integration cases passed on each version**, including connection-field aliases and private inverse FKs against MongoDB.
 - `npm run lint` and the diff whitespace check passed.
 - `npm run test:packages` installed all three actual archives outside the workspace, exercised their runtimes/exports/introspection, and compiled strict TypeScript consumers with GraphQL 16. Core/PostgreSQL installed no MongoDB, Mongoose or MCP packages.
-- CI provisions MongoDB 7 and PostgreSQL 15/16/18; normal unit runs skip database suites explicitly when their URI is absent.
+- At this runtime checkpoint, CI provisioned MongoDB 7 and PostgreSQL 15/16/18; normal unit runs skipped database suites explicitly when their URI was absent.
 
 ## v3.1.0 authorization and query limits
 
@@ -73,3 +73,11 @@ MongoDB transactions use the registered model connection, retry transient bodies
 Embedded parity also covers native/GraphQL default and minimization differences, direct SQL presence, uniqueness after omitted-parent defaults, and UTC historical Date parameters under `America/New_York`. PostgreSQL keeps required constraints: an omitted optional inline parent materialized by descendant array defaults must contain any required scalar; GraphQL create omits explicit null before applying defaults. See the PostgreSQL native/default contract for the explicit-null native alternative.
 
 Embedded query completion verification (2026-09-12): full suites passed **47 files /954 tests** on each of PostgreSQL15/Mongo7 and PostgreSQL18/Mongo8; PostgreSQL16/Mongo8 integration plus schema checks passed **12 files /266 tests**. All ran under America/New_York. Full lint and all five packed runtime/TypeScript consumers passed. The new embedded differential suite contributes 122 cases.
+
+## v3.2.0 package and CI delivery
+
+The root MongoDB facade, core, PostgreSQL, and MCP packages use local version 3.2.0 in lockstep with exact internal dependency versions. This version is not claimed to be published. Release archives and registry publication are ordered core, MCP, PostgreSQL, then the root facade. Core/PostgreSQL install no MongoDB, Mongoose, or MCP dependency chain; MCP and its SDK remain opt-in.
+
+Database CI runs three bounded full-suite jobs: PostgreSQL 15/MongoDB 7, PostgreSQL 16/MongoDB 8, and PostgreSQL 18/MongoDB 8. Each job sets both MongoDB environment variables to distinct databases so the differential and upstream regression suites run without colliding.
+
+PostgreSQL initialization exposes generated tables, primary keys, real FKs, indexes, presence columns, private ownership/key tables, functions, triggers, and maintenance metadata through `describeDatabase()`. These physical constraints are PostgreSQL behavior rather than a claim that native Mongoose APIs or storage coercions are identical. See the [canonical quick start](guide/postgresql.md) and [detailed storage reference](postgresql.md).

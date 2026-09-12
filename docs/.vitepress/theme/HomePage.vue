@@ -171,7 +171,7 @@ onUnmounted(() => {
         <div class="hero-copy" :inert="heroFocused" :aria-hidden="heroFocused">
           <p class="hero-overline"><span class="hero-wordmark">simfinity<span>.js</span></span><span class="overline-separator">/</span><span>THE GRAPHQL FRAMEWORK</span></p>
           <h1 id="hero-title"><span>Define once.</span><span class="hero-title-accent">Build beyond<span class="title-period">.</span></span></h1>
-          <p class="hero-description">Define your GraphQL types. Generate MongoDB models,<br class="desktop-break"> queries, mutations, and MCP tools from one schema.</p>
+          <p class="hero-description">Define your GraphQL types. Generate database storage,<br class="desktop-break"> queries, mutations, and optional MCP tools from one schema.</p>
           <div class="hero-actions">
             <a class="sim-button primary" :href="withBase('/guide/getting-started.html')">Start building <span aria-hidden="true">&#8599;</span></a>
             <a class="text-link" :href="withBase('/guide/introduction.html')">Read the docs <span aria-hidden="true">&#8599;</span></a>
