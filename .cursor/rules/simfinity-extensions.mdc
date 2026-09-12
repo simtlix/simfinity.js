@@ -83,6 +83,12 @@ Not set manually. When `buildInputType()` detects a `state` field on a type that
 
 ## Type-Level Extensions
 
+### `extensions.indexes` (PostgreSQL)
+
+Use `{ indexes: [{ fields: ['serie', 'star'], unique: true }] }` on a GraphQL type to declare a composite PostgreSQL index. Fields resolve to stored scalar/reference columns; list and embedded paths are rejected. MongoDB still uses its existing index/onModelCreated mechanism. PostgreSQL scalar/single-reference `unique` uses `NULLS NOT DISTINCT`; embedded/multikey uniqueness remains explicitly unsupported.
+
+PostgreSQL metadata requires a child `connectionField` for inverse collections. A singular reference defaults to its GraphQL field name. Reciprocal collections do not create implicit many-to-many storage: use an explicit linking entity with references to both sides.
+
 ### `extensions.validations` (on the type)
 
 ```javascript
@@ -118,4 +124,4 @@ const BookType = new GraphQLObjectType({
 });
 ```
 
-Scope functions modify query args in-place to enforce row-level security. Called by `executeScope()` before building the MongoDB aggregation pipeline.
+Scope functions modify query args in-place to enforce row-level security. The shared runtime calls `executeScope()` before compiling the MongoDB pipeline or PostgreSQL query. Flat scope predicates remain conjoined with caller logical groups; the existing root-only scope boundary is preserved.

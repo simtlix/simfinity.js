@@ -1,7 +1,7 @@
 import {
   GraphQLString, GraphQLInt, GraphQLFloat,
 } from 'graphql';
-import { createValidatedScalar } from './index.js';
+import { createValidatedScalar } from '@simtlix/simfinity-core';
 
 /**
  * Email scalar - validates email format

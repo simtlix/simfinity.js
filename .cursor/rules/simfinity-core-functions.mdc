@@ -4,7 +4,9 @@ globs: src/index.js
 alwaysApply: false
 ---
 
-# Core Functions in src/index.js
+# Core Functions
+
+The shared engine now lives in `packages/core/src/runtime.js`; `src/index.js` is the Mongo facade. Mongo-specific model, pipeline and transaction implementations moved to `src/mongo/`. PostgreSQL provides the same lifecycle adapter contract in `packages/postgres/src/adapter.js`, with driver-free query plans in core. Function descriptions below retain the legacy public API unless a backend-specific distinction is called out in `docs/postgresql.md`.
 
 ## Registration Phase
 

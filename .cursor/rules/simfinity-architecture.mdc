@@ -17,6 +17,18 @@ alwaysApply: true
 - **Linting**: ESLint 9 (flat config)
 - **Server integration**: GraphQL Yoga with Envelop plugins
 
+## Shared runtime and PostgreSQL workspaces
+
+- `packages/core` (`@simtlix/simfinity-core`) owns driver-free `createRuntime`, model metadata, query plans, scalar factory, errors, filter types and the once-only introspection patch. Registries/middleware are per runtime instance.
+- `src/index.js` binds the shared runtime to `src/mongo/adapter.js`. Mongo model generation, pipelines and transactions live under `src/mongo/`; existing root helpers/exports remain available.
+- `packages/postgres` (`@simtlix/simfinity-postgres`) exposes `createPostgres({pool,schema})`, the default configure/connect/createSchema facade and schema generation/initialization. It depends on core and `pg`, never Mongoose/MongoDB/MCP. Backend configuration is bound once and PostgreSQL types must be registered before createSchema.
+- PostgreSQL executes the shared GraphQL lifecycle: scopes, middleware, validators, hooks, nested CRUD and state transitions. Native model/session APIs differ from Mongoose. Supported parity is tested against real databases; do not claim arbitrary Mongo pipeline/model compatibility.
+- GraphQL metadata generates real FKs, including inverse collections, link entities and references in privately owned embedded tables. JSONB is used only for value-only embedded subtrees. See `docs/postgresql.md` for rejected shapes and current constraints.
+- Initialization borrows one pool client, owns its transaction, awaits DDL/catalog validation and never destructively synchronizes existing storage. `validate` mode is read-only. PostgreSQL >=15 is required.
+- Await initialization before serving; failure marks the instance unavailable. `preventCreatingCollection(true)` before createSchema forces validation only. Text columns and typed query expressions use binary C collation.
+- PostgreSQL writes use repeatable-read transactions; supplied sessions are joined, owned sessions retry confirmed serialization/deadlock aborts. Shared typed input snapshots isolate attempts. Adapter stateValue supplies the canonical persisted representation for state writes/guards (names on Mongo, enum internal values on PostgreSQL).
+- Owner+embedded writes are atomic even under standalone saveObject; hooks and independent nested entities only share a workflow transaction when one is supplied. Owner+embedded reads use one snapshot. Only ownership FKs cascade.
+
 ## Core Flow
 
 ```
@@ -44,7 +56,11 @@ simfinity.createSchema()
 
 | File | Responsibility |
 |------|---------------|
-| `src/index.js` | Core engine: type registration, schema/model generation, query/mutation builders, resolvers, middleware, scope |
+| `src/index.js` | MongoDB facade and legacy helper exports |
+| `packages/core/src/runtime.js` | Shared registration, input/schema generation, lifecycle, middleware, scopes and resolvers |
+| `packages/core/src/query-plan.js` | Driver-free typed query paths and predicate/sort/aggregation plans |
+| `src/mongo/` | Mongoose models, pipelines, transactions and record adapter |
+| `packages/postgres/src/` | PostgreSQL adapter, codecs, records, query compiler, transactions and schema lifecycle |
 | `src/auth/index.js` | Auth plugin (`createAuthPlugin`), permission resolution, deprecated middleware |
 | `src/auth/rules.js` | Rule helpers: `requireAuth`, `requireRole`, `composeRules`, `isOwner`, `allow`, `deny` |
 | `src/auth/expressions.js` | Policy expression DSL evaluator |
@@ -59,7 +75,7 @@ simfinity.createSchema()
 | `src/errors/simfinity.error.js` | Base error class with `code` and `status` extensions |
 | `src/errors/internal-server.error.js` | Internal server error (extends `SimfinityError`) |
 
-## Key Global State (in `src/index.js`)
+## Instance State (inside `createRuntime` in `packages/core/src/runtime.js`)
 
 - `typesDict` -- primary registry: `{ types: { [typeName]: { model, gqltype, simpleEntityEndpointName, listEntitiesEndpointName, endpoint, controller, stateMachine, inputType } } }`
 - `typesDictForUpdate` -- parallel registry with update-specific input types
@@ -69,4 +85,4 @@ simfinity.createSchema()
 
 ## Introspection Extension (Critical)
 
-Simfinity monkey-patches `__Field._fields` to inject `FieldExtensionsType` and `RelationType` into GraphQL introspection globally. This means these types exist outside the schema's type map. Any tool that rebuilds or copies the schema (like `graphql-middleware`'s `applyMiddleware` / `mapSchema`) will cause duplicate type errors. Always use Envelop plugins for schema transformations.
+`packages/core/src/introspection.js` patches `__Field._fields` once, guarded by a shared Symbol, to inject `FieldExtensionsType` and `RelationType` globally. These types exist outside the schema's type map. Tools that rebuild or copy the schema (like `graphql-middleware`'s `applyMiddleware` / `mapSchema`) can cause duplicate type errors. Use Envelop plugins for schema transformations. Use fresh GraphQL type instances for independent runtimes because generated resolvers are installed in place.

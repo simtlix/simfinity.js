@@ -1,6 +1,7 @@
 name: Build on master
 
 on:
+  pull_request:
   push:
     branches: master
 
@@ -8,12 +9,12 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v2.3.4
-      - uses: actions/setup-node@v1.4.4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: 14
+          node-version: 24
+          cache: npm
       - run: npm ci
-      - run: npx json -f package.json peerDependencies | npx json -ka | xargs -i{} bash -c 'echo $0@$(npx json -f package.json peerDependencies.$0)' {} | xargs -i{}  npm install --save-optional {}
       - run: npm run lint
       - run: npm test
-
+      - run: npm run test:packages

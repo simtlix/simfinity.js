@@ -6,6 +6,7 @@ A powerful Node.js framework that automatically generates GraphQL schemas from y
 
 - [Features](#-features)
 - [Installation](#-installation)
+- [PostgreSQL development status](#postgresql-development-status)
 - [Quick Start](#-quick-start)
 - [Core Concepts](#-core-concepts)
   - [Connecting Models](#connecting-models)
@@ -93,6 +94,14 @@ npm install mongoose graphql @simtlix/simfinity-js
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies.
+
+## PostgreSQL development status
+
+The repository includes experimental `@simtlix/simfinity-core` and `@simtlix/simfinity-postgres` workspaces. PostgreSQL now runs the shared GraphQL query/mutation engine, including scopes, controllers, validators, state transitions and nested writes. It generates and validates tables, indexes, and **real foreign keys**, including inverse relations, explicit many-to-many linking entities, and references inside embedded objects. PostgreSQL installation does not pull Mongoose or the MongoDB driver.
+
+Choose the backend at application setup. The existing package continues to use MongoDB; PostgreSQL uses `createPostgres({ pool, schema })`, the same `connect(null, Type, ...)`/`createSchema()` signatures, and an awaited `initializeDatabase()` before serving requests. The new workspace packages have not been published. See the executable [PostgreSQL setup, mappings, and limits](docs/postgresql.md) and [compatibility contract](docs/compatibility.md) before adopting this version.
+
+Compatibility tests run the same GraphQL schemas and query corpus against both databases. IDs use UUIDs on PostgreSQL, native model/session APIs differ, and some mappings remain explicitly unsupported, including embedded/multikey uniqueness and grouping by paths inside embedded lists. MongoDB fixes also cover list nullability wrappers, scalar-ID inverse relations, inverse aggregation paths, embedded array replacement after clearing, and isolation of mutation input across transaction retries. Existing API signatures remain unchanged.
 
 ## 🚀 Quick Start
 
@@ -4252,5 +4261,3 @@ const schema = simfinity.createSchema();
 ```
 
 *Built with ❤️ by [Simtlix](https://github.com/simtlix)*
-
-

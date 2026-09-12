@@ -1,6 +1,10 @@
 # IDE / agent local trees (never publish)
 .claude/
 .cursor/
+.superpowers/
+packages/
+scripts/
+docs/superpowers/
 
 # Package files
 *.tgz

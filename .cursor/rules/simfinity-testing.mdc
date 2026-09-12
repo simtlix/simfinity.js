@@ -88,3 +88,12 @@ await expect(validation.CREATE[0].validate('Type', 'field', 'a', null)).rejects.
 ## Lint After Testing
 
 Run `npm run lint` after modifying test files to catch unused imports or style violations.
+
+## Real database and packaging checks
+
+- `npm run test:integration` runs `tests/integration/`. Set `SIMFINITY_MONGODB_URI` to a disposable replica set and `SIMFINITY_POSTGRES_URI` to a disposable PostgreSQL database. Suites skip explicitly without their URI. Mongo setup drops its database; never use an application URI.
+- Shared GraphQL fixtures live in `tests/contracts/model-fixtures.js`. Both backends execute real GraphQL scopes/hooks/nested CRUD. `query-parity.test.js` compares schemas, filters/arrays/dates, joins/counts and aggregates across both databases.
+- PostgreSQL lifecycle/runtime/options suites cover rollback, retry input isolation, custom mutations, supplied sessions, concurrent state guards, embedded snapshots, explicit many-to-many, inverse scalar IDs, UUID aggregates, C collation/ICU drift and prevention of DDL.
+- PostgreSQL CI covers versions 15, 16 and 18. Check physical FKs, actions, ownership cascades, nullable list items, enabled FK triggers, catalog drift and transactional rollback.
+- `npm run test:packages` installs packed core/PostgreSQL/Mongo packages in isolated temporary applications and checks exports and dependency isolation.
+- Development/CI use Node.js 24 for Vitest 4. The library runtime floor remains Node.js >=18.18.0.

@@ -15,6 +15,10 @@ import type {
   GraphQLScalarType,
   GraphQLField,
 } from 'graphql';
+import type { DatabaseAdapter, RuntimeRegistration } from '@simtlix/simfinity-core';
+export { createRuntime } from '@simtlix/simfinity-core';
+export function createMongoAdapter(): DatabaseAdapter;
+export function getRegistrations(): RuntimeRegistration[];
 
 /* ========================================================================== *
  * Errors
@@ -405,9 +409,11 @@ export function buildErrorFormatter(
 export function preventCreatingCollection(prevent: boolean): void;
 
 /** Get the generated GraphQL input type registered for an object type. */
-export function getInputType(type: GraphQLObjectType | { name: string }): GraphQLInputObjectType;
+export function getInputType(
+  type: GraphQLObjectType | { name: string },
+): GraphQLInputObjectType | undefined;
 
-/** Persist an object of a connected type inside a transaction (runs controllers/validators). */
+/** Persist an object, running controllers/validators. Joins a supplied session; does not start a transaction. */
 export function saveObject(
   typeName: string,
   args: Record<string, any>,
