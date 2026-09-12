@@ -1,6 +1,6 @@
 # PostgreSQL 3.2.0 delivery record
 
-This record captures verified work and its boundaries. Library and Barber implementation and task reviews are complete. The application is running; the final combined review is in progress.
+This record captures verified work and its boundaries. Library and Barber implementation and task reviews are complete. The application is running. The final combined review requested an enum-filter compatibility correction; that correction and its consumer handoff are implemented, with scoped final review still pending.
 
 ## Library and package provenance
 
@@ -15,14 +15,16 @@ Four packages are prepared at **3.2.0**, with exact internal dependency versions
 | `@simtlix/simfinity-mcp` | Optional MCP tools and transports; server SDK is opt-in |
 | `@simtlix/simfinity-js` | Existing MongoDB facade and public exports |
 
-The verified release archive set is `3.2.0-96a50dcd9450`, with manifest source commit `96a50dcd945020e4232a26e4042051530037e698`. Its archive identities, dependency versions, SHA512 integrity and SHA256 hashes were checked. No registry package, remote branch, tag, GitHub release or website was published.
+The verified release archive set is `3.2.0-d98197387543`, with manifest source commit `d98197387543d185fc79d5c31757b12e07ef2436`. Its archive identities, dependency versions, SHA512 integrity and SHA256 hashes were checked. No registry package, remote branch, tag, GitHub release or website was published.
 
 | Archive | SHA256 |
 | --- | --- |
-| `simtlix-simfinity-core-3.2.0.tgz` | `8cb9f9dbd0460cb612e11062a37e9419b335e8c090d98df63a903127ea6c77b8` |
-| `simtlix-simfinity-mcp-3.2.0.tgz` | `08d4ee626f9f9b5c25971301059bf4dde965fd632c5f54f5569eaa1877d7dfc1` |
-| `simtlix-simfinity-postgres-3.2.0.tgz` | `3b152d2d01aae4407a4dacf310001cfaf3600c956a4c062ea971340358f4b9f3` |
-| `simtlix-simfinity-js-3.2.0.tgz` | `2b712acd4b7cba3b0458441b41e3d8482825892f89e14939eb2c7087e33b8076` |
+| `simtlix-simfinity-core-3.2.0.tgz` | `856d3b471ec708416a6cb116ca0ac9a470adc87d3ed0aca6dd4165f2c190bc43` |
+| `simtlix-simfinity-mcp-3.2.0.tgz` | `628f7351bb5d352f60bd4d5ad7a8da4dfc464aa35221ddfa5dd7882c77ad6778` |
+| `simtlix-simfinity-postgres-3.2.0.tgz` | `ba9525440e0a30e67f452e6cc7093f9a9a869cdcbe9c45da4d63dab4cf3108ae` |
+| `simtlix-simfinity-js-3.2.0.tgz` | `d734d486eda56fddb5f8b31cbf41e6e38338e4814f20304aeecef68ce341e6f8` |
+
+Both preceding archive directories (`3.2.0-03ac88d0543a` and `3.2.0-96a50dcd9450`) remain intact. All 70 files in the new archives byte-match the named Git source commit. Later delivery-report commits do not alter packaged source.
 
 ## Verified library behavior
 
@@ -36,7 +38,7 @@ The public contract and executable startup example are documented in `docs/guide
 
 ## Verification
 
-Final runtime/package-version matrix, run sequentially with distinct disposable contract and upstream Mongo databases:
+Pre-correction runtime/package-version matrix, run sequentially with distinct disposable contract and upstream Mongo databases:
 
 | PostgreSQL | MongoDB | Result |
 | --- | --- | --- |
@@ -79,13 +81,13 @@ The original Barber `main` remains at `00718c0195374ab1baaefd32d8a24e21a238b4c3`
 
 A focused probe of the unchanged original application, using its real Yoga authorization plugin and synthetic MongoDB data, confirmed three missing permission checks: self-service privilege updates, modifications to another user, and modifications to another owner's service. A foreign-shop update control correctly returned `FORBIDDEN`. The disposable database was removed and the original source was unchanged. The PostgreSQL port must preserve legitimate flows while closing these reproduced gaps.
 
-The application implementation is committed as `e74571ed88377c075119d84f66c1271ae2a6c754`, with review fix `d8d6424cc662e40fc17c40202f9913d2411d1685`, on `codex/postgresql`, in `/Users/claudiogonzalez/SCM/simfinity-barber/.worktrees/codex-postgresql`. It consumes the verified core/PostgreSQL/MCP archives above, committed with checksums in its `backend/vendor/`. The installed backend has one shared core and no Mongoose/MongoDB dependencies.
+The application implementation is committed as `e74571ed88377c075119d84f66c1271ae2a6c754`, with review fix `d8d6424cc662e40fc17c40202f9913d2411d1685`, on `codex/postgresql`, in `/Users/claudiogonzalez/SCM/simfinity-barber/.worktrees/codex-postgresql`. The final archive refresh and Storybook cleanup are committed as `d149c625100178f412b792d961a8ac4f42dc78b8`. It consumes the verified core/PostgreSQL/MCP archives above, committed with checksums in its `backend/vendor/`. The installed backend has one shared core and no Mongoose/MongoDB dependencies.
 
 The port centralizes Pool and schema readiness for Yoga, scripts and MCP, forwards active sessions through custom writes and controllers, and enforces resource ownership for root and nested mutations. The three reproduced original authorization gaps are covered by denial regressions alongside legitimate self/owner/admin operations. Native paging covers more than 100 records. Bundle and booking updates recalculate derived values; review statistics commit or roll back with the review. An explicit `(state, (address->>'city'))` index supplements generated indexes because embedded paths are not supported by generated compound index metadata.
 
 | Application verification | Result |
 | --- | --- |
-| Backend unit suite | 11 files, 63 tests passed before the review fix; 36 affected controller tests passed afterward; all 59 original tests retained/adapted |
+| Backend unit suite | 11 files, 69 tests passed after corrected archive installation; all 59 original tests retained/adapted |
 | Isolated PostgreSQL API runner | Final 67 successful/denied operation checks, plus auth, scopes, paging, FK, rollback and MCP assertions |
 | Dataset through GraphQL | Loaded and deleted 3 shops, 13 services, 8 categories, 6 professionals, 4 bundles, 4 bookings, 4 reviews and 4 favorites in a private schema |
 | SDL comparison | All 33 queries and 47 mutations retained; zero field/argument type differences |
@@ -93,9 +95,9 @@ The port centralizes Pool and schema readiness for Yoga, scripts and MCP, forwar
 | Independent browser QA | Three demo logins, UUID token subjects, real search/detail and dashboards; zero GraphQL/JavaScript errors; 390-pixel mobile layout fits |
 | Infrastructure | New Compose volume, generated schema readiness, same-volume restart, repeated seeding and final health checks passed |
 
-Browser QA found two invalid existing frontend selections (`review.professional` and `barbershop.createdAt`), now corrected and covered against the real schema. The mobile detail overflow was also corrected. Other frontend changes are backend URL configuration and tests. The existing nonfatal Storybook warning about missing MDX stories remains; the unit run passes.
+Browser QA found two invalid existing frontend selections (`review.professional` and `barbershop.createdAt`), now corrected and covered against the real schema. The mobile detail overflow was also corrected. Other frontend changes are backend URL configuration and tests. The final correction removes the unused MDX Storybook glob; the frontend unit command passes all 3 tests without the warning.
 
-The task reviewer reproduced stale derived fields when booking lines or bundle services were cleared to `[]` or `null`. Fix `d8d6424` applies unsets before calculating the effective record and resets the resulting charge/duration while retaining explicit null versus empty arrays. Omitted lists remain unchanged; the existing empty-bundle price exemption is preserved. Scoped re-review independently reproduced all four clear cases, omission controls and valid/invalid replacement behavior, then approved the fix with no new breakage. Task 6 is approved; the pre-existing Storybook warning is the only deferred minor observation.
+The task reviewer reproduced stale derived fields when booking lines or bundle services were cleared to `[]` or `null`. Fix `d8d6424` applies unsets before calculating the effective record and resets the resulting charge/duration while retaining explicit null versus empty arrays. Omitted lists remain unchanged; the existing empty-bundle price exemption is preserved. Scoped re-review independently reproduced all four clear cases, omission controls and valid/invalid replacement behavior, then approved the fix with no new breakage. Task 6 is approved. The pre-existing Storybook warning was subsequently removed in the final correction wave.
 
 The application records the generated SQL, FK catalog, original/PostgreSQL SDL and empty API diff in `backend/schema/`. Its `docs/postgresql-port.md` and root/backend/frontend READMEs contain reproducible commands, native migration examples, archive provenance and explicit limitations. Test mutation runners use random schemas and remove them in `finally`; browser booking tests create synthetic future reservations in the local demo.
 
@@ -110,4 +112,18 @@ The Compose project is `simfinity-barber-postgres`, with its own database and up
 
 Demo accounts are `cliente@demo.com`, `propietario@demo.com` and `admin@demo.com`, all with password `demo1234`. The approved shop is `/b/postgres-demo`, with an active service/professional and all-week 09:00–18:00 hours. From the application worktree, `docker compose up --build -d` starts services; `docker compose exec backend npm run seed:admin` and `docker compose exec backend npm run seed:demo` create or retain the synthetic demo accounts/data. `docker compose restart` retains data; `docker compose down` stops this project while retaining its volumes.
 
-All six implementation task reviews are approved. The final combined review remains pending; its verdict, any final fixes and cleanup status will be recorded before delivery is marked complete.
+All six implementation task reviews are approved. The final combined review found F1 (enum query compatibility) and M1 (whitespace hygiene). Their correction is implemented below; scoped final review and Task 7 completion remain with the coordinator.
+
+## Final correction verification
+
+Library source commit: `d98197387543d185fc79d5c31757b12e07ef2436`, from fix base `47bdd1f2643975d4bfe5687e568955f5fc124562`. App commit: `d149c625100178f412b792d961a8ac4f42dc78b8`, from fix base `d8d6424cc662e40fc17c40202f9913d2411d1685`.
+
+Enum metadata now retains names and original internal values. Only query encoding resolves a member name first, then a strictly equal internal value, before conversion to PostgreSQL text storage. This fixes the `ONE → TWO`, `TWO → two` collision and numeric values across EQ/NE/LT/LTE/GT/GTE/BTW/IN/NIN. LIKE rejects enum fields. The persistence encoder, state guards and GraphQL output semantics are unchanged. Dedicated differential cases exercise root/list/embedded/reference/state paths through find, count and aggregate, including nulls, unknowns, malformed inputs and actual Mongo baselines. The existing lifecycle regression now expects name precedence while retaining persisted-value and denied-transition assertions.
+
+Before runtime changes, the new compiler/differential/lifecycle run failed 24 tests and passed 20; afterward all 44 passed. The full suite on PostgreSQL 15/MongoDB 7 passed **48 files / 990 tests**, including upstream opt-in tests. The affected compiler/query/embedded/lifecycle suites on PostgreSQL 16/MongoDB 8 and PostgreSQL 18/MongoDB 8 each passed **5 files / 212 tests**. ESLint, all five packed runtime/strict-TypeScript consumers on Node 24 and the docs build passed. The coordinator independently verified all five packed consumers on Node 18.20.8 from the corrected source (read-only mount, temporary container removed). The full upstream-to-HEAD CRLF-aware whitespace comparison now passes after only the identified trailing-space/EOF cleanup.
+
+Release manifest verification and the local-only npm publication dry run passed. Barber's lockfile SHA512 entries were refreshed despite unchanged filenames/3.2.0 versions. Clean host `npm ci` and Docker `npm ci --omit=dev` both ran, and every installed file in all three packages (45 files total) byte-matches its archive on the host and in the running container. Dependency inspection confirms one deduplicated core and no Mongoose/MongoDB dependency.
+
+After archive replacement, Barber passed **11 backend files / 69 tests**, the **67-operation private-schema API runner** plus auth/scopes/FK/rollback/derived-value and real MCP assertions, unchanged **33-query/47-mutation SDL** with zero field/argument differences, and both dashboard schema selections. The warning-free frontend unit run passed **3 tests**. The backend was rebuilt from the exact archives, all three Compose services remain healthy on loopback bindings 4300/4301/55440, and an actual Chromium login/full-booking smoke passed (**1 test**) against that rebuilt backend. Its synthetic future reservation was confirmed with a UUID. No production frontend rebuild was needed for the Storybook configuration-only change. The coordinator then independently repeated all three actual logins, UUID checks, search/detail and dashboards against the rebuilt backend: zero GraphQL/JavaScript errors, with mobile width 390/390.
+
+Detailed commands, disposable URIs and logs are recorded in the task scratch `final-fix-report.md`. Final review approval has not been asserted by this correction record.
