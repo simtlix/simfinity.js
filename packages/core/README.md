@@ -1,6 +1,6 @@
 # @simtlix/simfinity-core
 
-Driver-free GraphQL runtime and model metadata for Simfinity. It requires GraphQL 16 and Node.js 18.18 or later, and does not import Mongoose, MongoDB, PostgreSQL, auth, or MCP packages.
+Driver-free GraphQL runtime, model metadata, and shared GraphQL helpers for Simfinity. It requires GraphQL 16 and Node.js 18.18 or later, and does not import Mongoose, MongoDB, PostgreSQL, or MCP packages.
 
 ## Runtime
 
@@ -23,4 +23,4 @@ Importing the runtime installs Simfinity's `__Field.extensions` introspection fi
 
 `createQueryPlan` and `resolveModelPath` turn Simfinity filter, sort, pagination, and aggregation inputs into a driver-neutral plan resolved against that metadata.
 
-The package also exports `createValidatedScalar`, `SimfinityError`, `InternalServerError`, `buildErrorFormatter`, `QLOperator`, `QLSort`, and `QLValue`. Database packages should reuse these exports so errors and globally named GraphQL types retain one identity.
+The package also exports the `auth`, `validators`, `scalars`, and `plugins` helper namespaces alongside `createValidatedScalar`, `SimfinityError`, `InternalServerError`, `buildErrorFormatter`, `QLOperator`, `QLSort`, and `QLValue`. Database packages reuse these exports so helpers, errors, and globally named GraphQL types retain one identity.

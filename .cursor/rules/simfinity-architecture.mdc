@@ -61,14 +61,14 @@ simfinity.createSchema()
 | `packages/core/src/query-plan.js` | Driver-free typed query paths and predicate/sort/aggregation plans |
 | `src/mongo/` | Mongoose models, pipelines, transactions and record adapter |
 | `packages/postgres/src/` | PostgreSQL adapter, codecs, records, query compiler, transactions and schema lifecycle |
-| `src/auth/index.js` | Auth plugin (`createAuthPlugin`), permission resolution, deprecated middleware |
-| `src/auth/rules.js` | Rule helpers: `requireAuth`, `requireRole`, `composeRules`, `isOwner`, `allow`, `deny` |
-| `src/auth/expressions.js` | Policy expression DSL evaluator |
-| `src/auth/errors.js` | `UnauthenticatedError`, `ForbiddenError` (extend `SimfinityError`) |
-| `src/validators.js` | Declarative field validators: `stringLength`, `pattern`, `email`, `numberRange`, etc. |
-| `src/scalars.js` | Pre-built scalars (`EmailScalar`, `URLScalar`) and scalar factories |
-| `src/plugins.js` | Plugin exports: `createAuthPlugin`, `apolloCountPlugin`, `envelopCountPlugin` |
-| `src/mcp.js` | MCP generation: `generateMCPTools`, `createMCPServer`, `startStdioMCPServer`, `createHTTPMCPHandler`. Converts the generated `GraphQLSchema` into MCP tools (one per Query/Mutation field) with JSON Schema inputs; in-process or remote execution. Uses optional `@modelcontextprotocol/sdk` |
+| `packages/core/src/auth/index.js` | Shared auth plugin (`createAuthPlugin`), permission resolution, deprecated middleware; `src/auth/` remains a compatibility facade |
+| `packages/core/src/auth/rules.js` | Shared rule helpers: `requireAuth`, `requireRole`, `composeRules`, `isOwner`, `allow`, `deny` |
+| `packages/core/src/auth/expressions.js` | Shared policy expression DSL evaluator |
+| `packages/core/src/auth/errors.js` | `UnauthenticatedError`, `ForbiddenError` (extend the shared `SimfinityError`) |
+| `packages/core/src/validators.js` | Shared declarative field validators: `stringLength`, `pattern`, `email`, `numberRange`, etc. |
+| `packages/core/src/scalars.js` | Shared pre-built scalars (`EmailScalar`, `URLScalar`) and scalar factories |
+| `packages/core/src/plugins.js` | Shared plugin exports: `createAuthPlugin`, `apolloCountPlugin`, `envelopCountPlugin` |
+| `packages/mcp/src/index.js` | Optional MCP generation and transports; `src/mcp.js` remains the Mongo facade shim. Uses optional `@modelcontextprotocol/sdk` |
 | `src/const/QLOperator.js` | `GraphQLEnumType` for filter operators (EQ, LT, GT, IN, LIKE, etc.) |
 | `src/const/QLValue.js` | `GraphQLScalarType` for filter values |
 | `src/const/QLSort.js` | `GraphQLInputObjectType` for sort expressions |
@@ -99,4 +99,3 @@ Simfinity adds `extensions` to the field map returned by `__Field.getFields()`. 
 The extension is still global to the shared GraphQL peer, and Simfinity's registries belong to each runtime instance. Schemas constructed after import collect `FieldExtensionsType` and `RelationType` in their type maps. Pre-existing schemas retain their original type maps: ordinary operations and direct metadata introspection work, but named fragments on these new types require a schema constructed after import.
 
 Tools that clone types (`graphql-middleware`'s `applyMiddleware` / `mapSchema`) remain unsupported. `buildClientSchema()` on a post-import schema's introspection can also produce duplicate metadata types when run in the same process as Simfinity. Use Envelop plugins and in-place resolver wrapping; initialization safety does not provide schema isolation or schema-cloning compatibility.
-

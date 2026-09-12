@@ -15,7 +15,7 @@ alwaysApply: false
 ## Test File Naming
 
 - `tests/{module}.test.js` corresponding to `src/{module}.js`
-- Auth tests: `tests/auth.test.js` covers `src/auth/index.js`, `src/auth/rules.js`, `src/auth/expressions.js`
+- Auth tests: `tests/auth.test.js` covers the canonical `packages/core/src/auth/` implementation through the `src/auth/` compatibility facade.
 - Feature-specific tests: `tests/aggregation.test.js`, `tests/scalar-naming.test.js`, etc.
 
 ## Test Structure

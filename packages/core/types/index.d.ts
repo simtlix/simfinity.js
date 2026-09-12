@@ -149,3 +149,157 @@ export function resolveModelPath(models: ModelDescription, entityName: string, p
 
 export function configureQueryLimits(options?: { maxPageSize?: number }): void;
 export function paginationStages(pagination: { page: number; size: number } | null | undefined, withDefault: boolean): Array<{ $skip: number } | { $limit: number }>;
+
+/** Envelop-style schema plugin used by the shared authorization helpers. */
+export interface EnvelopSchemaPlugin {
+  onSchemaChange?: (payload: {
+    schema: GraphQLSchema;
+    replaceSchema: (schema: GraphQLSchema) => void;
+  }) => void;
+  [key: string]: unknown;
+}
+
+/** A single field validator (throws SimfinityError VALIDATION_ERROR on failure). */
+export interface FieldValidator {
+  validate(typeName: string, fieldName: string, value: unknown, session?: unknown): Promise<void>;
+}
+
+/** Validators grouped by operation, as expected by field `extensions.validations`. */
+export interface FieldValidations {
+  CREATE: FieldValidator[];
+  UPDATE: FieldValidator[];
+  /** Backward-compatible alias of CREATE. */
+  save: FieldValidator[];
+  /** Backward-compatible alias of UPDATE. */
+  update: FieldValidator[];
+}
+
+/** Built-in field validator factories. */
+export const validators: {
+  stringLength(name: string, min?: number, max?: number): FieldValidations;
+  maxLength(name: string, max: number): FieldValidations;
+  pattern(name: string, regex: RegExp | string, message?: string): FieldValidations;
+  email(): FieldValidations;
+  url(): FieldValidations;
+  numberRange(name: string, min?: number, max?: number): FieldValidations;
+  positive(name: string): FieldValidations;
+  arrayLength(name: string, maxItems?: number, itemValidator?: FieldValidator[]): FieldValidations;
+  dateFormat(name: string, format?: string): FieldValidations;
+  futureDate(name: string): FieldValidations;
+};
+
+/* ========================================================================== *
+ * Shared scalars (packages/core/src/scalars.js default export)
+ * ========================================================================== */
+
+/** Pre-built validated scalars and factory functions. */
+export const scalars: {
+  EmailScalar: GraphQLScalarType;
+  URLScalar: GraphQLScalarType;
+  PositiveIntScalar: GraphQLScalarType;
+  PositiveFloatScalar: GraphQLScalarType;
+  createBoundedStringScalar(name: string, min?: number, max?: number): GraphQLScalarType;
+  createBoundedIntScalar(name: string, min?: number, max?: number): GraphQLScalarType;
+  createBoundedFloatScalar(name: string, min?: number, max?: number): GraphQLScalarType;
+  createPatternStringScalar(name: string, pattern: RegExp | string, message?: string): GraphQLScalarType;
+};
+
+/* ========================================================================== *
+ * Shared auth (packages/core/src/auth/index.js default export)
+ * ========================================================================== */
+
+/** A rule function: only true/void allows; all other values deny (or throw). */
+export type AuthRuleFunction = (
+  parent: any,
+  args: any,
+  ctx: any,
+  info: any,
+) => boolean | void | Promise<boolean | void>;
+
+/** Declarative policy expression (JSON AST or boolean). The complete AST is validated at runtime. */
+export type PolicyExpression = boolean | Record<string, unknown>;
+
+/** A rule: function, nonempty nested array of rules (AND), or a policy expression. */
+export type AuthRule = AuthRuleFunction | AuthRule[] | PolicyExpression;
+
+/** Field-name (or '*') to rule mapping for one GraphQL type. */
+export type TypePermissions = Record<string, AuthRule>;
+
+/** Type-name to {@link TypePermissions} mapping. */
+export type PermissionSchema = Record<string, TypePermissions>;
+
+/** Options for the auth plugin / middleware factories. */
+export interface AuthPluginOptions {
+  /** Policy applied when no rule matches. Default 'DENY'. */
+  defaultPolicy?: 'ALLOW' | 'DENY';
+  debug?: boolean;
+}
+
+declare class UnauthenticatedError extends SimfinityError {
+  constructor(message?: string);
+}
+
+declare class ForbiddenError extends SimfinityError {
+  constructor(message?: string);
+}
+
+/** Authorization utilities (RBAC/ABAC rules, plugin factories and auth errors). */
+export const auth: {
+  /** Wraps schema resolvers in-place. Throws TypeError for invalid rules, maps, or defaultPolicy. */
+  createAuthPlugin(permissions: PermissionSchema, options?: AuthPluginOptions): EnvelopSchemaPlugin;
+  /** @deprecated Use createAuthPlugin instead. graphql-middleware compatible middleware. */
+  createAuthMiddleware(
+    permissions: PermissionSchema,
+    options?: AuthPluginOptions,
+  ): (resolve: any, parent: any, args: any, ctx: any, info: any) => Promise<any>;
+  /** @deprecated Use createAuthPlugin instead. Field middleware object for graphql-middleware. */
+  createFieldMiddleware(
+    permissions: PermissionSchema,
+    options?: AuthPluginOptions,
+  ): Record<string, Record<string, any>>;
+  resolvePath(obj: any, pathOrFn: string | ((obj: any) => any)): any;
+  requireAuth(userPath?: string): AuthRuleFunction;
+  /** Required roles must be nonempty strings; invalid configuration throws TypeError. */
+  requireRole(role: string | string[], options?: { userPath?: string; rolePath?: string }): AuthRuleFunction;
+  /** Exact array membership; only a standalone '*' claim grants all permissions. */
+  requirePermission(
+    permission: string | string[],
+    options?: { userPath?: string; permissionsPath?: string },
+  ): AuthRuleFunction;
+  composeRules(...rules: AuthRuleFunction[]): AuthRuleFunction;
+  anyRule(...rules: AuthRuleFunction[]): AuthRuleFunction;
+  /** Compares nonempty string, finite number, or MongoDB ObjectId identities; missing IDs deny. */
+  isOwner(ownerField?: string, userIdField?: string, options?: { userPath?: string }): AuthRuleFunction;
+  createRule(predicate: AuthRuleFunction, errorMessage?: string, errorCode?: string): AuthRuleFunction;
+  allow(): AuthRuleFunction;
+  deny(message?: string): AuthRuleFunction;
+  /** Invalid ASTs and unresolved comparisons deny, including under negation. */
+  evaluateExpression(expression: unknown, context: any): boolean;
+  isPolicyExpression(value: unknown): boolean;
+  /** Throws TypeError for a malformed expression. */
+  createRuleFromExpression(expression: PolicyExpression): AuthRuleFunction;
+  UnauthenticatedError: typeof UnauthenticatedError;
+  ForbiddenError: typeof ForbiddenError;
+  createAuthError(message: string, code?: string): SimfinityError;
+};
+
+/* ========================================================================== *
+ * Shared plugins (packages/core/src/plugins.js default export)
+ * ========================================================================== */
+
+/** GraphQL server plugins: auth plugin factory plus count-extension plugins. */
+export const plugins: {
+  createAuthPlugin(permissions: PermissionSchema, options?: AuthPluginOptions): EnvelopSchemaPlugin;
+  /** Apollo Server plugin that copies `contextValue.count` into `extensions.count`. */
+  apolloCountPlugin(): {
+    requestDidStart(): Promise<{
+      willSendResponse(payload: any): Promise<void>;
+    }>;
+  };
+  /** Envelop plugin that copies `contextValue.count` into `extensions.count`. */
+  envelopCountPlugin(): {
+    onExecute(): {
+      onExecuteDone(payload: any): void;
+    };
+  };
+};

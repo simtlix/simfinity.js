@@ -5,7 +5,16 @@
   "type": "module",
   "main": "./src/index.js",
   "types": "./types/index.d.ts",
-  "exports": { ".": { "types": "./types/index.d.ts", "default": "./src/index.js" } },
+  "exports": {
+    ".": { "types": "./types/index.d.ts", "default": "./src/index.js" },
+    "./auth": "./src/auth/index.js",
+    "./auth/errors": "./src/auth/errors.js",
+    "./auth/expressions": "./src/auth/expressions.js",
+    "./auth/rules": "./src/auth/rules.js",
+    "./plugins": "./src/plugins.js",
+    "./scalars": "./src/scalars.js",
+    "./validators": "./src/validators.js"
+  },
   "files": ["src", "types", "README.md", "LICENSE"],
   "engines": { "node": ">=18.18.0" },
   "license": "Apache-2.0",

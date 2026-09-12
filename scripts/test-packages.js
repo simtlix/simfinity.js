@@ -61,9 +61,13 @@ const coreSource = `import assert from 'node:assert/strict';
     QLValue,
     SimfinityError,
     buildErrorFormatter,
+    auth,
     createRuntime,
     createValidatedScalar,
     describeModels,
+    plugins,
+    scalars,
+    validators,
   } from '@simtlix/simfinity-core';
   import {
     GraphQLID,
@@ -95,12 +99,17 @@ const coreSource = `import assert from 'node:assert/strict';
   assert.equal(buildErrorFormatter()(known), known);
   const unknown = buildErrorFormatter()(new Error('unknown'));
   assert(unknown instanceof InternalServerError);
-  assert.equal(unknown.getCause().message, 'unknown');`;
+  assert.equal(unknown.getCause().message, 'unknown');
+  assert.equal(typeof auth.createAuthPlugin, 'function');
+  assert.equal(typeof validators.email, 'function');
+  assert.equal(scalars.EmailScalar.name, 'Email_String');
+  assert.equal(typeof plugins.envelopCountPlugin, 'function');`;
 
 const postgresSource = `import assert from 'node:assert/strict';
   import {
     InternalServerError,
     SimfinityError,
+    auth,
     buildErrorFormatter,
     compileDatabaseSchema,
     configure,
@@ -109,6 +118,9 @@ const postgresSource = `import assert from 'node:assert/strict';
     createSchema,
     describeDatabase,
     initializeDatabase,
+    plugins,
+    scalars,
+    validators,
   } from '@simtlix/simfinity-postgres';
   import { createRuntime } from '@simtlix/simfinity-core';
   import {
@@ -130,6 +142,10 @@ const postgresSource = `import assert from 'node:assert/strict';
     fields: { id: { type: GraphQLID }, title: { type: GraphQLString } },
   });
   const api = createPostgres({ pool, schema: 'app' });
+  assert.equal(api.auth, auth);
+  assert.equal(api.plugins, plugins);
+  assert.equal(api.scalars, scalars);
+  assert.equal(api.validators, validators);
   api.connect(null, bookType, 'postgresBook', 'postgresBooks');
   const schema = api.createSchema();
   const beforeReady = await graphql({ schema, source: '{ postgresBooks { id } }' });
@@ -180,12 +196,24 @@ const postgresSource = `import assert from 'node:assert/strict';
 
 const mongoSource = `import assert from 'node:assert/strict';
   import * as simfinity from '@simtlix/simfinity-js';
-  import { SimfinityError } from '@simtlix/simfinity-core';
+  import {
+    SimfinityError,
+    auth,
+    plugins,
+    scalars,
+    validators,
+  } from '@simtlix/simfinity-core';
   import { GraphQLID, GraphQLObjectType, GraphQLString, graphqlSync } from 'graphql';
   ${adapterSource}
   if (simfinity.SimfinityError !== SimfinityError) throw new Error('shared error export failed');
   if (typeof simfinity.connect !== 'function') throw new Error('Mongo exports failed');
   if (typeof simfinity.createMongoAdapter !== 'function') throw new Error('Mongo adapter export failed');
+  assert.equal(simfinity.auth, auth);
+  assert.equal(simfinity.plugins, plugins);
+  assert.equal(simfinity.scalars, scalars);
+  assert.equal(simfinity.validators, validators);
+  assert.equal(typeof simfinity.generateMCPTools, 'function');
+  assert.equal(simfinity.mcp.generateMCPTools, simfinity.generateMCPTools);
   const runtime = simfinity.createRuntime(adapter);
   const type = new GraphQLObjectType({
     name: 'RootRuntimeBook',
@@ -201,15 +229,60 @@ const mongoSource = `import assert from 'node:assert/strict';
   assert(introspection.data.__type.fields.some((field) => field.name === 'extensions'));
   assert(simfinity.buildErrorFormatter()(new Error('root')) instanceof simfinity.InternalServerError);`;
 
+const mcpSource = `import assert from 'node:assert/strict';
+  import {
+    createMCPServer,
+    generateMCPTools,
+  } from '@simtlix/simfinity-mcp';
+  import {
+    GraphQLObjectType,
+    GraphQLSchema,
+    GraphQLString,
+  } from 'graphql';
+  const schema = new GraphQLSchema({
+    query: new GraphQLObjectType({
+      name: 'Query',
+      fields: { greeting: { type: GraphQLString, resolve: () => 'hello' } },
+    }),
+  });
+  const generated = generateMCPTools(schema);
+  assert.deepEqual(generated.tools.map((tool) => tool.name), ['greeting']);
+  const result = await generated.callTool('greeting');
+  assert.equal(result.structuredContent.greeting, 'hello');
+  assert.deepEqual(Object.keys(result.structuredContent), ['greeting']);
+  await assert.rejects(
+    () => createMCPServer(schema),
+    (error) => error.getCode() === 'MCP_SDK_NOT_INSTALLED',
+  );`;
+
+const mcpSdkSource = `import assert from 'node:assert/strict';
+  import { createMCPServer } from '@simtlix/simfinity-mcp';
+  import { GraphQLObjectType, GraphQLSchema, GraphQLString } from 'graphql';
+  const schema = new GraphQLSchema({
+    query: new GraphQLObjectType({
+      name: 'Query',
+      fields: { greeting: { type: GraphQLString, resolve: () => 'hello' } },
+    }),
+  });
+  const server = await createMCPServer(schema);
+  assert.equal(typeof server.connect, 'function');
+  await server.close();`;
+
 const coreTypes = `import {
   InternalServerError,
   QLOperator,
   QLSort,
   QLValue,
   SimfinityError,
+  auth,
   buildErrorFormatter,
   createRuntime,
+  plugins,
+  scalars,
+  validators,
+  type AuthRuleFunction,
   type DatabaseAdapter,
+  type FieldValidations,
 } from '@simtlix/simfinity-core';
 import {
   GraphQLEnumType,
@@ -244,15 +317,24 @@ const known: SimfinityError = new InternalServerError('known');
 const operator: GraphQLEnumType = QLOperator;
 const sort: GraphQLInputObjectType = QLSort;
 const valueName: string = QLValue.name;
-void [model, formatted, known, operator, sort, valueName];`;
+const rule: AuthRuleFunction = auth.requireAuth();
+const validations: FieldValidations = validators.email();
+const scalarName: string = scalars.EmailScalar.name;
+const countPlugin = plugins.envelopCountPlugin();
+void [model, formatted, known, operator, sort, valueName, rule, validations, scalarName, countPlugin];`;
 
 const postgresTypes = `import { Pool } from 'pg';
 import {
+  auth,
   configure,
   connect,
   createPostgres,
   createSchema,
   initializeDatabase,
+  plugins,
+  scalars,
+  validators,
+  type AuthRuleFunction,
   type DatabaseDescription,
   type InitializationResult,
   type PostgresModel,
@@ -262,6 +344,10 @@ import { GraphQLObjectType, GraphQLString } from 'graphql';
 declare const pool: Pool;
 const type = new GraphQLObjectType({ name: 'TypedPostgresBook', fields: { title: { type: GraphQLString } } });
 const api: PostgresRuntime = createPostgres({ pool, schema: 'app' });
+const rule: AuthRuleFunction = auth.requireAuth();
+const email = validators.email();
+const scalarName: string = scalars.EmailScalar.name;
+const countPlugin = plugins.envelopCountPlugin();
 api.connect(null, type, 'typedPostgresBook', 'typedPostgresBooks');
 const schema = api.createSchema();
 const model: PostgresModel | null | undefined = api.getModel(type);
@@ -272,15 +358,22 @@ configure({ pool });
 connect(null, type, 'defaultTypedPostgresBook', 'defaultTypedPostgresBooks');
 const defaultSchema = createSchema();
 const defaultReady: Promise<InitializationResult> = initializeDatabase({ mode: 'validate' });
-void [schema, model, ready, lowLevel, defaultSchema, defaultReady];`;
+void [schema, model, ready, lowLevel, defaultSchema, defaultReady, rule, email, scalarName, countPlugin];`;
 
 const mongoTypes = `import {
   InternalServerError,
   buildErrorFormatter,
   createMongoAdapter,
   createRuntime,
+  generateMCPTools,
   getInputType,
   getRegistrations,
+  auth,
+  plugins,
+  scalars,
+  validators,
+  type AuthRuleFunction,
+  type GeneratedMCPTools,
 } from '@simtlix/simfinity-js';
 import { GraphQLObjectType, GraphQLString } from 'graphql';
 const runtime = createRuntime(createMongoAdapter());
@@ -290,22 +383,73 @@ const registrations = getRegistrations();
 const inputType = getInputType(type);
 const formatted: Error = buildErrorFormatter()(new Error('typed'));
 const internal: InternalServerError = new InternalServerError('typed');
-void [registrations, inputType, formatted, internal];`;
+const rule: AuthRuleFunction = auth.requireAuth();
+const email = validators.email();
+const scalarName: string = scalars.EmailScalar.name;
+const countPlugin = plugins.envelopCountPlugin();
+const generated: GeneratedMCPTools = generateMCPTools(runtime.createSchema());
+void [registrations, inputType, formatted, internal, rule, email, scalarName, countPlugin, generated];`;
+
+const mcpTypes = `import mcp, {
+  createMCPServer,
+  generateMCPTools,
+  type GeneratedMCPTools,
+  type MCPServer,
+} from '@simtlix/simfinity-mcp';
+import { GraphQLObjectType, GraphQLSchema, GraphQLString } from 'graphql';
+const schema = new GraphQLSchema({
+  query: new GraphQLObjectType({
+    name: 'Query',
+    fields: { greeting: { type: GraphQLString } },
+  }),
+});
+const generated: GeneratedMCPTools = generateMCPTools(schema);
+const server: Promise<MCPServer> = createMCPServer(schema);
+const sameGenerator: typeof generateMCPTools = mcp.generateMCPTools;
+void [generated, server, sameGenerator];`;
 
 const cases = [
-  { name: 'core', archives: (core) => [core], source: coreSource, types: coreTypes },
+  {
+    name: 'core',
+    archives: (core) => [core],
+    source: coreSource,
+    types: coreTypes,
+    forbiddenPackages: ['mongoose', 'mongodb', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
+  },
   {
     name: 'postgres',
-    archives: (core, postgres) => [core, postgres],
+    archives: (core, mcp, postgres) => [core, postgres],
     source: postgresSource,
     types: postgresTypes,
     typeDependencies: ['@types/pg@8'],
+    forbiddenPackages: ['mongoose', 'mongodb', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
   },
-  { name: 'mongo', archives: (core, postgres, mongo) => [core, mongo], source: mongoSource, types: mongoTypes },
+  {
+    name: 'mcp',
+    archives: (core, mcp) => [core, mcp],
+    source: mcpSource,
+    types: mcpTypes,
+    forbiddenPackages: ['mongoose', 'mongodb', '@modelcontextprotocol/sdk'],
+  },
+  {
+    name: 'mcp-sdk',
+    archives: (core, mcp) => [core, mcp],
+    source: mcpSdkSource,
+    types: mcpTypes,
+    dependencies: ['@modelcontextprotocol/sdk@1'],
+    forbiddenPackages: ['mongoose', 'mongodb'],
+  },
+  {
+    name: 'mongo',
+    archives: (core, mcp, postgres, mongo) => [core, mcp, mongo],
+    source: mongoSource,
+    types: mongoTypes,
+  },
 ];
 
 try {
   const core = pack(resolve(root, 'packages/core'));
+  const mcp = pack(resolve(root, 'packages/mcp'));
   const postgres = pack(resolve(root, 'packages/postgres'));
   const mongo = pack(root);
   for (const testCase of cases) {
@@ -321,16 +465,19 @@ try {
       '--ignore-scripts',
       '--no-audit',
       '--no-fund',
-      ...testCase.archives(core, postgres, mongo),
+      ...testCase.archives(core, mcp, postgres, mongo),
       'graphql@16',
       'typescript@5',
+      ...(testCase.dependencies || []),
       ...(testCase.typeDependencies || []),
     ], cwd);
-    if (testCase.name !== 'mongo') {
+    if (testCase.forbiddenPackages) {
       const lock = JSON.parse(readFileSync(join(cwd, 'package-lock.json'), 'utf8'));
-      assert(!Object.keys(lock.packages).some((path) => (
-        /node_modules\/(mongoose|mongodb|@modelcontextprotocol\/sdk)$/.test(path)
-      )), `${testCase.name} pulled a MongoDB or MCP dependency`);
+      for (const packageName of testCase.forbiddenPackages) {
+        assert(!Object.keys(lock.packages).some((path) => (
+          path.endsWith(`node_modules/${packageName}`)
+        )), `${testCase.name} pulled forbidden dependency ${packageName}`);
+      }
     }
     run(process.execPath, ['--input-type=module', '--eval', testCase.source], cwd);
     writeFileSync(join(cwd, 'check.ts'), testCase.types);

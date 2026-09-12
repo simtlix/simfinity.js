@@ -1,7 +1,30 @@
 import type { ModelRegistration, Runtime } from '@simtlix/simfinity-core';
+import { auth, plugins, scalars, validators } from '@simtlix/simfinity-core';
 import type { GraphQLObjectType } from 'graphql';
-export { createValidatedScalar, SimfinityError, InternalServerError, buildErrorFormatter } from '@simtlix/simfinity-core';
-export type { EntityController, StateMachine, MiddlewareContext } from '@simtlix/simfinity-core';
+export {
+  auth,
+  buildErrorFormatter,
+  createValidatedScalar,
+  InternalServerError,
+  plugins,
+  scalars,
+  SimfinityError,
+  validators,
+} from '@simtlix/simfinity-core';
+export type {
+  AuthPluginOptions,
+  AuthRule,
+  AuthRuleFunction,
+  EntityController,
+  EnvelopSchemaPlugin,
+  FieldValidations,
+  FieldValidator,
+  MiddlewareContext,
+  PermissionSchema,
+  PolicyExpression,
+  StateMachine,
+  TypePermissions,
+} from '@simtlix/simfinity-core';
 
 export interface DatabaseColumn {
   name: string;
@@ -86,6 +109,10 @@ export interface PostgresConfiguration { pool: PostgresPool; schema?: string }
 export interface InitializationOptions { mode?: 'create' | 'validate' }
 export interface InitializationResult { mode: 'create' | 'validate'; created: string[] }
 export interface PostgresRuntime extends Runtime<PostgresModel, PostgresSession> {
+  readonly auth: typeof auth;
+  readonly plugins: typeof plugins;
+  readonly scalars: typeof scalars;
+  readonly validators: typeof validators;
   /** Bind pool/schema once, before createSchema. The caller owns the pool lifetime. */
   configure(options: PostgresConfiguration): void;
   describeDatabase(): DatabaseDescription;

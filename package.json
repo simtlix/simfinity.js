@@ -50,6 +50,7 @@
     "packages/*"
   ],
   "dependencies": {
-    "@simtlix/simfinity-core": "0.1.0"
+    "@simtlix/simfinity-core": "0.1.0",
+    "@simtlix/simfinity-mcp": "0.1.0"
   }
 }

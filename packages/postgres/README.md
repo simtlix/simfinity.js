@@ -42,6 +42,20 @@ await initializeDatabase({ mode: 'validate' });
 
 Transactions use one borrowed `pg` client and repeatable-read isolation. A supplied Simfinity PostgreSQL session joins the active transaction. Serialization failures and deadlocks are retried up to five times; mutation input is reset for each attempt. The caller owns the pool lifecycle.
 
+The module and every `createPostgres` instance expose the shared `auth`, `validators`, `scalars`, and `plugins` helpers. These are the same helper objects exported by the MongoDB package, so rules, scalar identities, and errors can be shared safely between backends.
+
+MCP integration is an independent opt-in and does not add MCP dependencies to PostgreSQL applications:
+
+```sh
+npm install @simtlix/simfinity-mcp @modelcontextprotocol/sdk
+```
+
+```javascript
+import { createMCPServer } from '@simtlix/simfinity-mcp';
+
+const mcpServer = await createMCPServer(schema);
+```
+
 ## Storage and compatible subset
 
 Entity identities and references use UUIDs. Scalars use native PostgreSQL types, scalar lists use arrays, reference-free embedded values use JSONB, and embedded values containing references use private owned tables. Foreign keys, inverse collections, explicit linking entities, missing/null markers, nullable embedded-list items, hooks, rollback, and state transitions are supported by the runtime.

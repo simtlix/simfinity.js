@@ -116,6 +116,14 @@ The shared runtime follows v3.1.0: generated relationships run target middleware
 
 Choose the backend at application setup. The existing package continues to use MongoDB; PostgreSQL uses `createPostgres({ pool, schema })`, the same `connect(null, Type, ...)`/`createSchema()` signatures, and an awaited `initializeDatabase()` before serving requests. The new workspace packages have not been published. See the executable [PostgreSQL setup, mappings, and limits](docs/postgresql.md) and [compatibility contract](docs/compatibility.md) before adopting this version.
 
+Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
+
+```sh
+npm install @simtlix/simfinity-mcp @modelcontextprotocol/sdk
+```
+
+Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
+
 Compatibility tests run the same GraphQL schemas and query corpus against both databases. IDs use UUIDs on PostgreSQL, native model/session APIs differ, and some mappings remain explicitly unsupported, including embedded/multikey uniqueness and grouping by paths inside embedded lists. MongoDB fixes also cover list nullability wrappers, scalar-ID inverse relations, inverse aggregation paths, embedded array replacement after clearing, and isolation of mutation input across transaction retries. Existing API signatures remain unchanged.
 
 ## 🚀 Quick Start
