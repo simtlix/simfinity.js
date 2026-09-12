@@ -137,6 +137,20 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL GraphQL parity', 
     expect(counts[1]).toBe(counts[0]);
   });
 
+  it.each(['$bad', 'a..b', ''])('rejects malformed aggregate sort path %j on both backends', async (field) => {
+    const source = 'query($sort:QLSortExpression){parityItems_aggregate(aggregation:{groupId:"kind",facts:[{operation:COUNT,factName:"total",path:"id"}]},sort:$sort){groupId facts}}';
+    for (const backend of backends) {
+      const result = await execute(backend, source, { sort: { terms: [{ field, order: 'ASC' }] } });
+      expect(result.errors?.[0].extensions.code).toBe('INVALID_FILTER_PATH');
+    }
+  });
+
+  it.each(['total', 'groupId', 'undeclaredAlias', 'safe.path'])('preserves aggregate ordering for safe sort field %j', async (field) => {
+    const source = 'query($sort:QLSortExpression){parityItems_aggregate(aggregation:{groupId:"kind",facts:[{operation:COUNT,factName:"total",path:"id"}]},sort:$sort){groupId facts}}';
+    const result = await assertParity(source, { sort: { terms: [{ field, order: 'ASC' }, { field: 'groupId', order: 'ASC' }] } });
+    expect(result.parityItems_aggregate.map((row) => row.groupId)).toEqual(field === 'total' ? ['two', null, 'one'] : [null, 'one', 'two']);
+  });
+
   it('aggregates scalar facts, null groups and relation paths with the same row multiplicity', async () => {
     await assertParity('{parityItems_aggregate(aggregation:{groupId:"kind",facts:[{operation:COUNT,factName:"count",path:"id"},{operation:SUM,factName:"sum",path:"score"},{operation:AVG,factName:"avg",path:"score"},{operation:MIN,factName:"min",path:"score"},{operation:MAX,factName:"max",path:"score"}]}){groupId facts}}');
     await assertParity('{contractseries_aggregate(aggregation:{groupId:"tenant",facts:[{operation:COUNT,factName:"count",path:"seasons.id"},{operation:SUM,factName:"sum",path:"seasons.number"}]}){groupId facts}}');

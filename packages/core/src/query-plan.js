@@ -97,6 +97,9 @@ export const createQueryPlan = (models, entityName, input = {}, { mode = 'find' 
   if (input.sort && (!Array.isArray(input.sort.terms) || !input.sort.terms.length)) fail('Sort requires non-empty terms', 'INVALID_SORT');
   if (mode !== 'count') for (const sort of input.sort?.terms || []) {
     if (!sort || (sort.order !== 'ASC' && sort.order !== 'DESC')) fail('Invalid sort order', 'INVALID_SORT');
+    if (typeof sort.field !== 'string' || sort.field.split('.').some((part) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(part))) {
+      fail('Invalid sort path', 'INVALID_FILTER_PATH');
+    }
     if (mode !== 'aggregate') {
       const field = resolveModelPath(models, entityName, sort.field).at(-1);
       if (field.kind !== 'scalar' && !field.inferred) fail('Sort path must end in a scalar field', 'INVALID_FILTER_PATH');
