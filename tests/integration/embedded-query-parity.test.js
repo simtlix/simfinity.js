@@ -121,11 +121,11 @@ describe.skipIf(!mongoUri || !postgresUri)('embedded query differential parity',
       }
     });
   }
-  it.each([0, 1])('sorts array aggregate facts across multiple groups (%s)', async (i) => {
-    for (const order of ['ASC', 'DESC']) for (const path of ['a.x', 'a.nested.x', 'a.texts', 'a.dates', 'a.kinds']) {
+  for (const i of [0, 1]) for (const order of ['ASC', 'DESC']) {
+    it.each(['a.x', 'a.nested.x', 'a.texts', 'a.dates', 'a.kinds'])(`sorts array aggregate facts across multiple groups (${i}, ${order}, %s)`, async (path) => {
       await parity(`{items${i}_aggregate(aggregation:{groupId:"key",facts:[{operation:MIN,factName:"min",path:"${path}"},{operation:MAX,factName:"max",path:"${path}"}]},sort:{terms:[{field:"min",order:${order}},{field:"groupId",order:ASC}]}){groupId facts}}`);
-    }
-  });
+    });
+  }
   it('shares referenced joins with embedded projections and inverse collection cardinality', async () => {
     for (const b of backends) {
       const targetModel = b.api.getModel(b.fixture.Target);
