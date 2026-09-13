@@ -30,7 +30,9 @@ const activeTool = ref('series');
 const database = ref('mongodb');
 const databaseGuide = computed(() => database.value === 'postgres' ? '/guide/postgresql.html' : '/guide/getting-started.html');
 const databaseName = computed(() => database.value === 'postgres' ? 'PostgreSQL' : 'MongoDB');
-const installCommand = computed(() => `cd simfinity-3.2.0-preview/${database.value} && npm install`);
+const installCommand = computed(() => database.value === 'postgres'
+  ? 'npm i @simtlix/simfinity-postgres@3.2.0 graphql@^16.11.0 pg@^8.16.3'
+  : 'npm i @simtlix/simfinity-js@3.2.0 graphql@^16.11.0 mongoose@^8.16.2');
 const toolExamples = [
   { name: 'series', kind: 'QUERY', description: 'Search your catalog with typed filters, sorting, and pagination.', link: '/guide/queries.html' },
   { name: 'series_aggregate', kind: 'AGGREGATE', description: 'Group your data and calculate counts, sums, and averages.', link: '/reference/aggregation.html' },
@@ -190,7 +192,7 @@ onUnmounted(() => {
             <a class="sim-button primary" :href="withBase(databaseGuide)">Start with {{ databaseName }} <span aria-hidden="true">&#8599;</span></a>
             <a class="text-link" :href="withBase('/guide/introduction.html')">Read the docs <span aria-hidden="true">&#8599;</span></a>
           </div>
-          <p class="preview-download"><a :href="withBase('/preview/simfinity-3.2.0-preview.zip')" download>Download 3.2.0 preview</a><span>Unzip, then run:</span></p>
+          <p class="preview-download"><a :href="withBase('/releases/simfinity-3.2.0-starters.zip')" download>Download v3.2.0 starters</a><span>Or install in your project:</span></p>
           <div class="install-command">
             <span class="terminal-prompt" aria-hidden="true">$</span>
             <code>{{ installCommand }}</code>
@@ -200,7 +202,7 @@ onUnmounted(() => {
             </button>
             <span class="copy-feedback" role="status">{{ copyState === 'Copy install command' ? '' : copyState }}</span>
           </div>
-          <p class="database-note">Choose once when setting up your app. <a :href="withBase('/resources/compatibility.html')">Preview packages are not yet on npm.</a></p>
+          <p class="database-note">Choose once when setting up your app. <a :href="withBase('/resources/compatibility.html')">v3.2.0 is available on npm.</a></p>
         </div>
         <div class="hero-system"><div class="hero-camera"><SchemaGraph ref="heroGraph" :active="activeNode" :focused="heroFocused" :phase="heroPhase" :light="!isDark" @select="selectNode" /></div></div>
         <div class="hero-explorer-controls" :inert="!heroFocused" :aria-hidden="!heroFocused">
@@ -286,7 +288,7 @@ onUnmounted(() => {
 
     <section class="final-section" aria-labelledby="final-title">
       <div class="final-connection" aria-hidden="true"><span></span><span></span><span></span></div>
-      <div class="sim-section final-inner reveal"><p class="section-eyebrow">YOUR NEXT IDEA STARTS WITH A CONNECTION.</p><h2 id="final-title">What will you<br><span>connect next?</span></h2><a class="sim-button primary" :href="withBase('/guide/databases.html')">Build with Simfinity <span aria-hidden="true">&#8599;</span></a><div class="final-meta"><span>OPEN SOURCE</span><span>JAVASCRIPT</span><span>APACHE 2.0</span></div><div class="adoption-links"><a :href="withBase('/guide/choosing-simfinity.html')">Is Simfinity a fit?</a><a :href="withBase('/resources/compatibility.html')">Compatibility & releases</a><a :href="withBase('/guide/databases.html#download-the-preview')">Download the starter</a></div></div>
+      <div class="sim-section final-inner reveal"><p class="section-eyebrow">YOUR NEXT IDEA STARTS WITH A CONNECTION.</p><h2 id="final-title">What will you<br><span>connect next?</span></h2><a class="sim-button primary" :href="withBase('/guide/databases.html')">Build with Simfinity <span aria-hidden="true">&#8599;</span></a><div class="final-meta"><span>OPEN SOURCE</span><span>JAVASCRIPT</span><span>APACHE 2.0</span></div><div class="adoption-links"><a :href="withBase('/guide/choosing-simfinity.html')">Is Simfinity a fit?</a><a :href="withBase('/resources/compatibility.html')">Compatibility & releases</a><a :href="withBase('/guide/databases.html#download-the-starters')">Download the starter</a></div></div>
       <div class="brand-watermark" data-parallax="38" aria-hidden="true">simfinity.js</div>
     </section>
   </main>

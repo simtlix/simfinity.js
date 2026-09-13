@@ -1,8 +1,8 @@
-![Simfinity.js — Define once. Build beyond. GraphQL, MongoDB, and MCP.](.github/assets/readme-cover.png)
+![Simfinity.js — Define once. Build beyond. GraphQL, MongoDB, PostgreSQL, and optional MCP.](.github/assets/readme-cover.png)
 
 # Simfinity.js
 
-A powerful Node.js framework that automatically generates GraphQL schemas from your data models, bringing all the power and flexibility of MongoDB query language to GraphQL interfaces.
+A Node.js framework that turns GraphQL object types into generated queries, mutations, relationships, and database storage. Use the established MongoDB/Mongoose facade or the PostgreSQL 15+ facade with real tables and foreign keys.
 
 Read the [documentation website](https://simtlix.github.io/simfinity.js/): start with the [quick start](https://simtlix.github.io/simfinity.js/guide/getting-started.html), explore the [guides](https://simtlix.github.io/simfinity.js/guide/schema.html), or consult the [API reference](https://simtlix.github.io/simfinity.js/reference/api.html). The website source is in [`docs/`](docs/).
 
@@ -15,12 +15,13 @@ npm run docs:dev
 
 For builds and hosting, see the [website maintainer guide](docs/.vitepress/README.md). The website documents the current source; some older examples later in this README retain historical conventions.
 
-> **Documentation for both databases:** The [public website](https://simtlix.github.io/simfinity.js/guide/databases.html) now covers MongoDB and PostgreSQL, including shared APIs, relationships, generated FKs, scopes, and MCP. The PostgreSQL adapter and the matching MongoDB adapter are available as a downloadable **3.2.0 preview**, not an npm release. The guides explain how to install the verified archives; this documentation update does not change the library version on `master`.
+> **Documentation for both databases:** The [public website](https://simtlix.github.io/simfinity.js/guide/databases.html) now covers MongoDB and PostgreSQL, including shared APIs, relationships, generated FKs, scopes, and MCP. Both adapters are available in **v3.2.0** on npm. Follow the quick starts for installation, or download the runnable starters and verified release archives.
 
 ## 📑 Table of Contents
 
 - [Features](#-features)
 - [Installation](#-installation)
+- [PostgreSQL support](#postgresql-support)
 - [Quick Start](#-quick-start)
 - [Core Concepts](#-core-concepts)
   - [Connecting Models](#connecting-models)
@@ -89,8 +90,8 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## ✨ Features
 
 - **Automatic Schema Generation**: Define your object model, and Simfinity.js generates all queries and mutations
-- **MongoDB Integration**: Seamless translation between GraphQL and MongoDB
-- **Powerful Querying**: Any query that can be executed in MongoDB can be executed in GraphQL
+- **MongoDB or PostgreSQL**: Choose the database facade once during application startup
+- **Powerful Querying**: Typed filters, nested paths, pagination, sorting, and aggregations across the supported contract
 - **Aggregation Queries**: Built-in support for GROUP BY queries with aggregation operations (SUM, COUNT, AVG, MIN, MAX)
 - **Auto-Generated Resolvers**: Automatically generates resolve methods for relationship fields
 - **Automatic Index Creation**: Automatically creates MongoDB indexes for all ObjectId fields, including nested embedded objects and relationship fields
@@ -104,10 +105,30 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose graphql @simtlix/simfinity-js
+npm install mongoose@^8.16.2 graphql@^16.11.0 @simtlix/simfinity-js@3.2.0
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies.
+
+## PostgreSQL support
+
+Version 3.2.0 releases `@simtlix/simfinity-core`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-postgres`, and the root MongoDB facade in lockstep. Install the selected adapter from npm; shared dependencies resolve automatically. PostgreSQL runs the shared GraphQL query/mutation engine, including scopes, controllers, validators, state transitions and nested writes. It generates and validates tables, indexes, and **real foreign keys**, including inverse relations, explicit many-to-many linking entities, and references inside embedded objects. PostgreSQL installation does not pull Mongoose, MongoDB, or MCP dependencies.
+
+Enum filters resolve member names first, then declared internal values by strict equality, on both backends. For example, with `ONE: { value: 'TWO' }` and `TWO: { value: 'two' }`, filter `"TWO"` selects member `TWO`. Numeric internal values require numbers, not numeric strings. This applies to scalar lists, embedded/reference leaves and state filters across EQ, NE, LT, LTE, GT, GTE, BTW, IN and NIN. LIKE accepts string fields only. PostgreSQL writes and state guards continue to use internal enum values.
+
+The shared runtime preserves the v3.1 contract: generated relationships run target middleware/scopes with protected identity and parent filters; nested mutations enforce child middleware and persisted ownership; standalone `saveObject()` wraps the complete workflow in a transaction. Accepted empty strings are preserved. Both facades expose `configureQueryLimits()` for bounded pagination.
+
+Choose the backend at application setup. The existing package continues to use MongoDB; PostgreSQL uses `createPostgres({ pool, schema })`, the same `connect(null, Type, ...)`/`createSchema()` signatures, and an awaited `initializeDatabase()` before serving requests. See the canonical [PostgreSQL quick start](docs/guide/postgresql.md), detailed [storage reference](docs/postgresql.md), and [compatibility contract](docs/compatibility.md) before adopting this version.
+
+Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
+
+```sh
+npm install @simtlix/simfinity-mcp@3.2.0 @modelcontextprotocol/sdk@^1.13.0
+```
+
+Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
+
+Compatibility tests run the same GraphQL schemas and query corpus against both databases. IDs use UUIDs on PostgreSQL, native model/session APIs differ, and some mappings remain explicitly unsupported, including whole embedded-object uniqueness and whole-object sorting/grouping. Nested embedded scalar-list filters/sorts, ragged array group keys and array aggregate facts now match the supported Mongo query contract. Native embedded writes retain explicit nulls, apply descendant list defaults and minimize empty inline objects; historical Date parameters use UTC. PostgreSQL enforces scalar/list multikey uniqueness within embedded trees through typed owner-key tables, validates JSONB embedded shapes, and checks owned marker/row consistency with deferred database triggers. MongoDB fixes also cover list nullability wrappers, scalar-ID inverse relations, inverse aggregation paths, embedded array replacement after clearing, and isolation of mutation input across transaction retries. Existing API signatures remain unchanged.
 
 ## 🚀 Quick Start
 
@@ -197,7 +218,7 @@ const schema = simfinity.createSchema(
 
 Importing Simfinity initializes its global `__Field.extensions` introspection field safely whether GraphQL's fields have already been materialized or a schema already exists. Repeated module evaluation with the same GraphQL peer reuses the existing extension field and metadata types. Application field metadata is preserved.
 
-The extension remains shared by every schema using that GraphQL peer; Simfinity's type and middleware registries also remain module-level state. Schemas constructed after import include `FieldExtensionsType` and `RelationType` in their type maps. Earlier schemas keep their original type maps: ordinary operations and direct metadata selections work, but named fragments on the new metadata types require a schema constructed after import.
+The extension remains shared by every schema using that GraphQL peer; Simfinity's type and middleware registries belong to each runtime instance. Schemas constructed after import include `FieldExtensionsType` and `RelationType` in their type maps. Earlier schemas keep their original type maps: ordinary operations and direct metadata selections work, but named fragments on the new metadata types require a schema constructed after import.
 
 Schema-cloning tools remain unsupported. In a process that has imported Simfinity, `buildClientSchema()` on a post-import schema's introspection result can also fail with duplicate metadata type names. Use Envelop plugins and in-place resolver wrapping; see the [introspection metadata reference](docs/reference/extensions.md).
 
@@ -2628,12 +2649,12 @@ Each generated tool follows MCP best practices so an agent can use it without ex
 
 On execution, each tool returns both a serialized JSON `text` content block and a machine-readable `structuredContent` (the GraphQL `data`) that conforms to the `outputSchema`. When the caller requests `pagination: { count: true }` on a **list** tool, the total record count is delivered in the tool result `_meta.count` (aggregate tools ignore the flag — their resolver never computes a total).
 
-> The MCP transports require the optional `@modelcontextprotocol/sdk` dependency (`^1.13.0` or newer). Install it with `npm install @modelcontextprotocol/sdk`. `generateMCPTools` works without it. SDK load problems raise distinct error codes: `MCP_SDK_NOT_INSTALLED` (not installed), `MCP_SDK_INCOMPATIBLE` (installed but too old to provide the requested transport — upgrade it), `MCP_SDK_LOAD_FAILED` (any other import failure).
+> The MCP transports require the optional `@modelcontextprotocol/sdk` dependency (`^1.13.0` or newer). Install it with `npm install @modelcontextprotocol/sdk@^1.13.0`. `generateMCPTools` works without it. SDK load problems raise distinct error codes: `MCP_SDK_NOT_INSTALLED` (not installed), `MCP_SDK_INCOMPATIBLE` (installed but too old to provide the requested transport — upgrade it), `MCP_SDK_LOAD_FAILED` (any other import failure).
 
 ### Installation
 
 ```bash
-npm install @modelcontextprotocol/sdk
+npm install @modelcontextprotocol/sdk@^1.13.0
 ```
 
 ### Generating tool definitions
@@ -4300,5 +4321,3 @@ const schema = simfinity.createSchema();
 ```
 
 *Built with ❤️ by [Simtlix](https://github.com/simtlix)*
-
-

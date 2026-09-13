@@ -1,15 +1,15 @@
 ---
 title: Database compatibility contract
-description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.2.0 preview.
+description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.2.0.
 ---
 
 # Database compatibility contract
 
 This ledger records the v3.2.0 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
 
-The test paths below refer to preview source commit `d98197387543d185fc79d5c31757b12e07ef2436`, not the current public `master` checkout. To try the API, use the [verified preview starters](guide/databases.md#download-the-preview).
+The test paths below are available in the [v3.2.0 source](https://github.com/simtlix/simfinity.js/tree/v3.2.0). To try the API, use the [released starters](guide/databases.md#download-the-starters).
 
-When working with that preview source, set `SIMFINITY_MONGODB_URI` and `SIMFINITY_POSTGRES_URI` to disposable databases for the cross-backend suites. Set `SIMFINITY_TEST_MONGODB_URI` to a separate disposable MongoDB database for upstream opt-in regressions. Mongo setup drops its configured databases, so these URIs must never identify application data. When a variable is absent, its integration suites are reported as skipped.
+When running the source tests, set `SIMFINITY_MONGODB_URI` and `SIMFINITY_POSTGRES_URI` to disposable databases for the cross-backend suites. Set `SIMFINITY_TEST_MONGODB_URI` to a separate disposable MongoDB database for upstream opt-in regressions. Mongo setup drops its configured databases, so these URIs must never identify application data. When a variable is absent, its integration suites are reported as skipped.
 
 ## MongoDB contract
 
@@ -83,7 +83,7 @@ Embedded query completion verification (2026-09-12): full suites passed **47 fil
 
 ## v3.2.0 package and CI delivery
 
-The root MongoDB facade, core, PostgreSQL, and MCP packages use local version 3.2.0 in lockstep with exact internal dependency versions. This version is not claimed to be published. Release archives and registry publication are ordered core, MCP, PostgreSQL, then the root facade. Core/PostgreSQL install no MongoDB, Mongoose, or MCP dependency chain; MCP and its SDK remain opt-in.
+The root MongoDB facade, core, PostgreSQL, and MCP packages use version 3.2.0 in lockstep with exact internal dependency versions. All four packages are released on npm. Release archives and registry publication are ordered core, MCP, PostgreSQL, then the root facade. Core/PostgreSQL install no MongoDB, Mongoose, or MCP dependency chain; MCP and its SDK remain opt-in.
 
 Database CI runs three bounded full-suite jobs: PostgreSQL 15/MongoDB 7, PostgreSQL 16/MongoDB 8, and PostgreSQL 18/MongoDB 8. Each job sets both MongoDB environment variables to distinct databases so the differential and upstream regression suites run without colliding.
 

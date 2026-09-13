@@ -1,6 +1,6 @@
 {
   "name": "@simtlix/simfinity-js",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "",
   "main": "src/index.js",
   "types": "./types/index.d.ts",
@@ -11,6 +11,8 @@
     "test:coverage": "vitest --coverage",
     "lint": "eslint \"**/*.js\"",
     "lint-fix": "eslint --fix \"**/*.js\"",
+    "test:integration": "vitest run tests/integration",
+    "test:packages": "node scripts/test-packages.js",
     "docs:install": "npm ci --prefix docs",
     "docs:dev": "npm run dev --prefix docs --",
     "docs:build": "npm run build --prefix docs",
@@ -23,7 +25,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/simtlix/simfinity.git"
+    "url": "https://github.com/simtlix/simfinity.js"
   },
   "peerDependencies": {
     "graphql": "^16.11.0",
@@ -43,5 +45,12 @@
     "graphql": "^16.11.0",
     "graphql-middleware": "^6.1.35",
     "mongoose": "^8.16.2"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "dependencies": {
+    "@simtlix/simfinity-core": "3.2.0",
+    "@simtlix/simfinity-mcp": "3.2.0"
   }
 }

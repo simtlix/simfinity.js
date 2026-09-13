@@ -17,6 +17,21 @@ alwaysApply: true
 - **Linting**: ESLint 9 (flat config)
 - **Server integration**: GraphQL Yoga with Envelop plugins
 
+## Shared runtime and PostgreSQL workspaces
+
+- `packages/core` (`@simtlix/simfinity-core`) owns driver-free `createRuntime`, model metadata, query plans, scalar factory, errors, filter types and the once-only introspection patch. Registries/middleware are per runtime instance.
+- `src/index.js` binds the shared runtime to `src/mongo/adapter.js`. Mongo model generation, pipelines and transactions live under `src/mongo/`; existing root helpers/exports remain available.
+- `packages/postgres` (`@simtlix/simfinity-postgres`) exposes `createPostgres({pool,schema})`, the default configure/connect/createSchema facade and schema generation/initialization. It depends on core and `pg`, never Mongoose/MongoDB/MCP. Backend configuration is bound once and PostgreSQL types must be registered before createSchema.
+- PostgreSQL executes the shared GraphQL lifecycle: scopes, middleware, validators, hooks, nested CRUD and state transitions. Native model/session APIs differ from Mongoose. Supported parity is tested against real databases; do not claim arbitrary Mongo pipeline/model compatibility.
+- GraphQL metadata generates real FKs, including inverse collections, link entities and references in privately owned embedded tables. JSONB is used only for value-only embedded subtrees. See `docs/postgresql.md` for rejected shapes and current constraints.
+- Generated PostgreSQL functions/triggers are explicit serializable metadata. Initializers verify their exact identities, bodies/configuration and enabled/deferrable enforcement; create mode backfills keys and validates existing data transactionally, never replaces drift. Private guard rows serialize owned mutations; typed key tables enforce owner-aware multikey uniqueness. Deferred triggers validate owned shape, and immutable validators enforce value-only JSONB shapes.
+- Embedded queries use JSONB projections for ragged lists and catalog-validated immutable ordering helpers: MIN/MAX compares whole arrays; sorting selects immediate extrema. Owned scalar/reference/JSONB and root JSONB presenceColumn markers distinguish SQL NULL absence from explicit null. Normalize descendant list defaults/minimized inline objects before encoding and deriving unique keys; preserve required constraints. Date parameters use per-query UTC encoding, never global pg defaults.
+- Initialization borrows one pool client, owns its transaction, awaits DDL/catalog validation and never destructively synchronizes existing storage. `validate` mode is read-only. PostgreSQL >=15 is required.
+- Await initialization before serving; failure marks the instance unavailable. `preventCreatingCollection(true)` before createSchema forces validation only. Text columns and typed query expressions use binary C collation.
+- Enum query filters resolve names before strict internal values, then encode the selected value for storage; query normalization must never be applied to writes or state guards. LIKE is string-only.
+- PostgreSQL writes use repeatable-read transactions; supplied sessions are joined, owned sessions retry confirmed serialization/deadlock aborts. Shared typed input snapshots isolate attempts. Adapter stateValue supplies the canonical persisted representation for state writes/guards (names on Mongo, enum internal values on PostgreSQL).
+- Standalone saveObject owns a full workflow transaction including hooks and independent nested entities; active supplied sessions remain caller-owned. Owner+embedded reads use one snapshot. Only ownership FKs cascade.
+
 ## Core Flow
 
 ```
@@ -44,15 +59,19 @@ simfinity.createSchema()
 
 | File | Responsibility |
 |------|---------------|
-| `src/index.js` | Core engine: type registration, schema/model generation, query/mutation builders, resolvers, middleware, scope |
-| `src/auth/index.js` | Auth plugin (`createAuthPlugin`), permission resolution, deprecated middleware |
-| `src/auth/rules.js` | Rule helpers: `requireAuth`, `requireRole`, `composeRules`, `isOwner`, `allow`, `deny` |
-| `src/auth/expressions.js` | Policy expression DSL evaluator |
-| `src/auth/errors.js` | `UnauthenticatedError`, `ForbiddenError` (extend `SimfinityError`) |
-| `src/validators.js` | Declarative field validators: `stringLength`, `pattern`, `email`, `numberRange`, etc. |
-| `src/scalars.js` | Pre-built scalars (`EmailScalar`, `URLScalar`) and scalar factories |
-| `src/plugins.js` | Plugin exports: `createAuthPlugin`, `apolloCountPlugin`, `envelopCountPlugin` |
-| `src/mcp.js` | MCP generation: `generateMCPTools`, `createMCPServer`, `startStdioMCPServer`, `createHTTPMCPHandler`. Converts the generated `GraphQLSchema` into MCP tools (one per Query/Mutation field) with JSON Schema inputs; in-process or remote execution. Uses optional `@modelcontextprotocol/sdk` |
+| `src/index.js` | MongoDB facade and legacy helper exports |
+| `packages/core/src/runtime.js` | Shared registration, input/schema generation, lifecycle, middleware, scopes and resolvers |
+| `packages/core/src/query-plan.js` | Driver-free typed query paths and predicate/sort/aggregation plans |
+| `src/mongo/` | Mongoose models, pipelines, transactions and record adapter |
+| `packages/postgres/src/` | PostgreSQL adapter, codecs, records, query compiler, transactions and schema lifecycle |
+| `packages/core/src/auth/index.js` | Shared auth plugin (`createAuthPlugin`), permission resolution, deprecated middleware; `src/auth/` remains a compatibility facade |
+| `packages/core/src/auth/rules.js` | Shared rule helpers: `requireAuth`, `requireRole`, `composeRules`, `isOwner`, `allow`, `deny` |
+| `packages/core/src/auth/expressions.js` | Shared policy expression DSL evaluator |
+| `packages/core/src/auth/errors.js` | `UnauthenticatedError`, `ForbiddenError` (extend the shared `SimfinityError`) |
+| `packages/core/src/validators.js` | Shared declarative field validators: `stringLength`, `pattern`, `email`, `numberRange`, etc. |
+| `packages/core/src/scalars.js` | Shared pre-built scalars (`EmailScalar`, `URLScalar`) and scalar factories |
+| `packages/core/src/plugins.js` | Shared plugin exports: `createAuthPlugin`, `apolloCountPlugin`, `envelopCountPlugin` |
+| `packages/mcp/src/index.js` | Optional MCP generation and transports; `src/mcp.js` remains the Mongo facade shim. Uses optional `@modelcontextprotocol/sdk` |
 | `src/const/QLOperator.js` | `GraphQLEnumType` for filter operators (EQ, LT, GT, IN, LIKE, etc.) |
 | `src/const/QLValue.js` | `GraphQLScalarType` for filter values |
 | `src/const/QLSort.js` | `GraphQLInputObjectType` for sort expressions |
@@ -67,7 +86,8 @@ simfinity.createSchema()
 - Remote attempt timeouts include reading the body. Queries alone may retry transport failures; client cancellation rejects during fetch or body reading. Validate the remote GraphQL envelope before creating a tool result.
 - `createHTTPMCPHandler` always creates a fresh stateless server/transport per request. Reject session generators, session callbacks and event stores at setup; applications needing sessions manage a transport with `createMCPServer`.
 
-## Key Global State (in `src/index.js`)
+## Instance State (inside `createRuntime` in `packages/core/src/runtime.js`)
+
 
 - `typesDict` -- primary registry: `{ types: { [typeName]: { model, gqltype, simpleEntityEndpointName, listEntitiesEndpointName, endpoint, controller, stateMachine, inputType } } }`
 - `typesDictForUpdate` -- parallel registry with update-specific input types
@@ -79,6 +99,6 @@ simfinity.createSchema()
 
 Simfinity adds `extensions` to the field map returned by `__Field.getFields()`. This works before or after GraphQL materializes introspection fields and reuses an existing extension field on repeated module evaluation, preserving metadata type identity. Do not capture or replace the private `_fields` thunk.
 
-The extension is still global to the shared GraphQL peer, and Simfinity's registries remain module-level state. Schemas constructed after import collect `FieldExtensionsType` and `RelationType` in their type maps. Pre-existing schemas retain their original type maps: ordinary operations and direct metadata introspection work, but named fragments on these new types require a schema constructed after import.
+The extension is still global to the shared GraphQL peer, and Simfinity's registries belong to each runtime instance. Schemas constructed after import collect `FieldExtensionsType` and `RelationType` in their type maps. Pre-existing schemas retain their original type maps: ordinary operations and direct metadata introspection work, but named fragments on these new types require a schema constructed after import.
 
 Tools that clone types (`graphql-middleware`'s `applyMiddleware` / `mapSchema`) remain unsupported. `buildClientSchema()` on a post-import schema's introspection can also produce duplicate metadata types when run in the same process as Simfinity. Use Envelop plugins and in-place resolver wrapping; initialization safety does not provide schema isolation or schema-cloning compatibility.

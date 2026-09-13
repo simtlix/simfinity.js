@@ -1,10 +1,10 @@
 ---
 description: Documents the authorization subsystem -- Envelop plugin, permission maps, rule helpers, and policy expressions
-globs: src/auth/**
+globs: packages/core/src/auth/**, src/auth/**
 alwaysApply: false
 ---
 
-# Authorization Module (`src/auth/`)
+# Authorization Module (`packages/core/src/auth/`)
 
 ## File Structure
 
@@ -74,7 +74,7 @@ Each rule receives `(parent, args, ctx, info)`. Only `true` or `undefined` grant
 | `requirePermission(perm, options?)` | Requires every permission; claims must be arrays of nonempty strings with exact membership. Only a standalone `'*'` entry grants all |
 | `composeRules(...rules)` | AND: all rules must pass |
 | `anyRule(...rules)` | OR: at least one rule must pass |
-| `isOwner(ownerField, userIdField?, options?)` | Compares nonempty strings, finite numbers, or Mongoose ObjectIds. Missing/null and arbitrary object IDs deny |
+| `isOwner(ownerField, userIdField?, options?)` | Compares nonempty strings, finite numbers, or BSON ObjectIds. Missing/null and arbitrary object IDs deny |
 | `createRule(predicate, errorMessage?, errorCode?)` | Custom rule from predicate function |
 | `allow()` | Always returns `true` |
 | `deny(message?)` | Always throws `ForbiddenError` |

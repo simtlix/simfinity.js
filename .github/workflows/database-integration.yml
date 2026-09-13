@@ -1,0 +1,64 @@
+name: Database integration
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: '15-alpine'
+            mongo: '7.0'
+            database: pg15_mongo7
+          - postgres: '16-alpine'
+            mongo: '8.0'
+            database: pg16_mongo8
+          - postgres: '18-alpine'
+            mongo: '8.0'
+            database: pg18_mongo8
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: simfinity
+          POSTGRES_DB: simfinity_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Start disposable MongoDB replica set
+        env:
+          MONGO_VERSION: ${{ matrix.mongo }}
+        run: |
+          docker run -d --name simfinity-mongo -p 27017:27017 "mongo:${MONGO_VERSION}" --replSet rs0 --bind_ip_all
+          for _ in $(seq 1 60); do
+            if docker exec simfinity-mongo mongosh --quiet --eval 'db.adminCommand({ping:1})' >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec simfinity-mongo mongosh --quiet --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
+          for _ in $(seq 1 60); do
+            if docker exec simfinity-mongo mongosh --quiet --eval 'if (!db.hello().isWritablePrimary) quit(1)' >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+      - name: Run full database suite
+        run: npm test
+        env:
+          SIMFINITY_MONGODB_URI: mongodb://127.0.0.1:27017/simfinity_contract_${{ matrix.database }}?replicaSet=rs0&directConnection=true
+          SIMFINITY_TEST_MONGODB_URI: mongodb://127.0.0.1:27017/simfinity_upstream_${{ matrix.database }}?replicaSet=rs0&directConnection=true
+          SIMFINITY_POSTGRES_URI: postgresql://postgres:simfinity@127.0.0.1:5432/simfinity_test
+      - if: always()
+        run: docker rm -f simfinity-mongo
