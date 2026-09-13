@@ -15,7 +15,7 @@ npm run docs:dev
 
 For builds and hosting, see the [website maintainer guide](docs/.vitepress/README.md). The website documents the current source; some older examples later in this README retain historical conventions.
 
-> **Documentation for both databases:** The [public website](https://simtlix.github.io/simfinity.js/guide/databases.html) now covers MongoDB and PostgreSQL, including shared APIs, relationships, generated FKs, scopes, and MCP. The PostgreSQL adapter and the matching MongoDB adapter are available as a downloadable **3.2.0 preview**, not an npm release. The guides explain how to install the verified archives; this documentation update does not change the library version on `master`.
+> **Documentation for both databases:** The [public website](https://simtlix.github.io/simfinity.js/guide/databases.html) now covers MongoDB and PostgreSQL, including shared APIs, relationships, generated FKs, scopes, and MCP. Both adapters are available in **v3.2.0** on npm. Follow the quick starts for installation, or download the runnable starters and verified release archives.
 
 ## 📑 Table of Contents
 
@@ -112,7 +112,7 @@ npm install mongoose graphql @simtlix/simfinity-js
 
 ## PostgreSQL support
 
-Version 3.2.0 prepares `@simtlix/simfinity-core`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-postgres`, and the root MongoDB facade in lockstep. This is an unpublished local feature version; do not assume the workspace packages are available from a public registry. PostgreSQL runs the shared GraphQL query/mutation engine, including scopes, controllers, validators, state transitions and nested writes. It generates and validates tables, indexes, and **real foreign keys**, including inverse relations, explicit many-to-many linking entities, and references inside embedded objects. PostgreSQL installation does not pull Mongoose, MongoDB, or MCP dependencies.
+Version 3.2.0 releases `@simtlix/simfinity-core`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-postgres`, and the root MongoDB facade in lockstep. Install the selected adapter from npm; shared dependencies resolve automatically. PostgreSQL runs the shared GraphQL query/mutation engine, including scopes, controllers, validators, state transitions and nested writes. It generates and validates tables, indexes, and **real foreign keys**, including inverse relations, explicit many-to-many linking entities, and references inside embedded objects. PostgreSQL installation does not pull Mongoose, MongoDB, or MCP dependencies.
 
 Enum filters resolve member names first, then declared internal values by strict equality, on both backends. For example, with `ONE: { value: 'TWO' }` and `TWO: { value: 'two' }`, filter `"TWO"` selects member `TWO`. Numeric internal values require numbers, not numeric strings. This applies to scalar lists, embedded/reference leaves and state filters across EQ, NE, LT, LTE, GT, GTE, BTW, IN and NIN. LIKE accepts string fields only. PostgreSQL writes and state guards continue to use internal enum values.
 

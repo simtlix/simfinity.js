@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitepress';
 import { readFileSync } from 'node:fs';
 
-const { version } = JSON.parse(readFileSync(new URL('../public/preview/manifest.json', import.meta.url), 'utf8'));
+const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
 const repository = 'https://github.com/simtlix/simfinity.js';
 const base = `/${(process.env.DOCS_BASE_PATH || '').replace(/^\/+|\/+$/g, '')}/`.replace('//', '/');
 const siteUrl = process.env.DOCS_SITE_URL;
@@ -10,7 +10,7 @@ export default defineConfig({
   title: 'Simfinity.js',
   description: 'Define your GraphQL types. Generate MongoDB or PostgreSQL storage, queries, mutations, relationships, and optional MCP tools with Simfinity.js.',
   lang: 'en-US',
-  srcExclude: ['public/**', 'superpowers/**', 'preview/**'],
+  srcExclude: ['public/**', 'superpowers/**', 'preview/**', 'starters/**'],
   base,
   lastUpdated: true,
   head: [
@@ -55,10 +55,11 @@ export default defineConfig({
         { text: 'Contributing', link: '/resources/contributing' },
         { text: 'Troubleshooting', link: '/resources/troubleshooting' },
       ] },
-      { text: `v${version} preview`, items: [
-        { text: 'Download preview & compatibility', link: '/guide/databases#download-the-preview' },
+      { text: `v${version}`, items: [
+        { text: 'Downloads & compatibility', link: '/guide/databases#download-the-starters' },
         { text: 'Release history', link: `${repository}/releases` },
-        { text: 'Package on npm', link: 'https://www.npmjs.com/package/@simtlix/simfinity-js' },
+        { text: 'MongoDB package on npm', link: 'https://www.npmjs.com/package/@simtlix/simfinity-js' },
+        { text: 'PostgreSQL package on npm', link: 'https://www.npmjs.com/package/@simtlix/simfinity-postgres' },
       ] },
     ],
     sidebar: [

@@ -33,7 +33,7 @@ Review both themes whenever changing colors. Use dark amber for text on light su
 
 Create a Markdown page with `title` and `description` frontmatter, a single H1, practical examples, and links to its prerequisites. Add it to `themeConfig.sidebar` in `config.mts`. Use `/guide/page` links in Markdown and `withBase('/guide/page.html')` in Vue components. Check examples against the current source. Keep JavaScript imports as ES modules; Simfinity's core uses namespace or named imports, not a default export.
 
-The release label reads `docs/public/preview/manifest.json` and explicitly identifies the 3.2.0 preview for both databases, independently of the library version on `master`. It does not imply npm availability or archived documentation for earlier releases. Last-updated dates come from Git history after a page has been committed.
+The release label reads the root `package.json`. It identifies the documented library version. Deploy release documentation only after all matching npm packages are published and verified. Last-updated dates come from Git history after a page has been committed.
 
 VitePress 1.6.4 is pinned to the stable release. Its Vite dependency is overridden to `^6.4.3` to use the patched development server instead of the vulnerable Vite 5 dependency. Keep the override until upgrading to a VitePress release that uses a patched version itself; validate development, production builds, and local search when updating it.
 
@@ -73,14 +73,14 @@ For another static host, use install command `npm ci --prefix docs`, build comma
 
 Before submitting changes, build the site, verify search, navigation, code copying, light/dark themes, and mobile layouts. Run the repository's `npm run lint` and `npm test`. Do not include generated output in Git or npm.
 
-## Maintaining the preview download
+## Maintaining starter downloads
 
-The preview ZIP contains the exact archives listed in `docs/public/preview/manifest.json`, separate MongoDB and PostgreSQL package manifests from `docs/preview/`, and the same server sources rendered by the quick starts. To rebuild after changing starter sources, obtain the verified archives, then run:
+The npm-based ZIP uses `docs/starters/package.*.json`, `docs/starters/README.md`, and the same server sources rendered by the quick starts. When updating the release, align the starter package versions and README, then rebuild:
 
 ```sh
-python3 docs/scripts/build-preview.py /path/to/verified-archives
+python3 docs/scripts/build-starters.py
 ```
 
-The builder uses only Python 3 standard-library modules, verifies both SHA-256 and npm SHA-512 integrity before writing, and produces a deterministic ZIP and its checksum in `docs/public/preview/`. Commit these public assets with the source change. Do not substitute newly packed archives without updating and verifying the manifest. Check clean installs and the quick-start operations on both databases before replacing the download.
+The builder checks Simfinity dependency versions against the root package and writes a deterministic ZIP plus SHA-256 checksum under `docs/public/releases/`. Commit both artifacts with the source changes. Verify clean registry installs and real quick-start operations for both databases after npm publication, then deploy Pages.
 
-The original `simfinity-series-starter.zip` remains pinned to the published MongoDB 3.0.1 release. Keep preview availability notes in the database chooser and compatibility page current when making an actual registry release. The docs workflow publishes the site only, not npm packages.
+The original MongoDB 3.0.1 starter and the earlier 3.2.0 preview archive kit remain unchanged as historical downloads. `docs/scripts/build-preview.py` rebuilds that archived snapshot only from the verified archives in its manifest; it is not the current release builder. The docs workflow publishes the site only. Library tags/releases and npm publication follow the separate workflows described in the contribution guide.

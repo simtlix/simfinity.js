@@ -2,7 +2,7 @@
 
 PostgreSQL 15 or later support for the Simfinity GraphQL runtime. The package requires GraphQL 16 and Node.js 18.18 or later, depends on `pg` and `@simtlix/simfinity-core`, and has no Mongoose or MongoDB dependency.
 
-Version 3.2.0 is prepared locally with the other Simfinity packages and is not yet published. Source and the complete startup guide: [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js), [`docs/guide/postgresql.md`](https://github.com/simtlix/simfinity.js/blob/master/docs/guide/postgresql.md).
+Version 3.2.0 is released together with the other Simfinity packages. Install from npm and keep their versions aligned. Source and the complete startup guide: [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js), [`docs/guide/postgresql.md`](https://github.com/simtlix/simfinity.js/blob/master/docs/guide/postgresql.md).
 
 ## Runtime
 

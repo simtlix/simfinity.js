@@ -12,9 +12,9 @@ This page is the MongoDB starter. For UUID identities, generated PostgreSQL tabl
 
 ## Download the starter
 
-[Download the 3.2.0 preview kit](/preview/simfinity-3.2.0-preview.zip) and extract it. The `mongodb` starter contains the files shown below. Keep the adjacent `packages` directory, which supplies the verified Simfinity archives. See [package availability and checksums](./databases#download-the-preview).
+[Download the v3.2.0 starters](/releases/simfinity-3.2.0-starters.zip) and extract them. The `mongodb` folder contains the files shown below and installs the released packages from npm. See [downloads and checksums](./databases#download-the-starters).
 
-For the published MongoDB release, the [original 3.0.1 starter](/simfinity-series-starter.zip) remains available; its schema and server support this page's operations. The rest of this site documents 3.2.0 preview, which is not yet on npm.
+For the published MongoDB release, the [original 3.0.1 starter](/simfinity-series-starter.zip) remains available; its schema and server support this page's operations. The rest of this site documents v3.2.0.
 
 | Before you begin | You will build |
 | --- | --- |
@@ -28,11 +28,11 @@ For the published MongoDB release, the [original 3.0.1 starter](/simfinity-serie
 Use a supported Node.js LTS release and npm. The library itself requires Node.js `>=18.18.0`.
 
 ```sh
-cd simfinity-3.2.0-preview/mongodb
+cd simfinity-3.2.0-starters/mongodb
 npm install
 ```
 
-The included `package.json` installs Simfinity core, MongoDB facade and MCP compatibility package from the local archives. GraphQL and Mongoose are peer dependencies. This guide uses Yoga as the HTTP server; Simfinity generates the schema supplied to it. Then configure MongoDB below and run `npm start`.
+The included `package.json` installs Simfinity core, MongoDB facade and MCP compatibility package from npm. GraphQL and Mongoose are peer dependencies. This guide uses Yoga as the HTTP server; Simfinity generates the schema supplied to it. Then configure MongoDB below and run `npm start`.
 
 ## 2. Start MongoDB
 

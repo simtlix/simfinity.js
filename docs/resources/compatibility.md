@@ -4,23 +4,23 @@ description: Runtime requirements, documentation version, releases and upgrade c
 ---
 
 <script setup>
-import library from '../public/preview/manifest.json';
+import library from '../../package.json';
 </script>
 
 # Compatibility and releases
 
-This documentation covers Simfinity.js **{{ library.version }} preview**, for **MongoDB and PostgreSQL**. The version menu identifies the documented preview independently of the repository's current npm package version.
+This documentation covers Simfinity.js **{{ library.version }}**, for **MongoDB and PostgreSQL**. All four packages are versioned and released together.
 
 ## Package availability
 
-As checked on September 12, 2026:
+| Package | Purpose | Release |
+| --- | --- | --- |
+| [@simtlix/simfinity-js](https://www.npmjs.com/package/@simtlix/simfinity-js) | MongoDB facade, including compatibility exports | 3.2.0 |
+| [@simtlix/simfinity-postgres](https://www.npmjs.com/package/@simtlix/simfinity-postgres) | PostgreSQL adapter with generated schema and FKs | 3.2.0 |
+| [@simtlix/simfinity-core](https://www.npmjs.com/package/@simtlix/simfinity-core) | Shared runtime and helpers | 3.2.0 |
+| [@simtlix/simfinity-mcp](https://www.npmjs.com/package/@simtlix/simfinity-mcp) | Optional MCP integration for either database | 3.2.0 |
 
-| Distribution | Availability |
-| --- | --- |
-| MongoDB 3.0.1 | Published on npm as `@simtlix/simfinity-js`; [original starter](/simfinity-series-starter.zip) |
-| MongoDB 3.2.0 preview | Verified archives in the [preview kit](../guide/databases#download-the-preview) |
-| PostgreSQL 3.2.0 preview | Verified archives in the same kit; `@simtlix/simfinity-postgres` is not yet on npm |
-| Core and optional MCP 3.2.0 preview | Included in the kit; install alongside the matching adapter |
+Follow [installation and downloads](../guide/databases#install-from-npm) or read the [v3.2.0 release notes](https://github.com/simtlix/simfinity.js/releases/tag/v3.2.0).
 
 ## Requirements
 
@@ -36,11 +36,11 @@ As checked on September 12, 2026:
 
 ## Before upgrading
 
-Version 3.2.0 is distributed here as an unpublished four-package preview. Do not assume registry availability from this documentation. For published versions, check the [release history](https://github.com/simtlix/simfinity.js/releases) and the [npm package](https://www.npmjs.com/package/@simtlix/simfinity-js), then read changes between your installed version and the version you intend to use.
+Check the [release history](https://github.com/simtlix/simfinity.js/releases) and the [npm package](https://www.npmjs.com/package/@simtlix/simfinity-js), then read changes between your installed version and the version you intend to use.
 
 Exercise the operations your application relies on: generated names and input shapes, relationships, permissions, scopes, custom mutations, state actions and MCP allowlists. Keep GraphQL and the selected adapter within supported ranges. PostgreSQL adoption also requires reviewing stronger `NOT NULL`, FK, uniqueness, embedded-shape, and UUID constraints, plus replacing Mongoose-native calls with the PostgreSQL Model/Session APIs.
 
-The site documents two database adapters for the same 3.2.0 preview API. It does not host separate historical documentation archives. The 3.0.1 starter is retained as a published-version entry point; newer reference APIs may not exist in that release.
+The site documents two database adapters for the same v3.2.0 API. It does not host separate historical documentation archives. The 3.0.1 starter is retained as a published-version entry point; newer reference APIs may not exist in that release.
 
 ## Get help with an integration
 

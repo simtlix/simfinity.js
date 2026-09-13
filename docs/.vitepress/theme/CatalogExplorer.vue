@@ -102,7 +102,7 @@ function navigate(event, index) {
         </div>
       </div>
     </div>
-    <div class="explorer-footer"><span>Sample data · 3.2.0 preview. MCP is an optional package for both databases.</span><a :href="withBase(isPostgres ? '/guide/postgresql.html' : '/guide/getting-started.html')">{{ isPostgres ? 'PostgreSQL' : 'MongoDB' }} quick start <span aria-hidden="true">↗</span></a></div>
+    <div class="explorer-footer"><span>Sample data · v3.2.0. MCP is an optional package for both databases.</span><a :href="withBase(isPostgres ? '/guide/postgresql.html' : '/guide/getting-started.html')">{{ isPostgres ? 'PostgreSQL' : 'MongoDB' }} quick start <span aria-hidden="true">↗</span></a></div>
   </div>
 </template>
 

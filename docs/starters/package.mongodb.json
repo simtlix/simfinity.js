@@ -1,0 +1,20 @@
+{
+  "name": "simfinity-mongodb-starter",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "mcp": "node mcp.js"
+  },
+  "dependencies": {
+    "@simtlix/simfinity-core": "3.2.0",
+    "@simtlix/simfinity-js": "3.2.0",
+    "@simtlix/simfinity-mcp": "3.2.0",
+    "graphql": "^16.11.0",
+    "graphql-yoga": "^5.0.0",
+    "mongoose": "^8.16.2"
+  }
+}
