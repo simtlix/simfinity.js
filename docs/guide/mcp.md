@@ -65,7 +65,7 @@ Generated inputs distinguish omission from explicit null: defaulted arguments us
 Install the SDK for protocol transports:
 
 ```sh
-npm install @modelcontextprotocol/sdk
+npm install @modelcontextprotocol/sdk@^1.13.0
 ```
 
 Create a standalone entry point that initializes your database and schema, then starts the transport:

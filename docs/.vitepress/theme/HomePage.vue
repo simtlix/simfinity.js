@@ -31,8 +31,8 @@ const database = ref('mongodb');
 const databaseGuide = computed(() => database.value === 'postgres' ? '/guide/postgresql.html' : '/guide/getting-started.html');
 const databaseName = computed(() => database.value === 'postgres' ? 'PostgreSQL' : 'MongoDB');
 const installCommand = computed(() => database.value === 'postgres'
-  ? 'npm i @simtlix/simfinity-postgres@3.2.0 graphql pg'
-  : 'npm i @simtlix/simfinity-js@3.2.0 graphql mongoose');
+  ? 'npm i @simtlix/simfinity-postgres@3.2.0 graphql@^16.11.0 pg@^8.16.3'
+  : 'npm i @simtlix/simfinity-js@3.2.0 graphql@^16.11.0 mongoose@^8.16.2');
 const toolExamples = [
   { name: 'series', kind: 'QUERY', description: 'Search your catalog with typed filters, sorting, and pagination.', link: '/guide/queries.html' },
   { name: 'series_aggregate', kind: 'AGGREGATE', description: 'Group your data and calculate counts, sums, and averages.', link: '/reference/aggregation.html' },

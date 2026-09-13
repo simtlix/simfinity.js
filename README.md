@@ -105,7 +105,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose graphql @simtlix/simfinity-js
+npm install mongoose@^8.16.2 graphql@^16.11.0 @simtlix/simfinity-js@3.2.0
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies.
@@ -123,7 +123,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp @modelcontextprotocol/sdk
+npm install @simtlix/simfinity-mcp@3.2.0 @modelcontextprotocol/sdk@^1.13.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
@@ -2649,12 +2649,12 @@ Each generated tool follows MCP best practices so an agent can use it without ex
 
 On execution, each tool returns both a serialized JSON `text` content block and a machine-readable `structuredContent` (the GraphQL `data`) that conforms to the `outputSchema`. When the caller requests `pagination: { count: true }` on a **list** tool, the total record count is delivered in the tool result `_meta.count` (aggregate tools ignore the flag — their resolver never computes a total).
 
-> The MCP transports require the optional `@modelcontextprotocol/sdk` dependency (`^1.13.0` or newer). Install it with `npm install @modelcontextprotocol/sdk`. `generateMCPTools` works without it. SDK load problems raise distinct error codes: `MCP_SDK_NOT_INSTALLED` (not installed), `MCP_SDK_INCOMPATIBLE` (installed but too old to provide the requested transport — upgrade it), `MCP_SDK_LOAD_FAILED` (any other import failure).
+> The MCP transports require the optional `@modelcontextprotocol/sdk` dependency (`^1.13.0` or newer). Install it with `npm install @modelcontextprotocol/sdk@^1.13.0`. `generateMCPTools` works without it. SDK load problems raise distinct error codes: `MCP_SDK_NOT_INSTALLED` (not installed), `MCP_SDK_INCOMPATIBLE` (installed but too old to provide the requested transport — upgrade it), `MCP_SDK_LOAD_FAILED` (any other import failure).
 
 ### Installation
 
 ```bash
-npm install @modelcontextprotocol/sdk
+npm install @modelcontextprotocol/sdk@^1.13.0
 ```
 
 ### Generating tool definitions

@@ -49,7 +49,7 @@ The module and every `createPostgres` instance expose the shared `auth`, `valida
 MCP integration is an independent opt-in and does not add MCP dependencies to PostgreSQL applications:
 
 ```sh
-npm install @simtlix/simfinity-mcp @modelcontextprotocol/sdk
+npm install @simtlix/simfinity-mcp@3.2.0 @modelcontextprotocol/sdk@^1.13.0
 ```
 
 ```javascript
