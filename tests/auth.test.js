@@ -4,8 +4,8 @@ import {
 import {
   GraphQLObjectType, GraphQLString, GraphQLSchema,
 } from 'graphql';
-import { auth } from '../src/index.js';
-import SimfinityError from '../src/errors/simfinity.error.js';
+import { auth } from '../packages/mongodb/src/index.js';
+import SimfinityError from '../packages/mongodb/src/errors/simfinity.error.js';
 
 const {
   createAuthPlugin,

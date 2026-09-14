@@ -20,7 +20,7 @@ alwaysApply: true
 ## Shared runtime and PostgreSQL workspaces
 
 - `packages/core` (`@simtlix/simfinity-core`) owns driver-free `createRuntime`, model metadata, query plans, scalar factory, errors, filter types and the once-only introspection patch. Registries/middleware are per runtime instance.
-- `src/index.js` binds the shared runtime to `src/mongo/adapter.js`. Mongo model generation, pipelines and transactions live under `src/mongo/`; existing root helpers/exports remain available.
+- `packages/mongodb/src/index.js` binds the shared runtime to `packages/mongodb/src/mongo/adapter.js`. Mongo model generation, pipelines and transactions live under `packages/mongodb/src/mongo/`; existing helper exports remain available.
 - `packages/postgres` (`@simtlix/simfinity-postgres`) exposes `createPostgres({pool,schema})`, the default configure/connect/createSchema facade and schema generation/initialization. It depends on core and `pg`, never Mongoose/MongoDB/MCP. Backend configuration is bound once and PostgreSQL types must be registered before createSchema.
 - PostgreSQL executes the shared GraphQL lifecycle: scopes, middleware, validators, hooks, nested CRUD and state transitions. Native model/session APIs differ from Mongoose. Supported parity is tested against real databases; do not claim arbitrary Mongo pipeline/model compatibility.
 - GraphQL metadata generates real FKs, including inverse collections, link entities and references in privately owned embedded tables. JSONB is used only for value-only embedded subtrees. See `docs/postgresql.md` for rejected shapes and current constraints.
@@ -59,24 +59,24 @@ simfinity.createSchema()
 
 | File | Responsibility |
 |------|---------------|
-| `src/index.js` | MongoDB facade and legacy helper exports |
+| `packages/mongodb/src/index.js` | MongoDB facade and legacy helper exports |
 | `packages/core/src/runtime.js` | Shared registration, input/schema generation, lifecycle, middleware, scopes and resolvers |
 | `packages/core/src/query-plan.js` | Driver-free typed query paths and predicate/sort/aggregation plans |
-| `src/mongo/` | Mongoose models, pipelines, transactions and record adapter |
+| `packages/mongodb/src/mongo/` | Mongoose models, pipelines, transactions and record adapter |
 | `packages/postgres/src/` | PostgreSQL adapter, codecs, records, query compiler, transactions and schema lifecycle |
-| `packages/core/src/auth/index.js` | Shared auth plugin (`createAuthPlugin`), permission resolution, deprecated middleware; `src/auth/` remains a compatibility facade |
+| `packages/core/src/auth/index.js` | Shared auth plugin (`createAuthPlugin`), permission resolution, deprecated middleware; `packages/mongodb/src/auth/` remains a compatibility facade |
 | `packages/core/src/auth/rules.js` | Shared rule helpers: `requireAuth`, `requireRole`, `composeRules`, `isOwner`, `allow`, `deny` |
 | `packages/core/src/auth/expressions.js` | Shared policy expression DSL evaluator |
 | `packages/core/src/auth/errors.js` | `UnauthenticatedError`, `ForbiddenError` (extend the shared `SimfinityError`) |
 | `packages/core/src/validators.js` | Shared declarative field validators: `stringLength`, `pattern`, `email`, `numberRange`, etc. |
 | `packages/core/src/scalars.js` | Shared pre-built scalars (`EmailScalar`, `URLScalar`) and scalar factories |
 | `packages/core/src/plugins.js` | Shared plugin exports: `createAuthPlugin`, `apolloCountPlugin`, `envelopCountPlugin` |
-| `packages/mcp/src/index.js` | Optional MCP generation and transports; `src/mcp.js` remains the Mongo facade shim. Uses optional `@modelcontextprotocol/sdk` |
-| `src/const/QLOperator.js` | `GraphQLEnumType` for filter operators (EQ, LT, GT, IN, LIKE, etc.) |
-| `src/const/QLValue.js` | `GraphQLScalarType` for filter values |
-| `src/const/QLSort.js` | `GraphQLInputObjectType` for sort expressions |
-| `src/errors/simfinity.error.js` | Base error class with `code` and `status` extensions |
-| `src/errors/internal-server.error.js` | Internal server error (extends `SimfinityError`) |
+| `packages/mcp/src/index.js` | Optional MCP generation and transports; `packages/mongodb/src/mcp.js` remains the Mongo facade shim. Uses optional `@modelcontextprotocol/sdk` |
+| `packages/mongodb/src/const/QLOperator.js` | `GraphQLEnumType` for filter operators (EQ, LT, GT, IN, LIKE, etc.) |
+| `packages/mongodb/src/const/QLValue.js` | `GraphQLScalarType` for filter values |
+| `packages/mongodb/src/const/QLSort.js` | `GraphQLInputObjectType` for sort expressions |
+| `packages/mongodb/src/errors/simfinity.error.js` | Base error class with `code` and `status` extensions |
+| `packages/mongodb/src/errors/internal-server.error.js` | Internal server error (extends `SimfinityError`) |
 
 ### MCP contracts
 

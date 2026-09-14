@@ -1,8 +1,8 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import mongoose from 'mongoose';
 import { graphql, GraphQLEnumType, GraphQLID, GraphQLInt, GraphQLObjectType, GraphQLScalarType, GraphQLSchema, GraphQLString } from 'graphql';
-import * as simfinity from '../src/index.js';
-import QLValue from '../src/const/QLValue.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
+import QLValue from '../packages/mongodb/src/const/QLValue.js';
 
 const profileType = new GraphQLObjectType({
   name: 'CorrectProfile',

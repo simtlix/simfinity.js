@@ -73,11 +73,11 @@ if (scenario === 'after-schema-creation') {
 }
 
 // Deliberately defer import to reproduce application load order in a fresh process.
-const simfinity = await import('../../src/index.js');
+const simfinity = await import('../../packages/mongodb/src/index.js');
 
 if (scenario === 'repeated-imports-before-schema') {
   // Distinct URLs force module evaluation again while sharing the same GraphQL peer.
-  await import('../../src/index.js?second-evaluation');
+  await import('../../packages/mongodb/src/index.js?second-evaluation');
 }
 
 const schema = makeSchema();
@@ -109,7 +109,7 @@ if (previousSchema) {
 }
 
 if (scenario === 'repeated-imports-after-schema') {
-  await import('../../src/index.js?second-evaluation');
+  await import('../../packages/mongodb/src/index.js?second-evaluation');
   const secondSchema = makeSchema();
   assertUsable(schema);
   assertUsable(secondSchema);

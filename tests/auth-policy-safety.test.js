@@ -1,8 +1,8 @@
 import { describe, test, expect } from 'vitest';
 import { GraphQLObjectType, GraphQLSchema, GraphQLString, graphql } from 'graphql';
 import mongoose from 'mongoose';
-import auth from '../src/auth/index.js';
-import { isOwner as deepIsOwner } from '../src/auth/rules.js';
+import auth from '../packages/mongodb/src/auth/index.js';
+import { isOwner as deepIsOwner } from '../packages/mongodb/src/auth/rules.js';
 
 const {
   createAuthPlugin, createAuthMiddleware, createFieldMiddleware,

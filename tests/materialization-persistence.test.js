@@ -3,7 +3,7 @@ import {
 } from 'vitest';
 import { graphql, validateSchema } from 'graphql';
 import mongoose from 'mongoose';
-import * as simfinity from '../src/index.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
 import { buildMaterializationTypes, parentInput } from './fixtures/materialization-types.js';
 
 const uri = process.env.SIMFINITY_TEST_MONGODB_URI;

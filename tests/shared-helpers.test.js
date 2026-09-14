@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import * as mongo from '../src/index.js';
+import * as mongo from '../packages/mongodb/src/index.js';
 import * as postgres from '../packages/postgres/src/index.js';
 import * as core from '../packages/core/src/index.js';
 

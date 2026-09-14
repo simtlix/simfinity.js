@@ -14,8 +14,8 @@ alwaysApply: false
 
 ## Test File Naming
 
-- `tests/{module}.test.js` corresponding to `src/{module}.js`
-- Auth tests: `tests/auth.test.js` covers the canonical `packages/core/src/auth/` implementation through the `src/auth/` compatibility facade.
+- `tests/{module}.test.js` corresponding to `packages/mongodb/src/{module}.js`
+- Auth tests: `tests/auth.test.js` covers the canonical `packages/core/src/auth/` implementation through the `packages/mongodb/src/auth/` compatibility facade.
 - Feature-specific tests: `tests/aggregation.test.js`, `tests/scalar-naming.test.js`, etc.
 
 ## Test Structure
@@ -40,7 +40,7 @@ describe('Module or Feature Name', () => {
 
 ## When to Update Tests
 
-**Any change to `src/` must have corresponding test updates:**
+**Any change to `packages/mongodb/src/` must have corresponding test updates:**
 
 - **New export**: add a test verifying the export exists and has the expected type.
 - **New function/feature**: add both positive cases (happy path) and negative cases (error handling, edge cases).

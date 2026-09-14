@@ -41,7 +41,7 @@ Use `npm run test:watch` while iterating; `npm run test:coverage` when coverage 
 
 ## Layout hints
 
-- **Implementation**: `packages/core/src/` owns the shared runtime and helpers; `src/` owns the MongoDB facade/adapter and compatibility shims; `packages/postgres/src/` owns PostgreSQL storage and execution; `packages/mcp/src/` owns MCP generation and transports.
+- **Implementation**: `packages/core/src/` owns the shared runtime and helpers; `packages/mongodb/src/` owns the MongoDB facade/adapter and compatibility shims; `packages/postgres/src/` owns PostgreSQL storage and execution; `packages/mcp/src/` owns MCP generation and transports.
 - **Tests**: `tests/*.test.js` — mirror modules; see `.cursor/rules/simfinity-testing.mdc` for `simfinity.preventCreatingCollection(true)` in `beforeAll`.
 
 ## When editing

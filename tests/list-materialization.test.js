@@ -3,7 +3,7 @@ import {
   GraphQLID, GraphQLList, GraphQLNonNull, GraphQLObjectType, GraphQLString, validateSchema,
 } from 'graphql';
 import mongoose from 'mongoose';
-import * as simfinity from '../src/index.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
 import { buildMaterializationTypes } from './fixtures/materialization-types.js';
 
 describe('Wrapped list schema and input generation', () => {

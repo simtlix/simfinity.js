@@ -195,6 +195,11 @@ const postgresSource = `import assert from 'node:assert/strict';
   assert(formatted instanceof SimfinityError);`;
 
 const mongoSource = `import assert from 'node:assert/strict';
+  import * as legacyEntry from '@simtlix/simfinity-js/src/index.js';
+  import legacyAuth from '@simtlix/simfinity-js/src/auth/index.js';
+  import { isOwner as legacyIsOwner } from '@simtlix/simfinity-js/src/auth/rules.js';
+  import LegacyError from '@simtlix/simfinity-js/src/errors/simfinity.error.js';
+  import legacyMcp from '@simtlix/simfinity-js/src/mcp.js';
   import * as simfinity from '@simtlix/simfinity-js';
   import {
     SimfinityError,
@@ -205,6 +210,11 @@ const mongoSource = `import assert from 'node:assert/strict';
   } from '@simtlix/simfinity-core';
   import { GraphQLID, GraphQLObjectType, GraphQLString, graphqlSync } from 'graphql';
   ${adapterSource}
+  assert.equal(legacyEntry.connect, simfinity.connect);
+  assert.equal(legacyAuth, auth);
+  assert.equal(legacyIsOwner, auth.isOwner);
+  assert.equal(LegacyError, SimfinityError);
+  assert.equal(legacyMcp.generateMCPTools, simfinity.generateMCPTools);
   if (simfinity.SimfinityError !== SimfinityError) throw new Error('shared error export failed');
   if (typeof simfinity.connect !== 'function') throw new Error('Mongo exports failed');
   if (typeof simfinity.createMongoAdapter !== 'function') throw new Error('Mongo adapter export failed');
@@ -451,7 +461,7 @@ try {
   const core = pack(resolve(root, 'packages/core'));
   const mcp = pack(resolve(root, 'packages/mcp'));
   const postgres = pack(resolve(root, 'packages/postgres'));
-  const mongo = pack(root);
+  const mongo = pack(resolve(root, 'packages/mongodb'));
   for (const testCase of cases) {
     const cwd = join(temporary, testCase.name);
     mkdirSync(cwd);

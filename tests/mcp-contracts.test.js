@@ -20,7 +20,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   generateMCPTools, createMCPServer, createHTTPMCPHandler,
-} from '../src/mcp.js';
+} from '../packages/mongodb/src/mcp.js';
 
 // Resolve the SDK's AJV version without adding a dependency or loading the
 // different AJV version used by ESLint. Unlike the SDK defaults, enable schema

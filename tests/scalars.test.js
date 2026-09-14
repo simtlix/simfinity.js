@@ -4,8 +4,8 @@ import {
 import {
   GraphQLObjectType, GraphQLID,
 } from 'graphql';
-import { scalars } from '../src/index.js';
-import * as simfinity from '../src/index.js';
+import { scalars } from '../packages/mongodb/src/index.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
 
 describe('Pre-built Scalars', () => {
   beforeAll(() => {

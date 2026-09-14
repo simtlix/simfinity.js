@@ -4,9 +4,9 @@ import {
 import {
   GraphQLObjectType, GraphQLString, GraphQLID,
 } from 'graphql';
-import { validators } from '../src/index.js';
-import * as simfinity from '../src/index.js';
-import SimfinityError from '../src/errors/simfinity.error.js';
+import { validators } from '../packages/mongodb/src/index.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
+import SimfinityError from '../packages/mongodb/src/errors/simfinity.error.js';
 
 describe('Declarative Validation Helpers', () => {
   beforeAll(() => {

@@ -1,6 +1,6 @@
 ---
 description: Documents the authorization subsystem -- Envelop plugin, permission maps, rule helpers, and policy expressions
-globs: packages/core/src/auth/**, src/auth/**
+globs: packages/core/src/auth/**, packages/mongodb/src/auth/**
 alwaysApply: false
 ---
 

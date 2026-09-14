@@ -6,7 +6,7 @@ import {
   GraphQLFloat,
   GraphQLList,
 } from 'graphql';
-import * as simfinity from '../src/index.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
 
 describe('Aggregation Queries', () => {
   let schema;

@@ -2,7 +2,7 @@ import {
   afterEach, beforeAll, describe, expect, test, vi,
 } from 'vitest';
 import mongoose from 'mongoose';
-import * as simfinity from '../src/index.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
 import { createRelationFixture } from './fixtures/relation-authorization.js';
 
 describe('Generated relation authorization', () => {

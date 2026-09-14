@@ -1,0 +1,43 @@
+{
+  "name": "@simtlix/simfinity-js",
+  "version": "3.2.0",
+  "description": "MongoDB/Mongoose adapter and compatibility facade for Simfinity GraphQL APIs",
+  "main": "src/index.js",
+  "types": "./types/index.d.ts",
+  "type": "module",
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "author": "Simtlix",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/simtlix/simfinity.js",
+    "directory": "packages/mongodb"
+  },
+  "peerDependencies": {
+    "graphql": "^16.11.0",
+    "mongoose": "^8.16.2"
+  },
+  "config": {
+    "owner": "simtlix"
+  },
+  "optionalDependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.0",
+    "graphql": "^16.11.0",
+    "graphql-middleware": "^6.1.35",
+    "mongoose": "^8.16.2"
+  },
+  "dependencies": {
+    "@simtlix/simfinity-core": "3.2.0",
+    "@simtlix/simfinity-mcp": "3.2.0"
+  },
+  "files": [
+    "src",
+    "types",
+    "README.md",
+    "LICENSE",
+    "AGGREGATION_EXAMPLE.md",
+    "AGGREGATION_CHANGES_SUMMARY.md"
+  ]
+}
