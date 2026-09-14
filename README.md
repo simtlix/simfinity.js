@@ -94,7 +94,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 - **Powerful Querying**: Typed filters, nested paths, pagination, sorting, and aggregations across the supported contract
 - **Aggregation Queries**: Built-in support for GROUP BY queries with aggregation operations (SUM, COUNT, AVG, MIN, MAX)
 - **Auto-Generated Resolvers**: Automatically generates resolve methods for relationship fields
-- **Automatic Index Creation**: Automatically creates MongoDB indexes for all ObjectId fields, including nested embedded objects and relationship fields
+- **Automatic Index Creation**: Generates MongoDB indexes for ObjectId fields and single references, including leaves inside embedded objects and embedded arrays; see the [index reference](./docs/reference/extensions.md#automatic-mongodb-indexes)
 - **Business Logic**: Implement business logic and domain validations declaratively
 - **State Machines**: Built-in support for declarative state machine workflows
 - **Lifecycle Hooks**: Controller methods for granular control over operations

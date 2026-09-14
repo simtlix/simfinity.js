@@ -5,3 +5,7 @@ data
 docs/.vitepress/cache/
 docs/.vitepress/dist/
 docs/.vitepress/.temp/
+
+# Local package/build archives; website downloads under docs/public remain tracked.
+/*.tgz
+/*.zip

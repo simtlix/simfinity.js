@@ -1,11 +1,12 @@
-# Agent guidance for `@simtlix/simfinity-js`
+# Agent guidance for the Simfinity monorepo
 
 This file helps coding agents (and humans) work productively and safely in this repository. It complements—not replaces—the detailed rules under `.cursor/rules/`.
 
 ## What this project is
 
-- **Packages**: `@simtlix/simfinity-js` is the MongoDB/Mongoose facade; `@simtlix/simfinity-core` is the driver-free runtime; `@simtlix/simfinity-postgres` is the PostgreSQL 15+ facade; `@simtlix/simfinity-mcp` is the optional database-independent MCP integration. All generate a GraphQL API from `GraphQLObjectType` definitions.
-- **Runtime**: Node.js `>=18.18.0`.
+- **Workspace**: the root `simfinity-workspace` package is private. All four publishable libraries, their declarations, licenses and package READMEs live under `packages/`.
+- **Packages**: `@simtlix/simfinity-js` is the MongoDB/Mongoose facade; `@simtlix/simfinity-core` owns the shared GraphQL runtime; `@simtlix/simfinity-postgres` is the PostgreSQL 15+ facade; `@simtlix/simfinity-mcp` generates MCP tools from a GraphQL schema.
+- **Runtime**: Node.js `>=18.18.0` for library consumers. Use Node.js 24 for development and CI; documentation requires Node.js 22 or later.
 - **Peers**: every package uses `graphql` ^16. The Mongo facade alone has a `mongoose` ^8 peer; MCP has an optional `@modelcontextprotocol/sdk` peer. PostgreSQL depends on `pg` and core, without MongoDB, Mongoose, or MCP.
 
 ## Authoritative rules (read these)
@@ -25,8 +26,10 @@ If something is ambiguous, prefer the matching `.mdc` file over this summary.
 ## Non-negotiables
 
 1. **Do not** use `graphql-middleware`’s `applyMiddleware` or `@graphql-tools/utils` `mapSchema` on a Simfinity schema — they rebuild the schema and duplicate globally injected introspection types. Use **Envelop** plugins and in-place resolver wrapping instead (see architecture rule).
-2. **Imports**: top of file only; ES modules; match existing style (single quotes, semicolons, trailing commas in multiline constructs).
+2. **Imports**: static ES imports belong at the top; match existing style (single quotes, semicolons, trailing commas in multiline constructs). Preserve MCP's lazy optional-SDK loading and the explicit import-order test fixtures described in the rules.
 3. **Behavior changes**: update tests under `tests/` and public docs (`README.md`) when the public API or documented behavior changes.
+4. **Package boundaries**: core must remain driver-free; PostgreSQL must not import MongoDB, Mongoose or MCP. Keep shared semantics in core and database operations in their adapters. Backend selection is fixed for each runtime; do not add runtime switching.
+5. **Compatibility**: `packages/mongodb` still publishes as `@simtlix/simfinity-js`. Preserve its entry points and `src/` deep imports inside the published archive. Keep shared helper/error identities and update package declarations for public API changes.
 
 ## Verification commands
 
@@ -39,13 +42,21 @@ npm test
 
 Use `npm run test:watch` while iterating; `npm run test:coverage` when coverage matters.
 
+- For package boundaries, dependencies, exports or declarations: `npm run test:packages` checks isolated packed applications, including strict TypeScript consumers and MongoDB deep imports.
+- For database behavior: run the full suite with disposable database URIs, as described in the testing rule. `npm run test:integration` covers only `tests/integration/`; additional MongoDB regression suites live directly under `tests/`.
+- For documentation: `npm run docs:install` and `npm run docs:build`.
+- For release metadata: `node scripts/release-packages.js check`. Release tooling aligns the private root version, all four package versions and exact internal dependencies; the root itself is never published.
+
 ## Layout hints
 
 - **Implementation**: `packages/core/src/` owns the shared runtime and helpers; `packages/mongodb/src/` owns the MongoDB facade/adapter and compatibility shims; `packages/postgres/src/` owns PostgreSQL storage and execution; `packages/mcp/src/` owns MCP generation and transports.
-- **Tests**: `tests/*.test.js` — mirror modules; see `.cursor/rules/simfinity-testing.mdc` for `simfinity.preventCreatingCollection(true)` in `beforeAll`.
+- **Tests**: `tests/` covers core, both adapters, MCP and release tooling; `tests/contracts/` and `tests/fixtures/` hold shared fixtures. See the testing rule for MongoDB collection suppression in tests without a database.
+- **Documentation**: `README.md` is the repository overview; `packages/*/README.md` describes each published package; `docs/` builds the public website independently of the runtime packages.
+- **Release tooling**: `scripts/release-packages.js`, `scripts/publish-packages.js` and `.github/workflows/` handle validation, archives and publication.
 
 ## When editing
 
 - Keep changes scoped to the task; avoid drive-by refactors.
 - Extend existing patterns rather than introducing parallel abstractions.
 - For GraphQL types in examples/tests: use `extensions.relation` on relationship fields; use `extensions.readOnly` where appropriate.
+- Keep the root free of backup READMEs and local `.tgz`/`.zip` output. Generate temporary archives outside the repository. Archives under `docs/public/` are intentional website downloads; check links and checksums before changing them.

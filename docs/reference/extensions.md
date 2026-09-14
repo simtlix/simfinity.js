@@ -34,7 +34,7 @@ const field = {
 
 | Property | Description |
 | --- | --- |
-| `embedded` | `true` stores the object inline; `false` uses referenced records. |
+| `embedded` | `true` gives the value parent-owned storage: inline on MongoDB, JSONB or owned tables on PostgreSQL; `false` uses referenced records. |
 | `connectionField` | For a reference, the stored ObjectId/UUID field; for a reverse collection, the child field linking back to the parent. |
 | `displayField` | Descriptive field name exposed through introspection for client tooling. |
 
@@ -83,8 +83,26 @@ The field-level shape is `{ CREATE: [validator], UPDATE: [validator] }`. Each va
 | --- | --- | --- |
 | `validations` | `{ CREATE, UPDATE }` validator arrays | Validates the full input and materialized model after field validation. |
 | `scope` | `{ find, get_by_id, aggregate }` callbacks | Adds filters to generated root reads. |
+| `indexes` | `{ fields: string[], unique?: boolean }[]` | Declares PostgreSQL composite indexes over stored scalar/reference fields; MongoDB uses its model index configuration. |
 
 Type validators receive `(typeName, args, modelArgs, session)`. Scope callbacks receive `{ type, args, operation, context }` and mutate `args` in place. See [query scope](/guide/query-scope) for supported operations and their authorization boundaries.
+
+## Automatic MongoDB indexes
+
+When generating a Mongoose model, the MongoDB adapter registers ascending indexes for direct `GraphQLID` fields, stored single-object references, and ObjectId leaves inside embedded objects and arrays of embedded objects. For example, a direct `countryId` field gets `{ countryId: 1 }`; the same leaf inside `address` gets `{ 'address.countryId': 1 }`. Nested embedded paths are traversed recursively.
+
+References use their stored `connectionField` name, or the GraphQL field name when it is omitted. The adapter also indexes private child connection fields that it generates for inverse collections. These are reference indexes; MongoDB does not enforce PostgreSQL-style foreign keys.
+
+Inspect generated declarations after registering your types and calling `createSchema()`:
+
+```javascript
+const model = simfinity.getModel(SerieType);
+const indexes = model.schema.indexes();
+```
+
+This automatic traversal does not add indexes for arbitrary string/number fields or direct lists of scalar IDs. Supported `unique` flags are handled separately as described above. Supplied Mongoose models keep their own schemas and index definitions; use their native configuration for additional or composite indexes.
+
+PostgreSQL generates indexes and real foreign keys from its storage description instead. See [PostgreSQL storage and constraints](/postgresql) for its index declarations and initialization contract.
 
 ## Introspection metadata
 

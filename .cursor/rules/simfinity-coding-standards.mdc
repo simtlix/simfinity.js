@@ -8,7 +8,7 @@ alwaysApply: true
 ## Module System
 
 - Use ES module syntax (`import`/`export`). No CommonJS (`require`/`module.exports`).
-- All imports at the top of the file. No inline or dynamic imports inside functions.
+- Static imports belong at the top of the file. Preserve the deliberate lazy SDK imports in MCP server/transport factories so schema tooling works without the optional SDK. Import-order fixtures also use dynamic imports as described in the testing rule; these exceptions are not a general style for application logic.
 
 ## Style (enforced by ESLint)
 
@@ -27,7 +27,9 @@ throw new SimfinityError('Resource not found', 'NOT_FOUND', 404);
 ```
 
 - For auth errors, use `UnauthenticatedError` (401) or `ForbiddenError` (403) from `packages/core/src/auth/errors.js`; `packages/mongodb/src/auth/errors.js` is the compatibility shim.
-- Wrap mutation logic in Mongoose transactions. Borrow only active caller sessions without managing their lifecycle. For owned transactions, retry `TransientTransactionError` separately from commit-only `UnknownTransactionCommitResult` retries, with bounded attempts; preserve primary errors and await cleanup (see `withTransaction` pattern).
+- Shared mutation logic uses `adapter.withTransaction`; do not import either database driver into core. Supplied sessions must already be active and remain caller-owned.
+- MongoDB owns Mongoose transaction handling: retry `TransientTransactionError` separately from commit-only `UnknownTransactionCommitResult` retries, with bounded attempts; preserve primary errors and await cleanup.
+- PostgreSQL owns `pg` clients and repeatable-read transactions; retry confirmed serialization/deadlock aborts with fresh input snapshots. Do not replay writes after uncertain commits or close an application-owned pool.
 
 ## GraphQL Type Definitions
 
@@ -44,8 +46,9 @@ throw new SimfinityError('Resource not found', 'NOT_FOUND', 404);
 ## Export Conventions
 
 - Named exports for public API functions.
-- Default export as an object aggregating all named exports (for convenient destructuring).
-- Re-export submodule defaults from `packages/mongodb/src/index.js`: `validators`, `scalars`, `plugins`, `auth`.
+- Core and the MongoDB/PostgreSQL facades use namespace or named imports, with no default facade export. MCP and helper submodules retain their existing default objects; preserve each package's established exports.
+- Re-export shared `validators`, `scalars`, `plugins` and `auth` helpers through both database facades. MongoDB also preserves MCP exports and legacy deep-import shims.
+- Keep implementations in their owning package and import other packages through their declared exports. Core must not depend on drivers or MCP; PostgreSQL depends on core and `pg` only. Keep matching declarations in `packages/*/types/` current.
 
 ## Function Naming
 
@@ -58,5 +61,5 @@ throw new SimfinityError('Resource not found', 'NOT_FOUND', 404);
 When making code changes, update **all** related artifacts:
 
 1. **Tests** (`tests/`): add or update tests for any new or changed behavior. See `simfinity-testing.mdc`.
-2. **Documentation** (`README.md`): update examples, API docs, and Table of Contents for any public API change. See `simfinity-documentation.mdc`.
-3. **Cursor rules** (`.cursor/rules/`): if a change affects architecture, internal functions, the extensions system, the auth module, coding standards, or testing/documentation conventions, update the corresponding `.mdc` rule file so it stays accurate.
+2. **Documentation** (`README.md`, affected package READMEs and `docs/`): update public examples and reference pages for both backends, distinguishing backend-specific behavior. See `simfinity-documentation.mdc`.
+3. **Agent guidance** (`AGENTS.md` and `.cursor/rules/`): update the matching files when architecture, package boundaries, internal functions or development conventions change.

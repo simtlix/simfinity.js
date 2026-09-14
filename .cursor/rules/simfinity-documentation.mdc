@@ -1,10 +1,20 @@
 ---
-description: Rules for maintaining README.md documentation when code changes
-globs: README.md
+description: Maintain the monorepo, package and public website documentation for both databases
+globs: README.md, AGENTS.md, packages/*/README.md, docs/**
 alwaysApply: false
 ---
 
 # Documentation Maintenance
+
+## Documentation locations
+
+- `README.md`: repository overview and shared API examples, with MongoDB/PostgreSQL setup links.
+- `packages/*/README.md`: each published package's installation, entry points and responsibilities. MongoDB's directory is `packages/mongodb`, but its public name remains `@simtlix/simfinity-js`.
+- `docs/guide/`, `docs/reference/`, `docs/resources/`: the VitePress website. Keep shared semantics consistent and identify backend-specific storage, initialization and native APIs.
+- `docs/postgresql.md` and `docs/compatibility.md`: detailed PostgreSQL contract and verification notes; distinguish historical snapshots from current support.
+- `AGENTS.md` and `.cursor/rules/`: development guidance for the current architecture. Globs must cover the owning packages, not only the MongoDB facade.
+
+Consolidate useful material into these locations instead of creating backup READMEs at the root. Generate local release/test archives outside the repository. Downloads and checksums under `docs/public/` are intentional site assets; retain linked historical downloads and verify every affected link before removing an artifact.
 
 ## When to Update README.md
 
@@ -27,7 +37,7 @@ Maintain this logical flow (define -> operate -> protect -> advanced):
 8. Controllers & Lifecycle Hooks (onSaving, onSaved, onUpdating, onUpdated, onDelete)
 9. Query Scope (row-level security via scope functions)
 10. Authorization (Envelop auth plugin, permission maps, rule helpers)
-11. Middlewares (global middleware via `use()`)
+11. Middlewares (runtime middleware via `use()`)
 12. Plugins (count plugins, auth plugin re-export)
 13. Custom Scalars (pre-built and factory functions)
 14. Error Handling
@@ -46,14 +56,20 @@ Use Simfinity's auto-generated endpoint names consistently:
 - **State actions**: `{actionName}_{singular}` (e.g., `approve_serie`)
 - **Aggregation**: `{plural}_aggregate` (e.g., `series_aggregate`)
 
-All names are lowercase as defined in `connect()` calls.
+Names preserve the strings supplied to `connect()`; examples use lowercase. Authorization maps use the actual GraphQL root type names, `RootQueryType` and `Mutation`.
 
 ## Reference Project
 
-Always link to the [Series Sample Project](https://github.com/simtlix/series-sample) as a complete working example. Mention it in Quick Start and Resources sections.
+Use `docs/guide/getting-started.md` for MongoDB and `docs/guide/postgresql.md` for PostgreSQL. The released starters linked from `docs/guide/databases.md` cover both adapters. The [Series Sample Project](https://github.com/simtlix/series-sample) is an additional MongoDB example; do not present it as a PostgreSQL example.
+
+## Build and release consistency
+
+Run `npm run docs:install` and `npm run docs:build` from the private root. The independent docs project reads the root `package.json` version and does not install a database adapter. See `docs/.vitepress/README.md` for theme, navigation, link and deployment conventions.
+
+The release helper aligns the private root and all four package versions with exact internal dependencies. Package tarballs retain consumer-facing paths even when repository directories change. Publish documentation for a new release only after the matching npm versions are verified; repository/documentation-only edits do not require a new npm release.
 
 ## Style Guidelines
 
-- Use fenced code blocks with `javascript` language tag for all code examples.
+- Use fenced blocks with the appropriate language: `javascript`, `graphql`, `sh` or `sql`.
 - Keep examples realistic -- use types and field names from the series-sample project (Serie, Season, Star, etc.) rather than abstract names.
 - Show both the type definition and the resulting GraphQL operation where appropriate.
