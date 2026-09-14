@@ -6,12 +6,15 @@ alwaysApply: false
 
 # Authorization Module (`packages/core/src/auth/`)
 
+Authorization is shared by MongoDB and PostgreSQL. Import public helpers from `@simtlix/simfinity-core/auth` or the selected facade's `auth` export. `packages/mongodb/src/auth/` preserves legacy imports and registers Mongoose's genuine ObjectId constructor through the driver-free core hook. UUID strings work without that registration; core/PostgreSQL must not import Mongoose merely to recognize IDs.
+
 ## File Structure
 
 - `index.js` -- `createAuthPlugin` (Envelop), deprecated `createAuthMiddleware`, permission resolution logic
 - `rules.js` -- Rule helper functions: `requireAuth`, `requireRole`, `requirePermission`, `composeRules`, `anyRule`, `isOwner`, `allow`, `deny`, `createRule`
 - `expressions.js` -- Policy expression DSL: `evaluateExpression`, `isPolicyExpression`, `createRuleFromExpression`
 - `errors.js` -- `UnauthenticatedError`, `ForbiddenError` (extend `SimfinityError`)
+- `object-id.js` -- internal registration and normalization of authentic ObjectId implementations; no BSON/Mongoose dependency
 
 ## `createAuthPlugin(permissions, options)` -- Envelop Plugin
 
@@ -36,8 +39,8 @@ const yoga = createYoga({ schema, plugins: [authPlugin] });
 
 ```javascript
 const permissions = {
-  Query: {
-    '*': allow(),                    // wildcard: default for all Query fields
+  RootQueryType: {
+    '*': allow(),                    // wildcard: default for all fields of this type
     series: requireAuth(),           // specific field overrides wildcard
   },
   Mutation: {
@@ -52,7 +55,7 @@ const permissions = {
 ```
 
 - Keys are GraphQL type names (must match `GraphQLObjectType.name` exactly)
-- Field keys are the auto-generated endpoint names (lowercase)
+- Field keys match the generated endpoint or object field names exactly; the examples use lowercase endpoints
 - Wildcard `'*'` applies to all fields of a type unless overridden by an exact match
 - Permission maps must be plain objects (including null-prototype objects); only own entries are used
 - Values can be: a rule function, a nonempty array of rules (nested arrays and mixed expressions are supported), or a JSON AST/boolean policy expression

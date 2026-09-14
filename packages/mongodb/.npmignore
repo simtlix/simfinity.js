@@ -13,10 +13,6 @@ docs/superpowers/
 tests/
 *.test.js
 
-# Documentation (keep README.md and aggregation docs)
-BACKUP_README.md
-README_INDEX_EXAMPLE.md
-
 # Development files
 .github/
 .idea/

@@ -1,6 +1,6 @@
 ---
 description: Documents the critical internal functions and pipelines in the Simfinity core engine
-globs: packages/mongodb/src/index.js
+globs: packages/core/src/**, packages/mongodb/src/**, packages/postgres/src/**
 alwaysApply: false
 ---
 
@@ -16,7 +16,7 @@ Registers a GraphQL type for full CRUD endpoint generation. The `model` param is
 
 ### `addNoEndpointType(gqltype)`
 
-Registers a supporting type (no query/mutation endpoints). Auto-detects whether a Mongoose model is needed based on relationship fields. Used for embedded types or types only referenced by other types.
+Registers a supporting type without query/mutation endpoints. During schema construction the runtime marks referenced supporting types that need an adapter model. Embedded storage is determined by the selected adapter.
 
 ### `registerMutation(name, description, inputModel, outputModel, callback)`
 
@@ -26,11 +26,13 @@ Registers a custom mutation outside the standard CRUD pattern.
 
 Called after all `connect()`/`addNoEndpointType()` calls. Executes in order:
 
-1. **`generateModel()`** / **`generateModelWithoutCollection()`** -- creates Mongoose schemas via `generateSchemaDefinition()`, auto-indexes all ObjectId fields via `createSchemaWithIndexes()` / `findObjectIdFields()`.
-2. **`buildPendingInputTypes()`** -- recursively resolves deferred input types (handles circular dependencies by retrying until all resolve).
-3. **`autoGenerateResolvers()`** -- for each type's non-embedded fields with `extensions.relation` and no existing resolver, generates: one-to-one resolvers (`resolveById` with target `get_by_id` middleware/scope), one-to-many resolvers (target `find` middleware/scope followed by an aggregation pipeline). Both await callbacks with the request context and enforce an independent referenced-ID or stored-parent predicate. Existing resolvers are preserved.
+1. **`markReferencedTypesForModelGeneration()`** and **`adapter.prepare()`** -- identify supporting models and prepare database metadata. PostgreSQL validates registrations and describes storage; MongoDB prepares private inverse connection fields.
+2. **`adapter.createModel()`** -- creates missing endpoint/supporting models. MongoDB uses `createMongoModel()` in `packages/mongodb/src/mongo/models.js`, with schema/index generation. PostgreSQL creates native handles rather than Mongoose models.
+3. **`autoGenerateResolvers()`** -- generates non-embedded relationship resolvers when none exists. Single references use `resolveById` with target `get_by_id` middleware/scope; collections use target `find` middleware/scope and `adapter.findChildren`. Both await callbacks with the request context and enforce independent identity/parent predicates. Existing resolvers are preserved.
 4. **`buildRootQuery()`** -- creates the root Query type with: `{singular}(id)` single-entity query, `{plural}(filters, pagination, sort)` list query, `{plural}_aggregate(filters, aggregation)` aggregation query.
-5. **`buildMutation()`** -- creates the Mutation type with: `add{singular}(input)`, `update{singular}(input)`, `delete{singular}(id)`, `{actionName}_{singular}(input)` for state machine transitions.
+5. **`buildMutation()`** -- first resolves deferred inputs through `buildPendingInputTypes()`, then creates `add{singular}(input)`, `update{singular}(input)`, `delete{singular}(id)` and `{actionName}_{singular}(input)`.
+
+PostgreSQL requires `await initializeDatabase({ mode: 'create' })` or `mode: 'validate'` after `createSchema()` and before operations. Preparing a GraphQL schema does not itself execute PostgreSQL DDL. Configuration is bound once and registrations freeze at preparation.
 
 ## Auto-Generated Endpoint Naming
 
@@ -41,7 +43,7 @@ Called after all `connect()`/`addNoEndpointType()` calls. Executes in order:
 - **Delete mutation**: `delete` + `simpleEntityEndpointName` (e.g., `deleteserie`)
 - **State action**: `{actionName}_{simpleEntityEndpointName}` (e.g., `approve_serie`)
 
-All names are lowercase as provided by the consumer in `connect()`.
+Names preserve the strings supplied by the consumer in `connect()`; the documented examples use lowercase. The generated root query type is `RootQueryType`, and the mutation type is `Mutation` (relevant to authorization permission maps).
 
 ## Input Type Generation (`buildInputType()`)
 
@@ -56,7 +58,9 @@ Preserves outer non-null wrappers for creation and removes only the outer wrappe
 
 ## Query Pipeline
 
-`buildQuery(args, gqltype)` translates GraphQL filter arguments into a MongoDB aggregation pipeline:
+The shared runtime runs middleware and scopes before calling adapter reads. MongoDB's compatibility `buildQuery(args, gqltype)` in `packages/mongodb/src/mongo/queries.js` returns an aggregation pipeline. PostgreSQL uses the typed plans in `packages/core/src/query-plan.js` and compiles parameterized SQL in `packages/postgres/src/query/`; raw MongoDB pipelines are not a portable API.
+
+MongoDB pipeline helpers:
 
 - `resolveQueryPath()` resolves declared filter/list-sort paths and Mongoose schema paths together, maps `id` to `_id`, and collects required lookups. `buildQueryTerms()` preserves every scalar/enum condition and relationship term, including repeated leaves. Values are validated and cast against the real schema, with state-machine state-name storage preserved.
 - `buildFilterGroupMatch()` -- recursively processes `QLFilterGroup` (AND/OR) into nested MongoDB `$and`/`$or` match expressions. Reuses `buildQueryTerms()` for each leaf condition. Deduplicates `$lookup` stages via shared `aggregationsIncluded` dict. Max depth: 5.
@@ -66,20 +70,24 @@ Preserves outer non-null wrappers for creation and removes only the outer wrappe
 - Sort: `$sort` from `QLSortExpression` input
 - AND/OR: optional `AND`/`OR` arguments containing `QLFilterGroup` trees. Flat field filters and scope-injected filters are always ANDed at the top level (cannot be bypassed by user OR).
 
-`buildAggregationQuery()` extends this with `$group` for aggregation operations (SUM, COUNT, AVG, MIN, MAX). Supports the same AND/OR filter pattern.
+`buildAggregationQuery()` extends this with `$group` for aggregation operations (SUM, COUNT, AVG, MIN, MAX). PostgreSQL implements the supported filter/sort/pagination/aggregation contract through its compiler, preserving root multiplicity across collection joins. Both adapters share query-limit configuration and typed enum normalization; enum names resolve before strict internal values. Do not reuse query normalization for persisted writes/state guards.
 
 ## Mutation Pipeline
 
-`withTransaction()` wraps generated mutations, custom mutations, and programmatic `saveObject()` calls:
+The runtime delegates generated mutations, custom mutations and programmatic `saveObject()` calls to `adapter.withTransaction()`. Field/type validators, hooks, nested writes and state transitions remain in core. Both adapters preserve active caller-owned sessions and retry owned transactions from fresh typed input snapshots.
+
+MongoDB transaction handling in `packages/mongodb/src/mongo/transactions.js`:
 
 1. Without a session, owns a session + transaction on the registered model's connection (default Mongoose connection for custom mutations). A supplied session must have an active transaction; the caller owns its lifecycle and retries.
 2. Calls the appropriate handler: `onSaveObject`, `onUpdateSubject`, `onDeleteObject`, `onStateChanged`
 3. Commits on success, aborts active transactions on write/hook errors, and awaits owned session cleanup. Abort/cleanup errors do not replace an earlier operation error.
 4. Retries the transaction on `TransientTransactionError`, up to five retries after the first attempt. `UnknownTransactionCommitResult` retries only commit, up to five retries, never repeating the body for an uncertain result. Expired commits are not retried; terminal uncertainty is surfaced without replaying writes.
 
-`onUpdateSubject()` awaits the parent update before collection writes and `onUpdated`. Missing parents throw `NOT_VALID_ID` (404) before child writes or `onUpdated`; the hook receives the updated Mongoose document. All hooks still run before commit and must tolerate transaction retries; external effects are not rolled back.
+PostgreSQL transaction handling in `packages/postgres/src/transactions.js` borrows one `pg` client, uses repeatable-read isolation and retries confirmed serialization failures/deadlocks. Sessions and native model handles are adapter-specific; do not accept a Mongoose model/session as a PostgreSQL handle.
 
-`materializeModel()` transforms GraphQL input args into Mongoose-compatible documents, running field-level and type-level validators during the process.
+`onUpdateSubject()` awaits the parent update before collection writes and `onUpdated`. Missing parents throw `NOT_VALID_ID` (404) before child writes or `onUpdated`; the hook receives the updated adapter record. All hooks still run before commit and must tolerate transaction retries; external effects are not rolled back.
+
+`materializeModel()` transforms GraphQL input args into adapter records, running field-level and type-level validators. The adapters handle encoding, persistence and the internal `$unset` update representation.
 
 Only `undefined` and `null` skip value materialization; accepted empty strings, zero, false, and empty arrays must survive. Nullable embedded list items retain `null`; nullable referenced-collection operation items are ignored. Single-object references use `relation.connectionField || fieldName` for both writes and nullable update `$unset`. Merge all null clears into one `$unset` without clearing originally non-null fields. Validators continue receiving the original value and are awaited.
 
@@ -87,9 +95,9 @@ Only `undefined` and `null` skip value materialization; accepted empty strings, 
 
 ## Middleware and Scope
 
-- `use(middleware)` -- pushes to global `middlewares` array. `excecuteMiddleware()` chains them with `next()` pattern.
+- `use(middleware)` -- pushes to the runtime instance's `middlewares` array. `executeMiddleware()` chains them with a `next()` pattern.
 - `executeScope()` -- checks `type.gqltype.extensions.scope[operation]` and calls the scope function to apply row-level filtering for `find`, `get_by_id`, and `aggregate` operations.
-- `resolveById()` -- shared root and generated single-relation read pipeline; generated relations supply an immutable target ID independently of mutable middleware/scope arguments. Required relation predicates are cast through the Mongoose schema path.
+- `resolveById()` -- shared root and generated single-relation read pipeline; generated relations supply an immutable target ID independently of mutable middleware/scope arguments. The selected adapter validates/casts required predicates using its storage metadata.
 
 ## Introspection Monkey-Patch
 

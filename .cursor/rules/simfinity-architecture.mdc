@@ -5,22 +5,27 @@ alwaysApply: true
 
 # Simfinity.js Architecture
 
-`@simtlix/simfinity-js` is a GraphQL framework that auto-generates schemas, CRUD queries, mutations, and MongoDB models from `GraphQLObjectType` definitions.
+Simfinity generates GraphQL schemas, CRUD queries and mutations from `GraphQLObjectType` definitions. MongoDB and PostgreSQL adapters share the GraphQL runtime and provide their own storage implementations. Backend selection is fixed for each runtime instance.
 
 ## Tech Stack
 
 - **Language**: JavaScript (ES modules, `"type": "module"`)
-- **Runtime**: Node.js >= 18.18.0
+- **Runtime**: Node.js >= 18.18.0 for consumers; Node.js 24 for development/CI
 - **GraphQL**: `graphql` ^16 (peer dependency)
-- **Database**: MongoDB via `mongoose` ^8 (peer dependency)
+- **Databases**: MongoDB via `mongoose` ^8; PostgreSQL >=15 via `pg` ^8
 - **Testing**: Vitest
 - **Linting**: ESLint 9 (flat config)
 - **Server integration**: GraphQL Yoga with Envelop plugins
 
-## Shared runtime and PostgreSQL workspaces
+## Workspace boundaries
+
+The root `simfinity-workspace` package is private and contains development commands only. Every publishable library has its own `package.json`, `src/`, `types/`, `README.md` and `LICENSE` under `packages/`. Shared tests remain at the root. The independent VitePress project in `docs/` reads the root version without installing a runtime package.
+
+All four package versions, exact internal dependencies and the private root version stay aligned through `scripts/release-packages.js`. Publication order is core, MCP, PostgreSQL, MongoDB. Keep local archives outside the repository; `docs/public/` contains intentional downloadable artifacts.
 
 - `packages/core` (`@simtlix/simfinity-core`) owns driver-free `createRuntime`, model metadata, query plans, scalar factory, errors, filter types and the once-only introspection patch. Registries/middleware are per runtime instance.
-- `packages/mongodb/src/index.js` binds the shared runtime to `packages/mongodb/src/mongo/adapter.js`. Mongo model generation, pipelines and transactions live under `packages/mongodb/src/mongo/`; existing helper exports remain available.
+- `packages/mongodb` publishes as `@simtlix/simfinity-js`, preserving the public name, entry points and existing `src/` deep imports. Its `src/index.js` binds core to the MongoDB adapter. Model generation, pipelines and transactions live under `packages/mongodb/src/mongo/`; helper shims preserve core identities.
+- `packages/mcp` (`@simtlix/simfinity-mcp`) owns database-independent tool generation and transports. Its SDK peer is optional. MongoDB retains compatibility re-exports; core and PostgreSQL do not depend on MCP.
 - `packages/postgres` (`@simtlix/simfinity-postgres`) exposes `createPostgres({pool,schema})`, the default configure/connect/createSchema facade and schema generation/initialization. It depends on core and `pg`, never Mongoose/MongoDB/MCP. Backend configuration is bound once and PostgreSQL types must be registered before createSchema.
 - PostgreSQL executes the shared GraphQL lifecycle: scopes, middleware, validators, hooks, nested CRUD and state transitions. Native model/session APIs differ from Mongoose. Supported parity is tested against real databases; do not claim arbitrary Mongo pipeline/model compatibility.
 - GraphQL metadata generates real FKs, including inverse collections, link entities and references in privately owned embedded tables. JSONB is used only for value-only embedded subtrees. See `docs/postgresql.md` for rejected shapes and current constraints.
@@ -45,14 +50,19 @@ simfinity.addNoEndpointType(Type)   // supporting types without endpoints
        v
 simfinity.createSchema()
        |
-       +-- buildPendingInputTypes()    // resolve deferred input types
-       +-- generateModel()            // create Mongoose schema + model per type
+       +-- adapter.prepare()          // prepare storage metadata
+       +-- adapter.createModel()      // Mongoose models or PostgreSQL handles
        +-- autoGenerateResolvers()    // wire relationship resolvers
        +-- buildRootQuery()           // list, single-entity, aggregate queries
-       +-- buildMutation()            // add, update, delete, state-change mutations
+       +-- buildMutation()            // resolve pending inputs and build mutations
        |
        v
-  GraphQLSchema ready for Yoga/Apollo
+  GraphQLSchema
+       |
+       +-- PostgreSQL: await initializeDatabase({ mode: 'create' | 'validate' })
+       |
+       v
+  Serve with Yoga/Apollo after database startup
 ```
 
 ## Module Map
@@ -72,11 +82,10 @@ simfinity.createSchema()
 | `packages/core/src/scalars.js` | Shared pre-built scalars (`EmailScalar`, `URLScalar`) and scalar factories |
 | `packages/core/src/plugins.js` | Shared plugin exports: `createAuthPlugin`, `apolloCountPlugin`, `envelopCountPlugin` |
 | `packages/mcp/src/index.js` | Optional MCP generation and transports; `packages/mongodb/src/mcp.js` remains the Mongo facade shim. Uses optional `@modelcontextprotocol/sdk` |
-| `packages/mongodb/src/const/QLOperator.js` | `GraphQLEnumType` for filter operators (EQ, LT, GT, IN, LIKE, etc.) |
-| `packages/mongodb/src/const/QLValue.js` | `GraphQLScalarType` for filter values |
-| `packages/mongodb/src/const/QLSort.js` | `GraphQLInputObjectType` for sort expressions |
-| `packages/mongodb/src/errors/simfinity.error.js` | Base error class with `code` and `status` extensions |
-| `packages/mongodb/src/errors/internal-server.error.js` | Internal server error (extends `SimfinityError`) |
+| `packages/core/src/const/` | Shared filter operators, values and sort input types; MongoDB retains compatibility shims |
+| `packages/core/src/errors/` | Shared `SimfinityError` and `InternalServerError` identities |
+| `packages/core/src/introspection.js` | Once-only extension of the shared GraphQL introspection types |
+| `packages/postgres/src/schema/` | Database description, DDL compilation and catalog validation |
 
 ### MCP contracts
 
@@ -93,7 +102,9 @@ simfinity.createSchema()
 - `typesDictForUpdate` -- parallel registry with update-specific input types
 - `waitingInputType` -- deferred input types awaiting dependency resolution (circular refs)
 - `registeredMutations` -- custom mutations registered via `registerMutation()`
-- `middlewares` -- array of global middleware functions registered via `use()`
+- `middlewares` -- array of middleware functions registered on this runtime via `use()`
+
+These registries are per runtime. The introspection extension and `configureQueryLimits()` setting in `packages/core/src/query-limits.js` are shared at module scope; do not describe them as instance-isolated.
 
 ## Introspection Extension (Critical)
 

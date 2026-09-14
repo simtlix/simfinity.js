@@ -1,6 +1,6 @@
 ---
 description: Documents the field/type extensions metadata system used in GraphQLObjectType definitions
-globs: packages/mongodb/src/index.js
+globs: packages/core/src/**, packages/mongodb/src/mongo/**, packages/postgres/src/schema/**, docs/reference/extensions.md
 alwaysApply: false
 ---
 
@@ -26,8 +26,8 @@ fields: () => ({
     type: AuthorType,
     extensions: {
       relation: {
-        embedded: false,          // false = ObjectId reference, true = nested document
-        connectionField: 'author_id',  // MongoDB field storing the ObjectId (defaults to field name)
+        embedded: false,          // reference: ObjectId on MongoDB, UUID/FK on PostgreSQL
+        connectionField: 'author_id',  // stored reference field (defaults to field name)
         displayField: 'name',     // field shown in introspection UI hints
       },
     },
@@ -36,16 +36,16 @@ fields: () => ({
     type: new GraphQLList(ChapterType),
     extensions: {
       relation: {
-        embedded: true,           // stored inline in parent document
+        embedded: true,           // value owned by its parent
       },
     },
   },
 })
 ```
 
-- **Non-embedded** (`embedded: false`): stored as ObjectId in MongoDB. Input types use `IdInputType` (`{ id: String! }`). List fields generate `OneToMany` input with `added`/`updated`/`deleted` sub-fields. Auto-generates `$lookup` resolvers.
-- **Embedded** (`embedded: true`): stored inline. Input types use the nested type's full input type. No `$lookup` needed.
-- **`connectionField`**: the actual MongoDB field name for a single ObjectId reference. If omitted, defaults to the GraphQL field name consistently during model generation, reads, writes, and nullable update clears. For referenced collections, explicitly configure the child's back-reference field.
+- **Non-embedded** (`embedded: false`): single references use ObjectId on MongoDB and UUID columns with real FKs on PostgreSQL. Inputs use `IdInputType` (`{ id: String! }`); collections generate `OneToMany` inputs with `added`/`updated`/`deleted` sub-fields and resolve through the selected adapter.
+- **Embedded** (`embedded: true`): MongoDB stores nested documents inline. PostgreSQL stores reference-free values as JSONB and reference-bearing values in private owned tables with FKs. Both expose nested GraphQL inputs and parent-owned lifecycle semantics.
+- **`connectionField`**: the stored field name for a single reference. If omitted, defaults to the GraphQL field name consistently during model generation, reads, writes and nullable update clears. For referenced collections, explicitly configure the child's back-reference field.
 - **Non-null wrappers**: relation objects and lists retain outer non-null requirements in create inputs; updates remove the outer wrapper. Embedded list items and referenced `added`/`updated` items preserve item nullability.
 
 ### `extensions.readOnly`
@@ -68,7 +68,7 @@ email: {
 }
 ```
 
-Adds a MongoDB unique index on the field in `generateSchemaDefinition()`.
+Adds a backend uniqueness structure for supported mappings. MongoDB's generator honors it on string/enum and numeric scalar fields. PostgreSQL supports mapped scalars, single references, scalar lists and scalar/reference leaves in embedded values; see the storage details below. Do not describe every MongoDB field mapping as supporting this flag.
 
 ### `extensions.validations`
 

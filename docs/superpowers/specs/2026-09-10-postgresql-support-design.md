@@ -181,7 +181,7 @@ On PostgreSQL, native customizations use a documented PostgreSQL model handle an
 
 ### Evidence from documentation and the reference application
 
-The relationship contract comes from `README.md:618`, the nested mutation examples at `README.md:955`, `.cursor/rules/simfinity-extensions.mdc`, and the storage/index examples in `README_INDEX_EXAMPLE.md`. The implementation was checked at `graphQLListInputType()`, `materializeModel()`, `generateSchemaDefinition()`, `executeItemFunction()`, and `autoGenerateResolvers()`.
+The relationship contract comes from `README.md:618`, the nested mutation examples at `README.md:955`, `.cursor/rules/simfinity-extensions.mdc`, and the historical [ObjectId index examples](https://github.com/simtlix/simfinity.js/blob/5f5d592075c6f96854391980ac2aac986d3ddb80/README_INDEX_EXAMPLE.md). The current index reference is maintained in [Extensions](../../reference/extensions.md#automatic-mongodb-indexes). The implementation was checked at `graphQLListInputType()`, `materializeModel()`, `generateSchemaDefinition()`, `executeItemFunction()`, and `autoGenerateResolvers()`.
 
 The reference application's actual type definitions confirm these structures:
 
