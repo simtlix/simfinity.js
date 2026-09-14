@@ -31,20 +31,27 @@ describe('workspace release preparation', () => {
     expect(lock.packages['packages/postgres'].dependencies).toEqual({ '@simtlix/simfinity-core': '3.2.0', pg: '^8.16.3' });
     expect(lock.dependencies['@simtlix/simfinity-mcp']).toEqual({ version: 'file:packages/mcp', requires: { '@simtlix/simfinity-core': '3.2.0' } });
     expect(lock.packages['node_modules/pg']).toEqual({ version: '8.16.3', integrity: 'preserve-external-entry' });
-    const docsLock = json(join(root, 'docs/package-lock.json'));
-    expect(docsLock.packages['..'].version).toBe('3.2.0');
-    expect(docsLock.packages['..'].dependencies).toEqual({ '@simtlix/simfinity-core': '3.2.0', '@simtlix/simfinity-mcp': '3.2.0' });
+    expect(json(join(root, 'package.json')).private).toBe(true);
+    expect(lock.packages[''].version).toBe('3.2.0');
+    expect(release.packages.map((item) => item.directory)).toEqual(['packages/core', 'packages/mcp', 'packages/postgres', 'packages/mongodb']);
     expect(readFileSync(join(root, 'package.json'), 'utf8').replaceAll('\r\n', '')).not.toContain('\n');
   });
 
-  it('rejects a stale root workspace snapshot in the documentation lockfile', () => {
+  it('rejects a publishable repository root before writing release versions', () => {
     const root = fixture();
-    setReleaseVersion(root, '3.2.0');
-    const path = join(root, 'docs/package-lock.json');
-    const lock = json(path);
-    lock.packages['..'].version = '3.1.0';
-    writeFileSync(path, JSON.stringify(lock));
-    expect(() => readRelease(root)).toThrow(/documentation lockfile/i);
+    const path = join(root, 'package.json');
+    const manifest = json(path);
+    manifest.private = false;
+    writeFileSync(path, JSON.stringify(manifest));
+    expect(() => setReleaseVersion(root, '3.2.0')).toThrow(/private/i);
+    expect(json(path).version).toBe('3.1.0');
+    expect(json(join(root, 'packages/mongodb/package.json')).version).toBe('0.1.0');
+  });
+
+  it('prepares releases without documentation dependencies or lockfiles', () => {
+    const root = fixture();
+    expect(() => setReleaseVersion(root, '3.2.0')).not.toThrow();
+    expect(readRelease(root).packages).toHaveLength(4);
   });
 
   it('stages every version file changed by the release workflow', () => {

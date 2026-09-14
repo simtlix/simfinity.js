@@ -83,7 +83,7 @@ Embedded query completion verification (2026-09-12): full suites passed **47 fil
 
 ## v3.2.0 package and CI delivery
 
-The root MongoDB facade, core, PostgreSQL, and MCP packages use version 3.2.0 in lockstep with exact internal dependency versions. All four packages are released on npm. Release archives and registry publication are ordered core, MCP, PostgreSQL, then the root facade. Core/PostgreSQL install no MongoDB, Mongoose, or MCP dependency chain; MCP and its SDK remain opt-in.
+The MongoDB facade, core, PostgreSQL, and MCP packages use version 3.2.0 in lockstep with exact internal dependency versions. All four packages are released on npm. Release archives and registry publication are ordered core, MCP, PostgreSQL, then the MongoDB facade. Core/PostgreSQL install no MongoDB, Mongoose, or MCP dependency chain; MCP and its SDK remain opt-in.
 
 Database CI runs three bounded full-suite jobs: PostgreSQL 15/MongoDB 7, PostgreSQL 16/MongoDB 8, and PostgreSQL 18/MongoDB 8. Each job sets both MongoDB environment variables to distinct databases so the differential and upstream regression suites run without colliding.
 

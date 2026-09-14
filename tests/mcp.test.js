@@ -10,7 +10,7 @@ import {
   GraphQLInt,
   GraphQLNonNull,
 } from 'graphql';
-import * as simfinity from '../src/index.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
 
 describe('MCP generation', () => {
   let schema;

@@ -5,7 +5,7 @@ import mongoose from 'mongoose';
 import {
   GraphQLID, GraphQLObjectType, GraphQLString, GraphQLList, graphql,
 } from 'graphql';
-import * as simfinity from '../src/index.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
 
 const createSession = () => ({
   startTransaction: vi.fn(),

@@ -33,7 +33,7 @@ Review both themes whenever changing colors. Use dark amber for text on light su
 
 Create a Markdown page with `title` and `description` frontmatter, a single H1, practical examples, and links to its prerequisites. Add it to `themeConfig.sidebar` in `config.mts`. Use `/guide/page` links in Markdown and `withBase('/guide/page.html')` in Vue components. Check examples against the current source. Keep JavaScript imports as ES modules; Simfinity's core uses namespace or named imports, not a default export.
 
-The release label reads the root `package.json`. It identifies the documented library version. Deploy release documentation only after all matching npm packages are published and verified. Last-updated dates come from Git history after a page has been committed.
+The release label reads the private root `package.json`; the docs build does not install the MongoDB package. It identifies the documented library version. Deploy release documentation only after all matching npm packages are published and verified. Last-updated dates come from Git history after a page has been committed.
 
 VitePress 1.6.4 is pinned to the stable release. Its Vite dependency is overridden to `^6.4.3` to use the patched development server instead of the vulnerable Vite 5 dependency. Keep the override until upgrading to a VitePress release that uses a patched version itself; validate development, production builds, and local search when updating it.
 

@@ -1,5 +1,5 @@
 import { GraphQLObjectType, GraphQLString, GraphQLNonNull, GraphQLID, GraphQLInputObjectType } from 'graphql';
-import * as simfinity from '/Users/claudiogonzalez/SCM/GitHub/simfinity.js/src/index.js';
+import * as simfinity from '@simtlix/simfinity-js';
 
 const BookType = new GraphQLObjectType({
   name: 'ReproBook',

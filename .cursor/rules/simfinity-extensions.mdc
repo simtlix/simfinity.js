@@ -1,6 +1,6 @@
 ---
 description: Documents the field/type extensions metadata system used in GraphQLObjectType definitions
-globs: src/index.js
+globs: packages/mongodb/src/index.js
 alwaysApply: false
 ---
 

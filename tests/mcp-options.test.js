@@ -12,7 +12,7 @@ import {
   GraphQLInt,
   GraphQLNonNull,
 } from 'graphql';
-import * as simfinity from '../src/index.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
 
 // ---------------------------------------------------------------------------
 // Simfinity-connected schema (unique McpOpt* type names so the per-file global

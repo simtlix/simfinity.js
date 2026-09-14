@@ -3,7 +3,7 @@ import {
 } from 'vitest';
 import mongoose from 'mongoose';
 import { graphql } from 'graphql';
-import * as simfinity from '../../src/index.js';
+import * as simfinity from '../../packages/mongodb/src/index.js';
 import { createContractModelFixtures } from '../contracts/model-fixtures.js';
 
 const mongodbUri = process.env.SIMFINITY_MONGODB_URI;

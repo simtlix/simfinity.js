@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { GraphQLObjectType, GraphQLString, GraphQLInt, GraphQLList, GraphQLNonNull, GraphQLEnumType, GraphQLScalarType, graphql } from 'graphql';
 import pg from 'pg';
 import mongoose from 'mongoose';
-import { createMongoModel } from '../../src/mongo/models.js';
+import { createMongoModel } from '../../packages/mongodb/src/mongo/models.js';
 import { createPostgres, describeDatabase, initializeDatabase, compileDatabaseSchema } from '../../packages/postgres/src/index.js';
 
 const uri = process.env.SIMFINITY_POSTGRES_URI;

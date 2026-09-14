@@ -3,7 +3,7 @@ import {
 } from 'vitest';
 import mongoose from 'mongoose';
 import { GraphQLObjectType, GraphQLString, GraphQLID } from 'graphql';
-import * as simfinity from '../src/index.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
 
 describe('preventCreatingCollection option', () => {
   let createCollectionSpy;

@@ -4,7 +4,7 @@ import { GraphQLEnumType, GraphQLID, GraphQLList, GraphQLObjectType, GraphQLStri
 import mongoose from 'mongoose';
 import pg from 'pg';
 import { createRuntime } from '../../packages/core/src/index.js';
-import { createMongoAdapter } from '../../src/mongo/adapter.js';
+import { createMongoAdapter } from '../../packages/mongodb/src/mongo/adapter.js';
 import { createPostgres } from '../../packages/postgres/src/index.js';
 
 const mongoUri = process.env.SIMFINITY_MONGODB_URI;

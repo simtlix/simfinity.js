@@ -112,7 +112,19 @@ npm install mongoose@^8.16.2 graphql@^16.11.0 @simtlix/simfinity-js@3.2.0
 
 ## PostgreSQL support
 
-Version 3.2.0 releases `@simtlix/simfinity-core`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-postgres`, and the root MongoDB facade in lockstep. Install the selected adapter from npm; shared dependencies resolve automatically. PostgreSQL runs the shared GraphQL query/mutation engine, including scopes, controllers, validators, state transitions and nested writes. It generates and validates tables, indexes, and **real foreign keys**, including inverse relations, explicit many-to-many linking entities, and references inside embedded objects. PostgreSQL installation does not pull Mongoose, MongoDB, or MCP dependencies.
+Version 3.2.0 releases `@simtlix/simfinity-core`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-postgres`, and the MongoDB facade in lockstep. Install the selected adapter from npm; shared dependencies resolve automatically. PostgreSQL runs the shared GraphQL query/mutation engine, including scopes, controllers, validators, state transitions and nested writes. It generates and validates tables, indexes, and **real foreign keys**, including inverse relations, explicit many-to-many linking entities, and references inside embedded objects. PostgreSQL installation does not pull Mongoose, MongoDB, or MCP dependencies.
+
+All publishable libraries live under `packages/`:
+
+| Directory | npm package |
+| --- | --- |
+| `packages/core` | `@simtlix/simfinity-core` |
+| `packages/mongodb` | `@simtlix/simfinity-js` |
+| `packages/postgres` | `@simtlix/simfinity-postgres` |
+| `packages/mcp` | `@simtlix/simfinity-mcp` |
+
+The repository root is a private npm workspace for shared tests, documentation and release tooling. MongoDB retains its existing package name, public API and deep imports such as `@simtlix/simfinity-js/src/auth/rules.js`. Run development commands from the root; pack MongoDB with `npm pack --workspace @simtlix/simfinity-js` or use the release scripts to pack all four libraries.
+
 
 Enum filters resolve member names first, then declared internal values by strict equality, on both backends. For example, with `ONE: { value: 'TWO' }` and `TWO: { value: 'two' }`, filter `"TWO"` selects member `TWO`. Numeric internal values require numbers, not numeric strings. This applies to scalar lists, embedded/reference leaves and state filters across EQ, NE, LT, LTE, GT, GTE, BTW, IN and NIN. LIKE accepts string fields only. PostgreSQL writes and state guards continue to use internal enum values.
 
@@ -3138,7 +3150,7 @@ Results are returned in a consistent format:
 }
 ```
 
-For complete documentation with more examples, see [AGGREGATION_EXAMPLE.md](./AGGREGATION_EXAMPLE.md) and [AGGREGATION_CHANGES_SUMMARY.md](./AGGREGATION_CHANGES_SUMMARY.md).
+For complete documentation with more examples, see [AGGREGATION_EXAMPLE.md](./packages/mongodb/AGGREGATION_EXAMPLE.md) and [AGGREGATION_CHANGES_SUMMARY.md](./packages/mongodb/AGGREGATION_CHANGES_SUMMARY.md).
 
 ## 📚 Complete Example
 

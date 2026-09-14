@@ -4,7 +4,7 @@ import { GraphQLBoolean, GraphQLEnumType, GraphQLID, GraphQLInt, GraphQLList, Gr
 import mongoose from 'mongoose';
 import pg from 'pg';
 import { createRuntime } from '../../packages/core/src/index.js';
-import { createMongoAdapter } from '../../src/mongo/adapter.js';
+import { createMongoAdapter } from '../../packages/mongodb/src/mongo/adapter.js';
 import { createFunctionSQL } from '../../packages/postgres/src/schema/ddl.js';
 import { createPostgres } from '../../packages/postgres/src/index.js';
 

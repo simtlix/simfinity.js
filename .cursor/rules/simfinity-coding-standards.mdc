@@ -26,7 +26,7 @@ alwaysApply: true
 throw new SimfinityError('Resource not found', 'NOT_FOUND', 404);
 ```
 
-- For auth errors, use `UnauthenticatedError` (401) or `ForbiddenError` (403) from `packages/core/src/auth/errors.js`; `src/auth/errors.js` is the compatibility shim.
+- For auth errors, use `UnauthenticatedError` (401) or `ForbiddenError` (403) from `packages/core/src/auth/errors.js`; `packages/mongodb/src/auth/errors.js` is the compatibility shim.
 - Wrap mutation logic in Mongoose transactions. Borrow only active caller sessions without managing their lifecycle. For owned transactions, retry `TransientTransactionError` separately from commit-only `UnknownTransactionCommitResult` retries, with bounded attempts; preserve primary errors and await cleanup (see `withTransaction` pattern).
 
 ## GraphQL Type Definitions
@@ -45,7 +45,7 @@ throw new SimfinityError('Resource not found', 'NOT_FOUND', 404);
 
 - Named exports for public API functions.
 - Default export as an object aggregating all named exports (for convenient destructuring).
-- Re-export submodule defaults from `src/index.js`: `validators`, `scalars`, `plugins`, `auth`.
+- Re-export submodule defaults from `packages/mongodb/src/index.js`: `validators`, `scalars`, `plugins`, `auth`.
 
 ## Function Naming
 

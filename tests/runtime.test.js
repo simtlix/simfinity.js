@@ -15,9 +15,9 @@ import {
 import mongoose from 'mongoose';
 
 import { createRuntime } from '../packages/core/src/index.js';
-import { createMongoAdapter } from '../src/mongo/adapter.js';
-import { createMongoModel } from '../src/mongo/models.js';
-import { createMongoQueries } from '../src/mongo/queries.js';
+import { createMongoAdapter } from '../packages/mongodb/src/mongo/adapter.js';
+import { createMongoModel } from '../packages/mongodb/src/mongo/models.js';
+import { createMongoQueries } from '../packages/mongodb/src/mongo/queries.js';
 
 const createType = (name) => new GraphQLObjectType({
   name,

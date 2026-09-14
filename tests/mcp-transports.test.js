@@ -13,7 +13,7 @@ import {
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import * as simfinity from '../src/index.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
 
 // ---------------------------------------------------------------------------
 // Stub schema (unique McpTrans* names).

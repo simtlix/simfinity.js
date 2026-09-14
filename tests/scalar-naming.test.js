@@ -2,7 +2,7 @@ import {
   describe, test, expect,
 } from 'vitest';
 import { GraphQLString, GraphQLInt, GraphQLFloat, GraphQLBoolean, GraphQLID } from 'graphql';
-import { createValidatedScalar } from '../src/index.js';
+import { createValidatedScalar } from '../packages/mongodb/src/index.js';
 
 describe('Validated Scalar Naming Convention', () => {
   test('should generate correct type names with base scalar type suffix', () => {

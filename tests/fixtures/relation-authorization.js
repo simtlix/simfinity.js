@@ -2,7 +2,7 @@ import {
   GraphQLID, GraphQLList, GraphQLObjectType, GraphQLString,
 } from 'graphql';
 import mongoose from 'mongoose';
-import * as defaultRuntime from '../../src/index.js';
+import * as defaultRuntime from '../../packages/mongodb/src/index.js';
 
 export const createRelationFixture = (prefix, customId = false, parentField = 'parent_id', simfinity = defaultRuntime, customConnectionField = 'child_id') => {
   const child = new GraphQLObjectType({

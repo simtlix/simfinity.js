@@ -2,7 +2,7 @@ import {
   GraphQLEnumType, GraphQLID, GraphQLInt, GraphQLList, GraphQLNonNull,
   GraphQLObjectType, GraphQLScalarType, GraphQLString,
 } from 'graphql';
-import * as simfinity from '../../src/index.js';
+import * as simfinity from '../../packages/mongodb/src/index.js';
 
 export const buildMaterializationTypes = () => {
   const Status = new GraphQLEnumType({ name: 'MaterialStatus', values: { OPEN: {}, CLOSED: {} } });

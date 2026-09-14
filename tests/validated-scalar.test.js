@@ -4,8 +4,8 @@ import {
 import {
   GraphQLObjectType, GraphQLString, GraphQLInt, GraphQLID, GraphQLList, GraphQLNonNull,
 } from 'graphql';
-import { createValidatedScalar } from '../src/index.js';
-import * as simfinity from '../src/index.js';
+import { createValidatedScalar } from '../packages/mongodb/src/index.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
 
 describe('Custom Validated Scalar Types', () => {
   let EmailScalar;

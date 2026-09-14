@@ -5,7 +5,7 @@ import mongoose from 'mongoose';
 import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLNonNull, graphql,
 } from 'graphql';
-import * as simfinity from '../src/index.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
 
 describe('Update mutation $unset merging', () => {
   let schema;

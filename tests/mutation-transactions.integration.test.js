@@ -5,7 +5,7 @@ import mongoose from 'mongoose';
 import {
   GraphQLEnumType, GraphQLID, GraphQLList, GraphQLObjectType, GraphQLString, graphql,
 } from 'graphql';
-import * as simfinity from '../src/index.js';
+import * as simfinity from '../packages/mongodb/src/index.js';
 
 // Opt in with a disposable replica-set URI. Only this suite's three collections
 // in its own per-process database are cleared; no shared database is dropped.
