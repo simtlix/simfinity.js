@@ -1,0 +1,45 @@
+{
+  "name": "@simtlix/example-barber-mongodb",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.yoga.js",
+    "dev": "node --watch index.yoga.js",
+    "seed:admin": "node scripts/seedAdmin.js",
+    "indexes": "node scripts/ensureIndexes.js",
+    "mcp:stdio": "node scripts/mcp-stdio.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:http": "node ../tests/http-contract.mjs",
+    "test:mongodb": "node integration/mongodb.js",
+    "test:dataset": "node integration/dataset.js",
+    "seed:demo": "node scripts/seedDemo.js",
+    "dataset:load": "node dataset/loadDataset.js",
+    "dataset:delete": "node dataset/deleteDataset.js"
+  },
+  "dependencies": {
+    "@envelop/core": "^5.3.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@simtlix/simfinity-js": "3.2.0",
+    "@simtlix/simfinity-js-client": "^1.1.0",
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.3.1",
+    "graphql": "^16.11.0",
+    "graphql-yoga": "^5.14.0",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^8.16.0",
+    "multer": "^2.1.1"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "@types/jsonwebtoken": "^9.0.10",
+    "vitest": "^4.1.4"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  }
+}

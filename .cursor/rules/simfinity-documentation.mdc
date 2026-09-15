@@ -1,6 +1,6 @@
 ---
 description: Maintain the monorepo, package and public website documentation for both databases
-globs: README.md, AGENTS.md, packages/*/README.md, docs/**
+globs: README.md, AGENTS.md, packages/*/README.md, examples/barber/**/README.md, examples/barber/README.md, docs/**
 alwaysApply: false
 ---
 
@@ -10,6 +10,7 @@ alwaysApply: false
 
 - `README.md`: repository overview and shared API examples, with MongoDB/PostgreSQL setup links.
 - `packages/*/README.md`: each published package's installation, entry points and responsibilities. MongoDB's directory is `packages/mongodb`, but its public name remains `@simtlix/simfinity-js`.
+- `examples/barber/README.md` and app READMEs: runnable MongoDB/PostgreSQL stacks, shared frontend, environment settings, synthetic seeds, reset commands and independent CI. Keep the public overview in `docs/resources/barber.md` linked to these runbooks.
 - `docs/guide/`, `docs/reference/`, `docs/resources/`: the VitePress website. Keep shared semantics consistent and identify backend-specific storage, initialization and native APIs.
 - `docs/postgresql.md` and `docs/compatibility.md`: detailed PostgreSQL contract and verification notes; distinguish historical snapshots from current support.
 - `AGENTS.md` and `.cursor/rules/`: development guidance for the current architecture. Globs must cover the owning packages, not only the MongoDB facade.
@@ -61,6 +62,8 @@ Names preserve the strings supplied to `connect()`; examples use lowercase. Auth
 ## Reference Project
 
 Use `docs/guide/getting-started.md` for MongoDB and `docs/guide/postgresql.md` for PostgreSQL. The released starters linked from `docs/guide/databases.md` cover both adapters. The [Series Sample Project](https://github.com/simtlix/series-sample) is an additional MongoDB example; do not present it as a PostgreSQL example.
+
+The in-repository Barber example is a complete MVP app with two backend implementations and one frontend. Describe its scopes, controllers, GraphQL IDs, MCP and generated PostgreSQL FKs without claiming native database APIs are interchangeable or that the demo is production-ready. Preserve source-commit provenance and the frontend license. Document generated schema output under ignored `generated/`, not as committed archives or historical API snapshots.
 
 ## Build and release consistency
 

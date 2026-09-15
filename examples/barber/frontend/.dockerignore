@@ -1,0 +1,15 @@
+node_modules
+.next
+.env*
+.git
+.cursor
+coverage
+test-results
+playwright-report
+storybook-static
+out
+build
+uploads
+*.tsbuildinfo
+next-env.d.ts
+*.log

@@ -6,6 +6,8 @@ A Node.js framework that turns GraphQL object types into generated queries, muta
 
 Read the [documentation website](https://simtlix.github.io/simfinity.js/): start with the [quick start](https://simtlix.github.io/simfinity.js/guide/getting-started.html), explore the [guides](https://simtlix.github.io/simfinity.js/guide/schema.html), or consult the [API reference](https://simtlix.github.io/simfinity.js/reference/api.html). The website source is in [`docs/`](docs/).
 
+For a complete application, run the [Barber examples](examples/barber/README.md): independent MongoDB and PostgreSQL backends with one shared Next.js frontend, synthetic demo data, Docker setup, and a dedicated CI workflow. Both consume released Simfinity 3.2.0 packages from npm.
+
 Run the documentation website locally with Node.js 22+:
 
 ```sh
@@ -3268,6 +3270,7 @@ app.listen(4000, () => {
 
 ## 🔗 Resources
 
+- **[Barber examples](examples/barber/README.md)** - A booking app with MongoDB and PostgreSQL backends, a shared frontend, GraphQL and MCP, and independent validation
 - **[Series Sample Project](https://github.com/simtlix/series-sample)** - A complete TV series microservice built with Simfinity.js demonstrating types, relationships, state machines, controllers, and authorization
 - **[Samples Repository](https://github.com/simtlix/simfinity.js-samples)** - Complete examples and use cases
 - **[MongoDB Query Language](https://docs.mongodb.com/manual/tutorial/query-documents/)** - Learn about MongoDB querying

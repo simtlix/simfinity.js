@@ -1,0 +1,120 @@
+name: Barber examples
+
+on:
+  pull_request:
+    paths:
+      - 'examples/barber/**'
+      - '.github/workflows/barber.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'examples/barber/**'
+      - '.github/workflows/barber.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: barber-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: examples/barber/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: examples/barber/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:unit
+      - run: npm run build-storybook
+
+  database:
+    name: Barber (${{ matrix.database }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - database: mongodb
+            backend-port: 4400
+            frontend-port: 4401
+          - database: postgres
+            backend-port: 4500
+            frontend-port: 4501
+    env:
+      GRAPHQL_ENDPOINT: http://localhost:${{ matrix.backend-port }}/graphql
+      PLAYWRIGHT_BASE_URL: http://localhost:${{ matrix.frontend-port }}
+      DATABASE_URL: postgres://barber:barber_local@localhost:55441/barber
+      MONGO: mongodb://127.0.0.1:57417/barber?replicaSet=rs0&directConnection=true
+    defaults:
+      run:
+        working-directory: examples/barber
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            examples/barber/${{ matrix.database }}/package-lock.json
+            examples/barber/frontend/package-lock.json
+      - name: Install backend dependencies and run unit tests
+        run: |
+          npm ci --prefix ${{ matrix.database }}
+          npm test --prefix ${{ matrix.database }}
+      - name: Build and start the complete application
+        run: docker compose -f compose.${{ matrix.database }}.yaml up --build -d --wait --wait-timeout 180
+      - name: Seed synthetic demo accounts and catalog
+        run: |
+          docker compose -f compose.${{ matrix.database }}.yaml exec -T backend npm run seed:admin
+          docker compose -f compose.${{ matrix.database }}.yaml exec -T backend npm run seed:demo
+          docker compose -f compose.${{ matrix.database }}.yaml exec -T backend npm run seed:demo
+      - name: Shared GraphQL, authorization and MCP HTTP contract
+        run: npm run test:http --prefix ${{ matrix.database }}
+      - name: MongoDB transactions, derived values and dataset
+        if: matrix.database == 'mongodb'
+        run: |
+          npm run test:mongodb --prefix mongodb
+          npm run test:dataset --prefix mongodb
+      - name: PostgreSQL FKs, transactions, dataset and frontend selections
+        if: matrix.database == 'postgres'
+        run: |
+          npm run test:postgres --prefix postgres
+          npm run test:dataset --prefix postgres
+          npm run test:frontend-queries --prefix postgres
+          npm run schema:export --prefix postgres
+      - name: Install browser tests
+        working-directory: examples/barber/frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Book an appointment through the shared frontend
+        working-directory: examples/barber/frontend
+        run: npm run test:e2e
+      - name: Collect container logs
+        if: always()
+        run: docker compose -f compose.${{ matrix.database }}.yaml logs --no-color > compose-${{ matrix.database }}.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: barber-${{ matrix.database }}-results
+          path: |
+            examples/barber/compose-${{ matrix.database }}.log
+            examples/barber/frontend/test-results/
+            examples/barber/postgres/generated/
+      - name: Remove this job's disposable containers and volumes
+        if: always()
+        run: docker compose -f compose.${{ matrix.database }}.yaml down --volumes --remove-orphans

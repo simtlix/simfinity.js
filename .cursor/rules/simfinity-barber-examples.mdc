@@ -1,0 +1,30 @@
+---
+description: Maintain the independent Barber applications, shared frontend, Docker stacks and dedicated CI
+globs: examples/barber/**, .github/workflows/barber.yml
+alwaysApply: false
+---
+
+# Barber application examples
+
+## Ownership and dependencies
+
+- `examples/barber/mongodb/`, `postgres/`, and `frontend/` are private npm apps with their own manifests and lockfiles. Run `npm ci` inside the affected app; root workspace installation does not install them.
+- Keep the apps outside `packages/*` workspaces and library release/version scripts. Backend Simfinity runtime packages use exact released version `3.2.0` from npm. Do not restore local vendor archives or file dependencies.
+- The frontend source is shared. Its GraphQL endpoint is selected by the environment at build time and must be reachable by the browser. Treat IDs as opaque GraphQL `ID` strings: MongoDB uses ObjectIds and PostgreSQL uses UUIDs.
+- Preserve the same domain concepts, relationship metadata, scopes, controller responsibilities, and state transitions. Native Mongoose and PostgreSQL model/session calls remain separate. Choose the backend at startup; do not add runtime switching or automatic data migration.
+
+## Operation and data
+
+- Run Compose from `examples/barber` with `-f compose.mongodb.yaml` or `-f compose.postgres.yaml`. Retain the distinct project names `simfinity-example-barber-mongodb` and `simfinity-example-barber-postgres`, named volumes, and loopback bindings so both stacks can coexist.
+- Default host ports are MongoDB `57417`, API `4400`, frontend `4401`; PostgreSQL `55441`, API `4500`, frontend `4501`. Backend/frontend container ports are `4300`/`4301`. Changes must update `.env.example` files, scripts, tests and READMEs together.
+- Await database readiness before serving `/health`, `/graphql` and `/mcp`. HTTP, stdio, seeds and operational scripts should reuse each backend's application/database initialization and auth context.
+- `seed:admin` precedes `seed:demo`. The synthetic demo uses `barber-demo`, `admin@demo.com`, `propietario@demo.com`, `cliente@demo.com`, and password `demo1234`. Preserve repeatable seeding and browser-test compatibility.
+- Reset only the selected example project. Data-changing scripts and tests must use disposable databases. `dataset:delete` deletes all records of its covered entity types at its endpoint, not only records bearing a fixture marker.
+- Do not track real environment files, user uploads, dependency directories, generated frontend output, vendor archives, or PostgreSQL schema exports. `schema:export` writes current SDL, SQL and real catalog FK descriptions under ignored `postgres/generated/`.
+
+## Verification and documentation
+
+- `.github/workflows/barber.yml` owns backend unit tests, the database HTTP/MCP matrix, frontend checks and browser coverage, and database integration checks. Root ESLint and Vitest exclude examples.
+- Run both database HTTP/browser paths for shared contracts. Preserve `test:mongodb` and both `test:dataset` suites for transactions, derived booking/bundle/review values and fixture operations. Keep PostgreSQL native model, FK, transaction and frontend-query regression checks. Do not use library unit tests as a substitute for app validation.
+- Update `examples/barber/README.md`, the affected app README, and `docs/resources/barber.md` when setup or documented behavior changes. Preserve source-commit provenance and `frontend/LICENSE`.
+- Describe the app as a synthetic local MVP. Its presence in the monorepo does not change the runtime library compatibility contract or require an npm library release.

@@ -7,6 +7,8 @@ description: Build and run a Simfinity GraphQL API with PostgreSQL, GraphQL Yoga
 
 Use `@simtlix/simfinity-postgres` when a new application will store Simfinity entities in PostgreSQL. The GraphQL registrations and generated operations match the MongoDB facade, while PostgreSQL uses UUID identities, native tables, real foreign keys, and its own Model and Session APIs. Choose the backend in application startup code; Simfinity does not switch a populated application between databases or migrate MongoDB data.
 
+For a complete application alongside this small starter, run the [Barber example app](/resources/barber). It includes a shared Next.js frontend, booking flow, GraphQL and MCP endpoints, and a PostgreSQL schema export with real foreign-key catalog data.
+
 ## Download and install
 
 [Download the v3.2.0 starters](/releases/simfinity-3.2.0-starters.zip), extract them, and install the PostgreSQL application from npm:

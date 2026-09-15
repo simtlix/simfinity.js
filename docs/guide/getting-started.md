@@ -196,6 +196,7 @@ Run `node mcp.js` after creating the record. If you ran the delete example, crea
 
 ## Where to go next
 
+- Run the [Barber example app](/resources/barber) with its shared frontend, booking flow, and independent MongoDB/PostgreSQL backends.
 - Add seasons using [relationships](./relationships).
 - Define business rules with [validation](./validation) and [controllers](./controllers).
 - Add [authorization](./authorization) before exposing protected data.

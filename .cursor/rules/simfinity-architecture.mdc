@@ -21,6 +21,8 @@ Simfinity generates GraphQL schemas, CRUD queries and mutations from `GraphQLObj
 
 The root `simfinity-workspace` package is private and contains development commands only. Every publishable library has its own `package.json`, `src/`, `types/`, `README.md` and `LICENSE` under `packages/`. Shared tests remain at the root. The independent VitePress project in `docs/` reads the root version without installing a runtime package.
 
+`examples/barber/mongodb`, `examples/barber/postgres`, and `examples/barber/frontend` are private applications with independent npm manifests and lockfiles outside the library workspaces. The backends consume released Simfinity runtime packages at exactly 3.2.0; no file dependencies, vendor archives, or npm publication are involved. The two Compose projects select separate backends at startup and share frontend source, while native Mongoose and PostgreSQL code remains in its owning backend. See `simfinity-barber-examples.mdc` for their operational and test boundaries.
+
 All four package versions, exact internal dependencies and the private root version stay aligned through `scripts/release-packages.js`. Publication order is core, MCP, PostgreSQL, MongoDB. Keep local archives outside the repository; `docs/public/` contains intentional downloadable artifacts.
 
 - `packages/core` (`@simtlix/simfinity-core`) owns driver-free `createRuntime`, model metadata, query plans, scalar factory, errors, filter types and the once-only introspection patch. Registries/middleware are per runtime instance.

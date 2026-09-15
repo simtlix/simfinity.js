@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+  <rect width="200" height="200" fill="#1B1B1D"/>
+  <rect x="1" y="1" width="198" height="198" rx="8" fill="none" stroke="#353437" stroke-width="1"/>
+  <text x="50%" y="100" font-family="Newsreader, Georgia, serif" font-size="16" fill="#C9A96E" text-anchor="middle" dominant-baseline="middle" font-style="italic">HC</text>
+  <text x="50%" y="119.2" font-family="Inter, sans-serif" font-size="9.6" fill="#353437" text-anchor="middle">Logo</text>
+</svg>

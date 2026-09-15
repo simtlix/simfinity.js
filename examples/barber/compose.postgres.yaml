@@ -1,0 +1,57 @@
+name: simfinity-example-barber-postgres
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: barber
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-barber_local}
+      POSTGRES_DB: barber
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-55441}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U barber -d barber"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  backend:
+    build: ./postgres
+    environment:
+      DATABASE_URL: postgres://barber:${POSTGRES_PASSWORD:-barber_local}@db:5432/barber
+      PORT: 4300
+      GRAPHQL_ENDPOINT: http://localhost:4300/graphql
+      JWT_SECRET: ${JWT_SECRET:-example-barber-access-secret}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-example-barber-refresh-secret}
+      SEED_ADMIN_EMAIL: admin@demo.com
+      SEED_ADMIN_PASSWORD: demo1234
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_BACKEND_PORT:-4500}:4300"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - postgres_uploads:/app/uploads
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://localhost:4300/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_GRAPHQL_URL: http://${PUBLIC_HOST:-localhost}:${POSTGRES_BACKEND_PORT:-4500}/graphql
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_FRONTEND_PORT:-4501}:4301"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://localhost:4301').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+volumes:
+  postgres_data:
+  postgres_uploads:

@@ -1,0 +1,11 @@
+node_modules
+.next
+.env*
+coverage
+test-results
+playwright-report
+uploads/*
+!uploads/.gitkeep
+.npmrc
+generated
+*.log

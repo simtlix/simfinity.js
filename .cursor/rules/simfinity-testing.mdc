@@ -1,6 +1,6 @@
 ---
 description: Testing conventions, patterns, and requirements for when tests must be updated
-globs: tests/**, scripts/test-packages.js, .github/workflows/database-integration.yml
+globs: tests/**, scripts/test-packages.js, .github/workflows/database-integration.yml, examples/barber/**, .github/workflows/barber.yml
 alwaysApply: false
 ---
 
@@ -11,6 +11,7 @@ alwaysApply: false
 - **Vitest** with ES module imports: `import { describe, test, expect, beforeAll } from 'vitest';`
 - Run tests: `npm test` (runs `vitest run`), `npm run test:watch`, `npm run test:coverage`
 - Run commands from the private repository root after `npm ci`; all four packages are local workspaces.
+- Barber applications are independent projects outside those workspaces. Root lint and Vitest discovery exclude `examples/`; install each app with its own `npm ci` and follow `.github/workflows/barber.yml`. Backend `__tests__/` suites, shared HTTP contracts, frontend checks and PostgreSQL integration scripts belong to that workflow, not the library release suite.
 - In MongoDB schema/unit tests without a database, call `simfinity.preventCreatingCollection(true)` before `createSchema()` (usually in `beforeAll`). Do not apply this indiscriminately to database creation tests. On PostgreSQL the same setting forces storage validation, not an in-memory substitute.
 
 ## Test File Naming
@@ -108,3 +109,9 @@ Run `npm run lint` after modifying test files to catch unused imports or style v
 - `npm run test:packages` checks five isolated runtime/strict TypeScript consumers: core, PostgreSQL, MCP without its optional SDK, MCP with its SDK, and MongoDB. It verifies dependency isolation, shared identities and legacy MongoDB deep imports against actual archives.
 - `tests/release-packages.test.js` and `tests/publish-packages.test.js` cover version alignment, workspace locks, archive validation and publication behavior. Keep the root private and all four published package versions aligned.
 - Development/CI use Node.js 24 for Vitest 4. The library runtime floor remains Node.js >=18.18.0.
+
+## Barber application checks
+
+Use `examples/barber/README.md` for the Compose and seed commands. Shared HTTP and browser tests must run against both independent backends when changing shared user flows. Preserve tests for login, role scopes, owner/client write boundaries, booking transitions, and MCP authorization. Both backends have real-database checks for transactions, derived booking/bundle/review values, and dataset load/delete behavior. PostgreSQL also checks physical FKs and frontend query selections.
+
+These checks mutate data. Use the isolated example Compose projects or a disposable database; never target a user's existing demo or production database. Keep generated PostgreSQL SDL/SQL/FK exports in ignored `examples/barber/postgres/generated/` and keep credentials, uploads and build output out of Git. See `simfinity-barber-examples.mdc` for the example boundaries.

@@ -1,0 +1,186 @@
+@import "tailwindcss";
+
+@theme {
+  /* MD3 Color Tokens — extracted from Stitch design */
+  --color-background: #131315;
+  --color-surface: #131315;
+  --color-surface-dim: #131315;
+  --color-surface-bright: #39393b;
+  --color-surface-container-lowest: #0e0e10;
+  --color-surface-container-low: #1b1b1d;
+  --color-surface-container: #201f21;
+  --color-surface-container-high: #2a2a2c;
+  --color-surface-container-highest: #353437;
+  --color-surface-variant: #353437;
+  --color-surface-tint: #e4c285;
+
+  --color-primary: #e6c487;
+  --color-primary-container: #c9a96e;
+  --color-primary-fixed: #ffdea4;
+  --color-primary-fixed-dim: #e4c285;
+  --color-on-primary: #412d00;
+  --color-on-primary-container: #543d0c;
+  --color-on-primary-fixed: #261900;
+  --color-on-primary-fixed-variant: #5a4312;
+  --color-inverse-primary: #745a27;
+
+  --color-secondary: #d7c4a7;
+  --color-secondary-container: #544731;
+  --color-secondary-fixed: #f3e0c1;
+  --color-secondary-fixed-dim: #d7c4a7;
+  --color-on-secondary: #3a2f1a;
+  --color-on-secondary-container: #c8b699;
+  --color-on-secondary-fixed: #241a07;
+  --color-on-secondary-fixed-variant: #52452f;
+
+  --color-tertiary: #b8c8f2;
+  --color-tertiary-container: #9dadd5;
+  --color-tertiary-fixed: #d8e2ff;
+  --color-tertiary-fixed-dim: #b6c6ef;
+  --color-on-tertiary: #203051;
+  --color-on-tertiary-container: #314163;
+  --color-on-tertiary-fixed: #081b3b;
+  --color-on-tertiary-fixed-variant: #374669;
+
+  --color-error: #ffb4ab;
+  --color-error-container: #93000a;
+  --color-on-error: #690005;
+  --color-on-error-container: #ffdad6;
+
+  --color-on-surface: #e5e1e4;
+  --color-on-surface-variant: #d0c5b5;
+  --color-on-background: #e5e1e4;
+  --color-inverse-surface: #e5e1e4;
+  --color-inverse-on-surface: #313032;
+
+  --color-outline: #998f81;
+  --color-outline-variant: #4d463a;
+
+  /* Semantic aliases */
+  --color-success: #4ade80;
+  --color-success-dim: #16a34a;
+
+  /* Font families */
+  --font-headline: "Newsreader", Georgia, serif;
+  --font-body: "Inter", system-ui, sans-serif;
+  --font-label: "Inter", system-ui, sans-serif;
+
+  /* Border radii matching the design */
+  --radius-sm: 0.125rem;
+  --radius-md: 0.25rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
+  --radius-3xl: 1.5rem;
+}
+
+body {
+  background: var(--color-background);
+  color: var(--color-on-surface);
+  font-family: var(--font-body);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+main {
+  animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200px 0; }
+  100% { background-position: calc(200px + 100%) 0; }
+}
+
+/* Init guard (SimfinityClient loading / error) */
+@keyframes init-orbit {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+@keyframes init-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.08); opacity: 0.8; }
+}
+@keyframes init-bounce {
+  0%, 80%, 100% { transform: translateY(0); }
+  40% { transform: translateY(-10px); }
+}
+@keyframes init-fade-in-up {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes init-shake {
+  0%, 100% { transform: translateX(0); }
+  10%, 30%, 50% { transform: translateX(-6px); }
+  20%, 40% { transform: translateX(6px); }
+  60% { transform: translateX(0); }
+}
+@keyframes init-breath {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 83, 80, 0.45); }
+  50% { box-shadow: 0 0 28px 8px rgba(239, 83, 80, 0.18); }
+}
+@keyframes init-ring-pulse {
+  0% { transform: scale(0.85); opacity: 0.5; }
+  50% { transform: scale(1.1); opacity: 0; }
+  100% { transform: scale(0.85); opacity: 0; }
+}
+@keyframes init-gold-glow {
+  0%, 100% { box-shadow: 0 0 12px 2px rgba(201, 169, 110, 0.15); }
+  50% { box-shadow: 0 0 24px 6px rgba(201, 169, 110, 0.3); }
+}
+
+/* Gold gradient utility */
+.bg-gold-gradient {
+  background: linear-gradient(135deg, #e6c487 0%, #c9a96e 100%);
+}
+
+.text-gold-gradient {
+  background: linear-gradient(135deg, #e6c487 0%, #c9a96e 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Frosted glass panel */
+.glass-panel {
+  background: rgba(42, 42, 44, 0.6);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #131315; }
+::-webkit-scrollbar-thumb { background: #2a2a2c; border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: #c9a96e; }
+
+/* Focus ring */
+*:focus-visible {
+  outline: 2px solid #e6c487;
+  outline-offset: 2px;
+}
+
+/* Material Symbols — font loaded via layout.tsx <link>; ligatures need this family */
+.material-symbols-outlined {
+  font-family: "Material Symbols Outlined";
+  font-weight: normal;
+  font-style: normal;
+  font-size: 1.25em;
+  line-height: 1;
+  display: inline-block;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  font-variation-settings: "FILL" 0, "wght" 300, "GRAD" 0, "opsz" 24;
+  vertical-align: middle;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Selection */
+::selection {
+  background: rgba(201, 169, 110, 0.3);
+}

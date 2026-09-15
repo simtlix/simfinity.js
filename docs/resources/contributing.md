@@ -30,6 +30,14 @@ npm test
 
 Add focused coverage for critical behavior and regressions. Keep the public documentation synchronized with API changes. A useful pull request explains the affected behavior, the change, and how it was validated.
 
+## Work on the Barber examples
+
+The [Barber app](/resources/barber) lives in `examples/barber/`: separate MongoDB and PostgreSQL backends plus one shared frontend. These private apps have their own manifests and lockfiles and consume released packages from npm. They are outside the library workspaces and release process.
+
+Use Node.js 24 and run `npm ci` inside each affected app. Follow the [example runbook](https://github.com/simtlix/simfinity.js/blob/master/examples/barber/README.md) and the dedicated [Barber workflow](https://github.com/simtlix/simfinity.js/blob/master/.github/workflows/barber.yml) for unit, frontend, real-database, HTTP/MCP, and browser checks. Root library lint and Vitest exclude examples. Shared app behavior should be checked against both backends; native PostgreSQL changes also need the relevant FK and transaction regressions.
+
+Use disposable databases for seeds, datasets, and integration tests. Keep app secrets, real uploads, generated schema exports, and build output out of Git. Example-only changes do not require publishing a library version.
+
 ## Improve the documentation
 
 Use Node.js 22 or newer for the website tooling:
@@ -85,6 +93,7 @@ Open an [issue on GitHub](https://github.com/simtlix/simfinity.js/issues) with y
 
 ## Resources
 
+- [Barber example app](/resources/barber)
 - [Source repository](https://github.com/simtlix/simfinity.js)
 - [Series Sample Project](https://github.com/simtlix/series-sample)
 - [Package on npm](https://www.npmjs.com/package/@simtlix/simfinity-js)
