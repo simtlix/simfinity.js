@@ -47,3 +47,7 @@ storybook-static
 # Playwright artifacts
 /test-results/
 /playwright-report/
+
+# These are source components, not a local database directory.
+!/src/components/shared/data/
+!/src/components/shared/data/**
