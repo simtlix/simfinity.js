@@ -16,7 +16,7 @@ Copy tracked source, tests, synthetic dataset and public UI assets. Exclude envi
 
 ## CI and documentation
 
-Add a dedicated Barber Action, triggered by example changes and relevant library/workflow changes, with explicit permissions and bounded jobs. Validate both backend unit suites, published dependency installation, real database initialization, login/scopes/booking and MCP behavior, and the shared frontend build/unit/browser tests against both backends. Keep library lint and Vitest discovery out of example applications; their own pipeline owns those dependencies and checks.
+Add a dedicated Barber Action, triggered by example and workflow changes, with explicit permissions and bounded jobs. Validate both backend unit suites, published dependency installation, real database initialization, login/scopes/booking and MCP behavior, and the shared frontend build/unit/browser tests against both backends. Keep library lint and Vitest discovery out of example applications; their own pipeline owns those dependencies and checks.
 
 Document Docker and host development, environment variables, demo credentials, reset commands restricted to each example, PostgreSQL/MongoDB differences and independent CI. Link the examples from the main README and public documentation, and update agent guidance for the new directory boundary.
 

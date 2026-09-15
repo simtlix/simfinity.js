@@ -50,7 +50,8 @@ export default defineConfig({
       ] },
       { text: 'API reference', link: '/reference/api', activeMatch: '/reference/' },
       { text: 'Resources', items: [
-        { text: 'Example project', link: 'https://github.com/simtlix/series-sample' },
+        { text: 'Barber example app', link: '/resources/barber' },
+        { text: 'Series sample (MongoDB)', link: 'https://github.com/simtlix/series-sample' },
         { text: 'Compatibility & releases', link: '/resources/compatibility' },
         { text: 'Contributing', link: '/resources/contributing' },
         { text: 'Troubleshooting', link: '/resources/troubleshooting' },
@@ -95,6 +96,7 @@ export default defineConfig({
         { text: 'MCP API', link: '/reference/mcp' },
       ] },
       { text: 'Resources', collapsed: false, items: [
+        { text: 'Barber example app', link: '/resources/barber' },
         { text: 'Troubleshooting', link: '/resources/troubleshooting' },
         { text: 'Compatibility & releases', link: '/resources/compatibility' },
         { text: 'Contributing', link: '/resources/contributing' },

@@ -1,0 +1,62 @@
+{
+  "name": "simfinity-barber-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack -p 4401",
+    "build": "next build",
+    "start": "next start -p 4401",
+    "lint": "eslint .",
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build",
+    "test:unit": "vitest run --project unit",
+    "test:e2e": "playwright test",
+    "ci:storybook": "storybook build",
+    "typecheck": "next typegen && tsc --noEmit"
+  },
+  "dependencies": {
+    "@simtlix/simfinity-js-client": "^1.1.0",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.1.0",
+    "leaflet": "^1.9.4",
+    "next": "^16.2.5",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-leaflet": "^5.0.0",
+    "recharts": "^3.8.1",
+    "tailwind-merge": "^3.3.1",
+    "tailwind-variants": "^3.1.1"
+  },
+  "devDependencies": {
+    "@chromatic-com/storybook": "^5.0.1",
+    "@playwright/test": "^1.58.2",
+    "@storybook/addon-a11y": "^10.2.17",
+    "@storybook/addon-docs": "^10.2.17",
+    "@storybook/addon-onboarding": "^10.2.17",
+    "@storybook/addon-vitest": "^10.2.17",
+    "@storybook/nextjs-vite": "^10.2.17",
+    "@tailwindcss/postcss": "^4.2.2",
+    "@types/leaflet": "^1.9.21",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitest/browser-playwright": "^4.1.0",
+    "@vitest/coverage-v8": "^4.1.0",
+    "eslint": "^9.39.3",
+    "eslint-config-next": "^16.1.6",
+    "playwright": "^1.58.2",
+    "postcss": "^8.5.8",
+    "storybook": "^10.2.17",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5",
+    "vite": "^7.0.0",
+    "vitest": "^4.1.0"
+  },
+  "overrides": {
+    "ajv": "6.14.0",
+    "minimatch": "^10.2.1"
+  },
+  "engines": {
+    "node": ">=24 <25"
+  }
+}

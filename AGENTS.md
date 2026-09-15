@@ -5,6 +5,7 @@ This file helps coding agents (and humans) work productively and safely in this 
 ## What this project is
 
 - **Workspace**: the root `simfinity-workspace` package is private. All four publishable libraries, their declarations, licenses and package READMEs live under `packages/`.
+- **Examples**: `examples/barber/{mongodb,postgres,frontend}` are independent private npm applications with their own lockfiles, outside the `packages/*` workspaces. The two backends consume released Simfinity runtime packages at exact version 3.2.0; the Next.js frontend is shared.
 - **Packages**: `@simtlix/simfinity-js` is the MongoDB/Mongoose facade; `@simtlix/simfinity-core` owns the shared GraphQL runtime; `@simtlix/simfinity-postgres` is the PostgreSQL 15+ facade; `@simtlix/simfinity-mcp` generates MCP tools from a GraphQL schema.
 - **Runtime**: Node.js `>=18.18.0` for library consumers. Use Node.js 24 for development and CI; documentation requires Node.js 22 or later.
 - **Peers**: every package uses `graphql` ^16. The Mongo facade alone has a `mongoose` ^8 peer; MCP has an optional `@modelcontextprotocol/sdk` peer. PostgreSQL depends on `pg` and core, without MongoDB, Mongoose, or MCP.
@@ -20,6 +21,7 @@ This file helps coding agents (and humans) work productively and safely in this 
 | Field extensions / introspection | `.cursor/rules/simfinity-extensions.mdc` |
 | Tests | `.cursor/rules/simfinity-testing.mdc` |
 | README / docs updates | `.cursor/rules/simfinity-documentation.mdc` |
+| Barber applications and their CI | `.cursor/rules/simfinity-barber-examples.mdc` |
 
 If something is ambiguous, prefer the matching `.mdc` file over this summary.
 
@@ -30,6 +32,7 @@ If something is ambiguous, prefer the matching `.mdc` file over this summary.
 3. **Behavior changes**: update tests under `tests/` and public docs (`README.md`) when the public API or documented behavior changes.
 4. **Package boundaries**: core must remain driver-free; PostgreSQL must not import MongoDB, Mongoose or MCP. Keep shared semantics in core and database operations in their adapters. Backend selection is fixed for each runtime; do not add runtime switching.
 5. **Compatibility**: `packages/mongodb` still publishes as `@simtlix/simfinity-js`. Preserve its entry points and `src/` deep imports inside the published archive. Keep shared helper/error identities and update package declarations for public API changes.
+6. **Example boundaries**: install and test Barber apps in their own directories. Keep them private, preserve registry dependencies and separate Compose projects, and do not add them to library workspaces or npm release tooling. Native database code stays in each backend; the frontend treats GraphQL IDs as opaque strings.
 
 ## Verification commands
 
@@ -45,6 +48,7 @@ Use `npm run test:watch` while iterating; `npm run test:coverage` when coverage 
 - For package boundaries, dependencies, exports or declarations: `npm run test:packages` checks isolated packed applications, including strict TypeScript consumers and MongoDB deep imports.
 - For database behavior: run the full suite with disposable database URIs, as described in the testing rule. `npm run test:integration` covers only `tests/integration/`; additional MongoDB regression suites live directly under `tests/`.
 - For documentation: `npm run docs:install` and `npm run docs:build`.
+- For Barber changes: follow `examples/barber/README.md` and `.github/workflows/barber.yml`. Root lint and Vitest exclude `examples/`; run the affected app checks and the shared HTTP/browser contract against both databases for shared behavior changes. Use only disposable example databases for data-changing checks.
 - For release metadata: `node scripts/release-packages.js check`. Release tooling aligns the private root version, all four package versions and exact internal dependencies; the root itself is never published.
 
 ## Layout hints
@@ -52,6 +56,7 @@ Use `npm run test:watch` while iterating; `npm run test:coverage` when coverage 
 - **Implementation**: `packages/core/src/` owns the shared runtime and helpers; `packages/mongodb/src/` owns the MongoDB facade/adapter and compatibility shims; `packages/postgres/src/` owns PostgreSQL storage and execution; `packages/mcp/src/` owns MCP generation and transports.
 - **Tests**: `tests/` covers core, both adapters, MCP and release tooling; `tests/contracts/` and `tests/fixtures/` hold shared fixtures. See the testing rule for MongoDB collection suppression in tests without a database.
 - **Documentation**: `README.md` is the repository overview; `packages/*/README.md` describes each published package; `docs/` builds the public website independently of the runtime packages.
+- **Barber examples**: `examples/barber/` contains both backends, the shared frontend, per-stack Compose files, and HTTP contracts. The dedicated `barber.yml` workflow owns their dependencies and checks. PostgreSQL schema exports go to ignored `examples/barber/postgres/generated/`.
 - **Release tooling**: `scripts/release-packages.js`, `scripts/publish-packages.js` and `.github/workflows/` handle validation, archives and publication.
 
 ## When editing

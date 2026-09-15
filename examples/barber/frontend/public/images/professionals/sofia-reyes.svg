@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <rect width="400" height="400" fill="#1B1B1D"/>
+  <rect x="1" y="1" width="398" height="398" rx="8" fill="none" stroke="#353437" stroke-width="1"/>
+  <text x="50%" y="200" font-family="Newsreader, Georgia, serif" font-size="32" fill="#C9A96E" text-anchor="middle" dominant-baseline="middle" font-style="italic">SR</text>
+  <text x="50%" y="238.4" font-family="Inter, sans-serif" font-size="19.2" fill="#353437" text-anchor="middle">Sofía Reyes</text>
+</svg>
