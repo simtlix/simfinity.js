@@ -1,7 +1,7 @@
-# Simfinity 3.2.0 starters
+# Simfinity 3.3.0 starters
 
 Choose one starter for your application. Use Node.js 22 or newer.
-`npm install` installs Simfinity 3.2.0 and its dependencies from npm.
+`npm install` installs Simfinity 3.3.0 and its dependencies from npm.
 
 ## MongoDB
 
@@ -33,9 +33,9 @@ npm start
 ```
 
 Use PostgreSQL 15, 16, or 18. Open http://127.0.0.1:4000/graphql. This starter
-creates the `series_api` schema, including the season-to-serie foreign key.
+uses `createSQL` with `postgresPlugin` and creates the `series_api` schema, including the season-to-serie foreign key. The existing `createPostgres` facade remains available.
 `SIMFINITY_SCHEMA_MODE=validate npm start` validates existing generated storage
-without DDL. MCP is optional: install `@simtlix/simfinity-mcp@3.2.0`
+without DDL. MCP is optional: install `@simtlix/simfinity-mcp@3.3.0`
 only when needed; protocol transports also need `@modelcontextprotocol/sdk`.
 
 Full setup, GraphQL operations, storage rules and MCP integration:
@@ -44,7 +44,7 @@ https://simtlix.github.io/simfinity.js/guide/postgresql.html
 ## Release
 
 Source, release notes, package archives and integrity manifest:
-https://github.com/simtlix/simfinity.js/releases/tag/v3.2.0
+https://github.com/simtlix/simfinity.js/releases/tag/v3.3.0
 
 The adapters share generated GraphQL operations, validation, authorization,
 scopes, controllers and optional MCP. PostgreSQL uses UUID IDs, SQL constraints

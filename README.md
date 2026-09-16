@@ -17,7 +17,7 @@ npm run docs:dev
 
 For builds and hosting, see the [website maintainer guide](docs/.vitepress/README.md). The website documents the current source; some older examples later in this README retain historical conventions.
 
-> **Documentation for both databases:** The [public website](https://simtlix.github.io/simfinity.js/guide/databases.html) now covers MongoDB and PostgreSQL, including shared APIs, relationships, generated FKs, scopes, and MCP. Both adapters are available in **v3.2.0** on npm. Follow the quick starts for installation, or download the runnable starters and verified release archives.
+> **Documentation for both databases:** The [public website](https://simtlix.github.io/simfinity.js/guide/databases.html) now covers MongoDB and PostgreSQL, including shared APIs, relationships, generated FKs, scopes, and MCP. Both adapters are available in **v3.3.0** on npm. Follow the quick starts for installation, or download the runnable starters and verified release archives.
 
 ## 📑 Table of Contents
 
@@ -107,25 +107,37 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose@^8.16.2 graphql@^16.11.0 @simtlix/simfinity-js@3.2.0
+npm install mongoose@^8.16.2 graphql@^16.11.0 @simtlix/simfinity-js@3.3.0
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies.
 
 ## PostgreSQL support
 
-Version 3.2.0 releases `@simtlix/simfinity-core`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-postgres`, and the MongoDB facade in lockstep. Install the selected adapter from npm; shared dependencies resolve automatically. PostgreSQL runs the shared GraphQL query/mutation engine, including scopes, controllers, validators, state transitions and nested writes. It generates and validates tables, indexes, and **real foreign keys**, including inverse relations, explicit many-to-many linking entities, and references inside embedded objects. PostgreSQL installation does not pull Mongoose, MongoDB, or MCP dependencies.
+Version 3.3.0 releases `@simtlix/simfinity-core`, `@simtlix/simfinity-sql`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-postgres`, and the MongoDB facade in lockstep. Install the selected adapter from npm; shared dependencies resolve automatically. PostgreSQL runs the shared GraphQL query/mutation engine, including scopes, controllers, validators, state transitions and nested writes. It generates and validates tables, indexes, and **real foreign keys**, including inverse relations, explicit many-to-many linking entities, and references inside embedded objects. PostgreSQL installation does not pull Mongoose, MongoDB, or MCP dependencies.
+
+Version 3.3.0 separates the driver-free relational runtime into `@simtlix/simfinity-sql`. PostgreSQL supplies the first SQL plugin; it owns physical SQL, types, schema initialization and `pg`. Existing `createPostgres` and namespace imports remain compatible, with unchanged generated PostgreSQL storage and FKs. Use the explicit composition API when you want to select a plugin:
+
+```javascript
+import { createSQL } from '@simtlix/simfinity-sql';
+import { postgresPlugin } from '@simtlix/simfinity-postgres';
+
+const simfinity = createSQL({ plugin: postgresPlugin({ pool, schema: 'app' }) });
+```
+
+Install both packages directly when importing both. Only PostgreSQL is supported initially; see the [SQL plugin guide](docs/guide/sql-plugins.md) for the contract, capabilities, dependency boundaries and extension requirements.
 
 All publishable libraries live under `packages/`:
 
 | Directory | npm package |
 | --- | --- |
 | `packages/core` | `@simtlix/simfinity-core` |
+| `packages/sql` | `@simtlix/simfinity-sql` |
 | `packages/mongodb` | `@simtlix/simfinity-js` |
 | `packages/postgres` | `@simtlix/simfinity-postgres` |
 | `packages/mcp` | `@simtlix/simfinity-mcp` |
 
-The repository root is a private npm workspace for shared tests, documentation and release tooling. MongoDB retains its existing package name, public API and deep imports such as `@simtlix/simfinity-js/src/auth/rules.js`. Run development commands from the root; pack MongoDB with `npm pack --workspace @simtlix/simfinity-js` or use the release scripts to pack all four libraries.
+The repository root is a private npm workspace for shared tests, documentation and release tooling. MongoDB retains its existing package name, public API and deep imports such as `@simtlix/simfinity-js/src/auth/rules.js`. Run development commands from the root; pack MongoDB with `npm pack --workspace @simtlix/simfinity-js` or use the release scripts to pack all five libraries.
 
 
 Enum filters resolve member names first, then declared internal values by strict equality, on both backends. For example, with `ONE: { value: 'TWO' }` and `TWO: { value: 'two' }`, filter `"TWO"` selects member `TWO`. Numeric internal values require numbers, not numeric strings. This applies to scalar lists, embedded/reference leaves and state filters across EQ, NE, LT, LTE, GT, GTE, BTW, IN and NIN. LIKE accepts string fields only. PostgreSQL writes and state guards continue to use internal enum values.
@@ -137,7 +149,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.2.0 @modelcontextprotocol/sdk@^1.13.0
+npm install @simtlix/simfinity-mcp@3.3.0 @modelcontextprotocol/sdk@^1.13.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.

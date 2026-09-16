@@ -6,7 +6,7 @@ alwaysApply: false
 
 # Core Functions
 
-The shared engine now lives in `packages/core/src/runtime.js`; `packages/mongodb/src/index.js` is the Mongo facade. Mongo-specific model, pipeline and transaction implementations moved to `packages/mongodb/src/mongo/`. PostgreSQL provides the same lifecycle adapter contract in `packages/postgres/src/adapter.js`, with driver-free query plans in core. Function descriptions below retain the legacy public API unless a backend-specific distinction is called out in `docs/postgresql.md`.
+The shared engine now lives in `packages/core/src/runtime.js`; `packages/mongodb/src/index.js` is the Mongo facade. Mongo-specific model, pipeline and transaction implementations moved to `packages/mongodb/src/mongo/`. SQL provides the relational lifecycle adapter in `packages/sql/src/adapter.js`; `packages/postgres/src/adapter.js` binds the PostgreSQL plugin, with driver-free query plans in core. Function descriptions below retain the legacy public API unless a backend-specific distinction is called out in `docs/postgresql.md`.
 
 ## Registration Phase
 
@@ -83,7 +83,7 @@ MongoDB transaction handling in `packages/mongodb/src/mongo/transactions.js`:
 3. Commits on success, aborts active transactions on write/hook errors, and awaits owned session cleanup. Abort/cleanup errors do not replace an earlier operation error.
 4. Retries the transaction on `TransientTransactionError`, up to five retries after the first attempt. `UnknownTransactionCommitResult` retries only commit, up to five retries, never repeating the body for an uncertain result. Expired commits are not retried; terminal uncertainty is surfaced without replaying writes.
 
-PostgreSQL transaction handling in `packages/postgres/src/transactions.js` borrows one `pg` client, uses repeatable-read isolation and retries confirmed serialization failures/deadlocks. Sessions and native model handles are adapter-specific; do not accept a Mongoose model/session as a PostgreSQL handle.
+SQL transaction handling in `packages/sql/src/transactions.js` orchestrates sessions and retries; the PostgreSQL plugin borrows a `pg` client, begins repeatable-read isolation and classifies confirmed serialization/deadlock aborts. The former PostgreSQL transaction module is a compatibility wrapper. Sessions and native model handles are adapter-specific; do not accept a Mongoose model/session as a PostgreSQL handle.
 
 `onUpdateSubject()` awaits the parent update before collection writes and `onUpdated`. Missing parents throw `NOT_VALID_ID` (404) before child writes or `onUpdated`; the hook receives the updated adapter record. All hooks still run before commit and must tolerate transaction retries; external effects are not rolled back.
 

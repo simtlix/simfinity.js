@@ -1,13 +1,13 @@
 ---
 title: Database compatibility contract
-description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.2.0.
+description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.3.0.
 ---
 
 # Database compatibility contract
 
-This ledger records the v3.2.0 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
+This ledger records the v3.3.0 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
 
-The test paths below are available in the [v3.2.0 source](https://github.com/simtlix/simfinity.js/tree/v3.2.0). To try the API, use the [released starters](guide/databases.md#download-the-starters).
+The test paths below are available in the [v3.3.0 source](https://github.com/simtlix/simfinity.js/tree/v3.3.0). To try the API, use the [released starters](guide/databases.md#download-the-starters).
 
 When running the source tests, set `SIMFINITY_MONGODB_URI` and `SIMFINITY_POSTGRES_URI` to disposable databases for the cross-backend suites. Set `SIMFINITY_TEST_MONGODB_URI` to a separate disposable MongoDB database for upstream opt-in regressions. Mongo setup drops its configured databases, so these URIs must never identify application data. When a variable is absent, its integration suites are reported as skipped.
 
@@ -88,3 +88,15 @@ The MongoDB facade, core, PostgreSQL, and MCP packages use version 3.2.0 in lock
 Database CI runs three bounded full-suite jobs: PostgreSQL 15/MongoDB 7, PostgreSQL 16/MongoDB 8, and PostgreSQL 18/MongoDB 8. Each job sets both MongoDB environment variables to distinct databases so the differential and upstream regression suites run without colliding.
 
 PostgreSQL initialization exposes generated tables, primary keys, real FKs, indexes, presence columns, private ownership/key tables, functions, triggers, and maintenance metadata through `describeDatabase()`. These physical constraints are PostgreSQL behavior rather than a claim that native Mongoose APIs or storage coercions are identical. See the [canonical quick start](guide/postgresql.md) and [detailed storage reference](postgresql.md).
+
+## v3.3.0 SQL core and PostgreSQL plugin
+
+The new `@simtlix/simfinity-sql` package owns driver-free relational planning, records and session orchestration. PostgreSQL supplies physical schema/query/record compilation, native codecs, initialization and driver operations through `postgresPlugin`. Existing PostgreSQL factories and namespace entry points use the same SQL runtime and remain compatible. The explicit composition API is `createSQL({ plugin: postgresPlugin({ pool, schema }) })`; see the [SQL plugin contract](guide/sql-plugins.md).
+
+All five packages use exact internal 3.3.0 versions. Publication order is core, SQL, MCP, PostgreSQL, then MongoDB. Installing SQL alone brings no PostgreSQL, MongoDB, Mongoose or MCP driver chain. PostgreSQL is the only supported SQL plugin initially.
+
+Logical capability checks reject missing guarantees before physical compilation and initialization. Foreign keys, embedded ownership, presence/default behavior, list ordering, NULL-equal uniqueness, scopes, hooks and state semantics are preserved. Three golden fixtures compare complete PostgreSQL descriptions and DDL with 3.2.0, including nested/null/unique/enums and special identifiers. An unchanged model requires no generated-schema migration for this extraction.
+
+Verification adds a non-PostgreSQL recording plugin, early contract/capability failures, fixed binding, transaction/session delegation, and real PostgreSQL interoperability between the old and new factories. Recording tests establish the plugin boundary; they do not establish support for a second SQL engine.
+
+SQL extraction verification (2026-09-16): the full suite passed **51 files / 1,026 tests** with disposable PostgreSQL 18 and MongoDB 8, with no skips. All six isolated packed runtime/strict TypeScript consumers passed. A separate registry-installed 3.2.0 runtime created real schema and nested data; 3.3.0 `createSQL` validated that schema without DDL, produced identical metadata/SQL, preserved the records and successfully updated them. Barber passed both backend unit suites (69 PostgreSQL and 59 MongoDB tests), its PostgreSQL 67-operation/native-constraint corpus, MongoDB transaction checks, shared 19-operation HTTP/MCP contract on each backend, both dataset load/delete suites and frontend query validation against the generated schema.

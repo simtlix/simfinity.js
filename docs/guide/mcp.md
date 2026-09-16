@@ -13,10 +13,10 @@ The MongoDB facade retains MCP compatibility exports. For either database, the d
 
 ## Choose the MCP package
 
-In v3.2.0, the following examples import `@simtlix/simfinity-mcp`, which works with either adapter. In either application, install it from npm:
+In v3.3.0, the following examples import `@simtlix/simfinity-mcp`, which works with either adapter. In either application, install it from npm:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.2.0
+npm install @simtlix/simfinity-mcp@3.3.0
 ```
 
 The MongoDB starter already includes it for compatibility. The published MongoDB 3.0.1 release instead exports these functions from `@simtlix/simfinity-js`.

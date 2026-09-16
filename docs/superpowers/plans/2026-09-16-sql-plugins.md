@@ -1,6 +1,6 @@
 # SQL Plugins Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Extract a driver-free SQL package with a versioned plugin contract and preserve PostgreSQL behavior.
 
@@ -24,10 +24,10 @@ Files: create packages/sql/src/schema/plan.js; modify packages/postgres/src/sche
 
 Interfaces: produce planRelationalSchema(models, {schema, naming}) as specified. Logical columns have scalar (ID, String, Int, Float, Boolean, DateTime, Enum, Embedded), list, nullable, optional default `{kind:'identity'}` or `{kind:'value',value}`, and presenceColumn. Logical checks use kind/state/column/value descriptors; no SQL expressions. Plan returns schema, tables, checkOrder, uniqueValues, requirements. PostgreSQL describeRelationalSchema(plan) lowers it; existing describeDatabase(registrations, options) invokes the planner with PostgreSQL naming rules.
 
-- [ ] Capture 3.2 descriptions and DDL using current schemaFixture plus edge cases before changing implementation.
-- [ ] Add red tests asserting scalar:'ID' rather than uuid, embedded storage layout, FK targets, null/empty ownership metadata, no SQL, capability requirements, and PostgreSQL lowering equality against the captured fixture.
-- [ ] Implement pure planner and engine lowering. Keep constraintBuilder and SQL expression compilation in PostgreSQL; replay logical checks in original order so descriptions/DDL stay identical.
-- [ ] Run new planner tests and existing postgres-schema/metadata/constraints suites; commit scoped files.
+- [x] Capture 3.2 descriptions and DDL using current schemaFixture plus edge cases before changing implementation.
+- [x] Add red tests asserting scalar:'ID' rather than uuid, embedded storage layout, FK targets, null/empty ownership metadata, no SQL, capability requirements, and PostgreSQL lowering equality against the captured fixture.
+- [x] Implement pure planner and engine lowering. Keep constraintBuilder and SQL expression compilation in PostgreSQL; replay logical checks in original order so descriptions/DDL stay identical.
+- [x] Run new planner tests and existing postgres-schema/metadata/constraints suites; commit scoped files.
 
 ## Task 2: SQL runtime and PostgreSQL plugin
 
@@ -35,10 +35,10 @@ Files: create packages/sql/src/{index,adapter,records,transactions,plugin}.js; c
 
 Interfaces: consume Task1 planner plus the exact plugin contract in the spec. Public createSQL({plugin}) and postgresPlugin({pool,schema}) expose the same runtime operations as createPostgres; plugin factories allow no initial options so existing namespace configure(options) remains usable. SQL source cannot embed PostgreSQL syntax or import PostgreSQL modules. Existing low-level PostgreSQL file imports used by tests remain valid via wrappers.
 
-- [ ] Add tests first for missing/malformed plugin, incompatible apiVersion, unsupported required capability, independent runtimes, configure-once, current facade equivalence and a non-PG recording plugin exercising create/read/update/delete/nested ownership without PostgreSQL casts or driver assumptions.
-- [ ] Move adapter/record/session orchestration into SQL. Delegate every statement and driver-specific value/transaction/error operation using the exact contract; preserve lifecycle order, UUID behavior through the PG plugin, result decoding and confirmed-abort retries.
-- [ ] Implement PostgreSQL plugin and record statement compiler by moving existing SQL text, with unchanged physical schema/query functions. Forward legacy createPostgres/default exports and internal wrappers to shared SQL implementations.
-- [ ] Run new plugin tests and existing postgres runtime/options/transaction tests. Record exact commands and results; commit only owned files.
+- [x] Add tests first for missing/malformed plugin, incompatible apiVersion, unsupported required capability, independent runtimes, configure-once, current facade equivalence and a non-PG recording plugin exercising create/read/update/delete/nested ownership without PostgreSQL casts or driver assumptions.
+- [x] Move adapter/record/session orchestration into SQL. Delegate every statement and driver-specific value/transaction/error operation using the exact contract; preserve lifecycle order, UUID behavior through the PG plugin, result decoding and confirmed-abort retries.
+- [x] Implement PostgreSQL plugin and record statement compiler by moving existing SQL text, with unchanged physical schema/query functions. Forward legacy createPostgres/default exports and internal wrappers to shared SQL implementations.
+- [x] Run new plugin tests and existing postgres runtime/options/transaction tests. Record exact commands and results; commit only owned files.
 
 ## Task 3: Packaging, declarations and release tooling
 
@@ -46,17 +46,17 @@ Files: packages/sql/{package.json,LICENSE,types/index.d.ts,README.md}; packages/
 
 Interfaces: expose concrete SQLPlugin, relational plan, physical storage and SQL runtime/session/model types; PostgreSQL pool/session native types remain source compatible. Publication order core, SQL, MCP, PostgreSQL, MongoDB. Existing script consumers must get SQL archives when installing PG.
 
-- [ ] Add SQL package metadata and typed old/new consumer cases; assert isolated SQL install never resolves pg/Mongoose/MCP/SDK.
-- [ ] Update five-package release set and fixtures, topological dependency validation, manifests and workflow staging/summary text. Keep fail-closed integrity checks.
-- [ ] Align to3.3.0 with release helper and regenerate root lock; run release/publisher tests, lint, and npm run test:packages.
-- [ ] Commit scoped packaging/declaration changes after review of runtime interface.
+- [x] Add SQL package metadata and typed old/new consumer cases; assert isolated SQL install never resolves pg/Mongoose/MCP/SDK.
+- [x] Update five-package release set and fixtures, topological dependency validation, manifests and workflow staging/summary text. Keep fail-closed integrity checks.
+- [x] Align to3.3.0 with release helper and regenerate root lock; run release/publisher tests, lint, and npm run test:packages.
+- [x] Commit scoped packaging/declaration changes after review of runtime interface.
 
 ## Task 4: Integration, documentation and publication
 
 Files: README.md, docs/guide/sql-plugins.md, docs/.vitepress/config.mts, relevant database/API/package docs, AGENTS.md, .cursor/rules/*.mdc, starter source/version assets, example dependency manifests after package publication.
 
-- [ ] Document architecture, full plugin contract, supported capabilities, old/new setup and immutable selection; advertise only PostgreSQL initially. Update development rules and package counts.
-- [ ] Run root lint/tests; full database suite on disposable Mongo/Postgres; verify an existing3.2 schema with new createSQL+postgresPlugin in validate mode and compare generated SQL; test both Barber backends against packed packages while retaining registry manifests in committed examples.
+- [x] Document architecture, full plugin contract, supported capabilities, old/new setup and immutable selection; advertise only PostgreSQL initially. Update development rules and package counts.
+- [x] Run root lint/tests; full database suite on disposable Mongo/Postgres; verify an existing3.2 schema with new createSQL+postgresPlugin in validate mode and compare generated SQL; test both Barber backends against packed packages while retaining registry manifests in committed examples.
 - [ ] Build docs and verify primary navigation/setup examples; request independent whole-branch review and resolve findings.
 - [ ] Push PR, wait relevant CI at exact head, merge; create tag/release following existing format; publish all five verified npm artifacts in dependency order under standing user authorization.
 - [ ] Verify anonymous registry metadata/tarballs and consumer installs; update examples to released3.3.0, build current starter assets and publish matching website; verify public pages.

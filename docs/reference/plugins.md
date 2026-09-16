@@ -7,6 +7,8 @@ description: Integrate authorization and pagination counts with GraphQL Yoga, En
 
 The shared `plugins` export from `@simtlix/simfinity-core`, also exposed as `simfinity.plugins` by either runtime, contains `createAuthPlugin`, `envelopCountPlugin`, and `apolloCountPlugin`.
 
+SQL database plugins have a separate storage contract. See [SQL core and plugins](/guide/sql-plugins) for `createSQL`, `postgresPlugin` and engine capabilities. They are selected at runtime construction; the helpers below integrate the generated GraphQL schema with a server.
+
 ## Authorization plugin
 
 ```javascript

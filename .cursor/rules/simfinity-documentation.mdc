@@ -69,7 +69,7 @@ Feature the in-repository Barber example on the homepage and in links to a compl
 
 Run `npm run docs:install` and `npm run docs:build` from the private root. The independent docs project reads the root `package.json` version and does not install a database adapter. See `docs/.vitepress/README.md` for theme, navigation, link and deployment conventions.
 
-The release helper aligns the private root and all four package versions with exact internal dependencies. Package tarballs retain consumer-facing paths even when repository directories change. Publish documentation for a new release only after the matching npm versions are verified; repository/documentation-only edits do not require a new npm release.
+The release helper aligns the private root and all five package versions with exact internal dependencies. Package tarballs retain consumer-facing paths even when repository directories change. Publish documentation for a new release only after the matching npm versions are verified; repository/documentation-only edits do not require a new npm release.
 
 ## Style Guidelines
 

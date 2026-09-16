@@ -10,7 +10,7 @@ Simfinity turns JavaScript `GraphQLObjectType` definitions into a GraphQL API ba
 You keep the GraphQL schema as the center of your application. Validation, lifecycle hooks, authorization, and state transitions provide places to add the behavior that makes your API specific to your product.
 
 ::: tip Choose your database
-Start with [MongoDB](./getting-started) or [PostgreSQL](./postgresql). These guides cover v3.2.0; [download the packages and compare storage semantics](./databases). Shared examples use `simfinity` for the selected runtime: the MongoDB namespace or the instance returned by `createPostgres()`.
+Start with [MongoDB](./getting-started) or [PostgreSQL](./postgresql). These guides cover v3.3.0; [download the packages and compare storage semantics](./databases). Shared examples use `simfinity` for the selected runtime: the MongoDB namespace or the instance returned by `createPostgres()`.
 :::
 
 Examples use the selected runtime from [database setup](./databases#runtime-setup-for-shared-examples). After `createSchema()`, PostgreSQL also requires awaited storage initialization before operations are served.

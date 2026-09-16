@@ -48,7 +48,7 @@ throw new SimfinityError('Resource not found', 'NOT_FOUND', 404);
 - Named exports for public API functions.
 - Core and the MongoDB/PostgreSQL facades use namespace or named imports, with no default facade export. MCP and helper submodules retain their existing default objects; preserve each package's established exports.
 - Re-export shared `validators`, `scalars`, `plugins` and `auth` helpers through both database facades. MongoDB also preserves MCP exports and legacy deep-import shims.
-- Keep implementations in their owning package and import other packages through their declared exports. Core must not depend on drivers or MCP; PostgreSQL depends on core and `pg` only. Keep matching declarations in `packages/*/types/` current.
+- Keep implementations in their owning package and import other packages through their declared exports. Core and SQL must not depend on drivers or MCP; PostgreSQL depends on SQL, core and `pg`. Keep physical SQL/types, error classification and connection operations inside the engine plugin; shared SQL must not import PostgreSQL. Keep matching declarations in `packages/*/types/` current.
 
 ## Function Naming
 

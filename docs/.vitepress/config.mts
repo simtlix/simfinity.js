@@ -47,6 +47,7 @@ export default defineConfig({
         { text: 'Choose a database', link: '/guide/databases' },
         { text: 'MongoDB', link: '/guide/getting-started' },
         { text: 'PostgreSQL', link: '/guide/postgresql' },
+        { text: 'SQL core & plugins', link: '/guide/sql-plugins' },
       ] },
       { text: 'Example app', link: '/resources/barber' },
       { text: 'API reference', link: '/reference/api', activeMatch: '/reference/' },
@@ -61,6 +62,7 @@ export default defineConfig({
         { text: 'Downloads & compatibility', link: '/guide/databases#download-the-starters' },
         { text: 'Release history', link: `${repository}/releases` },
         { text: 'MongoDB package on npm', link: 'https://www.npmjs.com/package/@simtlix/simfinity-js' },
+        { text: 'SQL package on npm', link: 'https://www.npmjs.com/package/@simtlix/simfinity-sql' },
         { text: 'PostgreSQL package on npm', link: 'https://www.npmjs.com/package/@simtlix/simfinity-postgres' },
       ] },
     ],
@@ -71,6 +73,7 @@ export default defineConfig({
         { text: 'Is Simfinity a fit?', link: '/guide/choosing-simfinity' },
         { text: 'MongoDB quick start', link: '/guide/getting-started' },
         { text: 'PostgreSQL quick start', link: '/guide/postgresql' },
+        { text: 'SQL core & plugins', link: '/guide/sql-plugins' },
       ] },
       { text: 'Build your API', collapsed: false, items: [
         { text: 'Schema & models', link: '/guide/schema' },

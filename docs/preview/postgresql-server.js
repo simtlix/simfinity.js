@@ -9,8 +9,7 @@ import {
 } from 'graphql';
 import { createYoga } from 'graphql-yoga';
 import pg from 'pg';
-import { createSQL } from '@simtlix/simfinity-sql';
-import { postgresPlugin } from '@simtlix/simfinity-postgres';
+import { createPostgres } from '@simtlix/simfinity-postgres';
 
 const SerieType = new GraphQLObjectType({
   name: 'Serie',
@@ -56,11 +55,9 @@ const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
   max: 10,
 });
-const simfinity = createSQL({
-  plugin: postgresPlugin({
-    pool,
-    schema: process.env.PGSCHEMA || 'series_api',
-  }),
+const simfinity = createPostgres({
+  pool,
+  schema: process.env.PGSCHEMA || 'series_api',
 });
 
 simfinity.connect(null, SerieType, 'serie', 'series', serieController);

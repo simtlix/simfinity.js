@@ -1,11 +1,11 @@
 ---
 title: Choose a database
-description: MongoDB and PostgreSQL editions of Simfinity, shared GraphQL APIs, storage differences, and downloadable v3.2.0 starters.
+description: MongoDB and PostgreSQL editions of Simfinity, shared GraphQL APIs, storage differences, and downloadable v3.3.0 starters.
 ---
 
 # Choose a database
 
-Simfinity 3.2.0 supports **MongoDB and PostgreSQL** through separate packages. Choose one when creating your application. The database adapter stays fixed for that deployment; this is not a runtime database switch or a MongoDB-to-PostgreSQL data migration tool.
+Simfinity 3.3.0 supports **MongoDB and PostgreSQL** through separate packages. Choose one when creating your application. The database adapter stays fixed for that deployment; this is not a runtime database switch or a MongoDB-to-PostgreSQL data migration tool.
 
 Both adapters generate the same GraphQL operation names and input shapes from the same type registrations and relationship metadata. Validation, authorization, query scopes, controllers, state machines, and optional MCP use the shared API. Native database access and physical storage have the differences below.
 
@@ -26,41 +26,43 @@ PostgreSQL enforces generated FKs, required values, UUID/scalar types, and embed
 
 To compare both backends in a complete app, run the [Barber examples](/resources/barber). They share a Next.js frontend and booking domain, with separate Docker stacks and native database implementations.
 
+Version 3.3.0 also exposes a [driver-free SQL core and PostgreSQL plugin](./sql-plugins). `createPostgres` remains supported and uses the same implementation; the plugin extraction preserves generated storage from 3.2.0.
+
 ## Install from npm
 
-Both adapters are released at **v3.2.0**. Choose one package in your application:
+Both adapters are released at **v3.3.0**. Choose one package in your application:
 
 ::: code-group
 
 ```sh [MongoDB]
-npm install @simtlix/simfinity-js@3.2.0 graphql@^16.11.0 mongoose@^8.16.2
+npm install @simtlix/simfinity-js@3.3.0 graphql@^16.11.0 mongoose@^8.16.2
 ```
 
 ```sh [PostgreSQL]
-npm install @simtlix/simfinity-postgres@3.2.0 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-postgres@3.3.0 graphql@^16.11.0 pg@^8.16.3
 ```
 
 :::
 
-Shared core dependencies install automatically. Add `@simtlix/simfinity-mcp@3.2.0` only when your PostgreSQL application exposes MCP tools; transport factories also require `@modelcontextprotocol/sdk`. See the [MCP guide](./mcp).
+Shared core dependencies install automatically. Add `@simtlix/simfinity-mcp@3.3.0` only when your PostgreSQL application exposes MCP tools; transport factories also require `@modelcontextprotocol/sdk`. See the [MCP guide](./mcp).
 
 <span id="download-the-preview"></span>
 
 ## Download the starters
 
-[Download both v3.2.0 starters](/releases/simfinity-3.2.0-starters.zip). Extract the ZIP and choose one application:
+[Download both v3.3.0 starters](/releases/simfinity-3.3.0-starters.zip). Extract the ZIP and choose one application:
 
 ::: code-group
 
 ```sh [MongoDB]
-cd simfinity-3.2.0-starters/mongodb
+cd simfinity-3.3.0-starters/mongodb
 npm install
 # Configure MongoDB using the MongoDB quick start.
 npm start
 ```
 
 ```sh [PostgreSQL]
-cd simfinity-3.2.0-starters/postgres
+cd simfinity-3.3.0-starters/postgres
 npm install
 # Set DATABASE_URL using the PostgreSQL quick start.
 npm start
@@ -68,19 +70,19 @@ npm start
 
 :::
 
-The starters require Node.js 22 or newer and pin Simfinity packages to 3.2.0 on npm. PostgreSQL installs neither Mongoose nor MCP by default. To use shared helpers directly, add `@simtlix/simfinity-core@3.2.0` as a direct dependency; both starter manifests already include it.
+The starters require Node.js 22 or newer and pin Simfinity packages to 3.3.0 on npm. PostgreSQL installs neither Mongoose nor MCP by default. To use shared helpers directly, add `@simtlix/simfinity-core@3.3.0` as a direct dependency; both starter manifests already include it.
 
 The MongoDB example uses embedded seasons. The PostgreSQL example uses a one-to-many relation to demonstrate real generated FKs. That example choice accounts for their different nested inputs; both adapters support both relationship shapes. Use the operation shown in the corresponding quick start.
 
 ### Verify the download
 
-Download the [ZIP SHA-256 checksum](/releases/simfinity-3.2.0-starters.zip.sha256.txt) beside the ZIP and check it before extraction:
+Download the [ZIP SHA-256 checksum](/releases/simfinity-3.3.0-starters.zip.sha256.txt) beside the ZIP and check it before extraction:
 
 ```sh
-shasum -a 256 -c simfinity-3.2.0-starters.zip.sha256.txt
+shasum -a 256 -c simfinity-3.3.0-starters.zip.sha256.txt
 ```
 
-The [v3.2.0 GitHub release](https://github.com/simtlix/simfinity.js/releases/tag/v3.2.0) contains the tagged source, package archives and integrity manifest. Keep installed Simfinity packages at the same version.
+The [v3.3.0 GitHub release](https://github.com/simtlix/simfinity.js/releases/tag/v3.3.0) contains the tagged source, package archives and integrity manifest. Keep installed Simfinity packages at the same version.
 
 ## Runtime setup for shared examples
 
@@ -112,7 +114,7 @@ The quick starts include their connection and runtime setup inline. When splitti
 
 ## Earlier downloads
 
-For an application using the published 3.0.1 MongoDB release, the [original MongoDB starter](/simfinity-series-starter.zip) remains available. It pins `@simtlix/simfinity-js` to `3.0.1` and supports the MongoDB quick start's operations. The wider API reference documents v3.2.0 and may include APIs or fixes absent from 3.0.1.
+For an application using the published 3.0.1 MongoDB release, the [original MongoDB starter](/simfinity-series-starter.zip) remains available. It pins `@simtlix/simfinity-js` to `3.0.1` and supports the MongoDB quick start's operations. The wider API reference documents v3.3.0 and may include APIs or fixes absent from 3.0.1.
 
 Check [compatibility and releases](../resources/compatibility) before upgrading an existing application. The [Series Sample Project](https://github.com/simtlix/series-sample) is a separate MongoDB application; it is not a PostgreSQL starter.
 
