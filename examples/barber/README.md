@@ -2,7 +2,7 @@
 
 Run the same barbershop booking app with either MongoDB or PostgreSQL. Both backends demonstrate generated GraphQL operations, relationships, query scopes, JWT authorization, controllers, state machines, and MCP tools. A shared Next.js frontend provides customer booking, an owner dashboard, and administration screens.
 
-These are independent, private npm applications in the Simfinity monorepo. They install released Simfinity runtime packages at exactly **3.2.0** from npm, with their own manifests and lockfiles. They are outside the `packages/*` workspaces and are not published with the libraries.
+These are independent, private npm applications in the Simfinity monorepo. They install released Simfinity runtime packages at exactly **3.3.0** from npm, with their own manifests and lockfiles. They are outside the `packages/*` workspaces and are not published with the libraries.
 
 ## Start with Docker
 

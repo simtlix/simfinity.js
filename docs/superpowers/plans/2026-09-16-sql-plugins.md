@@ -58,6 +58,6 @@ Files: README.md, docs/guide/sql-plugins.md, docs/.vitepress/config.mts, relevan
 - [x] Document architecture, full plugin contract, supported capabilities, old/new setup and immutable selection; advertise only PostgreSQL initially. Update development rules and package counts.
 - [x] Run root lint/tests; full database suite on disposable Mongo/Postgres; verify an existing3.2 schema with new createSQL+postgresPlugin in validate mode and compare generated SQL; test both Barber backends against packed packages while retaining registry manifests in committed examples.
 - [x] Build docs and verify primary navigation/setup examples; request independent whole-branch review and resolve findings.
-- [ ] Push PR, wait relevant CI at exact head, merge; create tag/release following existing format; publish all five verified npm artifacts in dependency order under standing user authorization.
+- [x] Push PR, wait relevant CI at exact head, merge; create tag/release following existing format; publish all five verified npm artifacts in dependency order under standing user authorization.
 - [ ] Verify anonymous registry metadata/tarballs and consumer installs; update examples to released3.3.0, build current starter assets and publish matching website; verify public pages.
 - [ ] Clean only owned worktree/test resources, keep master current and original demo healthy.

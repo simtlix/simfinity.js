@@ -9,7 +9,7 @@ alwaysApply: false
 ## Ownership and dependencies
 
 - `examples/barber/mongodb/`, `postgres/`, and `frontend/` are private npm apps with their own manifests and lockfiles. Run `npm ci` inside the affected app; root workspace installation does not install them.
-- Keep the apps outside `packages/*` workspaces and library release/version scripts. Backend Simfinity runtime packages use exact released version `3.2.0` from npm. Do not restore local vendor archives or file dependencies.
+- Keep the apps outside `packages/*` workspaces and library release/version scripts. Backend Simfinity runtime packages use exact released version `3.3.0` from npm. Do not restore local vendor archives or file dependencies.
 - The frontend source is shared. Its GraphQL endpoint is selected by the environment at build time and must be reachable by the browser. Treat IDs as opaque GraphQL `ID` strings: MongoDB uses ObjectIds and PostgreSQL uses UUIDs.
 - Preserve the same domain concepts, relationship metadata, scopes, controller responsibilities, and state transitions. Native Mongoose and PostgreSQL model/session calls remain separate. Choose the backend at startup; do not add runtime switching or automatic data migration.
 
