@@ -45,7 +45,7 @@ describe('manual workspace publication', () => {
     const result = publishRelease(manifestPath, { registry: 'npm', run: () => { throw new Error('Network must not be called'); } });
     expect(result.dryRun).toBe(true);
     expect(result.registry).toBe('https://registry.npmjs.org/');
-    expect(result.packages.map((item) => item.action)).toEqual(['validated', 'validated', 'validated', 'validated']);
+    expect(result.packages.map((item) => item.action)).toEqual(['validated', 'validated', 'validated', 'validated', 'validated']);
     expect(readFileSync(manifestPath)).toEqual(before);
   });
 
@@ -69,8 +69,8 @@ describe('manual workspace publication', () => {
     const remote = registry();
     const result = publishRelease(manifestPath, { registry: 'npm', dryRun: false, run: remote.run });
     expect(result.dryRun).toBe(false);
-    expect(result.packages.map((item) => item.action)).toEqual(['published', 'published', 'published', 'published']);
-    expect(remote.writes.map((item) => item.name)).toEqual(['@simtlix/simfinity-core', '@simtlix/simfinity-mcp', '@simtlix/simfinity-postgres', '@simtlix/simfinity-js']);
+    expect(result.packages.map((item) => item.action)).toEqual(['published', 'published', 'published', 'published', 'published']);
+    expect(remote.writes.map((item) => item.name)).toEqual(['@simtlix/simfinity-core', '@simtlix/simfinity-sql', '@simtlix/simfinity-mcp', '@simtlix/simfinity-postgres', '@simtlix/simfinity-js']);
     for (const { args } of remote.writes) {
       expect(args.slice(2)).toEqual(['--access', 'public', '--tag', 'latest', '--ignore-scripts', '--registry', 'https://registry.npmjs.org/']);
     }
@@ -96,15 +96,15 @@ describe('manual workspace publication', () => {
     const remote = registry(new Map([[`${core.name}@${core.version}`, core.integrity]]));
     const result = publishRelease(manifestPath, { registry: 'github', dryRun: false, run: remote.run });
     expect(result.packages[0].action).toBe('skipped');
-    expect(remote.writes.map((item) => item.name)).toEqual(['@simtlix/simfinity-mcp', '@simtlix/simfinity-postgres', '@simtlix/simfinity-js']);
+    expect(remote.writes.map((item) => item.name)).toEqual(['@simtlix/simfinity-sql', '@simtlix/simfinity-mcp', '@simtlix/simfinity-postgres', '@simtlix/simfinity-js']);
     for (const { args } of remote.writes) expect(args.slice(-2)).toEqual(['--registry', 'https://npm.pkg.github.com/']);
     const second = publishRelease(manifestPath, { registry: 'github', dryRun: false, run: remote.run });
-    expect(second.packages.map((item) => item.action)).toEqual(['skipped', 'skipped', 'skipped', 'skipped']);
-    expect(remote.writes).toHaveLength(3);
+    expect(second.packages.map((item) => item.action)).toEqual(['skipped', 'skipped', 'skipped', 'skipped', 'skipped']);
+    expect(remote.writes).toHaveLength(4);
   });
 
   it.each(['sha512-different', undefined, {}])('rejects conflicting or missing registry integrity %j before publishing any earlier package', (integrity) => {
-    const last = manifest.packages[3];
+    const last = manifest.packages.at(-1);
     const remote = registry(new Map([[`${last.name}@${last.version}`, integrity]]));
     expect(() => publishRelease(manifestPath, { registry: 'npm', dryRun: false, run: remote.run })).toThrow(/integrity/i);
     expect(remote.writes).toEqual([]);
@@ -125,7 +125,7 @@ describe('manual workspace publication', () => {
       throw remoteError('ETIMEDOUT');
     };
     expect(() => publishRelease(manifestPath, { registry: 'npm', dryRun: false, run })).toThrow(/publish|Registry/i);
-    expect(calls).toEqual(['view', 'view', 'view', 'view', 'publish']);
+    expect(calls).toEqual(['view', 'view', 'view', 'view', 'view', 'publish']);
   });
 
   it('rejects an unconfigured registry without a network request', () => {

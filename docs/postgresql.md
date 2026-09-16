@@ -1,11 +1,11 @@
 ---
 title: PostgreSQL storage reference
-description: PostgreSQL types, generated foreign keys, embedded storage, schema validation, native APIs, and compatibility boundaries in Simfinity 3.2.0.
+description: PostgreSQL types, generated foreign keys, embedded storage, schema validation, native APIs, and compatibility boundaries in Simfinity 3.3.0.
 ---
 
 # PostgreSQL support
 
-Simfinity 3.2.0 adds PostgreSQL schema generation and GraphQL execution through the shared runtime. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.2.0 is available from npm; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
+Simfinity 3.3.0 provides PostgreSQL schema generation and GraphQL execution through the shared core and SQL runtime. PostgreSQL is the first [SQL plugin](guide/sql-plugins.md); its existing facade and generated 3.2.0 physical schema remain compatible. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.3.0 is available from npm; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
 
 Start with the canonical [PostgreSQL quick start](guide/postgresql.md) for a complete Yoga server, initialization choice, controller/session example, and pool shutdown. This page is the detailed storage and compatibility reference.
 
@@ -13,16 +13,17 @@ The intended backend choice is permanent application configuration. There is no 
 
 ## Packages and local setup
 
-Use the [v3.2.0 starters](guide/databases.md#download-the-starters) and run `npm install` in the `postgres` folder. For library development, `npm ci` at the repository root installs the workspaces. Packages are distributed together:
+Use the [v3.3.0 starters](guide/databases.md#download-the-starters) and run `npm install` in the `postgres` folder. For library development, `npm ci` at the repository root installs the workspaces. Packages are distributed together:
 
 | Package | Current exports and dependencies |
 | --- | --- |
 | `@simtlix/simfinity-js` | MongoDB facade and native adapter, plus compatibility auth/MCP/scalar/validator/plugin exports. Mongoose dependencies remain here. |
 | `@simtlix/simfinity-core` | `createRuntime`, model metadata, typed query plans, scalar factory and error classes. GraphQL peer only; no drivers or MCP. |
-| `@simtlix/simfinity-postgres` | `createPostgres`, default-module runtime facade, schema description/DDL/initialization, shared scalar factory and errors. Depends on core and `pg`; GraphQL peer. No MongoDB, Mongoose or MCP dependency. |
+| `@simtlix/simfinity-sql` | `createSQL`, pure `planRelationalSchema`, plugin contract and relational orchestration. Depends on core; no driver, Mongoose or MCP. |
+| `@simtlix/simfinity-postgres` | `postgresPlugin`, `createPostgres`, default-module runtime facade, schema description/DDL/initialization, shared scalar factory and errors. Depends on SQL, core and `pg`; GraphQL peer. No MongoDB, Mongoose or MCP dependency. |
 | `@simtlix/simfinity-mcp` | Optional database-independent tool generation and transports. Depends on core; the MCP SDK is an optional peer. |
 
-All four packages are versioned together at version `3.2.0` with exact internal dependencies. The verified package set includes five standalone consumer checks, covering MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; the starter requires Node.js 22+. PostgreSQL 15, 16, and 18 are covered by the release verification.
+All five packages are versioned together at version `3.3.0` with exact internal dependencies. The verified package set includes standalone consumer checks for SQL as well as both facades, covering MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; the starter requires Node.js 22+. PostgreSQL 15, 16, and 18 are covered by the release verification.
 
 ## Executable example
 

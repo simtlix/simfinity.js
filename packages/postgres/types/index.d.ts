@@ -1,4 +1,5 @@
 import type { ModelRegistration, Runtime } from '@simtlix/simfinity-core';
+import type { SQLPlugin } from '@simtlix/simfinity-sql';
 import { auth, plugins, scalars, validators } from '@simtlix/simfinity-core';
 import type { GraphQLObjectType } from 'graphql';
 export {
@@ -153,6 +154,13 @@ export interface PostgresRuntime extends Runtime<PostgresModel, PostgresSession>
   initializeDatabase(options?: InitializationOptions): Promise<InitializationResult>;
   withTransaction<T>(session: PostgresSession | null | undefined, callback: (session: PostgresSession) => Promise<T> | T): Promise<T>;
 }
+/** PostgreSQL 15+ plugin for createSQL; omitted options allow later runtime.configure. */
+export function postgresPlugin(options?: PostgresConfiguration): SQLPlugin<
+  PostgresConfiguration,
+  DatabaseQueryable,
+  DatabaseDescription,
+  { rows: Record<string, unknown>[]; rowCount: number | null }
+>;
 export function createPostgres(options?: PostgresConfiguration): PostgresRuntime;
 export const configure: PostgresRuntime['configure'];
 export const connect: PostgresRuntime['connect'];

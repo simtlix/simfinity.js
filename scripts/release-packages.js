@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 // Dependencies precede every consumer in both archive manifests and publication.
 const packages = [
   ['packages/core', '@simtlix/simfinity-core'],
+  ['packages/sql', '@simtlix/simfinity-sql'],
   ['packages/mcp', '@simtlix/simfinity-mcp'],
   ['packages/postgres', '@simtlix/simfinity-postgres'],
   ['packages/mongodb', '@simtlix/simfinity-js'],

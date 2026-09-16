@@ -7,6 +7,7 @@ import CatalogExplorer from './CatalogExplorer.vue';
 import CodeSnippet from './CodeSnippet.vue';
 import { heroCapabilities } from './heroCapabilities.js';
 import { useHomeMotion } from './useHomeMotion.js';
+import { version } from '../../../package.json';
 
 const root = ref(null);
 useHomeMotion(root);
@@ -31,8 +32,8 @@ const database = ref('mongodb');
 const databaseGuide = computed(() => database.value === 'postgres' ? '/guide/postgresql.html' : '/guide/getting-started.html');
 const databaseName = computed(() => database.value === 'postgres' ? 'PostgreSQL' : 'MongoDB');
 const installCommand = computed(() => database.value === 'postgres'
-  ? 'npm i @simtlix/simfinity-postgres@3.2.0 graphql@^16.11.0 pg@^8.16.3'
-  : 'npm i @simtlix/simfinity-js@3.2.0 graphql@^16.11.0 mongoose@^8.16.2');
+  ? `npm i @simtlix/simfinity-postgres@${version} graphql@^16.11.0 pg@^8.16.3`
+  : `npm i @simtlix/simfinity-js@${version} graphql@^16.11.0 mongoose@^8.16.2`);
 const toolExamples = [
   { name: 'barbershops', kind: 'QUERY', description: 'Find approved shops with typed filters and pagination. Barber scopes decide which shops the caller can see.', link: '/guide/queries.html' },
   { name: 'bookings_aggregate', kind: 'AGGREGATE', description: 'Count bookings by state within the signed-in user’s query scope.', link: '/reference/aggregation.html' },
@@ -192,7 +193,7 @@ onUnmounted(() => {
             <a class="sim-button primary" :href="withBase(databaseGuide)">Start with {{ databaseName }} <span aria-hidden="true">&#8599;</span></a>
             <a class="text-link" :href="withBase('/resources/barber.html')">Explore the Barber app <span aria-hidden="true">&#8599;</span></a>
           </div>
-          <p class="preview-download"><a :href="withBase('/releases/simfinity-3.2.0-starters.zip')" download>Download v3.2.0 starters</a><span>Or install in your project:</span></p>
+          <p class="preview-download"><a :href="withBase(`/releases/simfinity-${version}-starters.zip`)" download>Download v{{ version }} starters</a><span>Or install in your project:</span></p>
           <div class="install-command">
             <span class="terminal-prompt" aria-hidden="true">$</span>
             <code>{{ installCommand }}</code>
@@ -202,7 +203,7 @@ onUnmounted(() => {
             </button>
             <span class="copy-feedback" role="status">{{ copyState === 'Copy install command' ? '' : copyState }}</span>
           </div>
-          <p class="database-note">Choose once when setting up your app. <a :href="withBase('/resources/compatibility.html')">v3.2.0 is available on npm.</a></p>
+          <p class="database-note">Choose once when setting up your app. <a :href="withBase('/resources/compatibility.html')">v{{ version }} is available on npm.</a></p>
         </div>
         <div class="hero-system"><div class="hero-camera"><SchemaGraph ref="heroGraph" :active="activeNode" :focused="heroFocused" :phase="heroPhase" :light="!isDark" @select="selectNode" /></div></div>
         <div class="hero-explorer-controls" :inert="!heroFocused" :aria-hidden="!heroFocused">

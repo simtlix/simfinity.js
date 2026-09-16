@@ -6,8 +6,9 @@ export const writeReleaseFixture = (root) => {
   const items = [
     ['packages/mongodb', '@simtlix/simfinity-js', { '@simtlix/simfinity-core': '0.1.0', '@simtlix/simfinity-mcp': '0.1.0' }],
     ['packages/core', '@simtlix/simfinity-core', {}],
+    ['packages/sql', '@simtlix/simfinity-sql', { '@simtlix/simfinity-core': '0.1.0' }],
     ['packages/mcp', '@simtlix/simfinity-mcp', { '@simtlix/simfinity-core': '0.1.0' }],
-    ['packages/postgres', '@simtlix/simfinity-postgres', { '@simtlix/simfinity-core': '0.1.0', pg: '^8.16.3' }],
+    ['packages/postgres', '@simtlix/simfinity-postgres', { '@simtlix/simfinity-core': '0.1.0', '@simtlix/simfinity-sql': '0.1.0', pg: '^8.16.3' }],
   ];
   const coordinator = { name: 'simfinity-workspace', version: '3.1.0', private: true, workspaces: ['packages/*'] };
   writeFileSync(join(root, 'package.json'), `${JSON.stringify(coordinator, null, 2)}\n`.replaceAll('\n', '\r\n'));

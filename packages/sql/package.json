@@ -1,0 +1,38 @@
+{
+  "name": "@simtlix/simfinity-sql",
+  "version": "3.3.0",
+  "description": "Driver-free relational runtime and database plugin contract for Simfinity",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./internal/adapter": "./src/adapter.js",
+    "./internal/records": "./src/records.js",
+    "./internal/transactions": "./src/transactions.js"
+  },
+  "files": [
+    "src",
+    "types",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/simtlix/simfinity.js",
+    "directory": "packages/sql"
+  },
+  "dependencies": {
+    "@simtlix/simfinity-core": "3.3.0"
+  },
+  "peerDependencies": {
+    "graphql": "^16.11.0"
+  }
+}

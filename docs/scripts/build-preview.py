@@ -31,7 +31,7 @@ def build(archive_directory):
         files[f'{backend}/package.json'] = (docs / f'preview/package.{backend}.json').read_bytes()
     for filename in ('schema.js', 'server.js', 'mcp.js'):
         files[f'mongodb/{filename}'] = (docs / f'public/starter/{filename}').read_bytes()
-    files['postgres/server.js'] = (docs / 'examples/postgresql-server.js').read_bytes()
+    files['postgres/server.js'] = (docs / 'preview/postgresql-server.js').read_bytes()
     output = docs / f'public/preview/{prefix}.zip'
     with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
         for filename, contents in sorted(files.items()):

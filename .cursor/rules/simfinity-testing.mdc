@@ -10,7 +10,7 @@ alwaysApply: false
 
 - **Vitest** with ES module imports: `import { describe, test, expect, beforeAll } from 'vitest';`
 - Run tests: `npm test` (runs `vitest run`), `npm run test:watch`, `npm run test:coverage`
-- Run commands from the private repository root after `npm ci`; all four packages are local workspaces.
+- Run commands from the private repository root after `npm ci`; all five packages are local workspaces.
 - Barber applications are independent projects outside those workspaces. Root lint and Vitest discovery exclude `examples/`; install each app with its own `npm ci` and follow `.github/workflows/barber.yml`. Backend `__tests__/` suites, shared HTTP contracts, frontend checks and PostgreSQL integration scripts belong to that workflow, not the library release suite.
 - In MongoDB schema/unit tests without a database, call `simfinity.preventCreatingCollection(true)` before `createSchema()` (usually in `beforeAll`). Do not apply this indiscriminately to database creation tests. On PostgreSQL the same setting forces storage validation, not an in-memory substitute.
 
@@ -104,10 +104,11 @@ Run `npm run lint` after modifying test files to catch unused imports or style v
 - `npm run test:integration` runs only `tests/integration/`. For the full database suite use `npm test` with `SIMFINITY_MONGODB_URI` (contract replica-set database), `SIMFINITY_TEST_MONGODB_URI` (a distinct MongoDB database for top-level regressions) and `SIMFINITY_POSTGRES_URI` (disposable PostgreSQL database). Suites skip explicitly without their URI. Setup drops databases/schema objects; never use an application URI.
 - Shared GraphQL fixtures live in `tests/contracts/model-fixtures.js`. Both backends execute real GraphQL scopes/hooks/nested CRUD. `query-parity.test.js` compares schemas, filters/arrays/dates, joins/counts and aggregates across both databases.
 - `embedded-query-parity.test.js` compares ragged nested scalar-list queries, array aggregates/sorts, direct presence markers, native/GraphQL defaults, state-name outputs, joined cardinality and historical UTC Date parameters. Run it under America/New_York as well as the database version matrix.
+- SQL plugin tests exercise a non-PostgreSQL recording driver, contract/capability rejection, binding, sessions and actual statement/value delegation. Golden 3.2.0 schema hashes protect physical compatibility; the recording driver does not count as supported database coverage.
 - PostgreSQL lifecycle/runtime/options suites cover rollback, retry input isolation, custom mutations, supplied sessions, concurrent state guards, embedded snapshots, explicit many-to-many, inverse scalar IDs, UUID aggregates, C collation/ICU drift and prevention of DDL.
 - Database CI runs the full suite on PostgreSQL 15/MongoDB 7, PostgreSQL 16/MongoDB 8 and PostgreSQL 18/MongoDB 8. Check physical FKs, actions, ownership cascades, nullable list items, enabled FK triggers, catalog drift and transactional rollback.
-- `npm run test:packages` checks five isolated runtime/strict TypeScript consumers: core, PostgreSQL, MCP without its optional SDK, MCP with its SDK, and MongoDB. It verifies dependency isolation, shared identities and legacy MongoDB deep imports against actual archives.
-- `tests/release-packages.test.js` and `tests/publish-packages.test.js` cover version alignment, workspace locks, archive validation and publication behavior. Keep the root private and all four published package versions aligned.
+- `npm run test:packages` checks isolated runtime/strict TypeScript consumers: core, driver-free SQL, PostgreSQL with old/new factories, MCP without its optional SDK, MCP with its SDK, and MongoDB. It verifies dependency isolation, shared identities and legacy MongoDB deep imports against actual archives.
+- `tests/release-packages.test.js` and `tests/publish-packages.test.js` cover version alignment, workspace locks, archive validation and publication behavior. Keep the root private and all five published package versions aligned.
 - Development/CI use Node.js 24 for Vitest 4. The library runtime floor remains Node.js >=18.18.0.
 
 ## Barber application checks

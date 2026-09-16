@@ -2,6 +2,7 @@
 import { computed } from 'vue';
 import DefaultTheme from 'vitepress/theme';
 import { useData, withBase } from 'vitepress';
+import { version } from '../../../package.json';
 
 const { page } = useData();
 const issueLink = computed(() => {
@@ -16,7 +17,7 @@ const issueLink = computed(() => {
 <template>
   <DefaultTheme.Layout>
     <template #doc-before>
-      <p class="docs-version-note">v3.2.0 · MongoDB & PostgreSQL. <a :href="withBase('/guide/databases.html#download-the-starters')">Install from npm or download the starters.</a></p>
+      <p class="docs-version-note">v{{ version }} · MongoDB & PostgreSQL. <a :href="withBase('/guide/databases.html#download-the-starters')">Install from npm or download the starters.</a></p>
     </template>
     <template #doc-footer-before>
       <div class="docs-feedback"><span>Help improve this page.</span><a :href="issueLink" target="_blank" rel="noreferrer">Report a documentation issue <span aria-hidden="true">↗</span></a></div>

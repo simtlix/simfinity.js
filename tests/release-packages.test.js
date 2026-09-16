@@ -24,16 +24,16 @@ describe('workspace release preparation', () => {
     setReleaseVersion(root, '3.2.0');
     const release = readRelease(root);
     expect(release.version).toBe('3.2.0');
-    expect(release.packages.map((item) => item.name)).toEqual(['@simtlix/simfinity-core', '@simtlix/simfinity-mcp', '@simtlix/simfinity-postgres', '@simtlix/simfinity-js']);
+    expect(release.packages.map((item) => item.name)).toEqual(['@simtlix/simfinity-core', '@simtlix/simfinity-sql', '@simtlix/simfinity-mcp', '@simtlix/simfinity-postgres', '@simtlix/simfinity-js']);
     for (const item of release.packages) expect(json(join(root, item.directory, 'package.json')).version).toBe('3.2.0');
     const lock = json(join(root, 'package-lock.json'));
     expect(lock.version).toBe('3.2.0');
-    expect(lock.packages['packages/postgres'].dependencies).toEqual({ '@simtlix/simfinity-core': '3.2.0', pg: '^8.16.3' });
+    expect(lock.packages['packages/postgres'].dependencies).toEqual({ '@simtlix/simfinity-core': '3.2.0', '@simtlix/simfinity-sql': '3.2.0', pg: '^8.16.3' });
     expect(lock.dependencies['@simtlix/simfinity-mcp']).toEqual({ version: 'file:packages/mcp', requires: { '@simtlix/simfinity-core': '3.2.0' } });
     expect(lock.packages['node_modules/pg']).toEqual({ version: '8.16.3', integrity: 'preserve-external-entry' });
     expect(json(join(root, 'package.json')).private).toBe(true);
     expect(lock.packages[''].version).toBe('3.2.0');
-    expect(release.packages.map((item) => item.directory)).toEqual(['packages/core', 'packages/mcp', 'packages/postgres', 'packages/mongodb']);
+    expect(release.packages.map((item) => item.directory)).toEqual(['packages/core', 'packages/sql', 'packages/mcp', 'packages/postgres', 'packages/mongodb']);
     expect(readFileSync(join(root, 'package.json'), 'utf8').replaceAll('\r\n', '')).not.toContain('\n');
   });
 
@@ -51,7 +51,7 @@ describe('workspace release preparation', () => {
   it('prepares releases without documentation dependencies or lockfiles', () => {
     const root = fixture();
     expect(() => setReleaseVersion(root, '3.2.0')).not.toThrow();
-    expect(readRelease(root).packages).toHaveLength(4);
+    expect(readRelease(root).packages).toHaveLength(5);
   });
 
   it('stages every version file changed by the release workflow', () => {
@@ -134,7 +134,7 @@ describe('workspace release preparation', () => {
     expect(readdirSync(root)).not.toContain('artifacts');
   });
 
-  it('packs all four actual archives in install order, skips lifecycle scripts, and verifies provenance and integrity', () => {
+  it('packs all five actual archives in install order, skips lifecycle scripts, and verifies provenance and integrity', () => {
     const root = fixture();
     setReleaseVersion(root, '3.2.0-rc.1');
     const destination = join(root, 'artifacts');
@@ -152,7 +152,12 @@ describe('workspace release preparation', () => {
       expect(item.integrity).toBe(`sha512-${createHash('sha512').update(readFileSync(archive)).digest('base64')}`);
       expect(item.sha256).toBe(createHash('sha256').update(readFileSync(archive)).digest('hex'));
     }
-    expect(readReleaseManifest(join(destination, 'manifest.json'))).toEqual(manifest);
+    const manifestPath = join(destination, 'manifest.json');
+    expect(readReleaseManifest(manifestPath)).toEqual(manifest);
+    const incomplete = { ...manifest, packages: manifest.packages.filter((item) => item.name !== '@simtlix/simfinity-sql') };
+    writeFileSync(manifestPath, JSON.stringify(incomplete));
+    expect(() => readReleaseManifest(manifestPath)).toThrow(/package set/i);
+    writeFileSync(manifestPath, JSON.stringify(manifest));
     const firstArchive = join(destination, manifest.packages[0].filename);
     const outside = join(root, 'outside.tgz');
     renameSync(firstArchive, outside);
@@ -164,9 +169,9 @@ describe('workspace release preparation', () => {
     expect(() => readReleaseManifest(join(destination, 'manifest.json'))).toThrow(/integrity/i);
   }, 30000);
 
-  it('rejects a new internal dependency that would publish a consumer before its dependency', () => {
+  it.each(['core', 'sql'])('rejects a new internal dependency that would publish %s before its dependency', (consumer) => {
     const root = fixture();
-    const path = join(root, 'packages/core/package.json');
+    const path = join(root, `packages/${consumer}/package.json`);
     const manifest = json(path);
     manifest.dependencies['@simtlix/simfinity-postgres'] = '0.1.0';
     writeFileSync(path, JSON.stringify(manifest));
@@ -207,7 +212,7 @@ describe('workspace release preparation', () => {
   it('rejects manifest paths escaping the artifact directory before reading files', () => {
     const root = fixture();
     const path = join(root, 'manifest.json');
-    const packages = ['core', 'mcp', 'postgres', 'js'].map((name) => ({ name: `@simtlix/simfinity-${name}`, version: '3.2.0', filename: 'safe.tgz' }));
+    const packages = ['core', 'sql', 'mcp', 'postgres', 'js'].map((name) => ({ name: `@simtlix/simfinity-${name}`, version: '3.2.0', filename: 'safe.tgz' }));
     packages[0].filename = '../secret.tgz';
     writeFileSync(path, JSON.stringify({ version: '3.2.0', commit: 'a'.repeat(40), packages }));
     expect(() => readReleaseManifest(path)).toThrow(/filename|manifest/i);

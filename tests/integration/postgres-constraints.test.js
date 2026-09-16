@@ -387,6 +387,8 @@ describe.skipIf(!uri || !mongoUri)('Mongo/PostgreSQL multikey differential', () 
   };
   const attempt = async (action) => { try { await action(); return true; } catch (error) { if (error.code === 11000 || error.extensions?.code === 'DUPLICATE_KEY') return false; throw error; } };
 
+  // Each matrix performs dozens of transactions on both engines. Budget CI
+  // latency explicitly instead of using the five-second unit-test deadline.
   it('matches generated Mongoose indexes and defaults for scalar keys inside embedded lists and nested trees', async () => {
     const cases = [{}, { entries: null }, { entries: [] }, { entries: [null] }, { entries: [{}] }, { entries: [{ code: null }] }, { entries: [{ code: 'x' }, { code: 'x' }] }];
     for (const value of cases) {
@@ -404,7 +406,7 @@ describe.skipIf(!uri || !mongoUri)('Mongo/PostgreSQL multikey differential', () 
     for (const other of [{}, { branches: [{ leaves: [{ code: 'x' }] }] }, { branches: [{ leaves: [{ code: 'y' }] }] }]) {
       expect(await attempt(() => api.getModel(types.Nested).create(other))).toBe(await attempt(() => mongoNested.create(other)));
     }
-  });
+  }, 30_000);
 
   it('matches explicit Mongo array indexes including default [] and terminal-empty versus ancestor-null keys', async () => {
     const cases = [{}, { entries: null }, { entries: [] }, { entries: [null] }, { entries: [{}] }, { entries: [{ codes: [] }] }, { entries: [{ codes: null }] }, { entries: [{ codes: [null] }] }, { entries: [{ codes: ['x', 'x'] }] }];
@@ -416,5 +418,5 @@ describe.skipIf(!uri || !mongoUri)('Mongo/PostgreSQL multikey differential', () 
         expect(await attempt(() => api.getModel(types.Arrays).create(other)), JSON.stringify({ value, other })).toBe(await attempt(() => mongoArrays.create(other)));
       }
     }
-  });
+  }, 30_000);
 });

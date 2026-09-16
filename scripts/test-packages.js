@@ -27,7 +27,9 @@ const run = (command, args, cwd) => {
 };
 const pack = (path) => {
   const output = JSON.parse(run('npm', ['pack', '--json', '--pack-destination', temporary], path));
-  assert(output[0].files.some((file) => file.path === 'types/index.d.ts'));
+  for (const required of ['types/index.d.ts', 'README.md', 'LICENSE']) {
+    assert(output[0].files.some((file) => file.path === required), `${output[0].name} is missing ${required}`);
+  }
   assert(!output[0].files.some((file) => (
     file.path.includes('.superpowers') || file.path.startsWith('node_modules/')
   )));
@@ -105,6 +107,43 @@ const coreSource = `import assert from 'node:assert/strict';
   assert.equal(scalars.EmailScalar.name, 'Email_String');
   assert.equal(typeof plugins.envelopCountPlugin, 'function');`;
 
+const sqlSource = `import assert from 'node:assert/strict';
+  import { createRequire } from 'node:module';
+  import { createSQL, planRelationalSchema } from '@simtlix/simfinity-sql';
+  import { describeModels } from '@simtlix/simfinity-core';
+  import { GraphQLID, GraphQLObjectType, GraphQLString, graphql } from 'graphql';
+  const require = createRequire(import.meta.url);
+  for (const dependency of ['pg', 'mongoose', 'mongodb', '@simtlix/simfinity-postgres', '@simtlix/simfinity-mcp', '@modelcontextprotocol/sdk']) {
+    assert.throws(() => require.resolve(dependency), { code: 'MODULE_NOT_FOUND' });
+  }
+  const book = new GraphQLObjectType({ name: 'SQLBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+  const plan = planRelationalSchema(describeModels([{ gqltype: book }]), { schema: 'recording' });
+  assert.deepEqual(plan.requirements, ['transactions']);
+  const calls = [];
+  const plugin = {
+    apiVersion: 1, name: 'recording', displayName: 'Recording', defaultSchema: 'recording', options: {}, capabilities: ['transactions'],
+    naming: { validateIdentifier() {}, generatedName: (...parts) => parts.join('__') },
+    describeSchema: (logical) => logical,
+    compileSchema: () => [],
+    async initialize() { return { mode: 'validate', created: [] }; },
+    compileQuery(models, description, query) { return { text: query.mode, values: [] }; },
+    compileRecord(description, operation) { return { text: operation.kind, values: [] }; },
+    values: { createId: () => 'recording-id', castId: String, encodeScalar: (field, value) => value, decodeScalar: (field, value) => value, encodeEmbedded: JSON.stringify },
+    driver: {
+      assertConfiguration() {}, acquire: async () => ({}), begin() {}, commit() {}, rollback() {}, release() {},
+      isRetryable: () => false, normalizeError: (error) => error,
+      async query(configuration, statement) { calls.push(statement.text); return { rows: [] }; },
+    },
+  };
+  const api = createSQL({ plugin });
+  api.connect(null, book, 'sqlBook', 'sqlBooks');
+  const schema = api.createSchema();
+  await api.initializeDatabase();
+  const result = await graphql({ schema, source: '{ sqlBooks { id title } }' });
+  assert.equal(result.errors, undefined);
+  assert.deepEqual(result.data.sqlBooks, []);
+  assert.deepEqual(calls, ['find']);`;
+
 const postgresSource = `import assert from 'node:assert/strict';
   import {
     InternalServerError,
@@ -118,11 +157,13 @@ const postgresSource = `import assert from 'node:assert/strict';
     createSchema,
     describeDatabase,
     initializeDatabase,
+    postgresPlugin,
     plugins,
     scalars,
     validators,
   } from '@simtlix/simfinity-postgres';
   import { createRuntime } from '@simtlix/simfinity-core';
+  import { createSQL } from '@simtlix/simfinity-sql';
   import {
     GraphQLID,
     GraphQLObjectType,
@@ -151,6 +192,10 @@ const postgresSource = `import assert from 'node:assert/strict';
   const beforeReady = await graphql({ schema, source: '{ postgresBooks { id } }' });
   assert.equal(beforeReady.errors[0].extensions.code, 'DATABASE_NOT_INITIALIZED');
   const description = api.describeDatabase();
+  const sql = createSQL({ plugin: postgresPlugin({ pool, schema: 'app' }) });
+  sql.connect(null, bookType, 'sqlBook', 'sqlBooks');
+  sql.createSchema();
+  assert.deepEqual(sql.describeDatabase(), description);
   assert(compileDatabaseSchema(description).some((sql) => sql.startsWith('CREATE TABLE')));
   assert.equal(describeDatabase([{ gqltype: bookType }]).tables.length, 1);
   assert.equal(typeof initializeDatabase, 'function');
@@ -333,7 +378,99 @@ const scalarName: string = scalars.EmailScalar.name;
 const countPlugin = plugins.envelopCountPlugin();
 void [model, formatted, known, operator, sort, valueName, rule, validations, scalarName, countPlugin];`;
 
-const postgresTypes = `import { Pool } from 'pg';
+const sqlTypes = `import {
+  createSQL,
+  planRelationalSchema,
+  type SQLCapability,
+  type SQLCompiledQuery,
+  type SQLDatabaseDescription,
+  type SQLFieldDescription,
+  type SQLModelDescription,
+  type SQLPlugin,
+  type SQLRecordOperation,
+  type SQLStatement,
+} from '@simtlix/simfinity-sql';
+import { describeModels } from '@simtlix/simfinity-core';
+import { GraphQLID, GraphQLObjectType, GraphQLString } from 'graphql';
+type Configuration = { schema: string; token: string };
+type Client = { active: boolean };
+type Description = SQLDatabaseDescription & { dialect: 'recording' };
+const book = new GraphQLObjectType({ name: 'TypedSQLBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+const plan = planRelationalSchema(describeModels([{ gqltype: book }]));
+const capability: SQLCapability = plan.requirements[0];
+const scalar: string = plan.tables[0].columns[0].scalar;
+const logical = plan.tables[0];
+// @ts-expect-error Physical column types do not belong to the relational plan.
+logical.columns[0].type;
+const plugin: SQLPlugin<Configuration, Client, Description> = {
+  apiVersion: 1, name: 'recording', displayName: 'Recording', defaultSchema: 'recording',
+  options: { schema: 'recording', token: 'test' }, capabilities: ['transactions'],
+  naming: { validateIdentifier(value) { if (!value) throw new Error('empty'); }, generatedName: (...parts) => parts.join('__') },
+  describeSchema(logicalPlan) {
+    return { schema: logicalPlan.schema, dialect: 'recording', tables: logicalPlan.tables.map((table) => ({ ...table, columns: table.columns.map((column) => ({ name: column.name, presenceColumn: column.presenceColumn })) })) };
+  },
+  compileSchema(description) { return [description.dialect]; },
+  async initialize(configuration, description, options) { return { mode: options?.mode ?? 'validate', created: [configuration.schema, description.dialect] }; },
+  compileQuery(models, description, query, extra) {
+    const metadata: SQLModelDescription = models;
+    const field: SQLFieldDescription = metadata.entities[0].fields[0];
+    const stateNames: string[] | undefined = field.stateNames?.map((state) => state.value + ':' + state.name);
+    // @ts-expect-error State storage values have already been converted to strings.
+    const numericState: number | undefined = field.stateNames?.[0].value;
+    void numericState;
+    const nestedStateNames: string[] | undefined = field.fields?.[0].stateNames?.map((state) => state.name);
+    return { text: query.mode, values: [stateNames, nestedStateNames, description.dialect, extra?.id], aggregateFields: [field] };
+  },
+  compileRecord(description, operation): SQLStatement {
+    const tableName: string = operation.table.name;
+    switch (operation.kind) {
+      case 'selectById': return { text: tableName, values: [operation.id, operation.lock] };
+      case 'selectOwned': return { text: tableName, values: [operation.ids, operation.ordered] };
+      case 'insert': return { text: tableName, values: Object.values(operation.data) };
+      case 'update': return { text: tableName, values: [operation.id, ...Object.values(operation.data)] };
+      case 'deleteById': return { text: tableName, values: [operation.id] };
+      case 'deleteOwned': return { text: tableName, values: [operation.ownerId] };
+      default: { const exhaustive: never = operation; return exhaustive; }
+    }
+  },
+  values: {
+    createId: () => 'opaque-id', castId: String,
+    encodeScalar(field, value) { return field.stateNames?.find((state) => state.name === value)?.value ?? value; },
+    decodeScalar(field, value, gqlField) { return field.stateNames?.find((state) => state.value === value)?.name ?? (gqlField?.name ? value : field.scalar); },
+    encodeEmbedded: JSON.stringify,
+  },
+  driver: {
+    assertConfiguration(configuration) { if (!configuration?.token) throw new Error('token'); },
+    async acquire(configuration) { return { active: Boolean(configuration.token) }; },
+    begin(client) { client.active = true; }, commit(client) { client.active = false; }, rollback(client) { client.active = false; }, release() {},
+    isRetryable(error) { return error instanceof Error && error.message === 'aborted'; }, normalizeError: (error) => error,
+    async query(configuration, statement, client) { return { rows: [{ token: configuration.token, text: statement.text, active: client?.active }] }; },
+  },
+};
+declare const compiled: SQLCompiledQuery;
+const aggregateStateNames: string[] | undefined = compiled.aggregateFields?.[0].stateNames?.map((state) => state.name);
+void aggregateStateNames;
+const api = createSQL({ plugin });
+const description: Description = api.describeDatabase();
+api.configure({ schema: 'recording', token: 'later' });
+// @ts-expect-error Runtime configuration preserves the plugin's required fields.
+api.configure({ schema: 'missing-token' });
+void api.withTransaction(null, async (session) => {
+  const active: boolean = session.client.active;
+  const result = await session.query('query', [active]);
+  const value: unknown = result.rows[0].token;
+  return value;
+});
+const model = api.getModel(book);
+void model?.find({ title: { value: 'book' } });
+// @ts-expect-error Record operations receive physical table metadata, not a name.
+const badOperation: SQLRecordOperation = { kind: 'deleteById', table: 'book', id: 'id' };
+// @ts-expect-error Only version 1 is currently supported.
+const badPlugin: SQLPlugin<Configuration, Client, Description> = { ...plugin, apiVersion: 2 };
+void [capability, scalar, description, badOperation, badPlugin];`;
+
+const postgresTypes = `import { Pool, type PoolClient } from 'pg';
+import { createSQL } from '@simtlix/simfinity-sql';
 import {
   auth,
   configure,
@@ -341,6 +478,7 @@ import {
   createPostgres,
   createSchema,
   initializeDatabase,
+  postgresPlugin,
   plugins,
   scalars,
   validators,
@@ -349,11 +487,26 @@ import {
   type InitializationResult,
   type PostgresModel,
   type PostgresRuntime,
+  type PostgresSession,
+  type DatabaseQueryable,
 } from '@simtlix/simfinity-postgres';
 import { GraphQLObjectType, GraphQLString } from 'graphql';
 declare const pool: Pool;
 const type = new GraphQLObjectType({ name: 'TypedPostgresBook', fields: { title: { type: GraphQLString } } });
 const api: PostgresRuntime = createPostgres({ pool, schema: 'app' });
+const sqlApi: PostgresRuntime = createSQL({ plugin: postgresPlugin({ pool, schema: 'app' }) });
+const deferred = createSQL({ plugin: postgresPlugin() });
+deferred.configure({ pool });
+declare const nativeClient: PoolClient;
+const queryable: DatabaseQueryable = nativeClient;
+const session: PostgresSession = { client: nativeClient, query: nativeClient.query.bind(nativeClient), inTransaction: () => true };
+void sqlApi.withTransaction(session, async (transaction) => {
+  await transaction.client.query('SELECT $1', [1]);
+  return transaction.inTransaction();
+});
+void sqlApi.getModel(type)?.find({ title: { operator: 'EQ', value: 'typed' }, sort: { terms: [{ field: 'title', order: 'ASC' }] } }, { session });
+void api.getModel(type)?.findById('opaque-id', { session });
+void queryable;
 const rule: AuthRuleFunction = auth.requireAuth();
 const email = validators.email();
 const scalarName: string = scalars.EmailScalar.name;
@@ -421,14 +574,21 @@ void [generated, server, sameGenerator];`;
 const cases = [
   {
     name: 'core',
-    archives: (core) => [core],
+    archives: ({ core }) => [core],
     source: coreSource,
     types: coreTypes,
-    forbiddenPackages: ['mongoose', 'mongodb', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
+    forbiddenPackages: ['pg', 'mongoose', 'mongodb', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
+  },
+  {
+    name: 'sql',
+    archives: ({ core, sql }) => [core, sql],
+    source: sqlSource,
+    types: sqlTypes,
+    forbiddenPackages: ['pg', 'mongoose', 'mongodb', '@simtlix/simfinity-postgres', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
   },
   {
     name: 'postgres',
-    archives: (core, mcp, postgres) => [core, postgres],
+    archives: ({ core, sql, postgres }) => [core, sql, postgres],
     source: postgresSource,
     types: postgresTypes,
     typeDependencies: ['@types/pg@8'],
@@ -436,14 +596,14 @@ const cases = [
   },
   {
     name: 'mcp',
-    archives: (core, mcp) => [core, mcp],
+    archives: ({ core, mcp }) => [core, mcp],
     source: mcpSource,
     types: mcpTypes,
     forbiddenPackages: ['mongoose', 'mongodb', '@modelcontextprotocol/sdk'],
   },
   {
     name: 'mcp-sdk',
-    archives: (core, mcp) => [core, mcp],
+    archives: ({ core, mcp }) => [core, mcp],
     source: mcpSdkSource,
     types: mcpTypes,
     dependencies: ['@modelcontextprotocol/sdk@1'],
@@ -451,7 +611,7 @@ const cases = [
   },
   {
     name: 'mongo',
-    archives: (core, mcp, postgres, mongo) => [core, mcp, mongo],
+    archives: ({ core, mcp, mongo }) => [core, mcp, mongo],
     source: mongoSource,
     types: mongoTypes,
   },
@@ -459,6 +619,7 @@ const cases = [
 
 try {
   const core = pack(resolve(root, 'packages/core'));
+  const sql = pack(resolve(root, 'packages/sql'));
   const mcp = pack(resolve(root, 'packages/mcp'));
   const postgres = pack(resolve(root, 'packages/postgres'));
   const mongo = pack(resolve(root, 'packages/mongodb'));
@@ -475,7 +636,7 @@ try {
       '--ignore-scripts',
       '--no-audit',
       '--no-fund',
-      ...testCase.archives(core, mcp, postgres, mongo),
+      ...testCase.archives({ core, sql, mcp, postgres, mongo }),
       'graphql@16',
       'typescript@5',
       ...(testCase.dependencies || []),
