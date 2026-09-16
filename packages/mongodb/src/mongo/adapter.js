@@ -4,12 +4,14 @@ import { getNamedType, isListType, isNonNullType } from 'graphql';
 import { createMongoModel } from './models.js';
 import { createMongoQueries } from './queries.js';
 import { withMongoTransaction } from './transactions.js';
+import { createMongoIntegrity } from './integrity.js';
 
 mongoose.set('strictQuery', false);
 
 const withSession = (query, session) => (session ? query.session(session) : query);
 
-export const createMongoAdapter = () => {
+export const createMongoAdapter = (options) => {
+  const integrity = createMongoIntegrity(options);
   let queries;
   const privateConnectionFields = new Map();
 
@@ -20,11 +22,13 @@ export const createMongoAdapter = () => {
 
   const adapter = {
     bind(binding) {
+      integrity.bind(binding);
       queries = createMongoQueries(binding);
       adapter.buildQuery = queries.buildQuery;
       adapter.buildFilterGroupMatch = queries.buildFilterGroupMatch;
     },
-    prepare(registrations) {
+    prepare(registrations, preparationOptions) {
+      integrity.prepare(registrations, preparationOptions);
       for (const registration of registrations) {
         for (const field of Object.values(registration.gqltype.getFields())) {
           const relation = field.extensions?.relation;
@@ -45,31 +49,34 @@ export const createMongoAdapter = () => {
         }
       }
     },
-    createModel(gqltype, onModelCreated, options) {
+    createModel(gqltype, onModelCreated, modelOptions) {
       return createMongoModel(gqltype, (model) => {
         for (const fieldName of privateConnectionFields.get(gqltype.name) || []) {
           model.schema.add({ [fieldName]: mongoose.Schema.Types.ObjectId });
           model.schema.index({ [fieldName]: 1 });
         }
         if (onModelCreated) onModelCreated(model);
-      }, options);
+      }, integrity.enabled ? { ...modelOptions, createCollection: false } : modelOptions);
     },
     castId(value) {
       return new mongoose.Types.ObjectId(value);
     },
-    withTransaction: withMongoTransaction,
+    initialize: integrity.initialize,
+    withTransaction: integrity.enabled ? integrity.withTransaction : withMongoTransaction,
     newRecord(Model, data, session) {
       const record = new Model(data);
       record.$session(session);
       return record;
     },
-    saveRecord(Model, record) {
+    saveRecord(Model, record, session) {
+      if (integrity.enabled) return integrity.saveRecord(Model, record, session === undefined ? record.$session() : session);
       return record.save();
     },
     toObject(record) {
       return typeof record?.toObject === 'function' ? record.toObject() : record;
     },
     getById(Model, id, session, { projection, plain, requiredId } = {}) {
+      integrity.assertReady();
       let query = withSession(requiredId == null ? Model.findById(id, projection)
         : Model.findOne({ $and: [{ _id: requiredId }, { _id: id }] }, projection), session);
       if (plain) query = query.lean();
@@ -79,27 +86,36 @@ export const createMongoAdapter = () => {
       return Object.keys(unset).length > 0 ? { ...set, $unset: unset } : set;
     },
     update(Model, id, update, session) {
+      if (integrity.enabled) return integrity.updateRecord(Model, id, update, session);
       return withSession(Model.findByIdAndUpdate(id, update, { new: true }), session);
     },
     delete(Model, id, session) {
+      if (integrity.enabled) {
+        integrity.assertWrite(Model, session);
+        return integrity.deleteRecord(Model, id, session);
+      }
       return withSession(Model.findByIdAndDelete(id), session);
     },
     async find(Model, gqltype, args, session, { requiredId } = {}) {
+      integrity.assertReady();
       const pipeline = await queries.buildQuery(args, gqltype);
       if (requiredId != null) pipeline.unshift({ $match: { _id: Model.schema.path('_id').cast(requiredId) } });
       if (pipeline.length === 0) return withSession(Model.find({}), session);
       return withSession(Model.aggregate(pipeline), session);
     },
     async count(Model, gqltype, args, session) {
+      integrity.assertReady();
       const pipeline = await queries.buildQuery(args, gqltype, true);
       const result = await withSession(Model.aggregate(pipeline), session);
       return result[0] ? result[0].size : 0;
     },
     async aggregate(Model, gqltype, args, session) {
+      integrity.assertReady();
       const pipeline = await queries.buildAggregationQuery(args, gqltype, args.aggregation);
       return withSession(Model.aggregate(pipeline), session);
     },
     async findChildren(Model, gqltype, connectionField, parentId, args, session) {
+      integrity.assertReady();
       const pipeline = await queries.buildQuery(args, gqltype);
       const path = Model.schema.path(connectionField);
       pipeline.unshift({ $match: { [connectionField]: path ? path.cast(parentId) : parentId } });
@@ -107,5 +123,6 @@ export const createMongoAdapter = () => {
     },
   };
 
+  Object.defineProperty(adapter, 'referentialIntegrity', { value: integrity.mode, enumerable: true });
   return adapter;
 };

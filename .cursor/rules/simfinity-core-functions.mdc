@@ -78,7 +78,7 @@ The runtime delegates generated mutations, custom mutations and programmatic `sa
 
 MongoDB transaction handling in `packages/mongodb/src/mongo/transactions.js`:
 
-1. Without a session, owns a session + transaction on the registered model's connection (default Mongoose connection for custom mutations). A supplied session must have an active transaction; the caller owns its lifecycle and retries.
+1. Without a session, owns a session + transaction on the registered model's connection (default Mongoose connection for custom mutations). A supplied session must have an active transaction; the caller owns its lifecycle and retries. Opt-in transactional Mongo reference integrity additionally requires snapshot/majority options and aborts supplied sessions on guarded-write errors, violations or ambiguous update results.
 2. Calls the appropriate handler: `onSaveObject`, `onUpdateSubject`, `onDeleteObject`, `onStateChanged`
 3. Commits on success, aborts active transactions on write/hook errors, and awaits owned session cleanup. Abort/cleanup errors do not replace an earlier operation error.
 4. Retries the transaction on `TransientTransactionError`, up to five retries after the first attempt. `UnknownTransactionCommitResult` retries only commit, up to five retries, never repeating the body for an uncertain result. Expired commits are not retried; terminal uncertainty is surfaced without replaying writes.

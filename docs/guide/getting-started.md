@@ -9,12 +9,14 @@ Build a small series catalog with a working GraphQL endpoint. By the end, you wi
 
 This page is the MongoDB starter. For UUID identities, generated PostgreSQL tables, and real foreign keys, follow the [PostgreSQL quick start](./postgresql).
 
+For transactional reference checks and restrict-delete behavior in MongoDB, opt into [MongoDB reference integrity](./mongodb-integrity) when creating the adapter. This starter keeps the default `'off'` behavior.
+
 
 ## Download the starter
 
 [Download the v3.3.0 starters](/releases/simfinity-3.3.0-starters.zip) and extract them. The `mongodb` folder contains the files shown below and installs the released packages from npm. See [downloads and checksums](./databases#download-the-starters).
 
-For the published MongoDB release, the [original 3.0.1 starter](/simfinity-series-starter.zip) remains available; its schema and server support this page's operations. The rest of this site documents v3.3.0.
+For the published MongoDB release, the [original 3.0.1 starter](/simfinity-series-starter.zip) remains available; its schema and server support this page's operations. The rest of this site documents v3.4.0.
 
 | Before you begin | You will build |
 | --- | --- |

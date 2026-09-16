@@ -72,6 +72,7 @@ export default defineConfig({
         { text: 'Choose a database', link: '/guide/databases' },
         { text: 'Is Simfinity a fit?', link: '/guide/choosing-simfinity' },
         { text: 'MongoDB quick start', link: '/guide/getting-started' },
+        { text: 'MongoDB reference integrity', link: '/guide/mongodb-integrity' },
         { text: 'PostgreSQL quick start', link: '/guide/postgresql' },
         { text: 'SQL core & plugins', link: '/guide/sql-plugins' },
       ] },

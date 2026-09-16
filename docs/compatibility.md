@@ -1,13 +1,13 @@
 ---
 title: Database compatibility contract
-description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.3.0.
+description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.4.0.
 ---
 
 # Database compatibility contract
 
-This ledger records the v3.3.0 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
+This ledger records the v3.4.0 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
 
-The test paths below are available in the [v3.3.0 source](https://github.com/simtlix/simfinity.js/tree/v3.3.0). To try the API, use the [released starters](guide/databases.md#download-the-starters).
+The test paths below are available in the [v3.4.0 source](https://github.com/simtlix/simfinity.js/tree/v3.4.0). To try the API, use the [released starters](guide/databases.md#download-the-starters).
 
 When running the source tests, set `SIMFINITY_MONGODB_URI` and `SIMFINITY_POSTGRES_URI` to disposable databases for the cross-backend suites. Set `SIMFINITY_TEST_MONGODB_URI` to a separate disposable MongoDB database for upstream opt-in regressions. Mongo setup drops its configured databases, so these URIs must never identify application data. When a variable is absent, its integration suites are reported as skipped.
 
@@ -75,7 +75,7 @@ Nested child saves/updates/deletes run target middleware with root argument shap
 
 `configureQueryLimits({ maxPageSize })` is available on MongoDB and PostgreSQL facades and runtime instances. Its shared process-wide default is 1000; unpaged lists use the smaller of 100 and the configured maximum. Explicit page/size and calculated skip must be positive/safe integers within the maximum; unpaged aggregates remain unbounded. Invalid sort/filter paths and malformed filter values fail with domain errors. v3.1.0 rejects whole-array EQ values and null elements in filter lists; these older permissive parity cases now assert rejection on both backends.
 
-MongoDB transactions use the registered model connection, retry transient bodies and uncertain commits separately, and await owned cleanup. Borrowed active sessions never commit, abort, retry or end inside the runtime. PostgreSQL validates instance-owned active handles, retains repeatable-read atomicity, and retries confirmed serialization/deadlock aborts only.
+MongoDB transactions use the registered model connection, retry transient bodies and uncertain commits separately, and await owned cleanup. Borrowed active sessions remain caller-owned in default Mongo mode. With opt-in transactional reference integrity, violations and guarded-write errors abort supplied sessions; those sessions require snapshot reads and majority commits. See [MongoDB reference integrity](guide/mongodb-integrity.md). PostgreSQL validates instance-owned active handles, retains repeatable-read atomicity, and retries confirmed serialization/deadlock aborts only.
 
 Embedded parity also covers native/GraphQL default and minimization differences, direct SQL presence, uniqueness after omitted-parent defaults, and UTC historical Date parameters under `America/New_York`. PostgreSQL keeps required constraints: an omitted optional inline parent materialized by descendant array defaults must contain any required scalar; GraphQL create omits explicit null before applying defaults. See the PostgreSQL native/default contract for the explicit-null native alternative.
 
@@ -100,3 +100,9 @@ Logical capability checks reject missing guarantees before physical compilation 
 Verification adds a non-PostgreSQL recording plugin, early contract/capability failures, fixed binding, transaction/session delegation, and real PostgreSQL interoperability between the old and new factories. Recording tests establish the plugin boundary; they do not establish support for a second SQL engine.
 
 SQL extraction verification (2026-09-16): the full suite passed **51 files / 1,029 tests** with disposable PostgreSQL 18 and MongoDB 8, with no skips. All six isolated packed runtime/strict TypeScript consumers passed. A separate registry-installed 3.2.0 runtime created real schema and nested data; 3.3.0 `createSQL` validated that schema without DDL, produced identical metadata/SQL, preserved the records and successfully updated them. Barber passed both backend unit suites (69 PostgreSQL and 59 MongoDB tests), its PostgreSQL 67-operation/native-constraint corpus, MongoDB transaction checks, shared 19-operation HTTP/MCP contract on each backend, both dataset load/delete suites and frontend query validation against the generated schema.
+
+## v3.4.0 optional MongoDB reference integrity
+
+Mongo adapters accept immutable `referentialIntegrity: 'off' | 'transactional'` configuration. The default remains off. Transactional mode requires awaited startup auditing, coordinates target-document writes against concurrent deletion, and rejects missing direct/embedded/inferred/private/link references with `REFERENCE_CONSTRAINT_VIOLATION`. Supplied transactions require snapshot/majority options and abort on guarded-write errors. Native writers remain outside the guarantee. See [the full contract](guide/mongodb-integrity.md). PostgreSQL physical schemas and FK behavior are unchanged.
+
+Verification: **53 files / 1,071 tests** passed against disposable MongoDB 8 replica-set and standalone deployments plus PostgreSQL 18, with no skipped tests. The 42 new cases include real GraphQL HTTP rejection, owned/borrowed rollback, post-write hook errors, three ordered concurrency schedules, independent runtime/client locks, actual transient retries, legacy off-mode Query compatibility and strict startup rejection. All six packed runtime/strict TypeScript consumers, lint and the website build passed.

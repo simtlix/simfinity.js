@@ -17,7 +17,7 @@ npm run docs:dev
 
 For builds and hosting, see the [website maintainer guide](docs/.vitepress/README.md). The website documents the current source; some older examples later in this README retain historical conventions.
 
-> **Documentation for both databases:** The [public website](https://simtlix.github.io/simfinity.js/guide/databases.html) now covers MongoDB and PostgreSQL, including shared APIs, relationships, generated FKs, scopes, and MCP. Both adapters are available in **v3.3.0** on npm. Follow the quick starts for installation, or download the runnable starters and verified release archives.
+> **Documentation for both databases:** The [public website](https://simtlix.github.io/simfinity.js/guide/databases.html) now covers MongoDB and PostgreSQL, including shared APIs, relationships, generated FKs, scopes, and MCP. Both adapters are available in **v3.4.0** on npm. Follow the quick starts for installation, or download the runnable starters and verified release archives.
 
 ## 📑 Table of Contents
 
@@ -28,6 +28,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 - [Core Concepts](#-core-concepts)
   - [Connecting Models](#connecting-models)
   - [Creating Schemas](#creating-schemas)
+  - [MongoDB Reference Integrity](#mongodb-reference-integrity)
   - [Global Configuration](#global-configuration)
 - [Basic Usage](#-basic-usage)
   - [Automatic Query Generation](#automatic-query-generation)
@@ -107,14 +108,14 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose@^8.16.2 graphql@^16.11.0 @simtlix/simfinity-js@3.3.0
+npm install mongoose@^8.16.2 graphql@^16.11.0 @simtlix/simfinity-js@3.4.0
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies.
 
 ## PostgreSQL support
 
-Version 3.3.0 releases `@simtlix/simfinity-core`, `@simtlix/simfinity-sql`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-postgres`, and the MongoDB facade in lockstep. Install the selected adapter from npm; shared dependencies resolve automatically. PostgreSQL runs the shared GraphQL query/mutation engine, including scopes, controllers, validators, state transitions and nested writes. It generates and validates tables, indexes, and **real foreign keys**, including inverse relations, explicit many-to-many linking entities, and references inside embedded objects. PostgreSQL installation does not pull Mongoose, MongoDB, or MCP dependencies.
+Version 3.4.0 releases `@simtlix/simfinity-core`, `@simtlix/simfinity-sql`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-postgres`, and the MongoDB facade in lockstep. Install the selected adapter from npm; shared dependencies resolve automatically. PostgreSQL runs the shared GraphQL query/mutation engine, including scopes, controllers, validators, state transitions and nested writes. It generates and validates tables, indexes, and **real foreign keys**, including inverse relations, explicit many-to-many linking entities, and references inside embedded objects. PostgreSQL installation does not pull Mongoose, MongoDB, or MCP dependencies.
 
 Version 3.3.0 separates the driver-free relational runtime into `@simtlix/simfinity-sql`. PostgreSQL supplies the first SQL plugin; it owns physical SQL, types, schema initialization and `pg`. Existing `createPostgres` and namespace imports remain compatible, with unchanged generated PostgreSQL storage and FKs. Use the explicit composition API when you want to select a plugin:
 
@@ -149,7 +150,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.3.0 @modelcontextprotocol/sdk@^1.13.0
+npm install @simtlix/simfinity-mcp@3.4.0 @modelcontextprotocol/sdk@^1.13.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
@@ -247,6 +248,25 @@ Importing Simfinity initializes its global `__Field.extensions` introspection fi
 The extension remains shared by every schema using that GraphQL peer; Simfinity's type and middleware registries belong to each runtime instance. Schemas constructed after import include `FieldExtensionsType` and `RelationType` in their type maps. Earlier schemas keep their original type maps: ordinary operations and direct metadata selections work, but named fragments on the new metadata types require a schema constructed after import.
 
 Schema-cloning tools remain unsupported. In a process that has imported Simfinity, `buildClientSchema()` on a post-import schema's introspection result can also fail with duplicate metadata type names. Use Envelop plugins and in-place resolver wrapping; see the [introspection metadata reference](docs/reference/extensions.md).
+
+### MongoDB Reference Integrity
+
+Opt into reference checks when creating the MongoDB adapter. The default remains `'off'`, preserving existing applications:
+
+```javascript
+import { createMongoAdapter, createRuntime } from '@simtlix/simfinity-js';
+
+const adapter = createMongoAdapter({ referentialIntegrity: 'transactional' });
+const simfinity = createRuntime(adapter);
+await mongoose.connect(process.env.MONGODB_URI);
+simfinity.connect(null, SerieType, 'serie', 'series');
+const schema = simfinity.createSchema();
+await adapter.initialize();
+```
+
+Register the complete type graph and await initialization before serving HTTP or MCP. Initialization audits existing references and verifies a transaction-capable MongoDB deployment. Protected writes reject missing targets and restrict deletion of referenced documents, including references within embedded lists, inferred/private inverse keys and explicit many-to-many links. Target-document writes coordinate concurrent creation/deletion. Failures return `REFERENCE_CONSTRAINT_VIOLATION` (409) and roll back the mutation.
+
+The mode is fixed at startup. All writers must share the same graph/mode; raw Mongoose/driver writes bypass this protection. PostgreSQL retains native database FKs. See [MongoDB reference integrity](docs/guide/mongodb-integrity.md) for snapshot/majority sessions, reserved lock metadata, contention and existing-data migration.
 
 ### Global Configuration
 
@@ -4310,7 +4330,7 @@ Programmatically save an object through the creation pipeline, including validat
 
 Without a session, `saveObject()` starts a transaction on the registered model's connection, commits the parent and nested writes together, and awaits session cleanup. The same bounded transaction and commit retries described above apply. This requires a transaction-capable MongoDB deployment, such as a replica set.
 
-With a session, it participates in the caller's active transaction. It never starts, commits, aborts, retries, or ends that caller-owned transaction/session; the caller must handle failures and finish the transaction. An inactive supplied session is rejected with `ACTIVE_TRANSACTION_REQUIRED` (400) before writes. Pass the provided session when calling from a controller or custom mutation so the writes share its transaction. Direct calls bypass GraphQL input coercion, field authorization, and global middleware.
+With a session, it participates in the caller's active transaction. The caller owns commit, retry and cleanup. In default Mongo mode it also owns abort; with transactional reference integrity, a constraint violation or guarded-write error aborts even a supplied transaction to prevent committing an invalid write. That mode requires snapshot read concern and majority write concern. An inactive supplied session is rejected with `ACTIVE_TRANSACTION_REQUIRED` (400) before writes. Pass the provided session when calling from a controller or custom mutation so the writes share its transaction. Direct calls bypass GraphQL input coercion, field authorization, and global middleware.
 
 **Example:**
 
