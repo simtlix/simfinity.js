@@ -95,7 +95,7 @@ export const createSQLAdapter = (sourcePlugin) => {
     castId,
     stateValue: (state) => state.value,
     withTransaction: transactions.withTransaction,
-    newRecord(model, data) { nameOf(model); const id = data._id || data.id || createId(); return { ...data, _id: castId(id), id: castId(id) }; },
+    newRecord(model, data) { nameOf(model); const id = data._id ?? data.id ?? createId(); return { ...data, _id: castId(id), id: castId(id) }; },
     toObject(record) { return record == null ? record : { ...record }; },
     saveRecord: safe((model, record, session) => transactions.withTransaction(session, (transaction) => records.create(nameOf(model), record, transaction))),
     getById: safe((model, id, session, options = {}) => transactions.withTransaction(session, (transaction) => records.getById(nameOf(model), id, transaction, options))),

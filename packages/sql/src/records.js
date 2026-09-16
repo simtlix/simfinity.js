@@ -182,7 +182,7 @@ export const createRecordStore = (models, database, query, plugin) => {
     if (!entity) throw new SimfinityError(`Type ${name} is not an entity`, 'INVALID_MODEL', 400);
     const storage = table(name);
     const normalized = normalize(entity.fields, record);
-    const data = { id: castId(normalized._id || normalized.id), ...columnValues(storage, entity.fields, normalized, true) };
+    const data = { id: castId(normalized._id ?? normalized.id), ...columnValues(storage, entity.fields, normalized, true) };
     const row = await insertRow(storage, data, session);
     await persistOwned(storage, entity.fields, row.id, normalized, session);
     return (await hydrateRows(name, [row], session))[0];

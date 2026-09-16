@@ -199,3 +199,35 @@ it('never replays an unknown commit outcome and bounds confirmed abort retries',
   await expect(retrying.withTransaction(null, abortedBody)).rejects.toThrow('aborted');
   expect(abortedBody).toHaveBeenCalledTimes(6);
 });
+
+it.each([
+  ['explicit id zero', { id: 0 }, 42, false],
+  ['explicit _id zero', { _id: 0 }, 42, false],
+  ['generated zero', {}, 0, true],
+])('preserves numeric identifiers through the recording runtime: %s', async (label, input, generated, generates) => {
+  const plugin = stubPlugin();
+  plugin.options = {};
+  plugin.describeSchema = (plan) => plan;
+  plugin.values = { ...plugin.values, createId: vi.fn(() => generated), castId: Number, encodeScalar: (field, value) => value, decodeScalar: (field, value) => value };
+  plugin.compileRecord = (description, operation) => ({ text: operation.kind, values: [operation] });
+  plugin.driver.acquire = async () => ({});
+  plugin.driver.normalizeError = (error) => error;
+  const stored = [];
+  plugin.driver.query = async (configuration, { text, values: [operation] }) => {
+    if (text === 'insert') { stored.push(operation.data); return { rows: [operation.data] }; }
+    return { rows: stored.filter((record) => record.id === operation.id) };
+  };
+  const runtime = createSQL({ plugin });
+  const Item = new GraphQLObjectType({ name: 'NumericRecordingItem', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+  runtime.connect(null, Item, 'item', 'items');
+  runtime.createSchema();
+  await runtime.initializeDatabase();
+  const model = runtime.getModel(Item);
+  expect(await model.create({ ...input, name: label })).toEqual({ id: 0, _id: 0, name: label });
+  expect(await model.findById(0)).toEqual({ id: 0, _id: 0, name: label });
+  expect(plugin.values.createId).toHaveBeenCalledTimes(generates ? 1 : 0);
+
+  const models = describeModels([{ gqltype: Item, endpoint: true }]);
+  const store = createRecordStore(models, runtime.describeDatabase(), (statement) => plugin.driver.query({}, statement), plugin);
+  expect(await store.create(Item.name, { _id: 0, name: 'direct record' })).toEqual({ id: 0, _id: 0, name: 'direct record' });
+});

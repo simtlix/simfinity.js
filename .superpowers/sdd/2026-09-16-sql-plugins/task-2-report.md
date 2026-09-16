@@ -39,3 +39,21 @@ Real database checks used a newly created, disposable `postgres:18` container na
 ## Scope and remaining work
 
 No Task1 schema planner/lowerer, manifests, declarations, public documentation, release metadata or package boundary tests were edited. Root/Task3 owns those follow-up changes. No implementation concerns remain from the targeted runtime checks. Full MongoDB parity, package consumers, release validation and full version-matrix checks remain the root task's responsibility.
+
+## Review follow-up: preserve numeric zero identifiers
+
+Whole-branch review identified truthiness-based identifier selection in SQL adapter.newRecord and record-store create. Reproduced before editing: explicit id0 and _id0 were replaced by generated42; direct record-store _id0 became NaN under the recording plugin's Number cast. Three new parameterized tests failed before the fix.
+
+Changed both selections to nullish coalescing. Only missing/null IDs use the fallback; the plugin receives numeric0 unchanged. Recording coverage verifies explicit id0, explicit _id0, generated0, lookup by0, generator call count, and direct record-store _id0. No second production database support is claimed.
+
+PostgreSQL UUID codecs remain unchanged. Explicit blank strings now reach UUID validation instead of being treated as absent and replaced with a generated ID; no existing configuration/runtime/options test specified blank-ID fallback. Existing generated/explicit valid UUID behavior passes real-PG regression checks.
+
+Verification on Node24.2.0:
+
+- Fail-first `npx vitest run tests/sql-plugin.test.js`: 3 failed / 11 passed before the two-line runtime fix.
+- With disposable PostgreSQL18 URI, `npx vitest run tests/sql-plugin.test.js tests/postgres-configuration.test.js tests/integration/postgres-runtime.test.js tests/integration/postgres-options.test.js tests/integration/sql-entry-point.test.js`: 28 passed, 5 files, zero skips.
+- `npm run lint`: passed.
+- `npm run test:packages`: all six consumers passed (core, SQL, PostgreSQL, MCP without SDK, MCP with SDK, MongoDB), including runtime and strict TypeScript checks.
+- `git diff --check`: passed.
+
+Root owns the full database rerun and container cleanup. Only adapter.js, records.js, sql-plugin.test.js and this report were changed for the follow-up.
