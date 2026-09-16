@@ -20,7 +20,7 @@
   "dependencies": {
     "@envelop/core": "^5.3.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@simtlix/simfinity-js": "3.2.0",
+    "@simtlix/simfinity-js": "3.3.0",
     "@simtlix/simfinity-js-client": "^1.1.0",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",

@@ -9,3 +9,7 @@ docs/.vitepress/.temp/
 # Local package/build archives; website downloads under docs/public remain tracked.
 /*.tgz
 /*.zip
+
+# Local agent implementation reports and worktrees.
+.superpowers/
+.worktrees/

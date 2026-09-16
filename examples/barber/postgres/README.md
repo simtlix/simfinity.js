@@ -1,6 +1,6 @@
 # Barber PostgreSQL backend
 
-An independent, private application using the released `@simtlix/simfinity-postgres`, `@simtlix/simfinity-core`, and `@simtlix/simfinity-mcp` packages at exactly **3.2.0**. It uses Express, GraphQL Yoga, and `pg`, with no MongoDB or Mongoose runtime dependency. It is outside the library workspaces and installs from npm without vendor archives.
+An independent, private application using the released `@simtlix/simfinity-postgres`, `@simtlix/simfinity-core`, and `@simtlix/simfinity-mcp` packages at exactly **3.3.0**. It uses Express, GraphQL Yoga, and `pg`, with no MongoDB or Mongoose runtime dependency. PostgreSQL delegates relational planning and runtime orchestration to `@simtlix/simfinity-sql`. This app retains the compatible PostgreSQL facade; the [SQL plugin guide](https://simtlix.github.io/simfinity.js/guide/sql-plugins.html) shows explicit plugin composition. It is outside the library workspaces and installs from npm without vendor archives.
 
 Use the [Barber quick start](../README.md) to run the complete Docker stack with the shared frontend.
 

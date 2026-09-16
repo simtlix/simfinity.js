@@ -5,7 +5,7 @@ This file helps coding agents (and humans) work productively and safely in this 
 ## What this project is
 
 - **Workspace**: the root `simfinity-workspace` package is private. All five publishable libraries, their declarations, licenses and package READMEs live under `packages/`.
-- **Examples**: `examples/barber/{mongodb,postgres,frontend}` are independent private npm applications with their own lockfiles, outside the `packages/*` workspaces. The two backends consume released Simfinity runtime packages at exact version 3.2.0; the Next.js frontend is shared.
+- **Examples**: `examples/barber/{mongodb,postgres,frontend}` are independent private npm applications with their own lockfiles, outside the `packages/*` workspaces. The two backends consume released Simfinity runtime packages at exact version 3.3.0; the Next.js frontend is shared.
 - **Packages**: `@simtlix/simfinity-js` is the MongoDB/Mongoose facade; `@simtlix/simfinity-core` owns the shared GraphQL runtime; `@simtlix/simfinity-sql` owns driver-free relational planning/runtime; `@simtlix/simfinity-postgres` is the PostgreSQL 15+ plugin and compatible facade; `@simtlix/simfinity-mcp` generates MCP tools from a GraphQL schema.
 - **Runtime**: Node.js `>=18.18.0` for library consumers. Use Node.js 24 for development and CI; documentation requires Node.js 22 or later.
 - **Peers**: every package uses `graphql` ^16. The Mongo facade alone has a `mongoose` ^8 peer; MCP has an optional `@modelcontextprotocol/sdk` peer. PostgreSQL depends on SQL, `pg` and core, without MongoDB, Mongoose, or MCP.
