@@ -1,6 +1,6 @@
 {
   "name": "@simtlix/simfinity-sql",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "Driver-free relational runtime and database plugin contract for Simfinity",
   "type": "module",
   "main": "./src/index.js",
@@ -30,7 +30,7 @@
     "directory": "packages/sql"
   },
   "dependencies": {
-    "@simtlix/simfinity-core": "3.2.0"
+    "@simtlix/simfinity-core": "3.3.0"
   },
   "peerDependencies": {
     "graphql": "^16.11.0"

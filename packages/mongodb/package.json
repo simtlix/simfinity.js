@@ -1,6 +1,6 @@
 {
   "name": "@simtlix/simfinity-js",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "MongoDB/Mongoose adapter and compatibility facade for Simfinity GraphQL APIs",
   "main": "src/index.js",
   "types": "./types/index.d.ts",
@@ -29,8 +29,8 @@
     "mongoose": "^8.16.2"
   },
   "dependencies": {
-    "@simtlix/simfinity-core": "3.2.0",
-    "@simtlix/simfinity-mcp": "3.2.0"
+    "@simtlix/simfinity-core": "3.3.0",
+    "@simtlix/simfinity-mcp": "3.3.0"
   },
   "files": [
     "src",

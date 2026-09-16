@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag, for example v3.2.0
+        description: Existing release tag, for example v3.3.0
         type: string
         required: true
       registry:
@@ -82,7 +82,7 @@ jobs:
       - name: Preview publication
         if: inputs.dry_run
         run: |
-          echo 'Validated all four package archives. No registry lookup or publication was performed by the publisher.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Validated all five package archives. No registry lookup or publication was performed by the publisher.' >> "$GITHUB_STEP_SUMMARY"
 
   publish-npm:
     if: ${{ !inputs.dry_run && (inputs.registry == 'npm' || inputs.registry == 'both') }}

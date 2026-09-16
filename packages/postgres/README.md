@@ -1,8 +1,8 @@
 # @simtlix/simfinity-postgres
 
-PostgreSQL 15 or later support for the Simfinity GraphQL runtime. The package requires GraphQL 16 and Node.js 18.18 or later, depends on `pg` and `@simtlix/simfinity-core`, and has no Mongoose or MongoDB dependency.
+PostgreSQL 15 or later support for the Simfinity GraphQL runtime. The package requires GraphQL 16 and Node.js 18.18 or later, depends on `pg`, `@simtlix/simfinity-sql`, and `@simtlix/simfinity-core`, and has no Mongoose or MongoDB dependency.
 
-Version 3.2.0 is released together with the other Simfinity packages. Install from npm and keep their versions aligned. Source and the complete startup guide: [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js), [`docs/guide/postgresql.md`](https://github.com/simtlix/simfinity.js/blob/master/docs/guide/postgresql.md).
+Version 3.3.0 is released together with the other Simfinity packages. Install from npm and keep their versions aligned. Source and the complete startup guide: [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js), [`docs/guide/postgresql.md`](https://github.com/simtlix/simfinity.js/blob/master/docs/guide/postgresql.md).
 
 ## Runtime
 
@@ -22,7 +22,18 @@ await simfinity.initializeDatabase({ mode: 'create' });
 // Serve `schema`; the application remains responsible for `await pool.end()`.
 ```
 
-`createPostgres` permanently binds one pool and schema. The returned runtime supports registration, generated queries and mutations, middleware and scopes, controllers and validators, custom mutations, state machines, nested relationship writes, embedded reconstruction, and native PostgreSQL model handles. Native handles expose `findById`, `find`, `create`, `update`, and `delete`; they are not Mongoose models.
+`createPostgres` uses the driver-free SQL runtime with the PostgreSQL plugin. The equivalent explicit entry point is:
+
+```javascript
+import { createSQL } from '@simtlix/simfinity-sql';
+import { postgresPlugin } from '@simtlix/simfinity-postgres';
+
+const simfinity = createSQL({ plugin: postgresPlugin({ pool, schema: 'library' }) });
+```
+
+Install `@simtlix/simfinity-sql@3.3.0` as a direct dependency when importing its factory. PostgreSQL 15 or later is the only supported SQL plugin. The [SQL package guide](https://github.com/simtlix/simfinity.js/tree/master/packages/sql) documents relational planning and the versioned plugin contract.
+
+Both factories permanently bind one pool and schema. The returned runtime supports registration, generated queries and mutations, middleware and scopes, controllers and validators, custom mutations, state machines, nested relationship writes, embedded reconstruction, and native PostgreSQL model handles. Native handles expose `findById`, `find`, `create`, `update`, and `delete`; they are not Mongoose models. `find(args, { session })` accepts the generated GraphQL list query arguments. Existing `pg.Pool` configuration and `pg.PoolClient` query interfaces remain compatible across both factories.
 
 Operations attempted before successful initialization fail with `DATABASE_NOT_INITIALIZED`. Call `createSchema` before `initializeDatabase`. Configuration and registrations become immutable once schema preparation begins. `preventCreatingCollection(true)` makes instance initialization validate existing storage without issuing creation DDL.
 
@@ -42,14 +53,14 @@ const schema = createSchema();
 await initializeDatabase({ mode: 'validate' });
 ```
 
-Transactions use one borrowed `pg` client and repeatable-read isolation. A supplied Simfinity PostgreSQL session joins the active transaction. Serialization failures and deadlocks are retried up to five times; mutation input is reset for each attempt. The caller owns the pool lifecycle.
+Transactions use one borrowed `pg` client and repeatable-read isolation. A supplied Simfinity PostgreSQL session joins the active transaction. Serialization failures and deadlocks are retried up to five times; mutation input is reset for each attempt. Unknown commit outcomes are not replayed. The caller owns the pool lifecycle.
 
 The module and every `createPostgres` instance expose the shared `auth`, `validators`, `scalars`, and `plugins` helpers. These are the same helper objects exported by the MongoDB package, so rules, scalar identities, and errors can be shared safely between backends.
 
 MCP integration is an independent opt-in and does not add MCP dependencies to PostgreSQL applications:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.2.0 @modelcontextprotocol/sdk@^1.13.0
+npm install @simtlix/simfinity-mcp@3.3.0 @modelcontextprotocol/sdk@^1.13.0
 ```
 
 ```javascript
