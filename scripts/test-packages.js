@@ -382,7 +382,10 @@ const sqlTypes = `import {
   createSQL,
   planRelationalSchema,
   type SQLCapability,
+  type SQLCompiledQuery,
   type SQLDatabaseDescription,
+  type SQLFieldDescription,
+  type SQLModelDescription,
   type SQLPlugin,
   type SQLRecordOperation,
   type SQLStatement,
@@ -408,7 +411,16 @@ const plugin: SQLPlugin<Configuration, Client, Description> = {
   },
   compileSchema(description) { return [description.dialect]; },
   async initialize(configuration, description, options) { return { mode: options?.mode ?? 'validate', created: [configuration.schema, description.dialect] }; },
-  compileQuery(models, description, query, extra) { return { text: query.mode, values: [models.entities.length, description.dialect, extra?.id] }; },
+  compileQuery(models, description, query, extra) {
+    const metadata: SQLModelDescription = models;
+    const field: SQLFieldDescription = metadata.entities[0].fields[0];
+    const stateNames: string[] | undefined = field.stateNames?.map((state) => state.value + ':' + state.name);
+    // @ts-expect-error State storage values have already been converted to strings.
+    const numericState: number | undefined = field.stateNames?.[0].value;
+    void numericState;
+    const nestedStateNames: string[] | undefined = field.fields?.[0].stateNames?.map((state) => state.name);
+    return { text: query.mode, values: [stateNames, nestedStateNames, description.dialect, extra?.id], aggregateFields: [field] };
+  },
   compileRecord(description, operation): SQLStatement {
     const tableName: string = operation.table.name;
     switch (operation.kind) {
@@ -423,8 +435,8 @@ const plugin: SQLPlugin<Configuration, Client, Description> = {
   },
   values: {
     createId: () => 'opaque-id', castId: String,
-    encodeScalar: (field, value) => value,
-    decodeScalar(field, value, gqlField) { return gqlField?.name ? value : field.scalar; },
+    encodeScalar(field, value) { return field.stateNames?.find((state) => state.name === value)?.value ?? value; },
+    decodeScalar(field, value, gqlField) { return field.stateNames?.find((state) => state.value === value)?.name ?? (gqlField?.name ? value : field.scalar); },
     encodeEmbedded: JSON.stringify,
   },
   driver: {
@@ -435,6 +447,9 @@ const plugin: SQLPlugin<Configuration, Client, Description> = {
     async query(configuration, statement, client) { return { rows: [{ token: configuration.token, text: statement.text, active: client?.active }] }; },
   },
 };
+declare const compiled: SQLCompiledQuery;
+const aggregateStateNames: string[] | undefined = compiled.aggregateFields?.[0].stateNames?.map((state) => state.name);
+void aggregateStateNames;
 const api = createSQL({ plugin });
 const description: Description = api.describeDatabase();
 api.configure({ schema: 'recording', token: 'later' });

@@ -28,9 +28,18 @@ export type {
 } from '@simtlix/simfinity-core';
 
 export type SQLCapability = 'transactions' | 'foreignKeys' | 'deferredForeignKeys' | 'embeddedValues' | 'ownedRecords' | 'scalarLists' | 'uniqueValues' | 'nullableUnique';
-export type RelationalScalar = NonNullable<FieldDescription['scalar']> | 'Embedded';
+/** Core field metadata enriched by SQL runtime preparation. */
+export interface SQLFieldDescription extends FieldDescription {
+  fields?: SQLFieldDescription[];
+  /** Registered state enum names paired with String(enumValue) storage values. */
+  stateNames?: Array<{ value: string; name: string }>;
+}
+export interface SQLModelDescription extends ModelDescription {
+  entities: Array<Omit<ModelDescription['entities'][number], 'fields'> & { fields: SQLFieldDescription[] }>;
+}
+export type RelationalScalar = NonNullable<SQLFieldDescription['scalar']> | 'Embedded';
 /** Serializable field metadata: GraphQL enum runtime values are deliberately omitted. */
-export interface RelationalField extends Omit<FieldDescription, 'enumValues' | 'fields'> {
+export interface RelationalField extends Omit<SQLFieldDescription, 'enumValues' | 'fields'> {
   fields?: RelationalField[];
 }
 export interface SQLNaming {
@@ -97,7 +106,7 @@ export interface RelationalPlan {
   requirements: SQLCapability[];
 }
 /** Pure planning; no physical SQL types, expressions, driver objects, or I/O. */
-export function planRelationalSchema(models: ModelDescription, options?: { schema?: string; naming?: SQLNaming }): RelationalPlan;
+export function planRelationalSchema(models: SQLModelDescription, options?: { schema?: string; naming?: SQLNaming }): RelationalPlan;
 
 /** Physical metadata needed by shared record reconstruction. Plugins may extend it. */
 export interface SQLColumnDescription {
@@ -117,7 +126,7 @@ export interface SQLDatabaseDescription<Table extends SQLTableDescription = SQLT
 export interface SQLStatement { text: string; values?: unknown[] }
 export interface SQLCompiledQuery extends SQLStatement {
   /** Group field followed by each fact field, required for aggregate queries. */
-  aggregateFields?: FieldDescription[];
+  aggregateFields?: SQLFieldDescription[];
 }
 export interface SQLQueryResult {
   rows: Array<Record<string, unknown>>;
@@ -136,8 +145,8 @@ export interface SQLInitializationResult { mode: 'create' | 'validate'; created:
 export interface SQLValueCodec<Id = string> {
   createId(): Id;
   castId(value: unknown): Id;
-  encodeScalar(field: FieldDescription, value: unknown): unknown;
-  decodeScalar(field: FieldDescription, value: unknown, gqlField?: GraphQLField<unknown, unknown>): unknown;
+  encodeScalar(field: SQLFieldDescription, value: unknown): unknown;
+  decodeScalar(field: SQLFieldDescription, value: unknown, gqlField?: GraphQLField<unknown, unknown>): unknown;
   encodeEmbedded(value: unknown): unknown;
 }
 export interface SQLDriver<Configuration extends object = SQLConfiguration, Client = unknown, Result extends SQLQueryResult = SQLQueryResult> {
@@ -171,7 +180,7 @@ export interface SQLPlugin<
   describeSchema(plan: RelationalPlan): Description;
   initialize(configuration: Configuration, description: Description, options?: SQLInitializationOptions): Promise<SQLInitializationResult>;
   compileSchema(description: Description): string[];
-  compileQuery(models: ModelDescription, description: Description, plan: QueryPlan, extra?: { column: string; id: Id } | null): SQLCompiledQuery;
+  compileQuery(models: SQLModelDescription, description: Description, plan: QueryPlan, extra?: { column: string; id: Id } | null): SQLCompiledQuery;
   /** The operation's table is the physical metadata from describeSchema. */
   compileRecord(description: Description, operation: SQLRecordOperation<Description['tables'][number], Id>): SQLStatement;
   values: SQLValueCodec<Id>;

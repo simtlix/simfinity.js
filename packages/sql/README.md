@@ -79,4 +79,6 @@ Every runtime requires `transactions`. Planning adds `foreignKeys`, `deferredFor
 
 Invalid plugin structure raises `INVALID_SQL_PLUGIN`; unsupported contract versions raise `UNSUPPORTED_SQL_PLUGIN_VERSION`; missing required guarantees raise `UNSUPPORTED_SQL_CAPABILITY`.
 
+`compileQuery` receives `SQLModelDescription`, which extends core model metadata with recursive `SQLFieldDescription` fields. A registered state field may have `stateNames: [{ value, name }]`: `value` is the string form of the stored enum value, and `name` is its GraphQL enum name. Compilers can use this mapping for aggregate state names. Scalar codecs and `aggregateFields` use the same enriched field type.
+
 TypeScript declarations export `SQLPlugin`, `SQLDriver`, `SQLValueCodec`, `RelationalPlan`, discriminated `RelationalCheck` and `SQLRecordOperation` unions, physical storage interfaces, and `SQLRuntime`, `SQLSession`, and `SQLModel`. Plugin generics preserve configuration, native client, physical description, query-result, and ID types through `createSQL`. Application-defined row values use `unknown` until narrowed. The `./internal/*` exports support the PostgreSQL compatibility wrappers and are not plugin-author APIs.
