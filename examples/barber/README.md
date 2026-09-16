@@ -104,6 +104,19 @@ GRAPHQL_ENDPOINT=http://localhost:4400/graphql npm run test:http
 GRAPHQL_ENDPOINT=http://localhost:4500/graphql npm run test:http
 ```
 
+Run the filter, aggregation and nested-mutation matrix against each disposable API:
+
+```sh
+GRAPHQL_ENDPOINT=http://localhost:4400/graphql npm run test:query-mutations --prefix examples/barber/mongodb
+GRAPHQL_ENDPOINT=http://localhost:4500/graphql npm run test:query-mutations --prefix examples/barber/postgres
+```
+
+Run these two commands from the repository root. The matrix creates its own synthetic users and catalog after `seed:admin`; it leaves them in the disposable database for diagnosis. It checks scalar/enum/null filters, nested AND/OR groups, relation paths, sorting/counts/pagination, COUNT/SUM/AVG/MIN/MAX with filters, scopes, nested create/update/delete, embedded replacement/clearing, authorization and transactional rollback. Set `CONTRACT_REPORT` to write a JSON result file. The dedicated CI runs it on both databases and saves the reports.
+
+The scopes preserve caller filters and intersect them with server restrictions. For example, selecting one shop still returns only that shop when the owner can access several; a booking OR filter remains combined with the owner's access rule. A requested user ID outside the scope returns null or an empty list.
+
+**Reference integrity differs:** PostgreSQL FKs reject an embedded reference to a nonexistent service and roll back the mutation. MongoDB can store that reference and resolve it to null on reads; Mongoose references are not foreign keys. The matrix checks this difference explicitly. Add application validation when the MongoDB API must reject missing references too.
+
 These tests exercise login, scopes, booking, and MCP against a real backend and create test records. Both backends also have real-database checks for transactions, derived domain values, and dataset loading/deletion. PostgreSQL adds storage, foreign-key, and frontend-query checks; see the backend READMEs. The frontend has its own unit, type, build, and browser checks.
 
 The dedicated [Barber workflow](../../.github/workflows/barber.yml) owns these apps' validation, including a database matrix and browser checks against both backends. Root library lint and Vitest discovery exclude `examples/`; root package release checks do not install or publish these apps. Example changes do not require an npm library release.

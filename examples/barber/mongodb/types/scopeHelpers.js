@@ -11,11 +11,23 @@ export function isOwner(context) {
   return Boolean(context?.user?.roles?.includes('OWNER'));
 }
 
+/** Intersect server restrictions with existing caller filters, including OR groups. */
+export function intersectScopeFilter(args, field, restriction) {
+  if (args[field] == null) {
+    args[field] = restriction;
+    return;
+  }
+  const group = field === 'OR'
+    ? { OR: restriction }
+    : { conditions: restriction.terms
+      ? restriction.terms.map((term) => ({ field, ...term }))
+      : [{ field, ...restriction }] };
+  args.AND = [...(args.AND || []), group];
+}
+
 /** Sets `args.id` to a zero-match filter so queries return no rows. */
 export function denyAnonymousByIdTerms(args) {
-  args.id = {
-    operator: 'EQ', value: ZERO_MATCH_OBJECT_ID,
-  };
+  intersectScopeFilter(args, 'id', { operator: 'EQ', value: ZERO_MATCH_OBJECT_ID });
 }
 
 /**
@@ -24,7 +36,7 @@ export function denyAnonymousByIdTerms(args) {
  * @param {string} userId
  */
 export function scopeRootIdToUser(args, userId) {
-  args.id = { operator: 'EQ', value: userId };
+  intersectScopeFilter(args, 'id', { operator: 'EQ', value: userId });
 }
 
 /**
@@ -34,9 +46,7 @@ export function scopeRootIdToUser(args, userId) {
  * @param {string} [field='user']
  */
 export function scopeRelationToUser(args, userId, field = 'user') {
-  args[field] = {
-    terms: [{ path: 'id', operator: 'EQ', value: userId }],
-  };
+  intersectScopeFilter(args, field, { terms: [{ path: 'id', operator: 'EQ', value: userId }] });
 }
 
 /**
@@ -49,9 +59,7 @@ export async function scopeBarbershopRelationByRole(simfinity, { args, context }
   const BarbershopModel = simfinity.getModel(simfinity.getType('barbershop'));
   if (isOwner(context)) {
     const ids = await getBarbershopIdsForOwner(BarbershopModel, context.user.id);
-    args.barbershop = {
-      terms: [{ path: 'id', operator: 'IN', value: ids.map(String) }],
-    };
+    intersectScopeFilter(args, 'barbershop', { terms: [{ path: 'id', operator: 'IN', value: ids.map(String) }] });
     return;
   }
   await scopeToApprovedBarbershopsOnly(BarbershopModel, { args });
@@ -83,7 +91,5 @@ export async function getApprovedBarbershopIds(BarbershopModel) {
  */
 export async function scopeToApprovedBarbershopsOnly(BarbershopModel, { args }) {
   const ids = await getApprovedBarbershopIds(BarbershopModel);
-  args.barbershop = {
-    terms: [{ path: 'id', operator: 'IN', value: ids }],
-  };
+  intersectScopeFilter(args, 'barbershop', { terms: [{ path: 'id', operator: 'IN', value: ids }] });
 }

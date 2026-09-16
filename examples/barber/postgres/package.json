@@ -17,7 +17,8 @@
     "schema:export": "node scripts/exportSchema.js",
     "test:frontend-queries": "node integration/frontend-queries.js",
     "test:dataset": "node integration/dataset.js",
-    "test:http": "node ../tests/http-contract.mjs"
+    "test:http": "node ../tests/http-contract.mjs",
+    "test:query-mutations": "node ../tests/query-mutation-contract.mjs"
   },
   "dependencies": {
     "@envelop/core": "^5.3.0",

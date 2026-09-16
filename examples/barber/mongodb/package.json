@@ -15,7 +15,8 @@
     "test:dataset": "node integration/dataset.js",
     "seed:demo": "node scripts/seedDemo.js",
     "dataset:load": "node dataset/loadDataset.js",
-    "dataset:delete": "node dataset/deleteDataset.js"
+    "dataset:delete": "node dataset/deleteDataset.js",
+    "test:query-mutations": "node ../tests/query-mutation-contract.mjs"
   },
   "dependencies": {
     "@envelop/core": "^5.3.0",

@@ -57,6 +57,7 @@ Run these from `examples/barber/postgres` after `npm ci`:
 | --- | --- |
 | `npm start` / `npm run dev` | Start HTTP, or watch for backend source changes. |
 | `npm test` | Run unit, scope, ownership, and controller regressions. |
+| `npm run test:query-mutations` | Check filters, combined aggregates and nested mutations against a disposable HTTP API; see the [shared runbook](../README.md#validate-changes). |
 | `npm run test:http` | Run `../tests/http-contract.mjs` against the running, seeded API. |
 | `npm run test:postgres` | Exercise PostgreSQL storage, FKs, transactions, GraphQL, and MCP in a temporary schema. |
 | `npm run test:dataset` | Start a temporary API and verify dataset loading and FK-ordered deletion. |
@@ -68,7 +69,7 @@ Run these from `examples/barber/postgres` after `npm ci`:
 | `npm run schema:export` | Write the current SDL, generated SQL, and real FK catalog under `generated/`. |
 | `npm run mcp:stdio` | Start MCP over standard input/output. |
 
-Use a disposable database for integration checks. `test:postgres` and `test:dataset` create and remove their own schemas; the configured database user needs schema creation privileges. `test:http` and dataset commands modify the endpoint they are given. These checks are owned by the [dedicated Barber workflow](../../../.github/workflows/barber.yml), separate from library CI.
+Use a disposable database for integration checks. `test:postgres` and `test:dataset` create and remove their own schemas; the configured database user needs schema creation privileges. `test:http`, `test:query-mutations` and dataset commands modify the endpoint they are given. These checks are owned by the [dedicated Barber workflow](../../../.github/workflows/barber.yml), separate from library CI.
 
 ## Storage and native APIs
 

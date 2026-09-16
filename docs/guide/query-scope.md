@@ -23,7 +23,10 @@ const tenantScope = async ({ args, context }) => {
   if (!context?.user?.tenantId) {
     throw new simfinity.auth.UnauthenticatedError();
   }
-  args.tenantId = { operator: 'EQ', value: context.user.tenantId };
+  args.AND = [
+    ...(args.AND || []),
+    { conditions: [{ field: 'tenantId', operator: 'EQ', value: context.user.tenantId }] },
+  ];
 };
 
 const SerieType = new GraphQLObjectType({
@@ -73,6 +76,8 @@ async function scope({ type, args, operation, context }) {
 | `context` | The application's GraphQL context. |
 
 Use GraphQL field names for filters. A scalar filter has `{ operator, value }`. A related-object filter uses `{ terms: [{ path, operator, value }] }`, as described in [queries](/guide/queries).
+
+Assigning a filter to an existing argument replaces the caller's filter. Append a server restriction as an AND group, as above, to retain both. For a server rule containing OR, append `{ OR: scopeBranches }` to `args.AND`; assigning `args.OR` would discard the caller's OR. The Barber examples use `intersectScopeFilter` in each backend's `types/scopeHelpers.js` to preserve scalar, relation, ID and logical filters.
 
 ## Operation behavior
 
