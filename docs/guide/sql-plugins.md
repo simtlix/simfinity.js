@@ -96,6 +96,8 @@ The exported `SQLPlugin` TypeScript interface documents the complete contract. A
 | `values` | Create/cast IDs, encode/decode scalars, encode embedded values |
 | `driver` | Validate configuration, execute statements, acquire/release connections, begin/commit/rollback transactions, classify retries and normalize errors |
 
+`compileQuery` receives `SQLModelDescription`. State-machine fields can include `stateNames`, an array of `{ value, name }` entries mapping persisted enum values to GraphQL state names for aggregate output. `SQLFieldDescription` exposes this metadata to typed compilers and codecs.
+
 `compileRecord` receives a physical table metadata object in `operation.table`. Supported operations are:
 
 | `operation.kind` | Additional fields |
