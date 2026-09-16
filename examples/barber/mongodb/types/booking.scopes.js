@@ -1,5 +1,5 @@
 import * as simfinity from '@simtlix/simfinity-js';
-import { isOwner, isPlatformAdmin } from './scopeHelpers.js';
+import { isOwner, isPlatformAdmin, intersectScopeFilter } from './scopeHelpers.js';
 
 /** Owner sees shop bookings or own client bookings; others only own client bookings. */
 export async function scopeBookingByRole({ args, context }) {
@@ -8,15 +8,15 @@ export async function scopeBookingByRole({ args, context }) {
     const BarbershopModel = simfinity.getModel(simfinity.getType('barbershop'));
     const ids = await BarbershopModel.find({ owner: context.user.id }).select('_id').lean();
     const shopIds = ids.map((r) => String(r._id));
-    args.OR = [
+    intersectScopeFilter(args, 'OR', [
       { conditions: [{ field: 'barbershop', path: 'id', operator: 'IN', value: shopIds }] },
       { conditions: [{ field: 'client', path: 'id', operator: 'EQ', value: context.user.id }] },
-    ];
+    ]);
     return;
   }
-  args.client = {
+  intersectScopeFilter(args, 'client', {
     terms: [{ path: 'id', operator: 'EQ', value: context?.user?.id ?? '000000000000000000000000' }],
-  };
+  });
 }
 
 export const bookingScopes = {

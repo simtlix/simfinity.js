@@ -11,6 +11,7 @@ alwaysApply: false
 - `examples/barber/mongodb/`, `postgres/`, and `frontend/` are private npm apps with their own manifests and lockfiles. Run `npm ci` inside the affected app; root workspace installation does not install them.
 - Keep the apps outside `packages/*` workspaces and library release/version scripts. Backend Simfinity runtime packages use exact released version `3.3.0` from npm. Do not restore local vendor archives or file dependencies.
 - The frontend source is shared. Its GraphQL endpoint is selected by the environment at build time and must be reachable by the browser. Treat IDs as opaque GraphQL `ID` strings: MongoDB uses ObjectIds and PostgreSQL uses UUIDs.
+- Scopes must intersect caller filters with server restrictions. Use `intersectScopeFilter` instead of overwriting an existing scalar, relation, ID or OR filter.
 - Preserve the same domain concepts, relationship metadata, scopes, controller responsibilities, and state transitions. Native Mongoose and PostgreSQL model/session calls remain separate. Choose the backend at startup; do not add runtime switching or automatic data migration.
 
 ## Operation and data
@@ -25,6 +26,7 @@ alwaysApply: false
 ## Verification and documentation
 
 - `.github/workflows/barber.yml` owns backend unit tests, the database HTTP/MCP matrix, frontend checks and browser coverage, and database integration checks. Root ESLint and Vitest exclude examples.
+- `test:query-mutations` runs the shared HTTP filter/aggregate/nested-mutation matrix. Its missing-reference case explicitly distinguishes PostgreSQL FK rejection from MongoDB dangling-reference acceptance. It leaves synthetic fixtures in the disposable API database; CI saves its JSON reports.
 - Run both database HTTP/browser paths for shared contracts. Preserve `test:mongodb` and both `test:dataset` suites for transactions, derived booking/bundle/review values and fixture operations. Keep PostgreSQL native model, FK, transaction and frontend-query regression checks. Do not use library unit tests as a substitute for app validation.
 - Update `examples/barber/README.md`, the affected app README, and `docs/resources/barber.md` when setup or documented behavior changes. Preserve source-commit provenance and `frontend/LICENSE`.
 - Describe the app as a synthetic local MVP. Its presence in the monorepo does not change the runtime library compatibility contract or require an npm library release.

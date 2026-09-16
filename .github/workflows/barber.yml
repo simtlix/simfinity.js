@@ -84,6 +84,8 @@ jobs:
           docker compose -f compose.${{ matrix.database }}.yaml exec -T backend npm run seed:demo
       - name: Shared GraphQL, authorization and MCP HTTP contract
         run: npm run test:http --prefix ${{ matrix.database }}
+      - name: Filters, aggregates and nested mutations over HTTP
+        run: CONTRACT_REPORT=query-mutation-${{ matrix.database }}.json npm run test:query-mutations --prefix ${{ matrix.database }}
       - name: MongoDB transactions, derived values and dataset
         if: matrix.database == 'mongodb'
         run: |
@@ -113,6 +115,7 @@ jobs:
           name: barber-${{ matrix.database }}-results
           path: |
             examples/barber/compose-${{ matrix.database }}.log
+            examples/barber/${{ matrix.database }}/query-mutation-${{ matrix.database }}.json
             examples/barber/frontend/test-results/
             examples/barber/postgres/generated/
       - name: Remove this job's disposable containers and volumes

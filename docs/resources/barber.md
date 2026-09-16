@@ -97,6 +97,12 @@ mutation CompleteBooking($id: ID!) {
 
 Provide the access token as an `Authorization: Bearer …` header in GraphiQL and the booking ID in query variables. The [booking state machine](https://github.com/simtlix/simfinity.js/blob/master/examples/barber/postgres/types/booking.stateMachine.js) defines the transition from `CONFIRMED` to `COMPLETED`; authorization and ownership checks still apply. The same operations are available through MCP with the app's verified user context and auth plugin.
 
+## API verification
+
+Both backends provide `npm run test:query-mutations` for a running disposable GraphQL API. The shared matrix checks filters and nested AND/OR groups, filtered aggregates, relation joins, scopes and nested mutations with rollback. CI runs the same expected results against both databases. See the [test commands and data boundaries](https://github.com/simtlix/simfinity.js/blob/master/examples/barber/README.md#validate-changes).
+
+Scopes intersect caller filters with access restrictions. PostgreSQL additionally enforces foreign keys; MongoDB can store a nonexistent referenced ID and resolve it to null. The matrix records this integrity difference explicitly.
+
 ## What the code demonstrates
 
 GraphQL types describe shops, services, bundles, professionals, bookings, reviews, favorites, and notifications. Relationship metadata connects them; generated operations support the frontend's reads and writes. Controllers enforce domain checks and derive values such as booking totals. State machines implement shop approval and booking transitions.

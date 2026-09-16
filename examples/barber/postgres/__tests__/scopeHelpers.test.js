@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   ZERO_MATCH_OBJECT_ID,
+  intersectScopeFilter,
   isPlatformAdmin,
   isOwner,
   denyAnonymousByIdTerms,
@@ -63,5 +64,34 @@ describe('scopeHelpers', () => {
         terms: [{ path: 'id', operator: 'EQ', value: 'uid' }],
       });
     });
+  });
+});
+
+
+describe('scope intersections', () => {
+  it('retains a requested ID and ANDs the authenticated user restriction', () => {
+    const requested = Object.freeze({ operator: 'EQ', value: 'someone-else' });
+    const args = { id: requested };
+    scopeRootIdToUser(args, 'current-user');
+    expect(args.id).toBe(requested);
+    expect(args.AND).toEqual([{ conditions: [{ field: 'id', operator: 'EQ', value: 'current-user' }] }]);
+  });
+
+  it('preserves relation terms and existing logical groups', () => {
+    const terms = Object.freeze([{ path: 'email', operator: 'LIKE', value: 'requested' }]);
+    const userGroup = { conditions: [{ field: 'title', value: 'Requested title' }] };
+    const args = { user: { terms }, AND: [userGroup] };
+    scopeRelationToUser(args, 'current-user');
+    expect(args.user.terms).toBe(terms);
+    expect(args.AND).toEqual([userGroup, { conditions: [{ field: 'user', path: 'id', operator: 'EQ', value: 'current-user' }] }]);
+  });
+
+  it('keeps a user OR separate from the owner scope OR', () => {
+    const userOR = [{ conditions: [{ field: 'totalPrice', operator: 'GT', value: 100 }] }];
+    const scopeOR = [{ conditions: [{ field: 'client', path: 'id', value: 'current-user' }] }];
+    const args = { OR: userOR };
+    intersectScopeFilter(args, 'OR', scopeOR);
+    expect(args.OR).toBe(userOR);
+    expect(args.AND).toEqual([{ OR: scopeOR }]);
   });
 });

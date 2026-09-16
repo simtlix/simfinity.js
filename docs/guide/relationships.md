@@ -233,3 +233,5 @@ Parent ownership does not replace application permissions. Use child operation m
 Deleting a parent does not automatically cascade through referenced collections. Implement the required deletion policy in your application. Existing field resolvers are preserved; Simfinity only generates a relation resolver when the field has none.
 
 PostgreSQL creates real `NO ACTION` foreign keys for single references, child-backed inverse collections, explicit link entities, and references inside private owned embedded tables. Only the private owner-to-embedded link cascades. See [PostgreSQL relationship foreign keys](./postgresql#relationship-foreign-keys) for the physical mapping and unsupported shapes.
+
+MongoDB/Mongoose references do not enforce target existence as database foreign keys do. A mutation can therefore store a well-formed but nonexistent referenced ID, which resolves to `null` on reads, while PostgreSQL rejects it and rolls back. Applications requiring the same missing-reference rejection on MongoDB must validate references in their mutation/controller path; shared GraphQL input shapes alone do not provide referential integrity.

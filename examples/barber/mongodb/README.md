@@ -56,6 +56,7 @@ Run these from `examples/barber/mongodb` after `npm ci`:
 | --- | --- |
 | `npm start` / `npm run dev` | Start HTTP, or watch for backend source changes. |
 | `npm test` | Run backend unit and regression tests. |
+| `npm run test:query-mutations` | Check filters, combined aggregates and nested mutations against a disposable HTTP API; see the [shared runbook](../README.md#validate-changes). |
 | `npm run test:http` | Run `../tests/http-contract.mjs` against the running, seeded API. |
 | `npm run test:mongodb` | Check real transactions and derived booking, bundle, and review values in a temporary MongoDB database. |
 | `npm run test:dataset` | Verify dataset load and deletion with a temporary API and MongoDB database. |
@@ -66,7 +67,7 @@ Run these from `examples/barber/mongodb` after `npm ci`:
 | `npm run indexes` | Ensure application indexes. |
 | `npm run mcp:stdio` | Start MCP over standard input/output. |
 
-Integration checks use the configured `MONGO` deployment and create and remove temporary databases. Use a disposable replica set; the configured user needs database creation and deletion privileges. `test:http` and dataset commands modify the endpoint they are given. The [dedicated Barber workflow](../../../.github/workflows/barber.yml) runs the backend, real-database, and shared frontend checks independently from library CI.
+Integration checks use the configured `MONGO` deployment and create and remove temporary databases. Use a disposable replica set; the configured user needs database creation and deletion privileges. `test:http`, `test:query-mutations` and dataset commands modify the endpoint they are given. The [dedicated Barber workflow](../../../.github/workflows/barber.yml) runs the backend, real-database, and shared frontend checks independently from library CI.
 
 ## Application layout
 
