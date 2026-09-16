@@ -5,7 +5,7 @@ export const heroCapabilities = [
     description: 'Define your domain with GraphQL object types. Generate storage, operations, relationships, and AI tools from the same schema.',
     features: ['GraphQL object types', 'Field extensions', 'Generated API'],
     file: 'schema.js · registration',
-    code: 'simfinity.connect(\n  null, SerieType, \'serie\', \'series\'\n);\n\nconst schema = simfinity.createSchema();',
+    code: 'simfinity.connect(\n  null, barbershopType, \'barbershop\', \'barbershops\'\n);\n\nconst schema = simfinity.createSchema();',
     link: '/guide/schema.html', cta: 'Explore schema definition',
   },
   {
@@ -14,7 +14,7 @@ export const heroCapabilities = [
     description: 'Generate MongoDB models or PostgreSQL tables from your GraphQL fields. Your types stay at the center.',
     features: ['MongoDB or PostgreSQL', 'Generated storage', 'Field metadata'],
     file: 'schema.js · generate storage',
-    code: '// Choose the database facade at startup.\nsimfinity.connect(\n  null, SerieType, \'serie\', \'series\'\n);',
+    code: '// Choose the database facade at startup.\nsimfinity.connect(\n  null, barbershopType, \'barbershop\', \'barbershops\'\n);',
     link: '/guide/schema.html', cta: 'Explore database models',
   },
   {
@@ -22,8 +22,8 @@ export const heroCapabilities = [
     title: 'Ask more.', accent: 'Write less.',
     description: 'Filter, sort, paginate, and aggregate with generated GraphQL queries. Fetch one record or explore a collection.',
     features: ['Typed filters', 'Sorting & pagination', 'Aggregations'],
-    file: 'catalog.graphql · generated query',
-    code: 'query {\n  series(name: { operator: LIKE, value: "Expanse" }) {\n    id\n    name\n  }\n}',
+    file: 'barber.graphql · generated query',
+    code: 'query {\n  barbershops(slug: { operator: EQ, value: "barber-demo" }) {\n    id\n    name\n  }\n}',
     link: '/guide/queries.html', cta: 'Explore queries',
   },
   {
@@ -31,8 +31,8 @@ export const heroCapabilities = [
     title: 'Make changes.', accent: 'Keep your rules.',
     description: 'Create, update, and delete with typed inputs, validation, lifecycle hooks, and database transactions.',
     features: ['Typed inputs', 'Validation & hooks', 'Transactions'],
-    file: 'catalog.graphql · generated mutation',
-    code: 'mutation {\n  addserie(input: { name: "The Expanse" }) {\n    id\n    name\n  }\n}',
+    file: 'barber.graphql · generated mutation',
+    code: '# As the shop owner or an administrator\nmutation CompleteBooking($id: ID!) {\n  complete_booking(input: { id: $id }) {\n    id\n    state\n  }\n}',
     link: '/guide/mutations.html', cta: 'Explore mutations',
   },
   {
@@ -40,8 +40,8 @@ export const heroCapabilities = [
     title: 'Connect types.', accent: 'Follow the story.',
     description: 'Describe embedded documents and references once. Follow your data through generated nested resolvers.',
     features: ['Embedded documents', 'References', 'Nested queries'],
-    file: 'catalog.graphql · related records',
-    code: 'query {\n  series {\n    name\n    seasons { number }\n  }\n}',
+    file: 'barber.graphql · related records',
+    code: 'query {\n  barbershops {\n    name\n    services { name price }\n    businessHours { dayOfWeek openTime closeTime }\n  }\n}',
     link: '/guide/relationships.html', cta: 'Explore relationships',
   },
   {
@@ -50,7 +50,7 @@ export const heroCapabilities = [
     description: 'Turn selected GraphQL operations into typed tools for AI clients, using your existing schema.',
     features: ['Typed tool inputs', 'Operation selection', 'Shared GraphQL schema'],
     file: 'mcp.js · expose read tools',
-    code: 'import { generateMCPTools } from \'@simtlix/simfinity-mcp\';\n\nconst { tools, callTool } =\n  generateMCPTools(schema, {\n    exclude: \'mutation\',\n  });',
+    code: 'import { generateMCPTools } from \'@simtlix/simfinity-mcp\';\n\nconst { tools, callTool } =\n  generateMCPTools(schema, {\n    include: [\'barbershops\'],\n    schemaPlugins: [authPlugin],\n    selectionDepth: 0,\n  });',
     link: '/guide/mcp.html', cta: 'Explore MCP integration',
   },
 ];

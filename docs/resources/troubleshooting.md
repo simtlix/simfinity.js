@@ -76,4 +76,4 @@ The SDK is needed for MCP transports. Tool definition generation itself can be u
 
 ## Still need help?
 
-Compare your setup with the [Series Sample Project](https://github.com/simtlix/series-sample), then [report a minimal reproduction](./contributing#report-a-problem) with the exact type definition and operation.
+Compare your setup with the [Barber example for your database](/resources/barber), then [report a minimal reproduction](./contributing#report-a-problem) with the exact type definition and operation.

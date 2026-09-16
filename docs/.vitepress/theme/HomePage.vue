@@ -22,11 +22,11 @@ const heroBack = ref(null);
 const heroGraph = ref(null);
 const selectedHeroNode = computed(() => heroCapabilities.find(node => node.id === activeNode.value));
 let heroTrigger = 'schema';
-const includeSeasons = ref(false);
+const includeOpeningHours = ref(false);
 const activeCapability = ref('01');
 let capabilityObserver;
 let heroResizeObserver;
-const activeTool = ref('series');
+const activeTool = ref('barbershops');
 const database = ref('mongodb');
 const databaseGuide = computed(() => database.value === 'postgres' ? '/guide/postgresql.html' : '/guide/getting-started.html');
 const databaseName = computed(() => database.value === 'postgres' ? 'PostgreSQL' : 'MongoDB');
@@ -34,9 +34,9 @@ const installCommand = computed(() => database.value === 'postgres'
   ? 'npm i @simtlix/simfinity-postgres@3.2.0 graphql@^16.11.0 pg@^8.16.3'
   : 'npm i @simtlix/simfinity-js@3.2.0 graphql@^16.11.0 mongoose@^8.16.2');
 const toolExamples = [
-  { name: 'series', kind: 'QUERY', description: 'Search your catalog with typed filters, sorting, and pagination.', link: '/guide/queries.html' },
-  { name: 'series_aggregate', kind: 'AGGREGATE', description: 'Group your data and calculate counts, sums, and averages.', link: '/reference/aggregation.html' },
-  { name: 'addserie', kind: 'MUTATION', description: 'Create a record through the same validation and lifecycle hooks.', link: '/guide/mutations.html' },
+  { name: 'barbershops', kind: 'QUERY', description: 'Find approved shops with typed filters and pagination. Barber scopes decide which shops the caller can see.', link: '/guide/queries.html' },
+  { name: 'bookings_aggregate', kind: 'AGGREGATE', description: 'Count bookings by state within the signed-in user’s query scope.', link: '/reference/aggregation.html' },
+  { name: 'complete_booking', kind: 'MUTATION', description: 'An owner or administrator completes a confirmed booking through its state machine. Replace the illustrative ID with an accessible booking ID.', link: '/guide/state-machines.html' },
 ];
 const copyState = ref('Copy install command');
 let copyTimer;
@@ -137,17 +137,17 @@ async function closeHero() {
 }
 
 const capabilityDetails = {
-  '01': { label: 'RELATIONSHIPS', title: 'A connection becomes a query.', code: 'series { seasons { number } }' },
-  '02': { label: 'QUERIES', title: 'A question becomes a filter.', code: 'name: { operator: LIKE, value: "Expanse" }' },
-  '03': { label: 'ACCESS CONTROL', title: 'Your context guides access.', code: "addserie: requireRole('editor')" },
+  '01': { label: 'RELATIONSHIPS', title: 'A connection becomes a query.', code: 'barbershops { services { name price } }' },
+  '02': { label: 'QUERIES', title: 'A question becomes a filter.', code: 'name: { operator: LIKE, value: "Barber" }' },
+  '03': { label: 'ACCESS CONTROL', title: 'Your context guides access.', code: 'addservice: requireOwnerOrPlatformAdmin()' },
   '04': { label: 'LIFECYCLE HOOKS', title: 'Your logic joins the lifecycle.', code: 'onSaving(doc, args, session, context)' },
 };
 const currentCapability = computed(() => capabilityDetails[activeCapability.value]);
-const mcpInputs = {
-  series: { pagination: { page: 1, size: 10 } },
-  series_aggregate: { aggregation: { groupId: 'category', facts: [{ operation: 'COUNT', factName: 'total', path: 'id' }] } },
-  addserie: { input: { name: 'The Expanse' } },
-};
+const mcpInputs = computed(() => ({
+  barbershops: { slug: { operator: 'EQ', value: 'barber-demo' }, pagination: { page: 1, size: 10 } },
+  bookings_aggregate: { aggregation: { groupId: 'state', facts: [{ operation: 'COUNT', factName: 'total', path: 'id' }] } },
+  complete_booking: { input: { id: database.value === 'postgres' ? 'bd418461-9c86-489e-8062-32c56b81a171' : '507f1f77bcf86cd799439012' } },
+}));
 onMounted(() => {
   const hero = root.value.querySelector('.sim-hero');
   const system = hero.querySelector('.hero-system');
@@ -190,7 +190,7 @@ onUnmounted(() => {
           </div>
           <div class="hero-actions">
             <a class="sim-button primary" :href="withBase(databaseGuide)">Start with {{ databaseName }} <span aria-hidden="true">&#8599;</span></a>
-            <a class="text-link" :href="withBase('/guide/introduction.html')">Read the docs <span aria-hidden="true">&#8599;</span></a>
+            <a class="text-link" :href="withBase('/resources/barber.html')">Explore the Barber app <span aria-hidden="true">&#8599;</span></a>
           </div>
           <p class="preview-download"><a :href="withBase('/releases/simfinity-3.2.0-starters.zip')" download>Download v3.2.0 starters</a><span>Or install in your project:</span></p>
           <div class="install-command">
@@ -232,9 +232,9 @@ onUnmounted(() => {
         <div class="chapter-label reveal"><span>01 / FROM SCHEMA TO SYSTEM</span><span class="chapter-line"></span><span>LESS REPETITION. MORE INTENTION.</span></div>
         <div class="section-heading reveal">
           <h2 id="workflow-title">A type is just<br><span class="muted-heading">the beginning.</span></h2>
-          <p>One series catalog. Three ways to work with it.<br><span>Add a relationship and follow what changes.</span></p>
+          <p>One Barber app. Two database backends.<br><span>Explore a shop profile and its opening hours.</span></p>
         </div>
-        <CatalogExplorer v-model:stage="activeTab" v-model:related="includeSeasons" :database="database" />
+        <CatalogExplorer v-model:stage="activeTab" v-model:related="includeOpeningHours" :database="database" />
       </div>
     </section>
 
@@ -265,11 +265,11 @@ onUnmounted(() => {
         <div class="mcp-copy reveal"><p class="section-eyebrow"><span class="blue-dot"></span> 03 / A NEW WAY TO CONNECT</p><h2 id="mcp-title">Your API.<br><span class="mcp-title-line">Meet <span class="mcp-ai">AI.</span></span></h2><p>Your schema already knows your data.<br>Now your AI tools can, too. Generate typed MCP<br class="desktop-break"> tools from the same GraphQL API, on either database.</p><a class="text-link" :href="withBase('/guide/mcp.html')">Explore MCP integration <span aria-hidden="true">&#8599;</span></a></div>
         <div class="mcp-terminal reveal" data-parallax="24" data-spotlight>
           <div class="terminal-heading"><span class="blue-dot"></span><span>schema &rarr; tools</span><span>MCP</span></div>
-          <div class="terminal-source"><span class="terminal-label">YOUR EXISTING SCHEMA</span><code>generateMCPTools(schema)</code></div>
+          <div class="terminal-source"><span class="terminal-label">BARBER SCHEMA + AUTH</span><code>generateMCPTools(schema, {<br>  schemaPlugins: [authPlugin],<br>  selectionDepth: 0,<br>})</code></div>
           <div class="tool-connection" aria-hidden="true"><span></span></div>
           <div class="tool-list" role="group" aria-label="Explore generated MCP tools"><button v-for="tool in toolExamples" :key="tool.name" class="tool-row" type="button" :aria-pressed="activeTool === tool.name" @click="activeTool = tool.name"><span class="tool-icon" aria-hidden="true">&#8599;</span><code>{{ tool.name }}</code><span>{{ tool.kind }}</span><span class="tool-signal" aria-hidden="true"></span></button></div>
           <template v-for="tool in toolExamples" :key="tool.name"><div v-if="activeTool === tool.name" class="tool-detail" role="status"><span class="terminal-label">{{ tool.kind }} TOOL</span><p>{{ tool.description }}</p><CodeSnippet :code="JSON.stringify(mcpInputs[tool.name], null, 2)" file="Example tool arguments" /><a :href="withBase(tool.link)">Explore this operation <span aria-hidden="true">&#8599;</span></a></div></template>
-          <p class="terminal-footnote">One schema. Every interface.</p>
+          <p class="terminal-footnote">GraphQL and MCP share Barber’s verified user context and rules.</p>
         </div>
       </div>
     </section>
@@ -281,7 +281,7 @@ onUnmounted(() => {
         <div class="learning-links" data-line-reveal>
           <a class="reveal" :href="withBase('/guide/databases.html')"><span class="learning-number">01</span><div><span class="learning-label">START HERE</span><h3>Your first API</h3><p>A downloadable starter, a working query,<br>and the response to expect.</p></div><span class="learning-arrow" aria-hidden="true">&#8599;</span></a>
           <a class="reveal" :href="withBase('/reference/api.html')"><span class="learning-number">02</span><div><span class="learning-label">GET SPECIFIC</span><h3>Know the details</h3><p>Every function, every option.<br>Find the exact API.</p></div><span class="learning-arrow" aria-hidden="true">&#8599;</span></a>
-          <a class="reveal" href="https://github.com/simtlix/series-sample" target="_blank" rel="noreferrer"><span class="learning-number">03</span><div><span class="learning-label">SEE IT WORK</span><h3>A real application</h3><p>Explore the Series sample.<br>Connect the dots.</p></div><span class="learning-arrow" aria-hidden="true">&#8599;</span></a>
+          <a class="reveal" :href="withBase('/resources/barber.html')"><span class="learning-number">03</span><div><span class="learning-label">SEE IT WORK</span><h3>The Barber app</h3><p>MongoDB or PostgreSQL. One frontend.<br>Run the complete booking example.</p></div><span class="learning-arrow" aria-hidden="true">&#8599;</span></a>
         </div>
       </div>
     </section>

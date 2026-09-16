@@ -60,6 +60,43 @@ The minimal seed creates an approved shop with slug `barber-demo`, a service nam
 
 This is a local MVP with synthetic data. Payment is on site, and the reminder job is a stub. The example demonstrates application patterns rather than a production deployment configuration.
 
+## From the homepage to the running app
+
+The homepage's interactive example follows a simplified shop profile and its embedded opening hours. After seeding either stack, run this query in its GraphiQL endpoint to explore the complete app:
+
+```graphql
+query FindBarberShop {
+  barbershops(
+    slug: { operator: EQ, value: "barber-demo" }
+    pagination: { page: 1, size: 10 }
+  ) {
+    id
+    name
+    slug
+    businessHours { dayOfWeek openTime closeTime }
+    services { id name price durationMinutes }
+    professionals { id name }
+  }
+}
+```
+
+The query is identical for MongoDB and PostgreSQL. The seed creates “Simfinity Barber Demo”, opening hours from 09:00 to 18:00, “Corte clásico”, and “Alex Demo”. IDs come from your database; homepage IDs are illustrative.
+
+Opening hours are embedded values. Services and professionals are separate records linked back to the shop through `extensions.relation.connectionField`. See the actual shop definitions for [MongoDB](https://github.com/simtlix/simfinity.js/blob/master/examples/barber/mongodb/types/barbershop.js) and [PostgreSQL](https://github.com/simtlix/simfinity.js/blob/master/examples/barber/postgres/types/barbershop.js), including their scopes and controller registration.
+
+The homepage also shows `bookings_aggregate` and `complete_booking`. These operate within the authenticated caller's permissions and scopes. To complete a booking, sign in as its shop owner or an administrator, use an existing confirmed booking's ID, and invoke its state action:
+
+```graphql
+mutation CompleteBooking($id: ID!) {
+  complete_booking(input: { id: $id }) {
+    id
+    state
+  }
+}
+```
+
+Provide the access token as an `Authorization: Bearer …` header in GraphiQL and the booking ID in query variables. The [booking state machine](https://github.com/simtlix/simfinity.js/blob/master/examples/barber/postgres/types/booking.stateMachine.js) defines the transition from `CONFIRMED` to `COMPLETED`; authorization and ownership checks still apply. The same operations are available through MCP with the app's verified user context and auth plugin.
+
 ## What the code demonstrates
 
 GraphQL types describe shops, services, bundles, professionals, bookings, reviews, favorites, and notifications. Relationship metadata connects them; generated operations support the frontend's reads and writes. Controllers enforce domain checks and derive values such as booking totals. State machines implement shop approval and booking transitions.

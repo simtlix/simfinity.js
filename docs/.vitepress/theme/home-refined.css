@@ -8,6 +8,13 @@
 .VPNavBarTitle .logo { width: 48px; height: 37px; margin-right: 11px; }
 .VPNavBarTitle .title { font-size: 21px; font-weight: 600; letter-spacing: -.9px; }
 .VPNavBarMenuLink { letter-spacing: -.1px; }
+/* Keep the expanded navigation in the menu until all links fit beside the brand. */
+@media (min-width: 768px) and (max-width: 1199px) {
+  .VPNavBar .menu, .VPNavBar .translations, .VPNavBar .appearance,
+  .VPNavBar .social-links, .VPNavBar .extra { display: none; }
+  .VPNavBar .hamburger { display: flex; }
+  .VPNav .VPNavScreen { display: block; }
+}
 .sim-home-layout .VPNavBar { background: color-mix(in srgb, var(--vp-c-bg), transparent 8%); backdrop-filter: blur(18px); }
 .sim-home-layout .VPNavBar .divider { opacity: .6; }
 .sim-home { --amber: #fbc343; }
