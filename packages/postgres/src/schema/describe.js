@@ -1,15 +1,17 @@
 import { describeModels } from '@simtlix/simfinity-core';
+import { planRelationalSchema } from '@simtlix/simfinity-sql';
 import { queryFunctions } from '../query/functions.js';
 import { constraintBuilder } from './constraints.js';
 import { identifier, literal, generatedName, invalid } from './sql.js';
 
-const scalarTypes = { ID: 'uuid', String: 'text', Enum: 'text', Int: 'integer', Float: 'double precision', Boolean: 'boolean', DateTime: 'timestamp with time zone' };
-const hasOwnedFields = (fields) => fields.some((field) => field.kind === 'reference' || field.unique || (field.fields && hasOwnedFields(field.fields)));
+const scalarTypes = { ID: 'uuid', String: 'text', Enum: 'text', Int: 'integer', Float: 'double precision', Boolean: 'boolean', DateTime: 'timestamp with time zone', Embedded: 'jsonb' };
+const physicalType = (column) => `${scalarTypes[column.scalar]}${column.list ? '[]' : ''}`;
+const physicalDefault = (value) => value.kind === 'identity' ? 'gen_random_uuid()' : typeof value.value === 'string' ? `${literal(value.value)}::text` : String(value.value);
 
-/** Compile GraphQL storage metadata into a serializable PostgreSQL description. */
-export const describeDatabase = (registrations, { schema = 'public' } = {}) => {
+/** Lower engine-independent relational guarantees into PostgreSQL storage and enforcement. */
+export const describeRelationalSchema = (plan) => {
+  const { schema } = plan;
   identifier(schema);
-  const { entities } = describeModels(registrations);
   const tables = [];
   const names = new Set();
   const addTable = (name, ownership) => {
@@ -36,88 +38,44 @@ export const describeDatabase = (registrations, { schema = 'public' } = {}) => {
     if (table.indexes.some((index) => JSON.stringify(index.columns) === JSON.stringify(columns) && index.unique === unique)) return;
     table.indexes.push({ name: generatedName(table.name, ...columns, unique ? 'uq' : 'idx'), columns, unique, nullsNotDistinct: unique });
   };
-  const addCheck = (table, field, suffix, expression) => {
-    table.checks.push({ name: generatedName(table.name, field, suffix), expression });
-  };
+  const addCheck = (table, field, suffix, expression) => table.checks.push({ name: generatedName(table.name, field, suffix), expression });
   const addReference = (table, column, targetTable, targetColumn = 'id', owned = false) => {
-    table.foreignKeys.push({
-      name: generatedName(table.name, column, 'fk'), columns: [column], targetTable, targetColumns: [targetColumn],
-      onDelete: owned ? 'CASCADE' : 'NO ACTION', onUpdate: 'NO ACTION', deferrable: true, initiallyDeferred: false,
-    });
+    table.foreignKeys.push({ name: generatedName(table.name, column, 'fk'), columns: [column], targetTable, targetColumns: [targetColumn], onDelete: owned ? 'CASCADE' : 'NO ACTION', onUpdate: 'NO ACTION', deferrable: true, initiallyDeferred: false });
     addIndex(table, [column]);
   };
+  for (const logical of plan.tables) {
+    const table = addTable(logical.name, logical.ownership && structuredClone(logical.ownership));
+    table.columns = [];
+    for (const column of logical.columns) addColumn(table, {
+      name: column.name, type: physicalType(column), nullable: column.nullable,
+      ...(column.default ? { default: physicalDefault(column.default) } : {}),
+      ...(column.presenceColumn ? { presenceColumn: column.presenceColumn } : {}),
+    });
+    table.primaryKey = structuredClone(logical.primaryKey);
+    table.foreignKeys = structuredClone(logical.foreignKeys);
+    table.indexes = logical.indexes.map(({ name, columns, unique, nullsEqual }) => ({ name, columns: [...columns], unique, nullsNotDistinct: nullsEqual }));
+  }
   const constraints = constraintBuilder(schema, tables, { addTable, addColumn, addReference, addIndex, addCheck });
-  const fieldsInto = (table, fields, path = []) => {
-    for (const field of fields) {
-      if (field.kind === 'collection') continue;
-      if (field.kind === 'embedded' && field.unique) invalid(`Whole embedded-object uniqueness is not supported: ${table.name}.${field.name}`);
-      if (!table.ownership && ['id', '_id'].includes(field.name)) {
-        if (field.kind !== 'scalar' || field.list || !['ID', 'String'].includes(field.scalar)) invalid(`Reserved identity field ${table.name}.${field.name} must be a scalar ID or String`);
-        continue;
-      }
-      if (field.storageName.startsWith('__')) invalid(`Reserved private column name ${table.name}.${field.storageName}`);
-      const conditional = table.ownership?.nullableItems === true;
-      const required = field.required && !conditional;
-      if (field.kind === 'embedded' && hasOwnedFields(field.fields)) {
-        // State preserves absent/null/empty values when the runtime reassembles nested objects.
-        const stateColumn = `__${field.name}_state`;
-        addColumn(table, { name: stateColumn, type: 'text', nullable: false, default: '\'missing\'::text' });
-        const values = field.required && !conditional ? ['present'] : ['missing', 'null', 'present'];
-        if (conditional && field.required) addCheck(table, stateColumn, 'required', `(NOT ${identifier('__item_present')}) OR (${identifier(stateColumn)} = 'present'::text)`);
-        addCheck(table, stateColumn, 'state', `${identifier(stateColumn)} = ANY (ARRAY[${values.map((v) => `${literal(v)}::text`).join(', ')}])`);
-        const owned = addTable(generatedName(table.name, field.name), {
-          ownerTable: table.name, ownerColumn: table.primaryKey.columns[0], field: field.name,
-          path: [...path, field.name], list: field.list, required: field.required,
-          nullableItems: field.list && !field.itemRequired, stateColumn,
-        });
-        addColumn(owned, { name: '__owner_id', type: 'uuid', nullable: false });
-        addReference(owned, '__owner_id', table.name, table.primaryKey.columns[0], true);
-        if (field.list) {
-          addColumn(owned, { name: '__position', type: 'integer', nullable: false });
-          addCheck(owned, '__position', 'nonnegative', `${identifier('__position')} >= 0`);
-          addIndex(owned, ['__owner_id', '__position'], true);
-          if (!field.itemRequired) addColumn(owned, { name: '__item_present', type: 'boolean', nullable: false, default: 'true' });
-        } else addIndex(owned, ['__owner_id'], true);
-        fieldsInto(owned, field.fields, [...path, field.name]);
-        continue;
-      }
-      const type = field.kind === 'embedded' ? 'jsonb' : field.kind === 'reference' ? 'uuid' : `${scalarTypes[field.scalar]}${field.list ? '[]' : ''}`;
-      if (!type || type.startsWith('undefined')) invalid(`Unsupported scalar at ${table.name}.${field.name}`);
-      const presenceColumn = table.ownership || field.kind === 'embedded' ? generatedName('__field', field.name, 'present') : null;
-      addColumn(table, { name: field.storageName, type, nullable: !required, ...(presenceColumn ? { presenceColumn } : {}) });
-      if (presenceColumn) addColumn(table, { name: presenceColumn, type: 'boolean', nullable: false, default: 'false' });
-      if (conditional && field.required) addCheck(table, field.storageName, 'required', `(NOT ${identifier('__item_present')}) OR (${identifier(field.storageName)} IS NOT NULL)`);
-      if (field.kind === 'reference') addReference(table, field.storageName, field.target);
-      if (field.scalar === 'ID') addIndex(table, [field.storageName]);
-      if (field.kind === 'embedded') constraints.addJSON(table, field);
-      if (field.unique) {
-        if (field.list || table.ownership) constraints.addUnique(table, field, type);
-        else addIndex(table, [field.storageName], true);
-      }
-      if (field.scalar === 'Enum') {
-        const values = `ARRAY[${field.values.map((value) => `${literal(value)}::text`).join(', ')}]`;
-        const expression = field.list
-          ? `array_remove(${identifier(field.storageName)}, NULL::text) <@ ${values}`
-          : `${identifier(field.storageName)} = ANY (${values})`;
-        addCheck(table, field.storageName, 'enum', expression);
-      }
-      if (field.kind === 'scalar' && field.list && field.itemRequired) {
-        addCheck(table, field.storageName, 'items', `array_position(${identifier(field.storageName)}, NULL::${scalarTypes[field.scalar]}) IS NULL`);
-      }
-    }
-  };
-  for (const entity of entities) addTable(entity.name);
-  for (const entity of entities) {
-    const table = tables.find((item) => item.name === entity.name);
-    fieldsInto(table, entity.fields);
-    for (const index of entity.indexes) {
-      const columns = index.fields.map((name) => {
-        const field = entity.fields.find((item) => item.name === name || item.storageName === name);
-        if (!field || !['scalar', 'reference'].includes(field.kind) || field.list) invalid(`Index ${entity.name}.${name} must refer to a stored scalar or reference`);
-        return field.name === '_id' ? 'id' : field.storageName;
-      });
-      addIndex(table, columns, index.unique);
-    }
+  for (const item of plan.checkOrder) {
+    const table = tables.find((entry) => entry.name === item.table);
+    const check = plan.tables.find((entry) => entry.name === item.table).checks.find((entry) => entry.name === item.name);
+    const column = identifier(check.column);
+    if (check.kind === 'embeddedShape') { constraints.addJSON(table, check.field); continue; }
+    let expression;
+    if (check.kind === 'presentWhenItem') expression = `(NOT ${identifier('__item_present')}) OR (${column} = 'present'::text)`;
+    else if (check.kind === 'requiredWhenItem') expression = `(NOT ${identifier('__item_present')}) OR (${column} IS NOT NULL)`;
+    else if (check.kind === 'nonnegative') expression = `${column} >= 0`;
+    else if (check.kind === 'state') expression = `${column} = ANY (ARRAY[${check.values.map((value) => `${literal(value)}::text`).join(', ')}])`;
+    else if (check.kind === 'enum') {
+      const values = `ARRAY[${check.values.map((value) => `${literal(value)}::text`).join(', ')}]`;
+      expression = check.list ? `array_remove(${column}, NULL::text) <@ ${values}` : `${column} = ANY (${values})`;
+    } else if (check.kind === 'itemsRequired') expression = `array_position(${column}, NULL::${scalarTypes[check.scalar]}) IS NULL`;
+    else invalid(`Unsupported relational check: ${check.kind}`);
+    table.checks.push({ name: check.name, expression });
+  }
+  for (const item of plan.uniqueValues) {
+    const table = tables.find((entry) => entry.name === item.table);
+    constraints.addUnique(table, item.field, table.columns.find((entry) => entry.name === item.field.storageName).type);
   }
   const generated = constraints.finish();
   generated.functions.push(...queryFunctions(schema));
@@ -136,3 +94,8 @@ export const describeDatabase = (registrations, { schema = 'public' } = {}) => {
   }
   return { schema, tables: tables.sort((a, b) => a.name.localeCompare(b.name)), ...generated };
 };
+
+/** Compile GraphQL storage metadata into the compatible PostgreSQL description. */
+export const describeDatabase = (registrations, { schema = 'public' } = {}) => describeRelationalSchema(planRelationalSchema(describeModels(registrations), {
+  schema, naming: { validateIdentifier: identifier, generatedName },
+}));

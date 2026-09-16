@@ -1,0 +1,20 @@
+{
+  "sourceCommit": "81872c69e6820359850cf6c1b163b4a4c4b0c54e",
+  "snapshots": [
+    {
+      "name": "relations",
+      "description": "8521de4793ebbd3f9e3041cffbe9a3c7a4f1432074a561aaeabfbc293a04ef54",
+      "ddl": "993426a33dc7d1155c5a70a96c121b3d789c479906e06f0f096a504350b6afcb"
+    },
+    {
+      "name": "nested-null-unique-enum",
+      "description": "0d1057b5c0e93de362e445cbacf68f2b651db380dc98f7f95a4ac1766cdd7c3a",
+      "ddl": "ebe04c74004959dcf521c8098019144149dfaf4b44ecb2e82e83c4fc8b0c81a5"
+    },
+    {
+      "name": "long-identifiers",
+      "description": "d089493b27b2d0ee854b398dd1e561b106afa694f644c29993062bbdd0a06eb0",
+      "ddl": "43b9350956af6a86bb91af94943a47c155a33e022f5bdb1d370e8052cd8b1f0a"
+    }
+  ]
+}
