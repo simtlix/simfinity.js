@@ -63,7 +63,7 @@ Names preserve the strings supplied to `connect()`; examples use lowercase. Auth
 
 Use `docs/guide/getting-started.md` for MongoDB and `docs/guide/postgresql.md` for PostgreSQL. The released starters linked from `docs/guide/databases.md` cover both adapters. The [Series Sample Project](https://github.com/simtlix/series-sample) is an additional MongoDB example; do not present it as a PostgreSQL example.
 
-The in-repository Barber example is a complete MVP app with two backend implementations and one frontend. Describe its scopes, controllers, GraphQL IDs, MCP and generated PostgreSQL FKs without claiming native database APIs are interchangeable or that the demo is production-ready. Preserve source-commit provenance and the frontend license. Document generated schema output under ignored `generated/`, not as committed archives or historical API snapshots.
+Feature the in-repository Barber example on the homepage and in links to a complete application. It is a complete MVP app with two backend implementations and one frontend. Describe its scopes, controllers, GraphQL IDs, MCP and generated PostgreSQL FKs without claiming native database APIs are interchangeable or that the demo is production-ready. Preserve source-commit provenance and the frontend license. Document generated schema output under ignored `generated/`, not as committed archives or historical API snapshots.
 
 ## Build and release consistency
 
@@ -74,5 +74,5 @@ The release helper aligns the private root and all four package versions with ex
 ## Style Guidelines
 
 - Use fenced blocks with the appropriate language: `javascript`, `graphql`, `sh` or `sql`.
-- Keep examples realistic -- use types and field names from the series-sample project (Serie, Season, Star, etc.) rather than abstract names.
+- Use actual Barber types and operation names for homepage examples; label simplified excerpts and illustrative data. Focused tutorials may retain the smaller Series domain (Serie, Season, Star, etc.).
 - Show both the type definition and the resulting GraphQL operation where appropriate.

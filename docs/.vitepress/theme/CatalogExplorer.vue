@@ -8,67 +8,74 @@ const isPostgres = computed(() => props.database === 'postgres');
 const stage = defineModel('stage', { default: 'schema' });
 const related = defineModel('related', { default: false });
 const stages = [
-  { id: 'schema', label: 'Define', file: 'schema.js · excerpt', title: 'Your domain, expressed once.', note: 'Register a type. Simfinity builds the models and operations around it.' },
-  { id: 'query', label: 'Query', file: 'catalog.graphql', title: 'Ask for exactly what you need.', note: 'Filters and pagination come from the same type definition.' },
+  { id: 'schema', label: 'Define', file: 'schema.js · simplified Barber types', title: 'A shop starts with a type.', note: 'Start with a shop profile, then add its embedded opening hours.' },
+  { id: 'query', label: 'Query', file: 'barber.graphql', title: 'Find a shop. Read its hours.', note: 'The same query works with either Barber backend.' },
   { id: 'mcp', label: 'Connect AI', file: 'mcp.js · excerpt', title: 'The same API, another interface.', note: 'Generated tools invoke GraphQL operations through your schema.' },
 ];
 const selected = computed(() => stages.find(item => item.id === stage.value) || stages[0]);
 const outputView = ref('response');
 const schemaCode = computed(() => `import { GraphQLObjectType, GraphQLID,
-  GraphQLString${related.value ? ', GraphQLList, GraphQLInt' : ''} } from 'graphql';
+  GraphQLString, GraphQLNonNull${related.value ? ', GraphQLList, GraphQLInt' : ''} } from 'graphql';
 ${isPostgres.value ? `import pg from 'pg';
 import { createPostgres } from '@simtlix/simfinity-postgres';
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-const simfinity = createPostgres({ pool, schema: 'series_api' });` : `import * as simfinity from '@simtlix/simfinity-js';
+const simfinity = createPostgres({ pool, schema: 'barber_example' });` : `import * as simfinity from '@simtlix/simfinity-js';
 // Connect Mongoose before registering types (see the quick start).`}
 ${related.value ? `
-const Season = new GraphQLObjectType({
-  name: 'Season',
-  fields: { number: { type: GraphQLInt } },
+const businessHourSlotType = new GraphQLObjectType({
+  name: 'businessHourSlot',
+  fields: {
+    dayOfWeek: { type: GraphQLInt },
+    openTime: { type: GraphQLString },
+    closeTime: { type: GraphQLString },
+  },
 });
-simfinity.addNoEndpointType(Season);
+simfinity.addNoEndpointType(businessHourSlotType);
 ` : ''}
-const Serie = new GraphQLObjectType({
-  name: 'Serie',
+const barbershopType = new GraphQLObjectType({
+  name: 'barbershop',
   fields: {
     id: { type: GraphQLID },
-    name: { type: GraphQLString },${related.value ? `
-    seasons: {
-      type: new GraphQLList(Season),
+    name: { type: new GraphQLNonNull(GraphQLString) },
+    slug: { type: new GraphQLNonNull(GraphQLString) },${related.value ? `
+    businessHours: {
+      type: new GraphQLList(businessHourSlotType),
       extensions: { relation: { embedded: true } },
     },` : ''}
   },
 });
 
-simfinity.connect(null, Serie, 'serie', 'series');
+simfinity.connect(null, barbershopType, 'barbershop', 'barbershops');
 export const schema = simfinity.createSchema();${isPostgres.value ? '\nawait simfinity.initializeDatabase({ mode: \'create\' });' : ''}`);
-const queryCode = computed(() => `query BrowseCatalog {
-  series(
-    name: { operator: LIKE, value: "Expanse" }
+const queryCode = computed(() => `query FindBarberShop {
+  barbershops(
+    slug: { operator: EQ, value: "barber-demo" }
     pagination: { page: 1, size: 10 }
   ) {
     id
-    name${related.value ? '\n    seasons { number }' : ''}
+    name
+    slug${related.value ? '\n    businessHours { dayOfWeek openTime closeTime }' : ''}
   }
 }`);
 const mcpCode = `import { generateMCPTools } from '@simtlix/simfinity-mcp';
 import { schema } from './schema.js';
 
 const { tools, callTool } = generateMCPTools(schema, {
-  include: ['series'],
+  include: ['barbershops'],
 });
 
-const result = await callTool('series', {
-  name: { operator: 'LIKE', value: 'Expanse' },
+const result = await callTool('barbershops', {
+  slug: { operator: 'EQ', value: 'barber-demo' },
   pagination: { page: 1, size: 10 },
 });`;
 const code = computed(() => stage.value === 'schema' ? schemaCode.value : stage.value === 'query' ? queryCode.value : mcpCode);
-const response = computed(() => JSON.stringify({ data: { series: [{ id: isPostgres.value ? 'b7c3b71c-4c5a-49a2-bfc8-7451e4f6408a' : '507f1f77bcf86cd799439011', name: 'The Expanse', ...(related.value ? { seasons: [{ number: 1 }, { number: 2 }] } : {}) }] } }, null, 2));
-const fields = computed(() => `type Serie {
+const response = computed(() => JSON.stringify({ data: { barbershops: [{ id: isPostgres.value ? 'b7c3b71c-4c5a-49a2-bfc8-7451e4f6408a' : '507f1f77bcf86cd799439011', name: 'Simfinity Barber Demo', slug: 'barber-demo', ...(related.value ? { businessHours: Array.from({ length: 7 }, (_, dayOfWeek) => ({ dayOfWeek, openTime: '09:00', closeTime: '18:00' })) } : {}) }] } }, null, 2));
+const fields = computed(() => `type barbershop {
   id: ID
-  name: String${related.value ? '\n  seasons: [Season]' : ''}
-}${related.value ? '\n\ntype Season {\n  number: Int\n}' : ''}`);
+  name: String!
+  slug: String!${related.value ? '\n  businessHours: [businessHourSlot]' : ''}
+}${related.value ? '\n\ntype businessHourSlot {\n  dayOfWeek: Int\n  openTime: String\n  closeTime: String\n}' : ''}`);
 function navigate(event, index) {
   let next = index;
   if (event.key === 'ArrowRight') next = (index + 1) % stages.length;
@@ -85,10 +92,10 @@ function navigate(event, index) {
 <template>
   <div class="catalog-explorer">
     <div class="explorer-controls">
-      <div class="explorer-tabs" role="tablist" aria-label="Explore the series catalog">
+      <div class="explorer-tabs" role="tablist" aria-label="Explore the Barber example">
         <button v-for="(item, index) in stages" :id="`catalog-tab-${item.id}`" :key="item.id" role="tab" type="button" :aria-selected="stage === item.id" aria-controls="catalog-panel" :tabindex="stage === item.id ? 0 : -1" @click="stage = item.id" @keydown="navigate($event, index)"><span>0{{ index + 1 }}</span>{{ item.label }}</button>
       </div>
-      <label class="relation-control"><input v-model="related" type="checkbox"><span class="relation-toggle" aria-hidden="true"></span>Include seasons</label>
+      <label class="relation-control"><input v-model="related" type="checkbox"><span class="relation-toggle" aria-hidden="true"></span>Include opening hours</label>
     </div>
     <div id="catalog-panel" role="tabpanel" :aria-labelledby="`catalog-tab-${selected.id}`">
       <div class="explorer-intro"><div><span class="explorer-eyebrow">{{ isPostgres ? 'POSTGRESQL' : 'MONGODB' }} / {{ related ? 'CONNECTED TYPES' : 'ONE TYPE' }}</span><h3>{{ selected.title }}</h3></div><p>{{ selected.note }}</p></div>
@@ -98,11 +105,11 @@ function navigate(event, index) {
           <div class="result-path" :key="`${stage}-${related}`" aria-hidden="true"><span>TYPE</span><i></i><span>GRAPHQL</span><i></i><span>MCP</span></div>
           <div class="result-views" role="group" aria-label="Inspect the example"><button type="button" :aria-pressed="outputView === 'response'" @click="outputView = 'response'">Example response</button><button type="button" :aria-pressed="outputView === 'fields'" @click="outputView = 'fields'">Type shape</button></div>
           <CodeSnippet :key="`${outputView}-${related}`" :code="outputView === 'response' ? response : fields" :file="outputView === 'response' ? 'GraphQL response · sample data' : 'schema.graphql · selected types'" />
-          <p class="result-note">{{ related ? 'An embedded relation adds nested input and queryable season fields.' : 'One registration adds list, detail, aggregation and CRUD operations.' }}</p>
+          <p class="result-note">{{ related ? 'Embedded opening hours become nested inputs and queryable fields.' : 'One registration adds list, detail, aggregation and CRUD operations.' }}</p>
         </div>
       </div>
     </div>
-    <div class="explorer-footer"><span>Sample data · v3.2.0. MCP is an optional package for both databases.</span><a :href="withBase(isPostgres ? '/guide/postgresql.html' : '/guide/getting-started.html')">{{ isPostgres ? 'PostgreSQL' : 'MongoDB' }} quick start <span aria-hidden="true">↗</span></a></div>
+    <div class="explorer-footer"><span>Simplified types · illustrative IDs. The full Barber app adds scopes, authorization, and booking rules.</span><a :href="withBase('/resources/barber.html')">Run the Barber app <span aria-hidden="true">↗</span></a></div>
   </div>
 </template>
 

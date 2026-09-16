@@ -48,6 +48,7 @@ export default defineConfig({
         { text: 'MongoDB', link: '/guide/getting-started' },
         { text: 'PostgreSQL', link: '/guide/postgresql' },
       ] },
+      { text: 'Example app', link: '/resources/barber' },
       { text: 'API reference', link: '/reference/api', activeMatch: '/reference/' },
       { text: 'Resources', items: [
         { text: 'Barber example app', link: '/resources/barber' },

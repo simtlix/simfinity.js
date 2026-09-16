@@ -198,7 +198,7 @@ query {
 }
 ```
 
-For a full working application, see the [Series Sample Project](https://github.com/simtlix/series-sample), with relationships, state machines, controllers, and authorization.
+For a full working application, see the [Barber examples](examples/barber/README.md), with MongoDB and PostgreSQL backends, a shared frontend, relationships, state machines, controllers, and authorization.
 
 ## 🔧 Core Concepts
 
