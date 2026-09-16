@@ -540,6 +540,13 @@ const mongoTypes = `import {
 } from '@simtlix/simfinity-js';
 import { GraphQLObjectType, GraphQLString } from 'graphql';
 const runtime = createRuntime(createMongoAdapter());
+const protectedAdapter = createMongoAdapter({ referentialIntegrity: 'transactional' });
+const protection: 'off' | 'transactional' = protectedAdapter.referentialIntegrity;
+const ready: Promise<void> = protectedAdapter.initialize();
+// @ts-expect-error startup mode is readonly
+protectedAdapter.referentialIntegrity = 'off';
+// @ts-expect-error misspelled mode must not compile
+createMongoAdapter({ referentialIntegrity: 'strict' });
 const type = new GraphQLObjectType({ name: 'TypedMongoBook', fields: { title: { type: GraphQLString } } });
 runtime.connect(null, type, 'typedMongoBook', 'typedMongoBooks');
 const registrations = getRegistrations();
@@ -551,7 +558,7 @@ const email = validators.email();
 const scalarName: string = scalars.EmailScalar.name;
 const countPlugin = plugins.envelopCountPlugin();
 const generated: GeneratedMCPTools = generateMCPTools(runtime.createSchema());
-void [registrations, inputType, formatted, internal, rule, email, scalarName, countPlugin, generated];`;
+void [registrations, inputType, formatted, internal, rule, email, scalarName, countPlugin, generated, protection, ready];`;
 
 const mcpTypes = `import mcp, {
   createMCPServer,

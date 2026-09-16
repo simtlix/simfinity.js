@@ -33,6 +33,7 @@ If something is ambiguous, prefer the matching `.mdc` file over this summary.
 4. **Package boundaries**: core and SQL must remain driver-free; PostgreSQL must not import MongoDB, Mongoose or MCP. Keep GraphQL semantics in core, relational planning/record/session orchestration in SQL, and physical SQL/DDL/codecs/driver operations in engine plugins. Backend selection is fixed for each runtime; do not add runtime switching.
 5. **Compatibility**: `packages/mongodb` still publishes as `@simtlix/simfinity-js`. Preserve its entry points and `src/` deep imports inside the published archive. Keep shared helper/error identities and update package declarations for public API changes.
 6. **Example boundaries**: install and test Barber apps in their own directories. Keep them private, preserve registry dependencies and separate Compose projects, and do not add them to library workspaces or npm release tooling. Native database code stays in each backend; the frontend treats GraphQL IDs as opaque strings.
+7. **Mongo reference integrity**: `createMongoAdapter({ referentialIntegrity: 'transactional' })` is opt-in and fixed at startup; default `'off'` stays compatible. Await `adapter.initialize()` after schema creation and database connection. Preserve target-document locks, snapshot/majority transactions, incoming-reference checks and rollback of supplied sessions on integrity violations. Native model/driver writes remain outside that guarantee; see `docs/guide/mongodb-integrity.md`.
 
 ## Verification commands
 

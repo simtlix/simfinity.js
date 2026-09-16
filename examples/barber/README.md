@@ -115,7 +115,7 @@ Run these two commands from the repository root. The matrix creates its own synt
 
 The scopes preserve caller filters and intersect them with server restrictions. For example, selecting one shop still returns only that shop when the owner can access several; a booking OR filter remains combined with the owner's access rule. A requested user ID outside the scope returns null or an empty list.
 
-**Reference integrity differs:** PostgreSQL FKs reject an embedded reference to a nonexistent service and roll back the mutation. MongoDB can store that reference and resolve it to null on reads; Mongoose references are not foreign keys. The matrix checks this difference explicitly. Add application validation when the MongoDB API must reject missing references too.
+**Reference integrity differs:** PostgreSQL FKs reject an embedded reference to a nonexistent service and roll back the mutation. The MongoDB example uses the default integrity mode and can store that reference and resolve it to null on reads; Mongoose references are not foreign keys. The matrix checks this difference explicitly. Simfinity 3.4.0 adds an opt-in [transactional Mongo integrity adapter](../../docs/guide/mongodb-integrity.md); these examples remain pinned to 3.3.0 and keep their existing defaults.
 
 These tests exercise login, scopes, booking, and MCP against a real backend and create test records. Both backends also have real-database checks for transactions, derived domain values, and dataset loading/deletion. PostgreSQL adds storage, foreign-key, and frontend-query checks; see the backend READMEs. The frontend has its own unit, type, build, and browser checks.
 

@@ -28,6 +28,17 @@ Shared examples can import the selected instance from [your application’s runt
 | Create in an owned or existing transaction | [saveObject](#saveobject) | Saved object |
 | Set the maximum query page size | [configureQueryLimits](#configurequerylimits) | Process-wide configuration |
 
+## createMongoAdapter
+
+```javascript
+const adapter = simfinity.createMongoAdapter({ referentialIntegrity: 'transactional' });
+const runtime = simfinity.createRuntime(adapter);
+// Connect MongoDB, register all types and call runtime.createSchema().
+await adapter.initialize();
+```
+
+`createMongoAdapter(options?: MongoAdapterOptions): MongoAdapter` accepts `referentialIntegrity: 'off' | 'transactional'`, defaulting to `'off'`. The mode is immutable and exposed as readonly `adapter.referentialIntegrity`. Transactional mode checks references and restricts target deletion using coordinated MongoDB transactions. `initialize(): Promise<void>` validates startup and existing data; await it before serving protected operations. It is a no-op in off mode. See [the complete contract](../guide/mongodb-integrity).
+
 ## configureQueryLimits
 
 ```javascript
@@ -171,7 +182,7 @@ Runs create materialization, field/type validators, collection processing, state
 
 Without `session`, `saveObject()` owns the backend transaction, including bounded retries and cleanup. Parent and nested writes commit or roll back together. MongoDB requires a transaction-capable deployment; PostgreSQL uses repeatable-read isolation.
 
-With `session`, the caller must already have an active session valid for the selected backend. `saveObject()` only participates: it never starts, commits, aborts, retries, or ends the caller's transaction/session. The caller must handle errors and decide whether to commit or abort. MongoDB requires an active native Mongoose session and throws `ACTIVE_TRANSACTION_REQUIRED` (400) for an inactive one. PostgreSQL requires an active Simfinity session from the same runtime and throws `INVALID_SESSION` for inactive sessions, arbitrary `pg.Client` objects, or sessions from another runtime. Pass the provided session inside a controller or custom mutation to share its transaction.
+With `session`, the caller must already have an active session valid for the selected backend and owns commit, retry and cleanup. In default Mongo mode the caller also owns abort. With [transactional Mongo reference integrity](../guide/mongodb-integrity), a reference violation or guarded-write error aborts even the supplied transaction; the mode requires snapshot read concern and majority write concern. MongoDB throws `ACTIVE_TRANSACTION_REQUIRED` (400) for an inactive session. PostgreSQL requires an active Simfinity session from the same runtime and throws `INVALID_SESSION` for inactive sessions, arbitrary `pg.Client` objects, or sessions from another runtime. Pass the provided session inside a controller or custom mutation to share its transaction.
 
 MongoDB-owned transactions retry transient failures up to five times after the first attempt; uncertain commit results retry only commit up to five times. PostgreSQL retries confirmed serialization failures and deadlocks, but never retries an unknown commit outcome. In either case an uncertain commit may already have succeeded. See [transaction boundaries](../guide/mutations#transaction-boundaries). Hooks run before commit and may repeat on a transient transaction retry. Calling `saveObject()` directly bypasses GraphQL input coercion, field authorization, and global middleware; validate and authorize programmatic callers accordingly.
 

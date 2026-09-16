@@ -101,7 +101,7 @@ Provide the access token as an `Authorization: Bearer …` header in GraphiQL an
 
 Both backends provide `npm run test:query-mutations` for a running disposable GraphQL API. The shared matrix checks filters and nested AND/OR groups, filtered aggregates, relation joins, scopes and nested mutations with rollback. CI runs the same expected results against both databases. See the [test commands and data boundaries](https://github.com/simtlix/simfinity.js/blob/master/examples/barber/README.md#validate-changes).
 
-Scopes intersect caller filters with access restrictions. PostgreSQL additionally enforces foreign keys; MongoDB can store a nonexistent referenced ID and resolve it to null. The matrix records this integrity difference explicitly.
+Scopes intersect caller filters with access restrictions. PostgreSQL additionally enforces foreign keys; this MongoDB example keeps the default integrity mode and can store a nonexistent referenced ID and resolve it to null. The matrix records this integrity difference explicitly. Simfinity 3.4.0 adds optional [transactional Mongo reference integrity](../guide/mongodb-integrity), while these examples remain on 3.3.0.
 
 ## What the code demonstrates
 

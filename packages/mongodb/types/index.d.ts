@@ -41,7 +41,16 @@ export type {
 } from '@simtlix/simfinity-core';
 export * from '@simtlix/simfinity-mcp';
 export { default as mcp } from '@simtlix/simfinity-mcp';
-export function createMongoAdapter(): DatabaseAdapter;
+export interface MongoAdapterOptions {
+  /** Fixed at adapter creation. Defaults to off; transactional mode requires initialize(). */
+  referentialIntegrity?: 'off' | 'transactional';
+}
+export interface MongoAdapter extends DatabaseAdapter {
+  readonly referentialIntegrity: 'off' | 'transactional';
+  /** After connecting MongoDB and createSchema(), await the transaction capability and existing-reference audit. */
+  initialize(): Promise<void>;
+}
+export function createMongoAdapter(options?: MongoAdapterOptions): MongoAdapter;
 export function getRegistrations(): RuntimeRegistration[];
 
 /* ========================================================================== *
@@ -146,6 +155,8 @@ export function getInputType(type: GraphQLObjectType | { name: string }): GraphQ
  * Without a session, owns a transaction on the model's connection and awaits cleanup.
  * A supplied session must have an active transaction and belong to the model's MongoDB client.
  * The caller then owns retries, commit, abort, and cleanup; inactive sessions are rejected.
+ * Exception: transactional reference integrity aborts on a violation, guarded-write error or ambiguous update result.
+ * That mode requires snapshot read concern and majority write concern on supplied transactions.
  * Owned transactions retry transient failures and uncertain commits separately, up to five times each.
  */
 

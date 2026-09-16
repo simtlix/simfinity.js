@@ -23,6 +23,12 @@ jobs:
             mongo: '8.0'
             database: pg18_mongo8
     services:
+      mongo-standalone:
+        image: mongo:${{ matrix.mongo }}
+        ports: ['27018:27017']
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1})'"
+          --health-interval 5s --health-timeout 5s --health-retries 12
       postgres:
         image: postgres:${{ matrix.postgres }}
         env:
@@ -58,6 +64,7 @@ jobs:
         run: npm test
         env:
           SIMFINITY_MONGODB_URI: mongodb://127.0.0.1:27017/simfinity_contract_${{ matrix.database }}?replicaSet=rs0&directConnection=true
+          SIMFINITY_STANDALONE_MONGODB_URI: mongodb://127.0.0.1:27018/simfinity_standalone_${{ matrix.database }}
           SIMFINITY_TEST_MONGODB_URI: mongodb://127.0.0.1:27017/simfinity_upstream_${{ matrix.database }}?replicaSet=rs0&directConnection=true
           SIMFINITY_POSTGRES_URI: postgresql://postgres:simfinity@127.0.0.1:5432/simfinity_test
       - if: always()

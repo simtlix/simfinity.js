@@ -29,7 +29,7 @@ const endOwnedSession = async (session, failed) => {
   }
 };
 
-export const withMongoTransaction = async (session, body, model) => {
+export const withMongoTransaction = async (session, body, model, transactionOptions) => {
   const connection = model?.db || mongoose.connection;
   if (session) {
     if (!session.inTransaction()) {
@@ -46,7 +46,8 @@ export const withMongoTransaction = async (session, body, model) => {
   let failed = false;
   try {
     for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
-      await mySession.startTransaction();
+      if (transactionOptions) await mySession.startTransaction(transactionOptions);
+      else await mySession.startTransaction();
       try {
         const result = await body(mySession);
         await commitWithRetry(mySession);

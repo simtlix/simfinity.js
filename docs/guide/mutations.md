@@ -82,6 +82,8 @@ Deleting a parent does not automatically delete referenced children. Choose an a
 
 Each generated root mutation field runs in its own backend transaction. Its parent and nested child writes share that transaction. A write or hook failure aborts those writes; a confirmed retryable transaction error can retry the operation, up to five retries after the initial attempt. MongoDB uses the registered model connection; PostgreSQL uses the configured pool and repeatable-read isolation.
 
+MongoDB's optional [transactional reference integrity](./mongodb-integrity) mode uses snapshot reads and majority commits, checks missing targets and restricts target deletion under coordinated document locks. A reference violation aborts the whole transaction, including a supplied session. The default Mongo mode remains unchanged.
+
 On MongoDB, an `UnknownTransactionCommitResult` retries only the commit, up to five times, without repeating writes or hooks. An expired commit (`MaxTimeMSExpired`) is not retried. PostgreSQL retries confirmed serialization/deadlock aborts as complete transaction attempts. If a driver reports an uncertain outcome, reconcile it before repeating an operation. Session cleanup is awaited, and cleanup failures do not replace an earlier operation error.
 
 Multiple root mutation fields in a GraphQL request are not one shared transaction. If a later field fails, an earlier field may already have committed. Use a custom mutation when a business operation needs a single transaction spanning several writes.
