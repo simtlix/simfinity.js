@@ -169,7 +169,10 @@ withMongo('MongoDB transactional reference integrity', () => {
 
   test('keeps off mode backward compatible', async () => {
     const legacy = integrityFixture({ prefix: 'LegacyIntegrity', mode: 'off' });
-    for (const model of Object.values(legacy.models)) await model.createCollection();
+    for (const model of Object.values(legacy.models)) {
+      await model.createCollection();
+      await model.init();
+    }
     const result = await mutate(legacy, 'add', 'Shop', { service: { id: missingId() } }, 'id service { id }');
     expect(result.errors).toBeUndefined();
     expect(result.data.addshop.service).toBeNull();
