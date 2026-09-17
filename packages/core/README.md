@@ -2,7 +2,7 @@
 
 Driver-free GraphQL runtime, model metadata, and shared GraphQL helpers for Simfinity. It requires GraphQL 16 and Node.js 18.18 or later, and does not import Mongoose, MongoDB, PostgreSQL, or MCP packages.
 
-Version 3.3.0 is released together with the other Simfinity packages. Install from npm and keep their versions aligned. Source: [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js).
+All Simfinity packages are released together. Install from npm and keep their versions aligned. Source: [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js).
 
 For relational storage, `@simtlix/simfinity-sql` builds on core and delegates physical database behavior to a plugin. PostgreSQL is the first supported plugin; its `createPostgres` facade remains available. See the [SQL plugin guide](https://simtlix.github.io/simfinity.js/guide/sql-plugins.html).
 

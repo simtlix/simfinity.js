@@ -58,23 +58,55 @@ npm run docs:preview
 
 Check links, search, mobile navigation, code examples, and both color themes. The [website maintainer guide](https://github.com/simtlix/simfinity.js/blob/master/docs/.vitepress/README.md) covers the layout, assets, build configuration, and publication workflow.
 
-## Create a GitHub release
+## Release a new version
 
-After merging the intended changes, open **Actions → Create GitHub release → Run workflow** and select `master`.
+Every new aligned version merged into `master` automatically runs **Release Simfinity** (`.github/workflows/release.yml`). Prepare the version in the same reviewed pull request as the intended release:
 
-- Choose `current` to tag an already prepared lockstep version, when all package manifests already contain the intended release version. Choose `patch`, `minor`, or `major` for a future bump. The workflow updates the private root version, all five package manifests, exact internal dependency versions, and workspace lock metadata together.
-- Enable **draft** to review the generated release notes before making the release public.
-- Enable **dry_run** to validate and preview the next version without changing the repository or creating a release.
+```sh
+node scripts/release-packages.js version 3.4.1
+node scripts/release-packages.js check
+```
 
-The workflow installs locked dependencies, runs lint and the existing tests, packs/validates all five packages in dependency order, and performs a local publication dry run. A normal run then pushes the version commit and matching `v` tag together and creates the GitHub release with generated notes. It does not publish packages. Real releases run only from `master`; other branches support dry runs and make no remote writes.
+Choose the next patch, minor or major version according to the changes. Commit the private root manifest, workspace lockfile and all five package manifests together. The helper keeps exact internal dependencies aligned. Ordinary commits that keep an existing release version do not create another release, and example-only/documentation-only changes do not require a new package version.
 
-The push fails if `master` changed during validation, and existing tags are never overwritten. If the tag was pushed but GitHub release creation failed, create the release from that existing tag in GitHub's Releases page instead of incrementing the version again.
+After the merge, the workflow automatically:
 
-## Publish packages separately
+1. Selects clean committed source and validates the aligned version.
+2. Runs lint, tests, all isolated package/TypeScript consumers, and the MongoDB/PostgreSQL database matrix.
+3. Creates the annotated `vX.Y.Z` tag, or verifies that an existing tag points to the exact same commit.
+4. Publishes the same verified archives to npm and GitHub Packages in order: core, SQL, MCP, PostgreSQL, MongoDB.
+5. Waits for all npm versions and their distribution tags to become visible, and compares registry SHA-512 integrity against the archive manifest.
+6. Creates the GitHub release with generated notes, the five archives, manifest and npm verification evidence.
+7. Publishes the stable release documentation to GitHub Pages.
 
-After the intended commit is on `master`, create the GitHub release first. For an already prepared version select **current**; otherwise select the appropriate bump. Existing release tags are never overwritten. Then open **Actions → Publish packages → Run workflow** on `master` and enter the existing tag, such as `v3.3.0`. Select `npm`, `github`, or `both`; npm is the default. Start with **dry_run** to validate without registry reads or publication.
+Stable versions use npm `latest`; prereleases use `next`, are marked as GitHub prereleases, and do not replace the stable website. Runs queue instead of canceling pending versions. A tag is never moved, an existing registry version is skipped only when its archive integrity matches, and superseded runs cannot move distribution tags, the latest release or Pages backward.
 
-The tag must match every package version. The workflow builds one verified archive set from that exact committed tag and publishes core, SQL, MCP, PostgreSQL, then the MongoDB facade. Before writing any package, it checks all existing registry versions: a matching SHA512 is skipped safely, while missing/malformed/conflicting integrity aborts. Stable versions use the `latest` distribution tag; prereleases use `next`. npm publication uses the repository's `NPMJS_TOKEN` secret; GitHub Packages uses the workflow token. Creating a GitHub release does not start package publication automatically.
+## Authentication and one-time setup
+
+npm publication uses [Trusted Publishing with OIDC](https://docs.npmjs.com/trusted-publishers/), with short-lived credentials issued to GitHub Actions. It does not use `NPMJS_TOKEN`, a local npm login, or a maintainer's passkey during releases. GitHub Packages uses the workflow's `GITHUB_TOKEN` with `packages: write`.
+
+The repository configuration expects these settings on **each** of `@simtlix/simfinity-core`, `@simtlix/simfinity-sql`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-postgres` and `@simtlix/simfinity-js`:
+
+| npm Trusted Publisher field | Value |
+| --- | --- |
+| Provider | GitHub Actions |
+| Organization | `simtlix` |
+| Repository | `simfinity.js` |
+| Workflow filename | `release.yml` |
+| Environment | `npm-release` |
+| Allowed action | Enable **Allow npm publish** |
+
+Use the **calling** workflow filename `release.yml`, even though its reusable `publish.yml` contains the publishing job. New npm trust entries default to staged publishing; direct publication must be enabled for this automatic flow. The GitHub `npm-release` environment allows deployments from the `master` branch only. The publish job runs on GitHub-hosted runners with `id-token: write` and npm 11. These settings must be established once by a package maintainer; npm may require their passkey to save the trust relationship.
+
+The workflows call each other explicitly. They do not rely on a tag pushed with `GITHUB_TOKEN` triggering another workflow, because GitHub suppresses those recursive events. Keep publication permissions restricted to the owning jobs and preserve the `npm-release` environment restriction.
+
+## Preview and recover a release
+
+Open **Actions → Release Simfinity → Run workflow** with **dry_run** enabled to validate the selected branch's current committed code and version. This runs packaging and the real database matrix without tags, releases, registry writes or deployments. A preview uses the candidate checkout even when its version already has an older release tag.
+
+For a failed release, inspect the failed job and correct its cause, then use **Re-run failed jobs** or **Re-run all jobs**. Matching archives are skipped safely, artifact names support reruns, and the tag remains immutable. Manual dispatch without **dry_run**, on `master`, retries the current version using its tagged source when available. It does not invent a new version. Superseded historical runs fail closed instead of replacing a newer release or website; recover any historical archive separately without moving current distribution tags.
+
+To publish documentation-only changes, the separate **Documentation** workflow still accepts **deploy** on `master`. It verifies that all packages for the documented version exist on npm first. A release automatically calls the same workflow after publication succeeds.
 
 For a local archive proof without publication, use a fresh destination outside the repository:
 

@@ -24,7 +24,7 @@ const publishedIntegrity = (run, item, registry) => {
   throw new Error(`Registry integrity is unavailable for ${item.name}@${item.version}`);
 };
 
-/** Manual publication; default mode verifies local artifacts without registry requests. */
+/** Ordered publication; default mode verifies local artifacts without registry requests. */
 export const publishRelease = (manifestPath, { registry = 'npm', dryRun = true, expectedCommit, run = execFileSync } = {}) => {
   if (!Object.hasOwn(registries, registry)) throw new Error(`Unknown package registry: ${registry}`);
   if (typeof dryRun !== 'boolean') throw new Error('dryRun must be a boolean');

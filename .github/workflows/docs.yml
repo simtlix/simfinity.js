@@ -1,6 +1,14 @@
 name: Documentation
 
 on:
+  workflow_call:
+    inputs:
+      deploy:
+        type: boolean
+        default: false
+      source_ref:
+        type: string
+        required: true
   pull_request:
     paths:
       - 'docs/**'
@@ -24,15 +32,26 @@ permissions:
 
 concurrency:
   group: docs-${{ github.ref }}
-  cancel-in-progress: false
+  queue: max
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      pages_artifact: github-pages-${{ github.run_attempt }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.source_ref || github.sha }}
+      - uses: actions/checkout@v4
+        if: inputs.deploy
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          sparse-checkout: scripts
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -45,21 +64,41 @@ jobs:
         env:
           DOCS_BASE_PATH: ${{ vars.DOCS_BASE_PATH || '/simfinity.js/' }}
           DOCS_SITE_URL: ${{ vars.DOCS_SITE_URL || 'https://simtlix.github.io' }}
+      - name: Verify the documented packages are available on npm
+        if: inputs.deploy
+        run: node .release-tools/scripts/verify-published.js --workspace
+      - name: Record documented version
+        id: version
+        run: node --input-type=module -e 'import { readFileSync } from "node:fs"; console.log("version=" + JSON.parse(readFileSync("package.json", "utf8")).version)' >> "$GITHUB_OUTPUT"
       - uses: actions/upload-pages-artifact@v3
         with:
+          name: github-pages-${{ github.run_attempt }}
           path: docs/.vitepress/dist
 
   deploy:
-    if: github.event_name == 'workflow_dispatch' && inputs.deploy && github.ref == 'refs/heads/master'
+    if: inputs.deploy && github.ref == 'refs/heads/master'
     needs: build
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Prevent an old retry from replacing newer documentation
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: node scripts/release-state.js verify-current "$RELEASE_VERSION"
       - uses: actions/configure-pages@v5
       - uses: actions/deploy-pages@v4
         id: deployment
+        with:
+          artifact_name: ${{ needs.build.outputs.pages_artifact }}

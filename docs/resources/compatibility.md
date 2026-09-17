@@ -21,7 +21,7 @@ This documentation covers Simfinity.js **{{ library.version }}**, for **MongoDB 
 | [@simtlix/simfinity-core](https://www.npmjs.com/package/@simtlix/simfinity-core) | Shared runtime and helpers | 3.3.0 |
 | [@simtlix/simfinity-mcp](https://www.npmjs.com/package/@simtlix/simfinity-mcp) | Optional MCP integration for either database | 3.3.0 |
 
-Follow [installation and downloads](../guide/databases#install-from-npm) or read the [v3.3.0 release notes](https://github.com/simtlix/simfinity.js/releases/tag/v3.3.0).
+Follow [installation and downloads](../guide/databases#install-from-npm) or read the [latest stable release notes](https://github.com/simtlix/simfinity.js/releases/latest).
 
 ## Requirements
 
@@ -45,7 +45,7 @@ Check the [release history](https://github.com/simtlix/simfinity.js/releases) an
 
 Exercise the operations your application relies on: generated names and input shapes, relationships, permissions, scopes, custom mutations, state actions and MCP allowlists. Keep GraphQL and the selected adapter within supported ranges. PostgreSQL adoption also requires reviewing stronger `NOT NULL`, FK, uniqueness, embedded-shape, and UUID constraints, plus replacing Mongoose-native calls with the PostgreSQL Model/Session APIs.
 
-The site documents two database adapters for the same v3.3.0 API. It does not host separate historical documentation archives. The 3.0.1 starter is retained as a published-version entry point; newer reference APIs may not exist in that release.
+The site documents two database adapters for the same GraphQL API. It does not host separate historical documentation archives. The 3.0.1 starter is retained as a published-version entry point; newer reference APIs may not exist in that release.
 
 ## Get help with an integration
 

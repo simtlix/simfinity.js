@@ -1,73 +1,55 @@
 name: Publish packages
 
+# Called explicitly by release.yml: GITHUB_TOKEN-created tags do not trigger
+# another push workflow, and npm trusts the calling release.yml identity.
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       tag:
-        description: Existing release tag, for example v3.3.0
         type: string
         required: true
-      registry:
-        description: Package registry
-        type: choice
-        options: [npm, github, both]
-        default: npm
+      commit:
+        type: string
+        required: true
       dry_run:
-        description: Validate the archives without publishing
         type: boolean
         default: false
 
 permissions:
   contents: read
 
-concurrency:
-  group: package-publication-${{ inputs.tag }}
-  cancel-in-progress: false
-
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    outputs:
-      commit: ${{ steps.release.outputs.commit }}
     steps:
-      - name: Check publication branch
-        env:
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: |
-          if [ "$GITHUB_REF" != refs/heads/master ] && [ "$DRY_RUN" != true ]; then
-            echo 'Publish from the master workflow. Other branches support dry runs only.' >&2
-            exit 1
-          fi
       - uses: actions/checkout@v7
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          ref: ${{ inputs.commit }}
           fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           package-manager-cache: false
-      - name: Validate release tag and source
-        id: release
+      - name: Validate release source
         env:
           RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_COMMIT: ${{ inputs.commit }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           node scripts/release-packages.js check
           version=$(node --input-type=module -e 'import { readFileSync } from "node:fs"; console.log(JSON.parse(readFileSync("package.json", "utf8")).version)')
-          if [ "$RELEASE_TAG" != "v$version" ]; then
-            echo 'The tag must match every package version.' >&2
-            exit 1
-          fi
+          test "$RELEASE_TAG" = "v$version"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           if [ "$DRY_RUN" != true ]; then
+            test "$GITHUB_REF" = refs/heads/master
             git merge-base --is-ancestor HEAD refs/remotes/origin/master
           fi
-          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - run: npm ci
       - run: npm run lint
       - run: npm test
       - run: npm run test:packages
-      - name: Pack the validated committed source
+      - name: Pack committed release source
         run: |
           git diff --exit-code HEAD
           node scripts/release-packages.js pack "$RUNNER_TEMP/simfinity-release"
@@ -77,40 +59,82 @@ jobs:
           name: release-packages
           path: ${{ runner.temp }}/simfinity-release/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
           overwrite: true
-      - name: Preview publication
-        if: inputs.dry_run
-        run: |
-          echo 'Validated all five package archives. No registry lookup or publication was performed by the publisher.' >> "$GITHUB_STEP_SUMMARY"
 
-  publish-npm:
-    if: ${{ !inputs.dry_run && (inputs.registry == 'npm' || inputs.registry == 'both') }}
+  databases:
     needs: build
+    uses: ./.github/workflows/database-integration.yml
+    with:
+      source_ref: ${{ inputs.commit }}
+
+  tag:
+    if: ${{ !inputs.dry_run }}
+    needs: [build, databases]
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.build.outputs.commit }}
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+      - name: Create or verify the immutable version tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_COMMIT: ${{ inputs.commit }}
+        run: |
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$SOURCE_COMMIT"
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git tag -a "$RELEASE_TAG" "$SOURCE_COMMIT" -m "$RELEASE_TAG"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
+
+  publish-npm:
+    needs: tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Prevent a superseded retry from changing npm distribution tags
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: node scripts/release-state.js verify-current "${RELEASE_TAG#v}"
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org/
           package-manager-cache: false
+      - run: npm install --global npm@11 --ignore-scripts
       - uses: actions/download-artifact@v8
         with:
           name: release-packages
           path: ${{ runner.temp }}/simfinity-release
-      - name: Publish verified archives in dependency order
+      - name: Publish through npm Trusted Publishing (OIDC)
         run: node scripts/publish-packages.js "$RUNNER_TEMP/simfinity-release/manifest.json" --registry npm --execute
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPMJS_TOKEN }}
-          SIMFINITY_RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+          SIMFINITY_RELEASE_COMMIT: ${{ inputs.commit }}
+      - name: Verify npm visibility, distribution tags and archive integrity
+        run: node scripts/verify-published.js "$RUNNER_TEMP/simfinity-release/manifest.json" > "$RUNNER_TEMP/simfinity-release/npm-verification.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-verification
+          overwrite: true
+          path: ${{ runner.temp }}/simfinity-release/npm-verification.json
+          if-no-files-found: error
+          retention-days: 30
 
   publish-gpr:
-    if: ${{ !inputs.dry_run && (inputs.registry == 'github' || inputs.registry == 'both') }}
-    needs: build
+    needs: tag
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -119,7 +143,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.build.outputs.commit }}
+          fetch-depth: 0
+      - name: Prevent a superseded retry from changing package distribution tags
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: node scripts/release-state.js verify-current "${RELEASE_TAG#v}"
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -133,4 +161,4 @@ jobs:
         run: node scripts/publish-packages.js "$RUNNER_TEMP/simfinity-release/manifest.json" --registry github --execute
         env:
           NODE_AUTH_TOKEN: ${{ github.token }}
-          SIMFINITY_RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+          SIMFINITY_RELEASE_COMMIT: ${{ inputs.commit }}

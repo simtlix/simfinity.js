@@ -1,6 +1,11 @@
 name: Database integration
 
 on:
+  workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        required: true
   pull_request:
   push:
     branches: [master]
@@ -40,6 +45,8 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 12
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24

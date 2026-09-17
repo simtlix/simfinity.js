@@ -2,7 +2,7 @@
 
 Database-independent MCP tool generation and transports for Simfinity GraphQL schemas. It requires GraphQL 16 and Node.js 18.18 or later.
 
-Version 3.3.0 is released together with the other Simfinity packages. Install from npm and keep their versions aligned. Source: [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js).
+All Simfinity packages are released together. Install from npm and keep their versions aligned. Source: [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js).
 
 Tool generation and execution use only GraphQL:
 
