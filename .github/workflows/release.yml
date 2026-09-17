@@ -2,13 +2,11 @@ name: Release Simfinity
 
 on:
   push:
-    branches: [master]
+    tags: ['v*']
+  release:
+    types: [published]
+  # Manual runs are previews only; publication requires a tag or release event.
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: Validate the current version without tagging, publishing, or deploying
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -20,12 +18,11 @@ concurrency:
 
 jobs:
   source:
-    if: github.repository == 'simtlix/simfinity.js' && (github.ref == 'refs/heads/master' || inputs.dry_run)
+    if: github.repository == 'simtlix/simfinity.js' && !github.event.deleted
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       commit: ${{ steps.release.outputs.commit }}
-      should_release: ${{ steps.release.outputs.shouldRelease }}
       prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
@@ -38,28 +35,31 @@ jobs:
       - name: Select immutable release source
         id: release
         env:
-          MODE: ${{ inputs.dry_run && 'preview' || github.event_name == 'workflow_dispatch' && 'retry' || 'auto' }}
-        run: node scripts/release-state.js "$MODE" >> "$GITHUB_OUTPUT"
-      - name: Explain unchanged version
-        if: steps.release.outputs.shouldRelease != 'true'
-        run: echo 'This version already has a release tag. Change the aligned workspace version in a PR to release new library code.' >> "$GITHUB_STEP_SUMMARY"
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            node scripts/release-state.js preview >> "$GITHUB_OUTPUT"
+          else
+            node scripts/release-state.js release "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            node scripts/release-state.js verify-current "${RELEASE_TAG#v}"
+          fi
 
   packages:
     needs: source
-    if: needs.source.outputs.should_release == 'true'
     uses: ./.github/workflows/publish.yml
     with:
       tag: ${{ needs.source.outputs.tag }}
       commit: ${{ needs.source.outputs.commit }}
-      dry_run: ${{ inputs.dry_run || false }}
+      dry_run: ${{ github.event_name == 'workflow_dispatch' }}
     permissions:
-      contents: write
+      contents: read
       packages: write
       id-token: write
 
   github-release:
     needs: [source, packages]
-    if: ${{ !inputs.dry_run }}
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -98,7 +98,7 @@ jobs:
 
   documentation:
     needs: [source, github-release]
-    if: ${{ !inputs.dry_run && needs.source.outputs.prerelease != 'true' }}
+    if: github.event_name != 'workflow_dispatch' && needs.source.outputs.prerelease != 'true'
     uses: ./.github/workflows/docs.yml
     with:
       deploy: true

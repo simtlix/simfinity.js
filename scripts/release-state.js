@@ -29,41 +29,49 @@ const isNewer = (candidate, previous) => {
 const gitAt = (root) => (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 /** Run again immediately before every publishing/latest/Pages mutation on retries. */
-export const assertReleaseCurrent = (root, version) => {
+export const assertReleaseCurrent = async (root, version, { registry = 'https://registry.npmjs.org/' } = {}) => {
   if (!releaseVersion.test(version)) throw new Error('Invalid release version');
-  const newer = gitAt(root)('tag', '--list').split('\n').filter((tag) => (
-    releaseVersion.test(tag) && (version.includes('-') || !tag.includes('-')) && isNewer(tag, version)
-  ));
-  if (newer.length) throw new Error(`Release ${version} is superseded by a newer release: ${newer.join(', ')}`);
+  // Tags can be queued before any publication. Only published package versions
+  // supersede a run; check every package to include partially published releases.
+  for (const { name } of readRelease(root).packages) {
+    const response = await fetch(new URL(encodeURIComponent(name), registry), { headers: { 'cache-control': 'no-cache' }, signal: AbortSignal.timeout(15000) });
+    if (response.status === 404) { await response.body?.cancel(); continue; }
+    if (!response.ok) throw new Error(`Registry returned ${response.status} for ${name}`);
+    const metadata = await response.json();
+    if (!metadata.versions || typeof metadata.versions !== 'object' || Array.isArray(metadata.versions)) throw new Error(`Registry version metadata is unavailable for ${name}`);
+    const newer = Object.keys(metadata.versions).filter((published) => (
+      releaseVersion.test(published) && (version.includes('-') || !published.includes('-')) && isNewer(published, version)
+    ));
+    if (newer.length) throw new Error(`Release ${version} is superseded by a newer published package: ${name}@${newer.join(', ')}`);
+  }
 };
 
-/** Select immutable release source; ordinary commits with the same version do not republish. */
-export const selectRelease = (root, { retryExisting = false, preview = false } = {}) => {
+/** Only an explicit existing release tag authorizes publication; previews never publish. */
+export const selectRelease = (root, { tag, preview = false } = {}) => {
   const git = gitAt(root);
   if (git('status', '--porcelain', '--untracked-files=normal')) throw new Error('Release source must be clean and committed');
   const { version } = readRelease(root);
-  const tag = `v${version}`;
   const head = git('rev-parse', 'HEAD');
-  const tags = git('tag', '--list').split('\n');
   const prerelease = version.includes('-');
-  if (preview) return { version, tag, commit: head, shouldRelease: true, prerelease };
-  assertReleaseCurrent(root, version);
-  if (tags.includes(tag)) {
-    const commit = git('rev-parse', `${tag}^{commit}`);
-    try { git('merge-base', '--is-ancestor', commit, head); }
-    catch { throw new Error(`Release tag ${tag} is outside the current ancestor history; it will not be moved`); }
-    return { version, tag, commit, shouldRelease: retryExisting || commit === head, prerelease };
-  }
-  return { version, tag, commit: head, shouldRelease: true, prerelease };
+  if (preview) return { version, tag: `v${version}`, commit: head, prerelease };
+  if (!tag) throw new Error('Publication requires an explicit release tag');
+  if (tag !== `v${version}`) throw new Error('Release tag must match the aligned package version');
+  let commit;
+  try { commit = git('rev-parse', '--verify', `refs/tags/${tag}^{commit}`); }
+  catch { throw new Error('Release tag must already exist'); }
+  if (commit !== head) throw new Error('Release tag must match the checked out source');
+  try { git('merge-base', '--is-ancestor', commit, 'refs/remotes/origin/master'); }
+  catch { throw new Error('Release tag must point to source merged into master'); }
+  return { version, tag, commit, prerelease };
 };
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const [mode = 'auto', value, ...extra] = process.argv.slice(2);
-    if (mode === 'verify-current' && value && !extra.length) assertReleaseCurrent(process.cwd(), value);
+    const [mode, value, ...extra] = process.argv.slice(2);
+    if (mode === 'verify-current' && value && !extra.length) await assertReleaseCurrent(process.cwd(), value);
     else {
-      if (!['auto', 'retry', 'preview'].includes(mode) || value || extra.length) throw new Error('Usage: node scripts/release-state.js [auto|retry|preview] | verify-current <version>');
-      const result = selectRelease(process.cwd(), { retryExisting: mode === 'retry', preview: mode === 'preview' });
+      if (extra.length || !((mode === 'release' && value) || (mode === 'preview' && !value))) throw new Error('Usage: node scripts/release-state.js release <tag> | preview | verify-current <version>');
+      const result = selectRelease(process.cwd(), { tag: value, preview: mode === 'preview' });
       for (const [key, output] of Object.entries(result)) console.log(`${key}=${output}`);
     }
   } catch (error) {

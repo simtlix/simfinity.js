@@ -1,7 +1,7 @@
 name: Publish packages
 
-# Called explicitly by release.yml: GITHUB_TOKEN-created tags do not trigger
-# another push workflow, and npm trusts the calling release.yml identity.
+# Called explicitly by release.yml for tag pushes and published GitHub releases.
+# npm trusts the calling release.yml identity.
 on:
   workflow_call:
     inputs:
@@ -42,7 +42,8 @@ jobs:
           test "$RELEASE_TAG" = "v$version"
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           if [ "$DRY_RUN" != true ]; then
-            test "$GITHUB_REF" = refs/heads/master
+            test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
+            test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$SOURCE_COMMIT"
             git merge-base --is-ancestor HEAD refs/remotes/origin/master
           fi
       - run: npm ci
@@ -68,33 +69,25 @@ jobs:
     with:
       source_ref: ${{ inputs.commit }}
 
-  tag:
+  verify-tag:
     if: ${{ !inputs.dry_run }}
     needs: [build, databases]
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.commit }}
           fetch-depth: 0
-      - name: Create or verify the immutable version tag
+      - name: Recheck the existing release tag after validation
         env:
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_COMMIT: ${{ inputs.commit }}
         run: |
-          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
-            test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$SOURCE_COMMIT"
-          else
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git tag -a "$RELEASE_TAG" "$SOURCE_COMMIT" -m "$RELEASE_TAG"
-            git push origin "refs/tags/$RELEASE_TAG"
-          fi
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$SOURCE_COMMIT"
+          node scripts/release-state.js release "$RELEASE_TAG"
 
   publish-npm:
-    needs: tag
+    needs: verify-tag
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: npm-release
@@ -134,7 +127,9 @@ jobs:
           retention-days: 30
 
   publish-gpr:
-    needs: tag
+    # Keep GPR behind verified npm so the shared npm freshness guard also
+    # protects failed-job retries from rolling GPR distribution tags backward.
+    needs: [verify-tag, publish-npm]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
