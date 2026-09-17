@@ -58,6 +58,24 @@ npm run docs:preview
 
 Check links, search, mobile navigation, code examples, and both color themes. The [website maintainer guide](https://github.com/simtlix/simfinity.js/blob/master/docs/.vitepress/README.md) covers the layout, assets, build configuration, and publication workflow.
 
+## Development and publication contract
+
+This workflow is a shared repository rule for human contributors and coding agents. It is also required by [AGENTS.md](https://github.com/simtlix/simfinity.js/blob/master/AGENTS.md#shared-development-and-publication-rule) and the always-applied [Cursor rule](https://github.com/simtlix/simfinity.js/blob/master/.cursor/rules/simfinity-development-workflow.mdc), so it travels with every clone of the repository.
+
+Develop scoped changes on a branch, update the relevant documentation and tests, and merge through a reviewed pull request with passing checks. If the agreed task includes publishing a library change, the contributor or agent owns the complete release process below. Publication already requested in that task does not need a second request or confirmation of the same scope.
+
+A publication task is complete only when all of these conditions hold:
+
+1. The intended version is aligned across the private root and all five libraries, including exact internal dependencies, and the intended source has passed its checks and been merged into `master`.
+2. Its `vX.Y.Z` tag points to that exact validated commit on GitHub, and the matching GitHub release is published. A tag push may let the workflow create the release automatically; the contributor or agent must still wait for and verify both results.
+3. **Release Simfinity** has succeeded, all five versions are available in npm and GitHub Packages, npm `latest` or `next` points to the intended version, and npm archive integrity matches the release manifest.
+4. The GitHub release contains the five package archives, manifest and npm verification report. For stable releases, the matching documentation is deployed successfully; prereleases do not replace the stable site.
+5. The completion report identifies the version and includes the GitHub release/tag, workflow links and verification results. A failure is resolved and retried, or reported explicitly with its external blocker and remaining steps.
+
+A version bump, merged pull request, draft release, or started workflow alone does not satisfy this contract. Choose the release version once and reuse a correctly prepared unpublished version. Never move a release tag, overwrite an existing published version, or bypass the workflow with a local npm publication to conceal a failed release.
+
+This rule applies when publication is requested or explicitly included in the work. An ordinary change does not automatically authorize a release. Documentation, CI, repository rules and private example changes do not require an npm version merely to be merged; use the separate documentation deployment flow when website publication is requested.
+
 ## Release a new version
 
 **Release Simfinity** (`.github/workflows/release.yml`) publishes only when a `vX.Y.Z` tag is pushed or a GitHub release is published. Changing versions, merging into `master`, and saving a draft release do not publish packages. Prepare the version in a reviewed pull request first:

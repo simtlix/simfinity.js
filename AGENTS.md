@@ -14,6 +14,7 @@ This file helps coding agents (and humans) work productively and safely in this 
 
 | Topic | Rule file |
 | --- | --- |
+| Development workflow and release completion | `.cursor/rules/simfinity-development-workflow.mdc` |
 | Architecture, core flow, global state | `.cursor/rules/simfinity-architecture.mdc` |
 | Coding style, imports, errors, schema transforms | `.cursor/rules/simfinity-coding-standards.mdc` |
 | Internal APIs / functions | `.cursor/rules/simfinity-core-functions.mdc` |
@@ -34,6 +35,20 @@ If something is ambiguous, prefer the matching `.mdc` file over this summary.
 5. **Compatibility**: `packages/mongodb` still publishes as `@simtlix/simfinity-js`. Preserve its entry points and `src/` deep imports inside the published archive. Keep shared helper/error identities and update package declarations for public API changes.
 6. **Example boundaries**: install and test Barber apps in their own directories. Keep them private, preserve registry dependencies and separate Compose projects, and do not add them to library workspaces or npm release tooling. Native database code stays in each backend; the frontend treats GraphQL IDs as opaque strings.
 7. **Mongo reference integrity**: `createMongoAdapter({ referentialIntegrity: 'transactional' })` is opt-in and fixed at startup; default `'off'` stays compatible. Await `adapter.initialize()` after schema creation and database connection. Preserve target-document locks, snapshot/majority transactions, incoming-reference checks and rollback of supplied sessions on integrity violations. Native model/driver writes remain outside that guarantee; see `docs/guide/mongodb-integrity.md`.
+8. **Publication is part of completion**: when a task includes releasing a library change, the responsible contributor or agent must ensure both its `vX.Y.Z` tag and published GitHub release exist, and verify successful package publication and the applicable documentation deployment. A merged PR or version bump is not a completed release.
+
+## Shared development and publication rule
+
+This is a repository-wide rule for contributors and coding agents, not a local assistant preference. Follow the [development and publication contract](docs/resources/contributing.md#development-and-publication-contract) and the [Cursor workflow rule](.cursor/rules/simfinity-development-workflow.mdc).
+
+Implement scoped changes on a branch, update the relevant documentation and tests, and merge through a reviewed PR with passing checks. When publication is requested or is already part of the agreed task, carry the work through the release workflow without asking again for the same authorization:
+
+1. Prepare the intended version with `node scripts/release-packages.js version <version>` and validate it with `node scripts/release-packages.js check`. Keep all five packages, their exact internal dependencies and the private root aligned. Reuse a correctly prepared unpublished version instead of inventing another bump.
+2. After merge, create the annotated `vX.Y.Z` tag on the exact validated commit in `master` and push it to GitHub. Ensure the matching GitHub release is published: the tag-triggered workflow can create it, or the contributor can publish the release in GitHub. Both must exist before completion.
+3. Wait for **Release Simfinity** to finish. Verify npm and GitHub Packages for all five packages, the expected npm distribution tags and archive integrity, the GitHub release assets, and the stable documentation deployment. Prereleases use `next` and do not deploy the stable site.
+4. Report the version, tag/release and workflow links, and verification results. If any step fails, resolve the cause and retry the original run; never move an existing release tag or describe a partial release as published. If access or another external dependency blocks completion, state exactly what remains.
+
+Publication intent is required: ordinary edits, merges, and version changes do not authorize or trigger a release on their own. Documentation, CI, repository rules, and example-only changes do not need a library version just to land in the repository. Use the documentation-only deployment flow when website publication is requested. Publish packages through GitHub Actions/OIDC, not a local npm login; manual release-workflow dispatch is preview-only.
 
 ## Verification commands
 
