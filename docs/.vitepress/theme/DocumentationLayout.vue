@@ -3,6 +3,7 @@ import { computed } from 'vue';
 import DefaultTheme from 'vitepress/theme';
 import { useData, withBase } from 'vitepress';
 import { version } from '../../../package.json';
+import AnimatedLogo from './AnimatedLogo.vue';
 
 const { page } = useData();
 const issueLink = computed(() => {
@@ -16,6 +17,7 @@ const issueLink = computed(() => {
 
 <template>
   <DefaultTheme.Layout>
+    <template #nav-bar-title-before><AnimatedLogo/></template>
     <template #doc-before>
       <p class="docs-version-note">v{{ version }} · MongoDB & PostgreSQL. <a :href="withBase('/guide/databases.html#download-the-starters')">Install from npm or download the starters.</a></p>
     </template>

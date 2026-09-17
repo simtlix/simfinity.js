@@ -5,7 +5,7 @@
   --refined-subtle: #616775;
 }
 .dark { --cap-icon-bg: #101217; --refined-line: #333844; --refined-subtle: #a0a8b8; }
-.VPNavBarTitle .logo { width: 48px; height: 37px; margin-right: 11px; }
+.VPNavBarTitle .logo { width: 48px; height: 37px; margin-right: 5px; }
 .VPNavBarTitle .title { font-size: 21px; font-weight: 600; letter-spacing: -.9px; }
 .VPNavBarMenuLink { letter-spacing: -.1px; }
 /* Keep the expanded navigation in the menu until all links fit beside the brand. */
@@ -214,7 +214,7 @@ html:not(.dark) .mcp-copy > p:not(.section-eyebrow) { color: #54627e; }
   .learning-label { font-size: 9px; }
 }
 @media (max-width: 560px) {
-  .VPNavBarTitle .logo { width: 40px; height: 32px; margin-right: 9px; }
+  .VPNavBarTitle .logo { width: 40px; height: 32px; margin-right: 4px; }
   .VPNavBarTitle .title { font-size: 20px; }
   .hero-inner { padding: 29px 24px 0; }
   .hero-overline { gap: 11px; font-size: 7px; letter-spacing: .05em; margin-bottom: 23px; }

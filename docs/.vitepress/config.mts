@@ -39,8 +39,7 @@ export default defineConfig({
     theme: { light: 'github-light', dark: 'github-dark' },
   },
   themeConfig: {
-    logo: { src: '/brand-mark.svg', alt: '' },
-    siteTitle: 'simfinity.js',
+    siteTitle: false,
     nav: [
       { text: 'Documentation', link: '/guide/introduction', activeMatch: '/guide/' },
       { text: 'Databases', items: [
@@ -75,6 +74,7 @@ export default defineConfig({
         { text: 'MongoDB reference integrity', link: '/guide/mongodb-integrity' },
         { text: 'PostgreSQL quick start', link: '/guide/postgresql' },
         { text: 'SQL core & plugins', link: '/guide/sql-plugins' },
+        { text: 'Build with an AI agent', link: '/guide/ai-project-bootstrap' },
       ] },
       { text: 'Build your API', collapsed: false, items: [
         { text: 'Schema & models', link: '/guide/schema' },
@@ -90,6 +90,7 @@ export default defineConfig({
         { text: 'Query scope', link: '/guide/query-scope' },
         { text: 'Middleware', link: '/guide/middleware' },
         { text: 'MCP & AI tools', link: '/guide/mcp' },
+        { text: 'Plugin authoring for AI agents', link: '/guide/plugin-authoring' },
       ] },
       { text: 'Reference', collapsed: false, items: [
         { text: 'Core API', link: '/reference/api' },
