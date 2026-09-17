@@ -1,0 +1,15 @@
+---
+description: Shared development workflow and required completion of requested releases
+alwaysApply: true
+---
+
+# Development and publication workflow
+
+Apply the repository's [shared development rule](../../AGENTS.md#shared-development-and-publication-rule) and [contributor contract](../../docs/resources/contributing.md#development-and-publication-contract) to every task. These instructions are versioned project policy for all contributors and agents.
+
+- Implement scoped changes, update relevant docs/tests, and merge a reviewed PR with passing checks.
+- If publication is requested or already included in the task, finish the release as part of that task. Do not stop at a version bump, commit, merged PR, pushed tag, draft release, or started Action, and do not request the same release authorization again.
+- Align all five packages and the private root with the release helper. Tag the exact validated commit in `master` as `vX.Y.Z`, push the tag, and ensure the matching GitHub release is published. The tag-triggered workflow may create the release; the contributor or agent must still verify it exists.
+- Wait for **Release Simfinity**, verify both registries, npm distribution tags and archive integrity, GitHub release assets, and stable Pages deployment. Prereleases use `next` without replacing the stable website. Report release/workflow links and verification results.
+- Fix failures and retry the original run without moving tags or overwriting published versions. Report an actual external blocker and remaining work instead of claiming partial publication is complete.
+- Do not infer publication intent from ordinary edits or merges. Docs, CI, rules, and example-only changes do not require an npm release. Package publication uses the tag/release-triggered GitHub Actions flow with OIDC; manual workflow dispatch is preview-only.
