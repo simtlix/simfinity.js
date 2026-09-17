@@ -1,6 +1,6 @@
 # @simtlix/simfinity-sql
 
-Driver-free relational planning, record reconstruction, and transaction orchestration for Simfinity. Version 3.3.0 requires Node.js 18.18 or later and GraphQL 16. It depends only on `@simtlix/simfinity-core`; it does not install `pg`, MongoDB, Mongoose, MCP, or a database plugin.
+Driver-free relational planning, record reconstruction, and transaction orchestration for Simfinity. It requires Node.js 18.18 or later and GraphQL 16. It depends only on `@simtlix/simfinity-core`; it does not install `pg`, MongoDB, Mongoose, MCP, or a database plugin.
 
 PostgreSQL 15 or later is the first and only supported SQL plugin. Install the SQL runtime and PostgreSQL plugin at matching versions:
 

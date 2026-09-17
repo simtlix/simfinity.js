@@ -17,7 +17,7 @@ npm run docs:dev
 
 For builds and hosting, see the [website maintainer guide](docs/.vitepress/README.md). The website documents the current source; some older examples later in this README retain historical conventions.
 
-> **Documentation for both databases:** The [public website](https://simtlix.github.io/simfinity.js/guide/databases.html) now covers MongoDB and PostgreSQL, including shared APIs, relationships, generated FKs, scopes, and MCP. Both adapters are available in **v3.4.0** on npm. Follow the quick starts for installation, or download the runnable starters and verified release archives.
+> **Documentation for both databases:** The [public website](https://simtlix.github.io/simfinity.js/guide/databases.html) now covers MongoDB and PostgreSQL, including shared APIs, relationships, generated FKs, scopes, and MCP. Both adapters are available on npm and released together. Follow the quick starts for installation, or download the runnable starters and verified release archives.
 
 ## 📑 Table of Contents
 
@@ -115,7 +115,7 @@ npm install mongoose@^8.16.2 graphql@^16.11.0 @simtlix/simfinity-js@3.4.0
 
 ## PostgreSQL support
 
-Version 3.4.0 releases `@simtlix/simfinity-core`, `@simtlix/simfinity-sql`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-postgres`, and the MongoDB facade in lockstep. Install the selected adapter from npm; shared dependencies resolve automatically. PostgreSQL runs the shared GraphQL query/mutation engine, including scopes, controllers, validators, state transitions and nested writes. It generates and validates tables, indexes, and **real foreign keys**, including inverse relations, explicit many-to-many linking entities, and references inside embedded objects. PostgreSQL installation does not pull Mongoose, MongoDB, or MCP dependencies.
+Simfinity releases `@simtlix/simfinity-core`, `@simtlix/simfinity-sql`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-postgres`, and the MongoDB facade in lockstep. Install the selected adapter from npm; shared dependencies resolve automatically. PostgreSQL runs the shared GraphQL query/mutation engine, including scopes, controllers, validators, state transitions and nested writes. It generates and validates tables, indexes, and **real foreign keys**, including inverse relations, explicit many-to-many linking entities, and references inside embedded objects. PostgreSQL installation does not pull Mongoose, MongoDB, or MCP dependencies.
 
 Version 3.3.0 separates the driver-free relational runtime into `@simtlix/simfinity-sql`. PostgreSQL supplies the first SQL plugin; it owns physical SQL, types, schema initialization and `pg`. Existing `createPostgres` and namespace imports remain compatible, with unchanged generated PostgreSQL storage and FKs. Use the explicit composition API when you want to select a plugin:
 
@@ -138,7 +138,7 @@ All publishable libraries live under `packages/`:
 | `packages/postgres` | `@simtlix/simfinity-postgres` |
 | `packages/mcp` | `@simtlix/simfinity-mcp` |
 
-The repository root is a private npm workspace for shared tests, documentation and release tooling. MongoDB retains its existing package name, public API and deep imports such as `@simtlix/simfinity-js/src/auth/rules.js`. Run development commands from the root; pack MongoDB with `npm pack --workspace @simtlix/simfinity-js` or use the release scripts to pack all five libraries.
+The repository root is a private npm workspace for shared tests, documentation and release tooling. MongoDB retains its existing package name, public API and deep imports such as `@simtlix/simfinity-js/src/auth/rules.js`. Run development commands from the root; pack MongoDB with `npm pack --workspace @simtlix/simfinity-js` or use the release scripts to pack all five libraries. Pushing a release tag (`vX.Y.Z`) or publishing a GitHub release automatically publishes all five packages with GitHub Actions, attaches verified archives to the release, and deploys the stable documentation. Version changes and merges to `master` do not publish; the tag must match the aligned package versions and point to source already merged into `master`. See the [release and OIDC setup guide](docs/resources/contributing.md#release-a-new-version).
 
 
 Enum filters resolve member names first, then declared internal values by strict equality, on both backends. For example, with `ONE: { value: 'TWO' }` and `TWO: { value: 'two' }`, filter `"TWO"` selects member `TWO`. Numeric internal values require numbers, not numeric strings. This applies to scalar lists, embedded/reference leaves and state filters across EQ, NE, LT, LTE, GT, GTE, BTW, IN and NIN. LIKE accepts string fields only. PostgreSQL writes and state guards continue to use internal enum values.
