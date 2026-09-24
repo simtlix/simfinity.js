@@ -1,6 +1,6 @@
 {
   "name": "@simtlix/simfinity-mcp",
-  "version": "3.4.1",
+  "version": "3.4.2",
   "description": "Database-independent MCP tools and transports for Simfinity GraphQL schemas",
   "type": "module",
   "main": "./src/index.js",
@@ -27,7 +27,7 @@
     "directory": "packages/mcp"
   },
   "dependencies": {
-    "@simtlix/simfinity-core": "3.4.1"
+    "@simtlix/simfinity-core": "3.4.2"
   },
   "peerDependencies": {
     "@modelcontextprotocol/sdk": "^1.13.0",
@@ -37,5 +37,12 @@
     "@modelcontextprotocol/sdk": {
       "optional": true
     }
-  }
+  },
+  "keywords": [
+    "simfinity",
+    "graphql",
+    "mcp",
+    "model-context-protocol",
+    "nodejs"
+  ]
 }

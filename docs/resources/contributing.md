@@ -30,6 +30,21 @@ npm test
 
 Add focused coverage for critical behavior and regressions. Keep the public documentation synchronized with API changes. A useful pull request explains the affected behavior, the change, and how it was validated.
 
+### Package quality and dependency security
+
+```sh
+npm run test:packages
+npm run test:security
+```
+
+The package check extracts each of the five npm archives and runs the pinned Skypack checker. It also verifies that entry points, declarations, README and license files actually exist, installs isolated JavaScript/TypeScript consumers, and checks dependency boundaries. A MongoDB compatibility fixture protects its published file paths and recorded resolution aliases. Directory specifiers ending in `/` are excluded: they were not valid ESM imports, and tools should resolve the package root or `package.json` instead. The checker is a development dependency of the private workspace and is never installed with a runtime package.
+
+The security command runs `npm audit` against the root lockfile, including development tools. Both Library CI and release validation require it to pass. The documentation application and Barber examples have independent lockfiles; audit them in their own directories when working on those applications.
+
+For a dependency advisory, identify the affected installed version and its parent chain with `npm explain`, update compatible versions, and re-run the affected consumer and database tests. A lockfile correction protects that checkout; an affected public dependency range must also exclude known vulnerable direct versions. Existing applications must update their own lockfiles. Do not use `npm audit fix --force` to introduce unreviewed major upgrades.
+
+A 100/100 metadata score verifies package configuration, not browser support or freedom from security defects. See the [September 2026 dependency review](https://github.com/simtlix/simfinity.js/blob/master/docs/superpowers/reports/2026-09-24-package-security.md) for the reviewed dependency paths and fixes.
+
 ## Work on the Barber examples
 
 The [Barber app](/resources/barber) lives in `examples/barber/`: separate MongoDB and PostgreSQL backends plus one shared frontend. These private apps have their own manifests and lockfiles and consume released packages from npm. They are outside the library workspaces and release process.

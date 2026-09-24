@@ -108,7 +108,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose@^8.16.2 graphql@^16.11.0 @simtlix/simfinity-js@3.4.0
+npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.4.2
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies.
@@ -152,7 +152,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.4.0 @modelcontextprotocol/sdk@^1.13.0
+npm install @simtlix/simfinity-mcp@3.4.2 @modelcontextprotocol/sdk@^1.13.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
@@ -164,7 +164,7 @@ Compatibility tests run the same GraphQL schemas and query corpus against both d
 The [complete quick start](docs/guide/getting-started.md) includes MongoDB setup, installation, and working create, read, update, and delete operations. Simfinity uses ES modules and named exports.
 
 ```sh
-npm install @simtlix/simfinity-js graphql@^16.11.0 mongoose@^8.16.2 graphql-yoga@^5
+npm install @simtlix/simfinity-js graphql@^16.11.0 mongoose@^8.24.2 graphql-yoga@^5
 ```
 
 Set `"type": "module"` in your application's `package.json`, then create `server.js`:

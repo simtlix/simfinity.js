@@ -1,6 +1,6 @@
 {
   "name": "@simtlix/simfinity-core",
-  "version": "3.4.1",
+  "version": "3.4.2",
   "description": "Driver-free GraphQL runtime and model metadata for Simfinity",
   "type": "module",
   "main": "./src/index.js",
@@ -36,5 +36,13 @@
   },
   "peerDependencies": {
     "graphql": "^16.11.0"
-  }
+  },
+  "keywords": [
+    "simfinity",
+    "graphql",
+    "runtime",
+    "schema",
+    "crud",
+    "nodejs"
+  ]
 }

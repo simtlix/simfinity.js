@@ -10,6 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkPackageQuality } from './package-quality.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const temporary = mkdtempSync(join(tmpdir(), 'simfinity-packages-'));
@@ -33,7 +34,12 @@ const pack = (path) => {
   assert(!output[0].files.some((file) => (
     file.path.includes('.superpowers') || file.path.startsWith('node_modules/')
   )));
-  return join(temporary, output[0].filename);
+  const archive = join(temporary, output[0].filename);
+  const extracted = mkdtempSync(join(temporary, 'quality-'));
+  run('tar', ['-xzf', archive, '-C', extracted], root);
+  checkPackageQuality(join(extracted, 'package'));
+  console.log(`${output[0].name}: package quality 100/100`);
+  return archive;
 };
 
 const adapterSource = `const adapter = {
@@ -649,15 +655,18 @@ try {
       ...(testCase.dependencies || []),
       ...(testCase.typeDependencies || []),
     ], cwd);
-    if (testCase.forbiddenPackages) {
+    {
       const lock = JSON.parse(readFileSync(join(cwd, 'package-lock.json'), 'utf8'));
-      for (const packageName of testCase.forbiddenPackages) {
+      for (const packageName of ['@skypack/package-check', ...(testCase.forbiddenPackages || [])]) {
         assert(!Object.keys(lock.packages).some((path) => (
           path.endsWith(`node_modules/${packageName}`)
         )), `${testCase.name} pulled forbidden dependency ${packageName}`);
       }
     }
     run(process.execPath, ['--input-type=module', '--eval', testCase.source], cwd);
+    if (testCase.name === 'mongo') {
+      run(process.execPath, [join(root, 'tests/fixtures/mongodb-package-resolution.js')], cwd);
+    }
     writeFileSync(join(cwd, 'check.ts'), testCase.types);
     writeFileSync(join(cwd, 'tsconfig.json'), JSON.stringify({
       compilerOptions: {

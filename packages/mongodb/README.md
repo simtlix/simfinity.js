@@ -3,7 +3,7 @@
 MongoDB/Mongoose adapter and compatibility facade for Simfinity. This package generates GraphQL queries, mutations, relationships and models from `GraphQLObjectType` definitions using the shared Simfinity runtime.
 
 ```sh
-npm install @simtlix/simfinity-js graphql@^16.11.0 mongoose@^8.16.2
+npm install @simtlix/simfinity-js graphql@^16.11.0 mongoose@^8.24.2
 ```
 
 ```javascript
@@ -17,6 +17,8 @@ const schema = simfinity.createSchema();
 ```
 
 Use a MongoDB replica set or sharded cluster for transactional mutations. The library requires Node.js >=18.18.0 and GraphQL 16.
+
+Mongoose 8.24.2 or later within version 8 is required to exclude the update-casting prototype-pollution vulnerability. Existing applications should update Mongoose and their dependency lockfile, then run `npm audit`; upgrading Simfinity does not refresh every transitive dependency already locked by the application.
 
 ## Optional transactional reference integrity
 
@@ -39,6 +41,8 @@ Initialization checks transaction support and audits existing references. Protec
 Owned transactions use snapshot reads and majority commits. Supplied sessions need the same options; a reference violation or guarded-write error aborts even a supplied transaction. The reserved `_simfinityReferenceLock` storage field is excluded from GraphQL. All writers must use the same complete registry and mode. Direct Mongoose/driver writes bypass this protection; this is not a native MongoDB FK. Read the [full setup, concurrency and migration contract](https://simtlix.github.io/simfinity.js/guide/mongodb-integrity.html).
 
 The source now lives in `packages/mongodb` in the monorepo. Its public npm name remains `@simtlix/simfinity-js`; existing imports, including paths under `@simtlix/simfinity-js/src/`, retain their layout. Shared helpers, error identities and MCP compatibility exports are preserved. Internal Simfinity dependencies use the same exact release version.
+
+For tooling that locates the package, use `require.resolve('@simtlix/simfinity-js/package.json')` or the package root without a trailing slash. Directory specifiers ending in `/` were not valid ESM imports and are not supported by the export map, including in `require.resolve`; use explicit filenames such as `src/auth/index.js`.
 
 - [MongoDB quick start](https://simtlix.github.io/simfinity.js/guide/getting-started.html)
 - [API reference](https://simtlix.github.io/simfinity.js/reference/api.html)

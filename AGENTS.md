@@ -61,7 +61,8 @@ npm test
 
 Use `npm run test:watch` while iterating; `npm run test:coverage` when coverage matters.
 
-- For package boundaries, dependencies, exports or declarations: `npm run test:packages` checks isolated packed applications, including strict TypeScript consumers and MongoDB deep imports.
+- For package boundaries, dependencies, exports or declarations: `npm run test:packages` checks extracted-archive quality, isolated packed applications, strict TypeScript consumers and MongoDB deep imports/resolution aliases. Keep quality tooling in root development dependencies only.
+- For dependency changes: `npm run test:security` audits the root lockfile including development dependencies; CI and release validation require it. Audit independent documentation/example applications separately. MongoDB requires Mongoose `^8.24.2`; retain the update-casting security regression.
 - For database behavior: run the full suite with disposable database URIs, as described in the testing rule. `npm run test:integration` covers only `tests/integration/`; additional MongoDB regression suites live directly under `tests/`.
 - For documentation: `npm run docs:install` and `npm run docs:build`.
 - For Barber changes: follow `examples/barber/README.md` and `.github/workflows/barber.yml`. Root lint and Vitest exclude `examples/`; run the affected app checks and the shared HTTP/browser contract against both databases for shared behavior changes. Use only disposable example databases for data-changing checks.

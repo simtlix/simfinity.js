@@ -1,6 +1,6 @@
 {
   "name": "@simtlix/simfinity-js",
-  "version": "3.4.1",
+  "version": "3.4.2",
   "description": "MongoDB/Mongoose adapter and compatibility facade for Simfinity GraphQL APIs",
   "main": "src/index.js",
   "types": "./types/index.d.ts",
@@ -17,7 +17,7 @@
   },
   "peerDependencies": {
     "graphql": "^16.11.0",
-    "mongoose": "^8.16.2"
+    "mongoose": "^8.24.2"
   },
   "config": {
     "owner": "simtlix"
@@ -26,11 +26,11 @@
     "@modelcontextprotocol/sdk": "^1.13.0",
     "graphql": "^16.11.0",
     "graphql-middleware": "^6.1.35",
-    "mongoose": "^8.16.2"
+    "mongoose": "^8.24.2"
   },
   "dependencies": {
-    "@simtlix/simfinity-core": "3.4.1",
-    "@simtlix/simfinity-mcp": "3.4.1"
+    "@simtlix/simfinity-core": "3.4.2",
+    "@simtlix/simfinity-mcp": "3.4.2"
   },
   "files": [
     "src",
@@ -39,5 +39,25 @@
     "LICENSE",
     "AGGREGATION_EXAMPLE.md",
     "AGGREGATION_CHANGES_SUMMARY.md"
-  ]
+  ],
+  "keywords": [
+    "simfinity",
+    "graphql",
+    "mongodb",
+    "mongoose",
+    "crud",
+    "nodejs"
+  ],
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./src": "./src/index.js",
+    "./src/auth": "./src/auth/index.js",
+    "./src/*.js": "./src/*.js",
+    "./src/*": "./src/*.js",
+    "./package": "./package.json",
+    "./*": "./*"
+  }
 }
