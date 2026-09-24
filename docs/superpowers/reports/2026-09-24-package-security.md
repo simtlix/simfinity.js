@@ -79,6 +79,16 @@ npm run test:packages
 
 Database suites require the disposable URIs described in `.cursor/rules/simfinity-testing.mdc`; without them, database tests are explicitly skipped. Dependency audit results are a dated snapshot and depend on the registry's advisory database.
 
+## Published release verification
+
+[PR #78](https://github.com/simtlix/simfinity.js/pull/78) merged as `ddce6522f4f39f8170facc2cb6e0b7d1b4561f6b`. The annotated [v3.4.2 tag and published GitHub release](https://github.com/simtlix/simfinity.js/releases/tag/v3.4.2) point to that validated commit. [Release Simfinity run 36000991949](https://github.com/simtlix/simfinity.js/actions/runs/36000991949) passed, including all three database matrix jobs, npm/OIDC and GitHub Packages publication, release assets and stable documentation deployment.
+
+All five npm packages report 3.4.2 as `latest`. Their downloaded archives match the SHA-512 integrity in the release manifest and registry metadata, and each passes the pinned official package checker with **100/100**. All six consumer configurations were rerun using these published archives: JavaScript runtime, strict TypeScript, dependency boundaries and full dependency audits passed. The live database guide contains the 3.4.2 installation examples and Mongoose 8.24.2 minimum.
+
+The [Skypack listing](https://www.skypack.dev/view/@simtlix/simfinity-js), rechecked after publication, still reports **August 11, 2021**; its retrieved page does not establish a current numeric score or completed security check. Skypack's [home page](https://www.skypack.dev/) directs service feedback to its issue tracker or Discord. No supported self-service listing refresh was found. That stale external index does not describe the verified 3.4.2 archives, and refreshing it is outside this repository's release pipeline.
+
+The independent application findings and fixes are covered by the [Barber security follow-up](./2026-09-24-barber-security.md).
+
 ## Guidance for existing applications
 
 Upgrade to the corrected Simfinity release and update the application's own dependency lockfile. Require Mongoose `^8.24.2` for MongoDB. Audit the actual application tree with `npm audit` and inspect retained versions with `npm explain`; changing Simfinity's repository lockfile does not replace a consumer's transitive resolutions. Applications that deliberately override or force incompatible dependency versions remain responsible for those choices.

@@ -153,6 +153,7 @@ The owner dashboard reads review professionals through `booking.professional`; t
 ## Verification
 
 ```bash
+npm run test:security
 npm run lint
 npm run typecheck
 npm run test:unit

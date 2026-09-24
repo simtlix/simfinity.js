@@ -35,6 +35,7 @@ jobs:
           cache: npm
           cache-dependency-path: examples/barber/frontend/package-lock.json
       - run: npm ci
+      - run: npm run test:security
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run test:unit
@@ -74,6 +75,7 @@ jobs:
       - name: Install backend dependencies and run unit tests
         run: |
           npm ci --prefix ${{ matrix.database }}
+          npm run test:security --prefix ${{ matrix.database }}
           npm test --prefix ${{ matrix.database }}
       - name: Build and start the complete application
         run: docker compose -f compose.${{ matrix.database }}.yaml up --build -d --wait --wait-timeout 180
