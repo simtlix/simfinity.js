@@ -36,16 +36,16 @@ Both adapters are released at **v3.4.0**. Choose one package in your application
 ::: code-group
 
 ```sh [MongoDB]
-npm install @simtlix/simfinity-js@3.4.0 graphql@^16.11.0 mongoose@^8.16.2
+npm install @simtlix/simfinity-js@3.4.2 graphql@^16.11.0 mongoose@^8.24.2
 ```
 
 ```sh [PostgreSQL]
-npm install @simtlix/simfinity-postgres@3.4.0 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-postgres@3.4.2 graphql@^16.11.0 pg@^8.16.3
 ```
 
 :::
 
-Shared core dependencies install automatically. Add `@simtlix/simfinity-mcp@3.4.0` only when your PostgreSQL application exposes MCP tools; transport factories also require `@modelcontextprotocol/sdk`. See the [MCP guide](./mcp).
+Shared core dependencies install automatically. Add `@simtlix/simfinity-mcp@3.4.2` only when your PostgreSQL application exposes MCP tools; transport factories also require `@modelcontextprotocol/sdk`. See the [MCP guide](./mcp).
 
 <span id="download-the-preview"></span>
 

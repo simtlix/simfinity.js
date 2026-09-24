@@ -47,6 +47,7 @@ jobs:
             git merge-base --is-ancestor HEAD refs/remotes/origin/master
           fi
       - run: npm ci
+      - run: npm run test:security
       - run: npm run lint
       - run: npm test
       - run: npm run test:packages
