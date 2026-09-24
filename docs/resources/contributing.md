@@ -43,7 +43,7 @@ The security command runs `npm audit` against the root lockfile, including devel
 
 For a dependency advisory, identify the affected installed version and its parent chain with `npm explain`, update compatible versions, and re-run the affected consumer and database tests. A lockfile correction protects that checkout; an affected public dependency range must also exclude known vulnerable direct versions. Existing applications must update their own lockfiles. Do not use `npm audit fix --force` to introduce unreviewed major upgrades.
 
-A 100/100 metadata score verifies package configuration, not browser support or freedom from security defects. See the [September 2026 dependency review](https://github.com/simtlix/simfinity.js/blob/master/docs/superpowers/reports/2026-09-24-package-security.md) for the reviewed dependency paths and fixes.
+A 100/100 metadata score verifies package configuration, not browser support or freedom from security defects. See the [September 2026 library dependency review](https://github.com/simtlix/simfinity.js/blob/master/docs/superpowers/reports/2026-09-24-package-security.md) and the [Barber follow-up](https://github.com/simtlix/simfinity.js/blob/master/docs/superpowers/reports/2026-09-24-barber-security.md) for the reviewed dependency paths and fixes.
 
 ## Work on the Barber examples
 

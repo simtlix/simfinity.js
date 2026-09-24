@@ -119,7 +119,17 @@ The scopes preserve caller filters and intersect them with server restrictions. 
 
 These tests exercise login, scopes, booking, and MCP against a real backend and create test records. Both backends also have real-database checks for transactions, derived domain values, and dataset loading/deletion. PostgreSQL adds storage, foreign-key, and frontend-query checks; see the backend READMEs. The frontend has its own unit, type, build, and browser checks.
 
-The dedicated [Barber workflow](../../.github/workflows/barber.yml) owns these apps' validation, including a database matrix and browser checks against both backends. Root library lint and Vitest discovery exclude `examples/`; root package release checks do not install or publish these apps. Example changes do not require an npm library release.
+The dedicated [Barber workflow](../../.github/workflows/barber.yml) owns these apps' validation, including a database matrix and browser checks against both backends. It also runs `npm run test:security` for each application, auditing both runtime and development dependencies in its own lockfile. Root library lint and Vitest discovery exclude `examples/`; root package release checks do not install or publish these apps. Example changes do not require an npm library release.
+
+After updating dependencies, audit all three applications independently:
+
+```sh
+npm run test:security --prefix examples/barber/mongodb
+npm run test:security --prefix examples/barber/postgres
+npm run test:security --prefix examples/barber/frontend
+```
+
+Use Node.js 24 and the committed lockfiles. The MongoDB example requires Mongoose `^8.24.2`; both backends require Multer `^2.3.0`; Vitest and its browser/coverage packages require `^4.1.11`. These minima exclude the reviewed vulnerable direct versions. Applications still consume the exact released Simfinity 3.3.0 packages; database selection, seeding and API behavior remain unchanged.
 
 ## Stop or reset one stack
 

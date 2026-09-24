@@ -12,7 +12,8 @@
     "test:unit": "vitest run --project unit",
     "test:e2e": "playwright test",
     "ci:storybook": "storybook build",
-    "typecheck": "next typegen && tsc --noEmit"
+    "typecheck": "next typegen && tsc --noEmit",
+    "test:security": "npm audit"
   },
   "dependencies": {
     "@simtlix/simfinity-js-client": "^1.1.0",
@@ -40,8 +41,8 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "@vitest/browser-playwright": "^4.1.0",
-    "@vitest/coverage-v8": "^4.1.0",
+    "@vitest/browser-playwright": "^4.1.11",
+    "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^9.39.3",
     "eslint-config-next": "^16.1.6",
     "playwright": "^1.58.2",
@@ -49,8 +50,8 @@
     "storybook": "^10.2.17",
     "tailwindcss": "^4.2.2",
     "typescript": "^5",
-    "vite": "^7.0.0",
-    "vitest": "^4.1.0"
+    "vite": "^7.3.5",
+    "vitest": "^4.1.11"
   },
   "overrides": {
     "ajv": "6.14.0",

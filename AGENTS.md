@@ -65,7 +65,7 @@ Use `npm run test:watch` while iterating; `npm run test:coverage` when coverage 
 - For dependency changes: `npm run test:security` audits the root lockfile including development dependencies; CI and release validation require it. Audit independent documentation/example applications separately. MongoDB requires Mongoose `^8.24.2`; retain the update-casting security regression.
 - For database behavior: run the full suite with disposable database URIs, as described in the testing rule. `npm run test:integration` covers only `tests/integration/`; additional MongoDB regression suites live directly under `tests/`.
 - For documentation: `npm run docs:install` and `npm run docs:build`.
-- For Barber changes: follow `examples/barber/README.md` and `.github/workflows/barber.yml`. Root lint and Vitest exclude `examples/`; run the affected app checks and the shared HTTP/browser contract against both databases for shared behavior changes. Use only disposable example databases for data-changing checks.
+- For Barber changes: follow `examples/barber/README.md` and `.github/workflows/barber.yml`. Root lint and Vitest exclude `examples/`; run each affected app's `npm run test:security`, its app checks, and the shared HTTP/browser contract against both databases for shared behavior changes. Use only disposable example databases for data-changing checks.
 - For release metadata: `node scripts/release-packages.js check`. Release tooling aligns the private root version, all five package versions and exact internal dependencies; the root itself is never published.
 
 ## Layout hints

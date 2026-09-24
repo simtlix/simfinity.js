@@ -26,6 +26,7 @@ alwaysApply: false
 ## Verification and documentation
 
 - `.github/workflows/barber.yml` owns backend unit tests, the database HTTP/MCP matrix, frontend checks and browser coverage, and database integration checks. Root ESLint and Vitest exclude examples.
+- Each app exposes `npm run test:security` and its CI job audits its own complete lockfile, including development tools. Keep Vitest/browser/coverage versions compatible and do not bypass peer conflicts with `--force` or `--legacy-peer-deps`. Preserve the supported majors and exact released Simfinity dependencies when updating security baselines.
 - `test:query-mutations` runs the shared HTTP filter/aggregate/nested-mutation matrix. Its missing-reference case explicitly distinguishes PostgreSQL FK rejection from MongoDB dangling-reference acceptance. It leaves synthetic fixtures in the disposable API database; CI saves its JSON reports.
 - Run both database HTTP/browser paths for shared contracts. Preserve `test:mongodb` and both `test:dataset` suites for transactions, derived booking/bundle/review values and fixture operations. Keep PostgreSQL native model, FK, transaction and frontend-query regression checks. Do not use library unit tests as a substitute for app validation.
 - Update `examples/barber/README.md`, the affected app README, and `docs/resources/barber.md` when setup or documented behavior changes. Preserve source-commit provenance and `frontend/LICENSE`.

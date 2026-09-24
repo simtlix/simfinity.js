@@ -10,7 +10,7 @@
 
 **Spec:** The user's request to review the Skypack score and plan improvements; the requirements below; `AGENTS.md`; `.cursor/rules/simfinity-development-workflow.mdc`; and `docs/resources/contributing.md#development-and-publication-contract`.
 
-**Implementation review, 2026-09-24:** Tasks 1–3 are implemented and verified; the report is `docs/superpowers/reports/2026-09-24-package-security.md`. Task 4 is proceeding through review and release. The final map also preserves the extensionless `package` alias. Trailing-slash directory specifiers are explicitly outside the retained resolution contract: they were never ESM entry points, and Node export maps cannot retain the root `/` alias. Canonical package/file imports and the 50 recorded resolution paths are preserved.
+**Implementation review, 2026-09-24:** Tasks 1–4 are complete; the report is `docs/superpowers/reports/2026-09-24-package-security.md`. Version 3.4.2 is published and verified for all five libraries. Skypack's external listing still reports August 2021. The final map also preserves the extensionless `package` alias. Trailing-slash directory specifiers are explicitly outside the retained resolution contract: they were never ESM entry points, and Node export maps cannot retain the root `/` alias. Canonical package/file imports and the 50 recorded resolution paths are preserved.
 
 ## Global Constraints
 
@@ -123,7 +123,7 @@ The explicit `.js` pattern preserves full filenames; the other source pattern re
 npm install --save-dev --save-exact @skypack/package-check@0.2.2
 ```
 
-- [x] Resolve its CLI from the root development installation using `createRequire(import.meta.url).resolve('@skypack/package-check/index.bin.js')`. Do not install it in any published package or consumer fixture.
+- [x] Resolve its CLI from the root development installation. The checker does not export `index.bin.js`, so the implementation resolves its public entry point and locates the CLI relative to that entry. Do not install it in any published package or consumer fixture.
 - [x] After `npm pack`, extract each archive into a unique directory under the script's existing temporary directory and run the checker on its `package/` directory. Add the following operations inside `pack`, using the existing `run`, `temporary` and `root` helpers:
 
 ```javascript
@@ -145,7 +145,7 @@ return archive;
 
 ## Task 3: Triage dependency security independently
 
-**Files:** Inspect root and package manifests/lockfile; modify dependency ranges only where evidence requires them. Record confirmed findings and dispositions in `docs/superpowers/reports/2026-09-21-package-security.md` when this task is executed.
+**Files:** Inspect root and package manifests/lockfile; modify dependency ranges only where evidence requires them. Findings and dispositions are recorded in `docs/superpowers/reports/2026-09-24-package-security.md`.
 
 A read-only `npm audit --omit=dev --json` of the current local workspace lockfile reported **six affected dependency entries: two high and four moderate**. Names: `fast-uri`, `ip-address`, `@hono/node-server`, `hono`, `mongoose`, `qs`. This is not six confirmed exploitable Simfinity defects and is not the Skypack Security result. It does not establish the dependency tree of a fresh published-package consumer.
 
@@ -154,7 +154,7 @@ A read-only `npm audit --omit=dev --json` of the current local workspace lockfil
 - [x] Choose fixes from confirmed patched versions within supported majors. If Mongoose needs a higher minimum, update matching peer/optional declarations and development fixtures consistently within Mongoose 8. Do not run `npm audit fix --force` or introduce Mongoose 9 as part of metadata cleanup.
 - [x] Distinguish a stale repository lockfile from a vulnerable permitted minimum. Updating the root lock alone does not constrain dependencies installed by library consumers.
 - [x] Re-run the affected packed-consumer checks and database regressions if runtime dependency versions change; use disposable databases following `.cursor/rules/simfinity-testing.mdc`. Re-audit and document remaining findings and their scope.
-- [x] Keep remediation in a separate commit or PR from metadata changes so the compatibility impact can be reviewed independently.
+- [x] Review remediation and metadata compatibility explicitly. Execution combined these library corrections in PR #78 with separate evidence in the security report; the additional Barber lockfile remediation is a separate example-only PR.
 
 **Acceptance:** Each reported finding has a reproducible scope and disposition. The quality score is never used as evidence that security findings were resolved.
 
@@ -164,12 +164,12 @@ Execute this phase when the implementation and publication are part of the agree
 
 **Files:** Version metadata managed by `scripts/release-packages.js`; release notes and existing publication workflows. No new trigger or local login is required.
 
-- [ ] Complete the reviewed PR with passing checks. For a compatible packaging fix, use the next unpublished patch version; **3.4.2 is the candidate after the currently observed 3.4.1**, subject to checking registry and GitHub state at execution time.
-- [ ] Align root, all five libraries and exact internal dependencies with the release helper; run its validation. After merging, create the annotated `vX.Y.Z` tag on the validated `master` commit and ensure the matching GitHub release is published.
-- [ ] Wait for **Release Simfinity**. Verify npm and GitHub Packages for all five packages, archive integrity, distribution tags, release assets and the applicable documentation deployment, following the repository's publication contract.
-- [ ] Download the exact newly published npm archives and run the pinned checker against them. Confirm **100/100 per library** and re-run consumer checks against those releases, rather than relying only on workspace results.
-- [ ] Revisit the Skypack listing and record its reported update/version and check states. If it still reflects 2021, investigate the service's supported refresh/support path. Treat stale indexing as an external follow-up; do not keep bumping Simfinity versions or promise the listing will refresh on a deadline.
-- [ ] Report the released version, tag/release/workflow links, five artifact-check results and the observed Skypack state separately.
+- [x] Complete the reviewed PR with passing checks. PR #78 merged; the verified release version is **3.4.2**.
+- [x] Align root, all five libraries and exact internal dependencies with the release helper; run its validation. After merging, create the annotated `vX.Y.Z` tag on the validated `master` commit and ensure the matching GitHub release is published.
+- [x] Wait for **Release Simfinity**. Verify npm and GitHub Packages for all five packages, archive integrity, distribution tags, release assets and the applicable documentation deployment, following the repository's publication contract.
+- [x] Download the exact newly published npm archives and run the pinned checker against them. Confirm **100/100 per library** and re-run consumer checks against those releases, rather than relying only on workspace results.
+- [x] Revisit the Skypack listing and record its reported update/version and check states. If it still reflects 2021, investigate the service's supported refresh/support path. Treat stale indexing as an external follow-up; do not keep bumping Simfinity versions or promise the listing will refresh on a deadline.
+- [x] Report the released version, tag/release/workflow links, five artifact-check results and the observed Skypack state separately.
 
 **Acceptance:** Correct metadata is verifiably published and protected by CI. Any stale external listing is clearly identified. Simfinity remains a Node.js server framework; these changes do not claim that a MongoDB/PostgreSQL backend can run in a browser through a CDN.
 
@@ -185,4 +185,4 @@ Implement Tasks 1–2 as one scoped metadata/packaging PR. Triage Task 3 separat
 - [Node.js package entry points](https://nodejs.org/api/packages.html#package-entry-points): export-map compatibility requirements.
 - npm registry metadata and extracted 3.4.1 tarballs for all five `@simtlix/simfinity-*` packages: observed package contents and metadata.
 
-Plan self-review: all visible check categories have a disposition; proposed imports and CLI invocation were checked against repository/tool source; metadata-only success is distinguished from compatibility, security and external indexing. Tasks 1–3 have been implemented and verified on 2026-09-24; publication completion is tracked by the release workflow and final delivery report.
+Plan self-review: all visible check categories have a disposition; implementation details and departures from the original sequence are recorded above; metadata-only success is distinguished from compatibility, security and external indexing. All four tasks were completed on 2026-09-24. See the security report for the release, workflow and published-consumer verification evidence.
