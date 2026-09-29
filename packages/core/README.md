@@ -15,7 +15,7 @@ For relational storage, `@simtlix/simfinity-sql` builds on core and delegates ph
 - `use`, `registerMutation`, and `saveObject` for middleware and write orchestration;
 - `preventCreatingCollection` to pass validation-only storage setup to an adapter.
 
-The adapter supplies model creation, identifiers, transactions, record reads and writes, queries, counts, aggregations, and inverse collection reads. `DatabaseAdapter`, `Runtime`, controller, middleware, registration, and state-machine interfaces are exported in the TypeScript declarations. A runtime binds one adapter; create another runtime to use another database or configuration.
+The adapter supplies model creation, identifiers, transactions, record reads and writes, queries, counts, aggregations, and inverse collection reads. `DatabaseAdapter`, `Runtime`, controller, middleware, registration, and state-machine interfaces are exported in the TypeScript declarations. A runtime binds one adapter; create another runtime to use another database or configuration. An adapter can also define `getByIds(model, ids, { context })`, which returns the records it finds in `getById` shape and any order; the runtime then batches generated single-reference reads per request and type, matching records by `castId`, splitting batches at `maxPageSize`, and reading an ID with `getById` when a batch read fails or when `castId` would normalize it.
 
 Generated and custom mutations run through `adapter.withTransaction`. Retried attempts receive fresh clones of GraphQL input objects, lists, and dates while enum values keep their identity. An adapter can define `stateValue` when its persisted enum representation differs from GraphQL enum names.
 

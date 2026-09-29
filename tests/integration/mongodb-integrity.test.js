@@ -344,6 +344,100 @@ withMongo('MongoDB transactional reference integrity', () => {
     expect(await invalid.models.Service.countDocuments()).toBe(0);
   });
 
+  test.each([
+    ['dotted storage alias', 'Shop', (id) => ({ nested: { target_id: id } })],
+    ['embedded object', 'Shop', (id) => ({ detail: { primary_id: id } })],
+    ['two embedded list levels', 'Shop', (id) => ({ details: [null, { items: [null, { service_id: id }] }] })],
+    ['string-typed reference', 'Shop', (id) => ({ service_id: id.toHexString() })],
+    ['one-to-many child key', 'Child', (id) => ({ shop_id: id })],
+    ['inferred scalar foreign key', 'Entry', (id) => ({ owner_id: id })],
+    ['private inverse key', 'Note', (id) => ({ owner_id: id })],
+    ['link entity', 'Link', (id) => ({ service_id: id })],
+    ['self-reference', 'Service', (id) => ({ related_id: id })],
+  ])('startup audit rejects an existing orphan in a %s', async (name, model, orphan) => {
+    const audit = integrityFixture({ prefix: `AuditOrphan${name.replace(/\W/g, '')}` });
+    for (const collection of Object.values(audit.models)) await collection.createCollection();
+    const service = new mongoose.Types.ObjectId();
+    const shop = new mongoose.Types.ObjectId();
+    await audit.models.Service.collection.insertOne({ _id: service, related_id: service });
+    await audit.models.Shop.collection.insertOne({ _id: shop, service_id: service, detail: { primary_id: null } });
+    await audit.models.Child.collection.insertOne({ shop_id: shop, service_id: service });
+    await audit.models[model].collection.insertOne(orphan(new mongoose.Types.ObjectId()));
+    await expect(audit.adapter.initialize()).rejects.toMatchObject({
+      message: 'Reference constraint violated', extensions: { code: 'REFERENCE_CONSTRAINT_VIOLATION', status: 409 },
+    });
+    expect((await mutate(audit, 'add', 'Service', { name: 'blocked' })).errors[0].extensions.code)
+      .toBe('MONGO_INTEGRITY_NOT_INITIALIZED');
+  });
+
+  test.each([
+    ['string', 'unlocked'],
+    ['ObjectId list', [new mongoose.Types.ObjectId()]],
+  ])('startup audit still rejects a %s lock field', async (name, value) => {
+    const audit = integrityFixture({ prefix: `AuditLock${name.replace(/\W/g, '')}` });
+    for (const collection of Object.values(audit.models)) await collection.createCollection();
+    await audit.models.Service.collection.insertOne({ name: 'locked', _simfinityReferenceLock: value });
+    await expect(audit.adapter.initialize())
+      .rejects.toMatchObject({ extensions: { code: 'INVALID_MONGO_INTEGRITY_CONFIGURATION' } });
+  });
+
+  describe('startup audit round trips', () => {
+    let connection;
+    let reads;
+    const monitoredFixture = (prefix) => integrityFixture({
+      prefix,
+      modelFactory: (type) => connection.model(type.name,
+        fixture.models[type.name.slice(prefix.length)].schema.clone(), type.name),
+    });
+
+    beforeAll(async () => {
+      connection = await mongoose.createConnection(uri, { dbName: mongoose.connection.name, monitorCommands: true })
+        .asPromise();
+      connection.getClient().on('commandStarted', ({ commandName }) => {
+        if (['find', 'getMore', 'aggregate', 'count'].includes(commandName)) reads.push(commandName);
+      });
+    });
+
+    beforeEach(() => { reads = []; });
+
+    afterAll(async () => { await connection.close(); });
+
+    test('verifies repeated targets with batched queries instead of one query per reference', async () => {
+      const audit = monitoredFixture('AuditRoundTrips');
+      for (const model of Object.values(audit.models)) await model.createCollection();
+      const services = [0, 1, 2].map(() => new mongoose.Types.ObjectId());
+      await audit.models.Service.collection.insertMany(services.map((_id) => ({ _id, related_id: _id })));
+      await audit.models.Shop.collection.insertMany(Array.from({ length: 1200 }, (_, index) => {
+        const service = services[index % services.length];
+        return {
+          service_id: service, detail: { primary_id: service, items: [null, { service_id: service }] },
+          details: [null, { items: [null, { service_id: service }] }], nested: { target_id: service },
+        };
+      }));
+      reads = [];
+      await audit.adapter.initialize();
+      // 6,003 stored references: one scan per model, its getMore and one batched check per target.
+      expect(reads.length).toBeLessThan(20);
+      expect((await mutate(audit, 'add', 'Shop', { service: { id: String(services[0]) } })).errors).toBeUndefined();
+    }, 30000);
+
+    test('reports an orphan found after the first full batch of distinct targets', async () => {
+      const audit = monitoredFixture('AuditBatchBoundary');
+      for (const model of Object.values(audit.models)) await model.createCollection();
+      const services = Array.from({ length: 1500 }, () => new mongoose.Types.ObjectId());
+      await audit.models.Service.collection.insertMany(services.map((_id) => ({ _id })));
+      await audit.models.Shop.collection.insertMany(services.map((service, index) => ({
+        service_id: index === 1300 ? new mongoose.Types.ObjectId() : service,
+      })));
+      reads = [];
+      await expect(audit.adapter.initialize())
+        .rejects.toMatchObject({ extensions: { code: 'REFERENCE_CONSTRAINT_VIOLATION' } });
+      expect(reads.length).toBeLessThan(20);
+      expect((await mutate(audit, 'add', 'Service', { name: 'blocked' })).errors[0].extensions.code)
+        .toBe('MONGO_INTEGRITY_NOT_INITIALIZED');
+    }, 30000);
+  });
+
   test.skipIf(!process.env.SIMFINITY_STANDALONE_MONGODB_URI)('startup rejects a real standalone MongoDB server', async () => {
     const connection = await mongoose.createConnection(process.env.SIMFINITY_STANDALONE_MONGODB_URI).asPromise();
     const standalone = integrityFixture({

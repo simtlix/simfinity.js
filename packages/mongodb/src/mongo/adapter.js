@@ -10,6 +10,19 @@ mongoose.set('strictQuery', false);
 
 const withSession = (query, session) => (session ? query.session(session) : query);
 
+// Even a shared hook can branch on `this.op` or the filter shape. Preserve findOne semantics
+// whenever either query operation has hooks instead of inferring equivalence from function identity.
+const hasNoFindHooks = (hooks) => {
+  if (!(hooks?._pres instanceof Map) || !(hooks._posts instanceof Map)) return false;
+  return ['find', 'findOne'].every((operation) => !hooks._pres.get(operation)?.length
+    && !hooks._posts.get(operation)?.length);
+};
+
+// getById reads through `findOne` and getByIds through `find`. Mongoose copies the schema's query
+// hooks to the model when compiling it, so both registries must allow the batched read.
+const batchesFindOne = (Model) => hasNoFindHooks(Model.schema?.s?.hooks)
+  && (Model.Query?.prototype?._queryMiddleware == null || hasNoFindHooks(Model.Query.prototype._queryMiddleware));
+
 export const createMongoAdapter = (options) => {
   const integrity = createMongoIntegrity(options);
   let queries;
@@ -81,6 +94,14 @@ export const createMongoAdapter = (options) => {
         : Model.findOne({ $and: [{ _id: requiredId }, { _id: id }] }, projection), session);
       if (plain) query = query.lean();
       return query;
+    },
+    getByIds(Model, ids) {
+      integrity.assertReady();
+      // When `find` middleware could return other records, fail before reading, so the runtime
+      // reads each ID once with getById.
+      if (!batchesFindOne(Model)) throw new Error(`${Model.modelName} query middleware requires reads by ID`);
+      // Trusted, so that the `sanitizeFilter` option does not wrap the operator in `$eq`.
+      return Model.find({ _id: mongoose.trusted({ $in: ids }) });
     },
     prepareUpdate(set, unset) {
       return Object.keys(unset).length > 0 ? { ...set, $unset: unset } : set;

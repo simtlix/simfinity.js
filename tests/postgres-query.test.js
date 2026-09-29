@@ -28,6 +28,26 @@ describe('PostgreSQL query compilation', () => {
     expect(compile({ title: { operator: 'IN', value: [] } }).text).toContain('FALSE');
     expect(compile({ title: { operator: 'NIN', value: [] } }).text).toContain('TRUE');
   });
+  it('compiles positive non-null filters to index-friendly operators and keeps negations null-safe', () => {
+    const where = (args) => { const { text, values } = compile(args); return { sql: text.slice(text.indexOf(' WHERE ') + 7, text.indexOf(' LIMIT ')), values }; };
+    const title = '(t0."title") COLLATE "pg_catalog"."C"';
+    expect(where({ title: { value: 'a' } }).sql).toBe(`(${title} = $1::text)`);
+    expect(where({ id: { value: '00000000-0000-4000-8000-000000000000' } }).sql).toBe('(t0."id" = $1::uuid)');
+    expect(where({ title: { value: null } }).sql).toBe(`(${title} IS NULL)`);
+    const membership = where({ title: { operator: 'IN', value: ['a', 'b'] } });
+    expect(membership.sql).toBe(`(${title} = ANY ($1::text[]))`);
+    expect(membership.values[0]).toEqual(['a', 'b']);
+    expect(where({ seasons: { terms: [{ path: 'year', operator: 'GTE', value: 2000 }] } }).sql).toBe('(t1."year" >= $1::integer)');
+    expect(where({ seasons: { terms: [{ path: 'year', operator: 'BTW', value: [2000, 2030] }] } }).sql).toBe('((t1."year" >= $1::integer AND t1."year" <= $2::integer))');
+    expect(where({ title: { operator: 'LIKE', value: 'x' } }).sql).toBe(`(strpos(${title}, $1::text) > 0)`);
+    expect(where({ title: { operator: 'NE', value: 'a' } }).sql).toBe(`(${title} IS DISTINCT FROM $1::text)`);
+    const exclusion = where({ title: { operator: 'NIN', value: ['a', 'b'] } });
+    expect(exclusion.sql).toBe(`(NOT COALESCE(${title} = ANY ($1::text[]), FALSE))`);
+    expect(exclusion.values[0]).toEqual(['a', 'b']);
+    const categories = '(t0."categories") COLLATE "pg_catalog"."C"';
+    expect(where({ categories: { operator: 'NIN', value: ['a', 'b'] } }).sql).toBe(`(NOT (array_position(${categories}, $1::text) IS NOT NULL OR array_position(${categories}, $2::text) IS NOT NULL))`);
+    expect(where({ categories: { operator: 'NE', value: 'a' } }).sql).toBe(`(NOT (array_position(${categories}, $1::text) IS NOT NULL))`);
+  });
   it('projects embedded-list group keys with presence and stable child order', () => {
     const result = compile({ aggregation: { groupId: 'credits.role', facts: [{ path: 'id', operation: 'COUNT', factName: 'count' }] } }, { mode: 'aggregate' });
     expect(result.text).toContain('jsonb_agg');
@@ -63,10 +83,12 @@ const compileEnum = (field, operator, value) => {
 describe('enum query value normalization', () => {
   it.each(['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN'])('resolves member names before internal values for %s', (operator) => {
     const collection = ['BTW', 'IN', 'NIN'].includes(operator);
+    // Scalar IN/NIN bind the whole list as one array parameter; list fields bind each element.
+    const bound = (field, { values }) => ['IN', 'NIN'].includes(operator) && field !== 'kinds' ? values[0] : values.slice(0, collection ? 2 : 1);
     for (const field of ['kind', 'kinds']) {
-      expect(compileEnum(field, operator, collection ? ['ONE', 'TWO'] : 'TWO').values.slice(0, collection ? 2 : 1)).toEqual(collection ? ['TWO', 'two'] : ['two']);
+      expect(bound(field, compileEnum(field, operator, collection ? ['ONE', 'TWO'] : 'TWO'))).toEqual(collection ? ['TWO', 'two'] : ['two']);
     }
-    expect(compileEnum('numeric', operator, collection ? ['ONE', 2] : 'ONE').values.slice(0, collection ? 2 : 1)).toEqual(collection ? ['1', '2'] : ['1']);
+    expect(bound('numeric', compileEnum('numeric', operator, collection ? ['ONE', 2] : 'ONE'))).toEqual(collection ? ['1', '2'] : ['1']);
   });
   it.each(['1', 'unknown', false, {}])('rejects undeclared numeric internal values with strict equality: %j', (value) => {
     expect(() => compileEnum('numeric', 'EQ', value)).toThrow('Invalid enum value');

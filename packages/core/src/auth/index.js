@@ -32,9 +32,11 @@
  * const yoga = createYoga({ schema, plugins: [authPlugin] });
  */
 
-import { GraphQLObjectType, defaultFieldResolver } from 'graphql';
+import { GraphQLError, GraphQLObjectType, defaultFieldResolver } from 'graphql';
+import SimfinityError from '../errors/simfinity.error.js';
 import { UnauthenticatedError, ForbiddenError, createAuthError } from './errors.js';
 import { isPolicyExpression, createRuleFromExpression, evaluateExpression } from './expressions.js';
+import { collectQueryPaths, walkQueryPath } from '../query-plan.js';
 import {
   resolvePath,
   requireAuth,
@@ -196,6 +198,46 @@ const executeRule = async (rule, parent, args, ctx, info) => {
 };
 
 /**
+ * Applies read rules to the paths a client names in a generated list, aggregate or collection
+ * field's filter, sort and aggregation arguments. Each segment needs its own `Type.field` rule
+ * (exact, wildcard, then default policy). Rules run without a parent, with empty args and the
+ * path field's identity in info, so parent-dependent rules such as isOwner deny query paths. A rule that
+ * throws anything other than a Simfinity or GraphQL error denies the path.
+ */
+const authorizeQueryPaths = async (permissions, defaultPolicy, schema, query, args, ctx, info) => {
+  const queriedType = query && schema?.getType?.(query.typeName);
+  if (!queriedType) return;
+  const checked = new Set();
+  for (const segments of collectQueryPaths(args, query.operation)) {
+    const steps = [];
+    walkQueryPath(queriedType, segments, (step) => steps.push(step));
+    for (const { type, fieldName, field } of steps) {
+      const key = `${type.name}.${fieldName}`;
+      if (checked.has(key)) continue;
+      checked.add(key);
+      const rules = getFieldRules(permissions, type.name, fieldName);
+      if (rules === null) {
+        if (defaultPolicy === 'DENY') throw new ForbiddenError(`Access denied to ${key}`);
+        continue;
+      }
+      // The operation and response location belong to the invoking query, but permissions must
+      // see the identity of the path field, just as when that field is selected directly.
+      const fieldInfo = { ...info, fieldName, parentType: type, returnType: field.type };
+      for (const rule of rules) {
+        let allowed;
+        try {
+          allowed = await executeRule(rule, undefined, {}, ctx, fieldInfo);
+        } catch (error) {
+          if (error instanceof SimfinityError || error instanceof GraphQLError) throw error;
+          allowed = false;
+        }
+        if (!allowed) throw new ForbiddenError(`Access denied to ${key}`);
+      }
+    }
+  }
+};
+
+/**
  * Creates a graphql-middleware compatible authorization middleware.
  *
  * @deprecated Use {@link createAuthPlugin} instead. `applyMiddleware` from graphql-middleware
@@ -227,6 +269,7 @@ export const createAuthMiddleware = (permissions, options = {}) => {
 
     // Get rules for this field
     const rules = getFieldRules(permissions, typeName, fieldName);
+    const query = info.parentType?.getFields?.()[fieldName]?.extensions?.simfinityQuery;
 
     // If no rules found, apply default policy
     if (rules === null) {
@@ -237,6 +280,7 @@ export const createAuthMiddleware = (permissions, options = {}) => {
       }
 
       // ALLOW - proceed to resolver
+      await authorizeQueryPaths(permissions, defaultPolicy, info.schema, query, args, ctx, info);
       return resolve(parent, args, ctx, info);
     }
 
@@ -252,6 +296,7 @@ export const createAuthMiddleware = (permissions, options = {}) => {
       }
     }
 
+    await authorizeQueryPaths(permissions, defaultPolicy, info.schema, query, args, ctx, info);
     log(`Access granted to ${typeName}.${fieldName}`);
 
     // All rules passed - proceed to resolver
@@ -344,6 +389,7 @@ export const createAuthPlugin = (permissions, options = {}) => {
       for (const [fieldName, field] of Object.entries(fields)) {
         const rules = getFieldRules(permissions, typeName, fieldName);
         const originalResolve = field.resolve || defaultFieldResolver;
+        const query = field.extensions?.simfinityQuery;
 
         field.resolve = async (parent, args, ctx, info) => {
           log(`Checking ${typeName}.${fieldName}`);
@@ -355,6 +401,7 @@ export const createAuthPlugin = (permissions, options = {}) => {
               throw new ForbiddenError(`Access denied to ${typeName}.${fieldName}`);
             }
 
+            await authorizeQueryPaths(permissions, defaultPolicy, schema, query, args, ctx, info);
             return originalResolve(parent, args, ctx, info);
           }
 
@@ -369,6 +416,7 @@ export const createAuthPlugin = (permissions, options = {}) => {
             }
           }
 
+          await authorizeQueryPaths(permissions, defaultPolicy, schema, query, args, ctx, info);
           log(`Access granted to ${typeName}.${fieldName}`);
 
           return originalResolve(parent, args, ctx, info);

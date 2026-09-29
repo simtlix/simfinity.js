@@ -365,13 +365,13 @@ describe('createRuntime', () => {
         from: ChildType.name,
         foreignField: 'parentKey',
         localField: '_id',
-        as: 'requiredChildren',
+        as: '__sf_l0',
       },
     });
     expect(pipeline).toContainEqual({
       $match: {
         requiredTags: 'one',
-        'requiredChildren.value': 'child',
+        '__sf_l0.value': 'child',
       },
     });
   });
@@ -432,12 +432,12 @@ describe('createRuntime', () => {
       $lookup: {
         from: GrandchildType.name,
         foreignField: 'childKey',
-        localField: 'requiredChildren._id',
-        as: 'requiredChildren_requiredGrandchildren',
+        localField: '__sf_l0._id',
+        as: '__sf_l1',
       },
     });
     expect(pipeline).toContainEqual({
-      $match: { 'requiredChildren_requiredGrandchildren.value': 'nested' },
+      $match: { '__sf_l1.value': 'nested' },
     });
   });
 
@@ -476,14 +476,14 @@ describe('createRuntime', () => {
         from: ChildType.name,
         foreignField: 'parentKey',
         localField: '_id',
-        as: 'children',
+        as: '__sf_l0',
       },
     }]);
     expect(pipeline).toContainEqual({
       $group: {
         _id: '$tenant',
-        count: { $sum: 1 },
-        sum: { $sum: '$children.number' },
+        fact_0: { $sum: 1 },
+        fact_1: { $sum: '$__sf_l0.number' },
       },
     });
   });

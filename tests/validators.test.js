@@ -95,6 +95,38 @@ describe('Declarative Validation Helpers', () => {
       await expect(validator.validate('User', 'email', 'notanemail', null))
         .rejects.toThrow(SimfinityError);
     });
+
+    test('accepts exactly the strings matched by the original email pattern', async () => {
+      // The original pattern; only ever run on short strings here.
+      const reference = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      const validator = validators.email().CREATE[0];
+      const alphabet = ['a', '.', '@', ' ', ' ', '\n'];
+      const values = [''];
+      for (let index = 0; values[index].length < 6; index += 1) {
+        for (const character of alphabet) values.push(values[index] + character);
+      }
+      const mismatches = [];
+      for (const value of values) {
+        const accepted = await validator.validate('User', 'email', value, null).then(() => true, () => false);
+        if (accepted !== reference.test(value)) mismatches.push(value);
+      }
+      expect(mismatches).toEqual([]);
+    });
+
+    test('rejects hostile dot-filled domains in linear time', async () => {
+      const validation = validators.email();
+      // The first size already takes about a second with a backtracking pattern.
+      for (const size of [32 * 1024, 1024 * 1024]) {
+        for (const value of [`a@${'.'.repeat(size)} `, `a@${'.'.repeat(size)}@`]) {
+          for (const validator of [validation.CREATE[0], validation.UPDATE[0]]) {
+            const started = performance.now();
+            await expect(validator.validate('User', 'email', value, null))
+              .rejects.toMatchObject({ message: 'Invalid email format', extensions: { code: 'VALIDATION_ERROR', status: 400 } });
+            expect(performance.now() - started).toBeLessThan(200);
+          }
+        }
+      }
+    });
   });
 
   describe('numberRange validator', () => {

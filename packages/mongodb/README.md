@@ -6,6 +6,8 @@ MongoDB/Mongoose adapter and compatibility facade for Simfinity. This package ge
 npm install @simtlix/simfinity-js graphql@^16.11.0 mongoose@^8.24.2
 ```
 
+`graphql` and `mongoose` are peer dependencies: the facade uses your application's copies, and npm reports an out-of-range version as a peer conflict instead of installing a second copy. The MCP transports (`createMCPServer`, `startStdioMCPServer`, `createHTTPMCPHandler`) need the optional peer `@modelcontextprotocol/sdk@^1.13.0`; install it only when you use them. `generateMCPTools` works without it. The package does not install `graphql-middleware`.
+
 ```javascript
 import mongoose from 'mongoose';
 import * as simfinity from '@simtlix/simfinity-js';
@@ -17,6 +19,8 @@ const schema = simfinity.createSchema();
 ```
 
 Use a MongoDB replica set or sharded cluster for transactional mutations. The library requires Node.js >=18.18.0 and GraphQL 16.
+
+Generated single-reference reads can be batched within a request. Models with any `find` or `findOne` pre/post query hook retain individual `findOne` reads, including hooks shared by both operations, to preserve access restrictions and other middleware behavior. See the [relationship contract](https://simtlix.github.io/simfinity.js/guide/relationships.html).
 
 Mongoose 8.24.2 or later within version 8 is required to exclude the update-casting prototype-pollution vulnerability. Existing applications should update Mongoose and their dependency lockfile, then run `npm audit`; upgrading Simfinity does not refresh every transitive dependency already locked by the application.
 

@@ -105,7 +105,8 @@ export interface DatabaseDescription {
 export interface DatabasePool {
   connect(): Promise<{
     query(sql: string, values?: unknown[]): Promise<{ rows: any[]; rowCount: number | null }>;
-    release(): void;
+    /** An error means the connection must be destroyed instead of reused. */
+    release(error?: unknown): void;
   }>;
 }
 export function describeDatabase(registrations: ModelRegistration[], options?: { schema?: string }): DatabaseDescription;

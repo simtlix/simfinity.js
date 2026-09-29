@@ -5,7 +5,7 @@ description: Apply server-controlled filters to list, single-record, and aggrega
 
 # Query scope
 
-Scope functions add server-controlled filters before generated root queries and non-embedded relationship reads reach the selected database adapter. Use them to restrict records by tenant, owner, or another field in your GraphQL model.
+Scope functions add server-controlled filters before generated root queries and non-embedded relationship reads reach the selected database adapter. They also restrict the referenced records that client filter, sort and aggregation paths reach. Use them to restrict records by tenant, owner, or another field in your GraphQL model.
 
 <DomainDiagram kind="access" />
 
@@ -89,7 +89,17 @@ Assigning a filter to an existing argument replaces the caller's filter. Append 
 
 A scoped ID lookup returns `null` when no record matches both the requested ID and the added restriction. Preserve the normalized ID filter when adding a scope.
 
-Scopes run after [global middleware](/guide/middleware). Flat filters, including the filters added by a scope, are combined with user `AND`/`OR` conditions at the top level using AND. A user-provided OR does not remove that restriction.
+Scopes run after [global middleware](/guide/middleware) and modify the same `args` object that is sent to the database adapter, including when list, aggregate or collection-relationship middleware replaces `params.args`. Flat filters, including the filters added by a scope, are combined with user `AND`/`OR` conditions at the top level using AND. A user-provided OR does not remove that restriction.
+
+## Relationship paths in filters, sorts and aggregations
+
+Filter, sort, `groupId` and fact paths can name fields of related types, such as `author.email` on a post. When a client-supplied path crosses a non-embedded single reference to a type whose scope defines `find`, Simfinity calls that `find` scope with empty `args` and the request context after the root scope runs. It moves the conditions the scope adds below the relation path, so `tenant` becomes `author.tenant`, and ANDs them with the query. When a client uses the path only in `AND`/`OR` group conditions, the conditions are ANDed into each group that uses it instead, so an `OR` alternative that does not name the reference keeps its matches. Any other use (a field filter, relation `terms`, a sort, `groupId` or fact path) restricts the whole query, as does a group that middleware or a scope replaced, or a group nested so deeply that adding the scope would exceed the five-level filter depth limit. Each relation path is scoped once, and a path through several scoped references applies each target's scope.
+
+A relation filter therefore cannot confirm facts about a scoped-out record. When that scope restricts the caller, sorting or grouping through the reference also omits rows whose referenced record it excludes, including rows without a reference. A client path that enters a collection relation fails with `FORBIDDEN_FILTER_PATH` (403) when the collection type's `find` scope adds conditions for the caller, because a per-child scope cannot be correlated with the collection match. Callers for whom that scope adds nothing, such as administrators whose scope returns early, may use the path.
+
+A joined `find` scope must not filter through a non-embedded collection relation, or through a non-embedded reference inside an embedded list. For example, membership-based tenancy on `User` (`args.memberships = { terms: [{ path: 'org', value: org }] }`) would become `author.memberships.org` on a post, and the join through the memberships would repeat a post once per matching membership in lists, counts and aggregate facts. Likewise, `args.roles = { terms: [{ path: 'org.id', operator: 'IN', value: orgIds }] }`, where `roles` is an embedded list of objects that reference `Org`, joins the organization once per role. Whenever such a scope adds conditions for the caller, a client path into its type fails with `FORBIDDEN_FILTER_PATH` and names the collection or reference. Callers for whom the scope adds nothing are unaffected. To allow these paths, express the scope with fields of the scoped type itself or its single references, such as a stored tenant field. Scalar fields of embedded lists, including fields of their embedded objects such as `roles.level`, are not joined and may be used.
+
+Write these `find` scopes with the documented filter forms: flat filters, relation `terms`, and `AND`/`OR` groups. Sort and pagination values they set are ignored, and a relation filter without terms is rejected. Paths added by middleware or scope functions are trusted and do not trigger joined scopes. Fields that clients may not query at all are described under [path restrictions](/guide/queries#path-restrictions).
 
 ## Scope boundaries
 

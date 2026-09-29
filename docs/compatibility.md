@@ -1,13 +1,13 @@
 ---
 title: Database compatibility contract
-description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.4.0.
+description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.5.0.
 ---
 
 # Database compatibility contract
 
-This ledger records the v3.4.0 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
+This ledger records the v3.5.0 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
 
-The test paths below are available in the [v3.4.0 source](https://github.com/simtlix/simfinity.js/tree/v3.4.0). To try the API, use the [released starters](guide/databases.md#download-the-starters).
+The test paths below are available in the [v3.5.0 source](https://github.com/simtlix/simfinity.js/tree/v3.5.0). To try the API, use the [released starters](guide/databases.md#download-the-starters).
 
 When running the source tests, set `SIMFINITY_MONGODB_URI` and `SIMFINITY_POSTGRES_URI` to disposable databases for the cross-backend suites. Set `SIMFINITY_TEST_MONGODB_URI` to a separate disposable MongoDB database for upstream opt-in regressions. Mongo setup drops its configured databases, so these URIs must never identify application data. When a variable is absent, its integration suites are reported as skipped.
 
@@ -106,3 +106,11 @@ SQL extraction verification (2026-09-16): the full suite passed **51 files / 1,0
 Mongo adapters accept immutable `referentialIntegrity: 'off' | 'transactional'` configuration. The default remains off. Transactional mode requires awaited startup auditing, coordinates target-document writes against concurrent deletion, and rejects missing direct/embedded/inferred/private/link references with `REFERENCE_CONSTRAINT_VIOLATION`. Supplied transactions require snapshot/majority options and abort on guarded-write errors. Native writers remain outside the guarantee. See [the full contract](guide/mongodb-integrity.md). PostgreSQL physical schemas and FK behavior are unchanged.
 
 Verification: **53 files / 1,071 tests** passed against disposable MongoDB 8 replica-set and standalone deployments plus PostgreSQL 18, with no skipped tests. The 42 new cases include real GraphQL HTTP rejection, owned/borrowed rollback, post-write hook errors, three ordered concurrency schedules, independent runtime/client locks, actual transient retries, legacy off-mode Query compatibility and strict startup rejection. All six packed runtime/strict TypeScript consumers, lint and the website build passed.
+
+## v3.5.0 query authorization and reference batching
+
+Client filter, sort and aggregation paths enforce read rules for every segment and restrict referenced records through the target's scope. Fields with custom resolvers require an explicit `queryable: true` to allow stored-value queries; `queryable: false` blocks them. Path rules receive the checked field's identity, with no parent and empty arguments. See the [upgrade notes](resources/compatibility.md#upgrade-to-3-5-0) for compatibility and scope restrictions.
+
+Generated single references can batch by request, type and nesting level. Both adapters preserve per-field middleware, while scoped targets and MongoDB models with any `find` or `findOne` pre/post hook retain individual reads. Shared hook functions do not establish equivalent behavior: hooks may depend on the operation or filter shape.
+
+Regression coverage includes `tests/query-path-authorization.test.js`, `tests/relation-batching.test.js`, and their cross-backend counterparts in `tests/integration/`. Embedded replacement validation is covered by `embedded-update-required-parity.test.js`; SQL transaction tests cover expired sessions and failed rollback cleanup. The release matrix runs these cases with PostgreSQL 15/16/18 and MongoDB 7/8.

@@ -33,7 +33,7 @@ const databaseGuide = computed(() => database.value === 'postgres' ? '/guide/pos
 const databaseName = computed(() => database.value === 'postgres' ? 'PostgreSQL' : 'MongoDB');
 const installCommand = computed(() => database.value === 'postgres'
   ? `npm i @simtlix/simfinity-postgres@${version} graphql@^16.11.0 pg@^8.16.3`
-  : `npm i @simtlix/simfinity-js@${version} graphql@^16.11.0 mongoose@^8.16.2`);
+  : `npm i @simtlix/simfinity-js@${version} graphql@^16.11.0 mongoose@^8.24.2`);
 const toolExamples = [
   { name: 'barbershops', kind: 'QUERY', description: 'Find approved shops with typed filters and pagination. Barber scopes decide which shops the caller can see.', link: '/guide/queries.html' },
   { name: 'bookings_aggregate', kind: 'AGGREGATE', description: 'Count bookings by state within the signed-in user’s query scope.', link: '/reference/aggregation.html' },

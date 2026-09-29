@@ -2,10 +2,13 @@ import {
   describe, test, expect, beforeAll,
 } from 'vitest';
 import {
-  GraphQLObjectType, GraphQLID,
+  GraphQLObjectType, GraphQLID, Kind,
 } from 'graphql';
 import { scalars } from '../packages/mongodb/src/index.js';
 import * as simfinity from '../packages/mongodb/src/index.js';
+
+// The original email pattern; only ever run on short strings here.
+const referenceEmailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 describe('Pre-built Scalars', () => {
   beforeAll(() => {
@@ -23,6 +26,53 @@ describe('Pre-built Scalars', () => {
       expect(() => scalars.EmailScalar.serialize('test@example.com')).not.toThrow();
       expect(() => scalars.EmailScalar.serialize('invalid-email')).toThrow('Invalid email format');
       expect(() => scalars.EmailScalar.serialize('notanemail')).toThrow('Invalid email format');
+    });
+
+    test.each(['a@b.c', 'a@b..c', 'a@.b.c', 'a@b.c.', 'first.last+tag@sub.example.co'])('accepts %j', (value) => {
+      expect(scalars.EmailScalar.parseValue(value)).toBe(value);
+    });
+
+    test.each(['a@b', 'a@.b', 'a@b.', '@b.c', 'a@b@c.d', 'a@@b.c', 'a b@c.d', 'a@b.c ', 'a@b.c\n', 'a@b .c'])('rejects %j', (value) => {
+      expect(() => scalars.EmailScalar.parseValue(value)).toThrow('Invalid email format');
+    });
+
+    test('accepts exactly the strings matched by the original email pattern', () => {
+      const alphabet = ['a', '.', '@', ' ', ' ', '\n'];
+      const accepts = (value) => {
+        try {
+          scalars.EmailScalar.parseValue(value);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const mismatches = [];
+      const visit = (value) => {
+        if (accepts(value) !== referenceEmailPattern.test(value)) mismatches.push(value);
+        if (value.length < 6) {
+          for (const character of alphabet) visit(value + character);
+        }
+      };
+      visit('');
+      expect(mismatches).toEqual([]);
+    });
+
+    test('rejects hostile dot-filled domains in linear time on every coercion path', () => {
+      // The first size already takes about a second with a backtracking pattern.
+      for (const size of [32 * 1024, 1024 * 1024]) {
+        for (const value of [`a@${'.'.repeat(size)} `, `a@${'.'.repeat(size)}@`]) {
+          const coercions = [
+            () => scalars.EmailScalar.parseValue(value),
+            () => scalars.EmailScalar.parseLiteral({ kind: Kind.STRING, value }),
+            () => scalars.EmailScalar.serialize(value),
+          ];
+          for (const coerce of coercions) {
+            const started = performance.now();
+            expect(coerce).toThrow('Invalid email format');
+            expect(performance.now() - started).toBeLessThan(200);
+          }
+        }
+      }
     });
   });
 

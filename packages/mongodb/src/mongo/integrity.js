@@ -3,6 +3,9 @@ import { describeModels, SimfinityError } from '@simtlix/simfinity-core';
 import { withMongoTransaction } from './transactions.js';
 
 const LOCK_FIELD = '_simfinityReferenceLock';
+// Startup audit bounds: distinct target ids checked per query and ids remembered per target.
+const AUDIT_BATCH_SIZE = 1000;
+const AUDIT_VERIFIED_LIMIT = 100000;
 const transactionOptions = { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } };
 const violation = () => new SimfinityError('Reference constraint violated', 'REFERENCE_CONSTRAINT_VIOLATION', 409);
 const invalid = (message) => new SimfinityError(message, 'INVALID_MONGO_INTEGRITY_CONFIGURATION', 400);
@@ -165,21 +168,40 @@ export const createMongoIntegrity = (options = {}) => {
       await Model.init();
     }
     const session = await connection.startSession();
+    // Distinct target ids awaiting one batched existence query, and ids already
+    // found in this snapshot, per target model.
+    const pending = new Map();
+    const verified = new Map();
+    const verify = async (target) => {
+      const ids = pending.get(target);
+      pending.delete(target);
+      const found = new Set((await models.get(target).collection.find(
+        { _id: { $in: [...ids.values()] } }, { session, projection: { _id: 1 }, batchSize: ids.size + 1 },
+      ).toArray()).map(({ _id }) => _id.toHexString()));
+      for (const key of ids.keys()) if (!found.has(key)) throw violation();
+      if ((verified.get(target)?.size || 0) + ids.size > AUDIT_VERIFIED_LIMIT) verified.delete(target);
+      if (!verified.has(target)) verified.set(target, new Set());
+      for (const key of ids.keys()) verified.get(target).add(key);
+    };
     try {
       session.startTransaction({ readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } });
       for (const Model of models.values()) {
-        const cursor = Model.collection.find({}, { session });
+        const projection = { _id: 1, [LOCK_FIELD]: 1 };
+        for (const { path } of outgoing.get(Model)) projection[path.join('.')] = 1;
+        const cursor = Model.collection.find({}, { session, projection });
         try {
           for await (const record of cursor) {
             if (record[LOCK_FIELD] != null && record[LOCK_FIELD]?._bsontype !== 'ObjectId') {
               throw invalid(`Existing ${LOCK_FIELD} data is incompatible with reference integrity`);
             }
             for (const { target, id } of modelReferences(Model, record)) {
-              if (!await models.get(target).collection.findOne({ _id: id }, { session, projection: { _id: 1 } })) {
-                throw violation();
-              }
+              const key = id.toHexString();
+              if (verified.get(target)?.has(key)) continue;
+              if (!pending.has(target)) pending.set(target, new Map());
+              if (pending.get(target).set(key, id).size >= AUDIT_BATCH_SIZE) await verify(target);
             }
           }
+          for (const target of [...pending.keys()]) await verify(target);
         } finally { await cursor.close(); }
       }
       // Read-only startup audit. Mutation attempts use independently owned or supplied sessions.

@@ -14,6 +14,8 @@ export const configureQueryLimits = (options = {}) => {
   queryMaxPageSize = maxPageSize;
 };
 
+export const getQueryMaxPageSize = () => queryMaxPageSize;
+
 export const paginationStages = (pagination, withDefault) => {
   if (pagination == null) return withDefault ? [{ $skip: 0 }, { $limit: Math.min(100, queryMaxPageSize) }] : [];
   const { page, size } = pagination;

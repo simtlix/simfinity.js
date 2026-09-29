@@ -5,7 +5,7 @@ description: MongoDB and PostgreSQL editions of Simfinity, shared GraphQL APIs, 
 
 # Choose a database
 
-Simfinity 3.4.0 supports **MongoDB and PostgreSQL** through separate packages. Choose one when creating your application. The database adapter stays fixed for that deployment; this is not a runtime database switch or a MongoDB-to-PostgreSQL data migration tool.
+Simfinity 3.5.0 supports **MongoDB and PostgreSQL** through separate packages. Choose one when creating your application. The database adapter stays fixed for that deployment; this is not a runtime database switch or a MongoDB-to-PostgreSQL data migration tool.
 
 Both adapters generate the same GraphQL operation names and input shapes from the same type registrations and relationship metadata. Validation, authorization, query scopes, controllers, state machines, and optional MCP use the shared API. Native database access and physical storage have the differences below.
 
@@ -31,21 +31,21 @@ Version 3.3.0 also exposes a [driver-free SQL core and PostgreSQL plugin](./sql-
 
 ## Install from npm
 
-Both adapters are released at **v3.4.0**. Choose one package in your application:
+Both adapters are released at **v3.5.0**. Choose one package in your application:
 
 ::: code-group
 
 ```sh [MongoDB]
-npm install @simtlix/simfinity-js@3.4.2 graphql@^16.11.0 mongoose@^8.24.2
+npm install @simtlix/simfinity-js@3.5.0 graphql@^16.11.0 mongoose@^8.24.2
 ```
 
 ```sh [PostgreSQL]
-npm install @simtlix/simfinity-postgres@3.4.2 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-postgres@3.5.0 graphql@^16.11.0 pg@^8.16.3
 ```
 
 :::
 
-Shared core dependencies install automatically. Add `@simtlix/simfinity-mcp@3.4.2` only when your PostgreSQL application exposes MCP tools; transport factories also require `@modelcontextprotocol/sdk`. See the [MCP guide](./mcp).
+Shared core dependencies install automatically. Add `@simtlix/simfinity-mcp@3.5.0` only when your PostgreSQL application exposes MCP tools; transport factories also require `@modelcontextprotocol/sdk`. See the [MCP guide](./mcp).
 
 <span id="download-the-preview"></span>
 
@@ -73,7 +73,7 @@ npm start
 
 :::
 
-These archived starters keep the default Mongo integrity mode off. Upgrade all their Simfinity dependencies to 3.4.0 before using the new transactional option. The starters require Node.js 22 or newer and pin Simfinity packages to 3.3.0 on npm. PostgreSQL installs neither Mongoose nor MCP by default. To use shared helpers directly, add `@simtlix/simfinity-core@3.3.0` as a direct dependency; both starter manifests already include it.
+These archived starters keep the default Mongo integrity mode off. Upgrade all their Simfinity dependencies together to 3.5.0 before using current features; review the [upgrade notes](../resources/compatibility#upgrade-to-3-5-0). The starters require Node.js 22 or newer and pin Simfinity packages to 3.3.0 on npm. PostgreSQL installs neither Mongoose nor MCP by default. To use shared helpers directly, add `@simtlix/simfinity-core@3.3.0` as a direct dependency; both starter manifests already include it.
 
 The MongoDB example uses embedded seasons. The PostgreSQL example uses a one-to-many relation to demonstrate real generated FKs. That example choice accounts for their different nested inputs; both adapters support both relationship shapes. Use the operation shown in the corresponding quick start.
 
@@ -117,7 +117,7 @@ The quick starts include their connection and runtime setup inline. When splitti
 
 ## Earlier downloads
 
-For an application using the published 3.0.1 MongoDB release, the [original MongoDB starter](/simfinity-series-starter.zip) remains available. It pins `@simtlix/simfinity-js` to `3.0.1` and supports the MongoDB quick start's operations. The wider API reference documents v3.4.0 and may include APIs or fixes absent from 3.0.1.
+For an application using the published 3.0.1 MongoDB release, the [original MongoDB starter](/simfinity-series-starter.zip) remains available. It pins `@simtlix/simfinity-js` to `3.0.1` and supports the MongoDB quick start's operations. The wider API reference documents v3.5.0 and may include APIs or fixes absent from 3.0.1.
 
 Check [compatibility and releases](../resources/compatibility) before upgrading an existing application. The [Series Sample Project](https://github.com/simtlix/series-sample) is a separate MongoDB application; it is not a PostgreSQL starter.
 

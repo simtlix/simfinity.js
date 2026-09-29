@@ -68,6 +68,15 @@ const permissions = {
 
 Each rule receives `(parent, args, ctx, info)`. Only `true` or `undefined` grants access; all other results deny, including `null`, zero, empty strings, and truthy objects. Throwing denies with an error. This applies equally to direct functions, `composeRules`, `anyRule`, and `createRule`, including async results. Composition helpers and `createRule` reject nonfunction arguments at creation.
 
+## Query Path Rules (`authorizeQueryPaths`)
+
+Generated list, aggregate and collection-relationship fields carry `extensions.simfinityQuery = { typeName, operation }`. After the field's own rule passes (or no rule applies under `ALLOW`), the plugin and the deprecated middleware use `collectQueryPaths`/`walkQueryPath` from `query-plan.js` to check every field that client filter keys, relation `terms`, `AND`/`OR` conditions, list sort terms, and aggregation `groupId`/fact paths name, following related types. Each segment resolves through `getFieldRules` like a read, so under `DENY` every segment needs a rule, including the usual `COUNT` fact path `id`.
+
+- Path rules run with an `undefined` parent and empty `args`; `info.fieldName`, `info.parentType` and `info.returnType` identify the path field being checked. Other metadata, including `path` and `fieldNodes`, remains that of the invoking query. Parent-dependent rules such as `isOwner` deny query paths
+- A denying rule, a missing rule under `DENY`, or a rule that throws anything other than a `SimfinityError` or `GraphQLError` raises `ForbiddenError('Access denied to Type.field')`; Simfinity and GraphQL errors propagate unchanged
+- Aggregate sort terms (result keys) and paths added by middleware or scopes are not checked
+- The core runtime, not the plugin, rejects non-queryable fields with `FORBIDDEN_FILTER_PATH` (403) and restricts joined relation paths with the target type's `find` scope; see the extensions rule
+
 ## Rule Helpers (from `rules.js`)
 
 | Helper | Description |

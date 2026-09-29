@@ -62,7 +62,7 @@ beforeAll(() => {
 afterEach(() => simfinity.configureQueryLimits?.({ maxPageSize: 1000 }));
 
 describe('query correctness', () => {
-  it.each(['profile', 'author'])('preserves every %s term, including repeated leaves beside OR', async (field) => {
+  it.each([['profile', 'profile'], ['author', '__sf_l0']])('preserves every %s term, including repeated leaves beside OR', async (field, prefix) => {
     const pipeline = await simfinity.buildQuery({
       [field]: { terms: [
         { path: 'name', value: 'Alice' },
@@ -72,7 +72,7 @@ describe('query correctness', () => {
       OR: [{ conditions: [{ field: 'title', value: 'A' }] }, { conditions: [{ field: 'title', value: 'B' }] }],
     }, bookType);
     const serialized = JSON.stringify(match(pipeline));
-    expect(serialized).toContain(`"${field}.name":"Alice"`);
+    expect(serialized).toContain(`"${prefix}.name":"Alice"`);
     expect(serialized).toContain('"$gte":18');
     expect(serialized).toContain('"$lte":30');
     expect(serialized).toContain('"$or"');
@@ -96,7 +96,7 @@ describe('query correctness', () => {
       { field: 'id', order: 'ASC' }, { field: 'author.id', order: 'DESC' },
       { field: 'author.name', order: 'ASC' }, { field: 'profile.age', order: 'ASC' },
     ] } }, bookType);
-    expect(pipeline.find((stage) => stage.$sort)).toEqual({ $sort: { _id: 1, 'author._id': -1, 'author.name': 1, 'profile.age': 1 } });
+    expect(pipeline.find((stage) => stage.$sort)).toEqual({ $sort: { _id: 1, '__sf_l0._id': -1, '__sf_l0.name': 1, 'profile.age': 1 } });
     expect(pipeline.filter((stage) => stage.$lookup)).toHaveLength(1);
   });
 

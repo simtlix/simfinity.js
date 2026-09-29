@@ -206,6 +206,8 @@ Referenced collections receive scalar filters, relationship filters, logical gro
 
 Generated referenced-object resolvers run the target type's `get_by_id` middleware and [query scope](./query-scope); generated collection resolvers run its `find` middleware and scope. They await callbacks and pass the request context. The original referenced ID or parent connection remains required even when middleware or scope changes filters. Scoped-out single records return `null`, and scoped-out children are omitted before pagination.
 
+Within a request, generated single-reference fields are batched: `get_by_id` middleware still runs once per field, the bundled MongoDB and PostgreSQL adapters read the referenced records of one type and nesting level in one batched read (split at `maxPageSize`), and fields that reference the same ID share the returned record. References to a type with a `get_by_id` scope, IDs that middleware changes or the adapter cannot cast (such as non-ObjectId MongoDB `_id` values), executions without a context object, and Mongoose models with any `find` or `findOne` pre/post query hook are read one ID at a time. Even a hook function shared by both operations may branch on `this.op` or the filter shape, so those models retain the original `findOne` behavior. Collection fields keep one read per parent, because each parent's filters and pagination apply separately.
+
 ## Update a collection
 
 ```graphql

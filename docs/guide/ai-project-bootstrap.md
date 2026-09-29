@@ -37,7 +37,7 @@ actual installed runtime; do not bypass compatibility errors with --force or
 
 In an empty project, run npm init -y, enable ES modules, then install:
 
-npm install @simtlix/simfinity-js graphql mongoose graphql-yoga
+npm install @simtlix/simfinity-js graphql@^16.11.0 mongoose@^8.24.2 graphql-yoga
 
 Constrain GraphQL, Mongoose, and Yoga to compatible versions when metadata
 requires it. Do not blindly install incompatible latest major versions.

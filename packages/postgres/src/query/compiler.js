@@ -153,7 +153,11 @@ export const compileQuery = (models, database, plan, extra = null) => {
     }
     unsupported('Invalid query path');
   };
-  const predicate = (expression, operator, value) => {
+  /**
+   * WHERE rejects NULL and FALSE alike, so positive scalar filters use bare, index-friendly operators.
+   * Anything under a NOT (NE, NIN or a negated group) keeps the null-safe forms that never yield NULL.
+   */
+  const predicate = (expression, operator, value, negated = false) => {
     const { sql, field, type, list, vector } = expression;
     // Filters accept member names first; writes already receive internal enum values.
     const encodeFilter = (item) => {
@@ -164,8 +168,9 @@ export const compileQuery = (models, database, plan, extra = null) => {
       return encodeScalar(field, entry.value);
     };
     if (operator === 'LIKE' && field.scalar !== 'String') invalidValue('LIKE requires a string field');
-    const scalarBind = (item) => { const value = encodeFilter(item); return bind(expression.dateNumeric && value ? value.getTime() : value, type); };
-    const equality = (item) => {
+    const encodeValue = (item) => { const value = encodeFilter(item); return expression.dateNumeric && value ? value.getTime() : value; };
+    const scalarBind = (item) => bind(encodeValue(item), type);
+    const equality = (item, nullSafe = negated) => {
       if (Array.isArray(item)) {
         if (!field.list || vector) invalidValue('Array equality requires a scalar-list field');
         return `${sql} IS NOT DISTINCT FROM ${bind(item.map(encodeFilter), `${type}[]`)}`;
@@ -174,18 +179,26 @@ export const compileQuery = (models, database, plan, extra = null) => {
         const contains = `array_position(${sql}, ${scalarBind(item)}) IS NOT NULL`;
         return item == null ? `(${sql} IS NULL OR ${contains})` : contains;
       }
-      return item == null ? `${sql} IS NULL` : `${sql} IS NOT DISTINCT FROM ${scalarBind(item)}`;
+      if (item == null) return `${sql} IS NULL`;
+      return `${sql} ${nullSafe ? 'IS NOT DISTINCT FROM' : '='} ${scalarBind(item)}`;
     };
     if (operator === 'EQ') return equality(value);
     if (operator === 'NE') {
       if (!list && !Array.isArray(value)) return value == null ? `${sql} IS NOT NULL` : `${sql} IS DISTINCT FROM ${scalarBind(value)}`;
-      return `NOT (${equality(value)})`;
+      return `NOT (${equality(value, true)})`;
     }
     if (operator === 'IN' || operator === 'NIN') {
-      const expressionSQL = value.length ? `(${value.map(equality).join(' OR ')})` : 'FALSE';
-      return operator === 'IN' ? expressionSQL : value.length ? `NOT ${expressionSQL}` : 'TRUE';
+      if (!value.length) return operator === 'IN' ? 'FALSE' : 'TRUE';
+      let expressionSQL;
+      if (list) expressionSQL = `(${value.map((item) => equality(item)).join(' OR ')})`;
+      else {
+        // For scalar columns, one array parameter keeps large lists within the 65,535 bind limit.
+        const member = `${sql} = ANY (${bind(value.map(encodeValue), `${type}[]`)})`;
+        expressionSQL = negated || operator === 'NIN' ? `COALESCE(${member}, FALSE)` : member;
+      }
+      return operator === 'IN' ? expressionSQL : `NOT ${expressionSQL}`;
     }
-    if (operator === 'BTW') return `(${predicate(expression, 'GTE', value[0])} AND ${predicate(expression, 'LTE', value[1])})`;
+    if (operator === 'BTW') return `(${predicate(expression, 'GTE', value[0], negated)} AND ${predicate(expression, 'LTE', value[1], negated)})`;
     if (value == null || Array.isArray(value)) invalidValue(`${operator} requires a non-null scalar value`);
     const parameter = scalarBind(value);
     const compare = (left) => {
@@ -194,12 +207,14 @@ export const compileQuery = (models, database, plan, extra = null) => {
       }
       return `${left} ${{ LT: '<', LTE: '<=', GT: '>', GTE: '>=' }[operator]} ${parameter}`;
     };
-    return list ? `EXISTS (SELECT 1 FROM unnest(${sql}) v(value) WHERE ${compare('v.value')})` : `COALESCE(${compare(sql)}, FALSE)`;
+    if (list) return `EXISTS (SELECT 1 FROM unnest(${sql}) v(value) WHERE ${compare('v.value')})`;
+    return negated ? `COALESCE(${compare(sql)}, FALSE)` : compare(sql);
   };
-  const where = (node) => {
+  // A negation reaches every predicate below it, including those nested in AND/OR groups.
+  const where = (node, negated = false) => {
     if (!node) return 'TRUE';
-    if (node.kind === 'predicate') return `(${predicate(path(node.path), node.operator, node.value)})`;
-    return `(${node.terms.map(where).join(node.kind === 'and' ? ' AND ' : ' OR ')})`;
+    if (node.kind === 'predicate') return `(${predicate(path(node.path), node.operator, node.value, negated)})`;
+    return `(${node.terms.map((term) => where(term, negated)).join(node.kind === 'and' ? ' AND ' : ' OR ')})`;
   };
   let condition = where(plan.where);
   if (extra) {

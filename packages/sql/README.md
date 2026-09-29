@@ -5,7 +5,7 @@ Driver-free relational planning, record reconstruction, and transaction orchestr
 PostgreSQL 15 or later is the first and only supported SQL plugin. Install the SQL runtime and PostgreSQL plugin at matching versions:
 
 ```sh
-npm install @simtlix/simfinity-sql@3.3.0 @simtlix/simfinity-postgres@3.3.0 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-sql@3.5.0 @simtlix/simfinity-postgres@3.5.0 graphql@^16.11.0 pg@^8.16.3
 ```
 
 ## Runtime
@@ -62,7 +62,7 @@ A plugin factory returns an object with `apiVersion: 1`, `name`, `displayName`, 
 | `values` | Create/cast IDs, encode/decode scalars, and encode embedded values. |
 | `driver` | Validate configuration, execute statements, acquire/release clients, begin/commit/rollback transactions, classify retryable aborts, and normalize errors. |
 
-The driver supplies `assertConfiguration`, `query`, `acquire`, `begin`, `commit`, `rollback`, `release`, `isRetryable`, and `normalizeError`. `query(configuration, statement, client?)` returns a promise resolving to `{ rows, rowCount? }`. Value codecs supply `createId()`, `castId(value)`, `encodeScalar(field, value)`, `decodeScalar(field, value, gqlField?)`, and `encodeEmbedded(value)`.
+The driver supplies `assertConfiguration`, `query`, `acquire`, `begin`, `commit`, `rollback`, `release`, `isRetryable`, and `normalizeError`. `query(configuration, statement, client?)` returns a promise resolving to `{ rows, rowCount? }`. `release(client, error?)` receives the rollback failure when ROLLBACK did not complete; the driver must then discard the connection instead of returning it to a pool, and SQL does not retry that attempt. A transaction session stops accepting statements as soon as its callback settles, before COMMIT or ROLLBACK is sent, so un-awaited session work fails with `INVALID_SESSION`. Value codecs supply `createId()`, `castId(value)`, `encodeScalar(field, value)`, `decodeScalar(field, value, gqlField?)`, and `encodeEmbedded(value)`.
 
 Physical descriptions must preserve the table names, primary keys, column names, presence markers, and ownership metadata needed for record reconstruction. Plugins may extend those shapes with native types, functions, triggers, and other engine metadata. `compileRecord` receives a physical **table object**, with one of these operation shapes:
 

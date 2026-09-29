@@ -126,6 +126,8 @@ export interface DatabaseAdapter<Model = any, Session = any> {
   saveRecord(model: Model, record: any, session?: Session): any;
   toObject(record: any): any;
   getById(model: Model, id: any, session?: Session | null, options?: { projection?: Record<string, number>; plain?: boolean; lock?: boolean; requiredId?: any; context?: any }): any;
+  /** Optional batch read: the records found for `ids`, in getById shape and any order. After a failure, the runtime reads each ID with getById. */
+  getByIds?(model: Model, ids: any[], options?: { context?: any }): any;
   prepareUpdate(set: Record<string, any>, unset: Record<string, string>): any;
   update(model: Model, id: any, changes: any, session?: Session): any;
   delete(model: Model, id: any, session?: Session): any;

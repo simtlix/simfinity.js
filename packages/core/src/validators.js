@@ -1,4 +1,5 @@
 import SimfinityError from './errors/simfinity.error.js';
+import { isEmailFormat } from './scalars/email.js';
 
 /**
  * Creates a validation object that works for both 'save' (CREATE) and 'update' (UPDATE) operations.
@@ -88,14 +89,12 @@ export const pattern = (name, regex, message) => {
 };
 
 export const email = () => {
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
   return createValidator(async (typeName, fieldName, value) => {
     if (typeof value !== 'string') {
       throw new SimfinityError('Email must be a string', 'VALIDATION_ERROR', 400);
     }
 
-    if (!emailRegex.test(value)) {
+    if (!isEmailFormat(value)) {
       throw new SimfinityError('Invalid email format', 'VALIDATION_ERROR', 400);
     }
   }, false); // Optional
