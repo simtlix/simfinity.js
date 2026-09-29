@@ -31,7 +31,8 @@ export const postgresPlugin = (options) => ({
     begin: (client) => client.query('BEGIN ISOLATION LEVEL REPEATABLE READ'),
     commit: (client) => client.query('COMMIT'),
     rollback: (client) => client.query('ROLLBACK'),
-    release: (client) => client.release(),
+    // A release error makes pg-pool destroy a connection whose transaction may still be open.
+    release: (client, error) => client.release(error),
     isRetryable: (error) => ['40001', '40P01'].includes(error.code),
     normalizeError: normalizeDatabaseError,
   },

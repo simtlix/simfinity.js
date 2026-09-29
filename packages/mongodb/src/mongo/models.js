@@ -24,32 +24,30 @@ const getListItemType = (type) => {
   return unwrapNonNull(listType.ofType);
 };
 
-const isCustomValidatedScalar = (type) => (
-  type instanceof GraphQLScalarType && type.baseScalarType
-);
-
-const matchesScalar = (fieldType, target) => {
-  if (fieldType === target) return true;
-  if (fieldType instanceof GraphQLNonNull && fieldType.ofType === target) return true;
-  if (isCustomValidatedScalar(fieldType) && fieldType.baseScalarType === target) return true;
-  return fieldType instanceof GraphQLNonNull
-    && isCustomValidatedScalar(fieldType.ofType)
-    && fieldType.ofType.baseScalarType === target;
+// Follow validated-scalar chains to their storage scalar; a cyclic chain stops where it repeats.
+export const resolveStorageScalar = (type) => {
+  let base = type;
+  const visited = new Set();
+  while (base instanceof GraphQLScalarType && base.baseScalarType && !visited.has(base)) {
+    visited.add(base);
+    base = base.baseScalarType;
+  }
+  return base;
 };
 
+const matchesScalar = (fieldType, target) => resolveStorageScalar(unwrapNonNull(fieldType)) === target;
+
 const getEffectiveTypeName = (type) => (
-  type instanceof GraphQLScalarType && type.baseScalarType ? type.baseScalarType.name : type.name
+  type instanceof GraphQLScalarType ? resolveStorageScalar(type).name : type.name
 );
 
 const isGraphQLisoDate = (typeName) => (
   typeName === 'DateTime' || typeName === 'Date' || typeName === 'Time'
 );
 
-const listItemMatchesScalar = (listType, target) => {
-  const ofType = getListItemType(listType);
-  return ofType === target
-    || (isCustomValidatedScalar(ofType) && ofType.baseScalarType === target);
-};
+const listItemMatchesScalar = (listType, target) => (
+  resolveStorageScalar(getListItemType(listType)) === target
+);
 
 const withUnique = (fieldEntry, mongoType) => (fieldEntry.extensions && fieldEntry.extensions.unique
   ? { type: mongoType, unique: true }
@@ -154,7 +152,10 @@ export const createMongoModel = (gqlType, onModelCreated, { createCollection = t
     onModelCreated(model);
   }
   if (createCollection) {
-    model.createCollection();
+    // Mongoose already ignores NamespaceExists; report other failures instead of crashing the process.
+    Promise.resolve(model.createCollection()).catch((error) => {
+      console.warn(`Simfinity could not create MongoDB collection ${model.collection.collectionName}: ${error?.message ?? error}`);
+    });
   }
   return model;
 };

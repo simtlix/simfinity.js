@@ -61,7 +61,7 @@ Register global middleware once at application startup. Type and middleware regi
 
 For `simfinity.use()`, `await next()` advances only the middleware chain. The database resolver runs after the chain returns. Code after `next()` is still pre-execution; omitting `next()` skips remaining middleware but does not cancel the resolver. Throw to reject an operation. Do not implement response caching, after-save events, or complete operation timing with this hook.
 
-Mutate the existing `args` or `context` object where the contract permits it. Replacing `params.args` does not reliably replace the resolver's arguments. Generated save/update middleware receives `{ input }`; delete receives `{ id }`. Custom mutation metadata differs from entity operations, so do not assume `type` is always present.
+Mutate the existing `args` or `context` object where the contract permits it. Generated list, count, aggregate and collection-relationship reads use the post-middleware `params.args` for the scope and the adapter, so replacing it takes effect there. Mutations, nested collection writes and `get_by_id` reads keep the resolver's own reference and ignore a replaced `params.args`. Client query paths are checked before middleware runs; paths that middleware or scopes add are trusted. Generated save/update middleware receives `{ input }`; delete receives `{ id }`. Custom mutation metadata differs from entity operations, so do not assume `type` is always present.
 
 Scopes mutate query arguments; their return value is not a database filter. Preserve normalized ID filters for `get_by_id`. Generated non-embedded relationship reads apply the target type's middleware and scope, with a separate predicate enforcing the persisted relationship. Embedded fields, custom resolvers, and direct Mongoose calls do not inherit that coverage.
 
@@ -83,7 +83,7 @@ Create `args` is the inner mutation input. `onSaved` receives a plain parent sna
 
 All these hooks execute before transaction commit. Nested collection writes use the same session and invoke the child controller. A failure later in the mutation can roll back earlier hook writes.
 
-- Pass the supplied session to every related database operation. Do not commit, abort, end, or replace a caller-owned session.
+- Pass the supplied session to every related database operation and await that work before the hook returns. Do not commit, abort, end, or replace a caller-owned session. A SQL session rejects statements with `INVALID_SESSION` once its transaction callback settles.
 - `saveObject()` with an active supplied session joins that transaction. Without one, it owns a separate transaction. It runs the creation pipeline but bypasses GraphQL coercion, field authorization, and global middleware. Direct Mongoose access also bypasses Simfinity controllers and validation.
 - Transient transaction errors can retry the transaction body and its hooks. Unknown commit results retry only the commit. If commit uncertainty remains, an error does not prove that nothing was persisted. Design retry-sensitive work and client retries accordingly.
 - For email, webhooks, or indexing, persist an outbox event with the entity change and process it after commit. The external processor needs idempotency and retry handling; an outbox alone does not guarantee exactly-once delivery.

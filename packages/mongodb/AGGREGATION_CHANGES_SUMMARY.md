@@ -55,8 +55,9 @@ const QLAggregationOperation = new GraphQLEnumType({
 
 #### New Functions
 
-##### buildFieldPath(gqltype, fieldPath)
-- Resolves a field path string (e.g., "category" or "country.name") to MongoDB field paths
+##### buildFieldPath(gqltype, fieldPath) (historical, removed)
+- Removed: groupId and fact paths are now resolved by the same validated resolver as filters, must end in a scalar field, and relation lookups use reserved `__sf_lN` aliases.
+- Resolved a field path string (e.g., "category" or "country.name") to MongoDB field paths
 - Handles:
   - Direct scalar fields
   - Embedded object fields

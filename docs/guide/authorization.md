@@ -88,9 +88,17 @@ const canEdit = auth.requireRole(['admin', 'editor'], {
 });
 ```
 
-`isOwner` reads the resolver's parent object. A root mutation's parent is not the target record, so a root update/delete ownership check must load and validate the target in application code. See [controllers](/guide/controllers) for mutation checks and [query scope](/guide/query-scope) for root query filtering.
+`isOwner` reads the resolver's parent object. A root mutation's parent is not the target record, so a root update/delete ownership check must load and validate the target in application code. Filter, sort and aggregation paths have no parent either, so `isOwner` denies them (see below). See [controllers](/guide/controllers) for mutation checks and [query scope](/guide/query-scope) for root query filtering.
 
 Ownership IDs may be nonempty strings, finite numbers (including zero), or Mongoose `ObjectId` instances. Numbers compare by string representation and ObjectIds by hexadecimal value. Missing/null IDs, empty strings, arrays, booleans, and arbitrary objects deny access. Use an extractor to obtain a supported ID from a custom identity object.
+
+## Filter, sort and aggregation paths
+
+Generated list, aggregate and collection-relationship fields accept field paths in their arguments: field filters and relation `terms`, `AND`/`OR` conditions, list `sort` terms, and aggregation `groupId` and fact paths. Before the resolver runs, the plugin evaluates the read rule of every field such a path names, following related types. For example, `posts(author: { terms: [{ path: "email", operator: LIKE, value: "@" }] })` needs the `Post.author` and `User.email` rules. With the permissions above, only admins can read `internalNotes`, filter by it or sort by it. Rules resolve as for reads (exact rule, `'*'`, then the default policy), so with `defaultPolicy: 'DENY'` every type a path reaches needs a rule.
+
+Path rules run with an `undefined` parent and empty `args`, so parent-dependent rules such as `isOwner` deny paths through their field, even for a caller who may read that value on their own record. Their `info.fieldName`, `info.parentType` and `info.returnType` identify the field being checked: for `author.email`, the email rule sees `email`, `User` and the email field's GraphQL type. The remaining operation metadata, including `info.path` and `info.fieldNodes`, still belongs to the invoking list, aggregate or collection field; a path argument is not a response selection. This preserves rules that choose permissions by field or type name. A custom rule that reads `parent` should tolerate `undefined`; if a rule throws anything other than a Simfinity or GraphQL error, the path is denied with `FORBIDDEN`. Aggregate sort terms name result keys (`groupId` or a fact name) and are not checked. Paths added by middleware or scope functions are trusted. The deprecated `createAuthMiddleware` applies the same check.
+
+These rules add to the runtime checks that apply without the plugin: non-queryable fields and paths through scoped relationships are described under [path restrictions](/guide/queries#path-restrictions).
 
 ## JSON policy expressions
 

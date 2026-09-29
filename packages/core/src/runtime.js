@@ -1,4 +1,4 @@
-import { configureQueryLimits } from './query-limits.js';
+import { configureQueryLimits, getQueryMaxPageSize } from './query-limits.js';
 import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
@@ -10,7 +10,65 @@ import InternalServerError from './errors/internal-server.error.js';
 import QLOperator from './const/QLOperator.js';
 import QLValue from './const/QLValue.js';
 import QLSort from './const/QLSort.js';
+import { collectQueryPathEntries, collectQueryPaths, walkQueryPath } from './query-plan.js';
 import './introspection.js';
+
+// Resolvers Simfinity generates. Any other resolver on a registered type when its schema is first
+// created is application code, such as a masking resolver, recorded once per type so later
+// in-place wrapping (for example by the auth plugin) does not change the snapshot.
+const generatedResolvers = new WeakSet();
+const applicationResolvedFields = new WeakMap();
+const markGenerated = (resolve) => {
+  generatedResolvers.add(resolve);
+  return resolve;
+};
+const listApplicationResolvedFields = (gqltype) => new Set(Object.entries(gqltype.getFields())
+  .filter(([, field]) => field.resolve && !generatedResolvers.has(field.resolve))
+  .map(([fieldName]) => fieldName));
+const hasApplicationResolver = (gqltype, fieldName) => (
+  applicationResolvedFields.get(gqltype) || listApplicationResolvedFields(gqltype)
+).has(fieldName);
+const forbiddenPath = (message) => new SimfinityError(message, 'FORBIDDEN_FILTER_PATH', 403);
+const SCOPE_IGNORED_ARGS = new Set(['sort', 'pagination', 'aggregation']);
+
+// Moves a joined type's scope group below the relation path that entered it.
+const prefixScopeGroup = (group, prefix) => {
+  if (!group || typeof group !== 'object' || Array.isArray(group)) {
+    throw new SimfinityError('Expected a scope filter group object', 'INVALID_FILTER_VALUE', 400);
+  }
+  const prefixed = {};
+  if (group.conditions != null) {
+    prefixed.conditions = [].concat(group.conditions).map((condition) => ({
+      field: `${prefix}.${condition?.path != null && condition.path !== '' ? `${condition.field}.${condition.path}` : condition?.field}`,
+      operator: condition?.operator,
+      value: condition?.value,
+    }));
+  }
+  if (group.AND != null) prefixed.AND = [].concat(group.AND).map((item) => prefixScopeGroup(item, prefix));
+  if (group.OR != null) prefixed.OR = [].concat(group.OR).map((item) => prefixScopeGroup(item, prefix));
+  return prefixed;
+};
+
+const prefixScopeArgs = (scopeArgs, prefix, typeName) => {
+  const conditions = [];
+  const groups = [];
+  for (const [name, value] of Object.entries(scopeArgs)) {
+    if (value == null || SCOPE_IGNORED_ARGS.has(name)) continue;
+    if (name === 'AND') groups.push(...[].concat(value).map((group) => prefixScopeGroup(group, prefix)));
+    else if (name === 'OR') {
+      const branches = [].concat(value);
+      if (branches.length) groups.push({ OR: branches.map((group) => prefixScopeGroup(group, prefix)) });
+    } else if (Object.hasOwn(value, 'terms')) {
+      if (!Array.isArray(value.terms) || !value.terms.length) {
+        throw new SimfinityError(`Scope filter ${typeName}.${name} requires non-empty terms`, 'MISSING_FILTER_PATH', 400);
+      }
+      for (const term of value.terms) {
+        conditions.push({ field: `${prefix}.${name}.${term?.path}`, operator: term?.operator, value: term?.value });
+      }
+    } else conditions.push({ field: `${prefix}.${name}`, operator: value.operator, value: value.value });
+  }
+  return conditions.length ? [{ conditions }, ...groups] : groups;
+};
 
 const GraphQLJSON = new GraphQLScalarType({
   name: 'JSON',
@@ -684,6 +742,42 @@ const getEmbeddedFieldNames = (gqltype) => {
   return names;
 };
 
+// Update inputs relax embedded NonNull members, so check the embedded values an update writes
+// against the embedded output type. Omitted lists are written as [], as on create. With `patch`,
+// only nested embedded values supplied by that patch are checked; stored nested values it keeps
+// are not. `id` and readOnly members are not accepted by generated inputs and remain the
+// application's responsibility.
+const completeEmbeddedValue = (fieldName, fieldEntry, value, patch = null) => {
+  const listShape = getListShape(fieldEntry.type);
+  const embeddedType = listShape ? listShape.itemType : unwrapNonNull(fieldEntry.type);
+  let items = [value];
+  if (listShape) items = Array.isArray(value) ? value : [];
+  for (const item of items) {
+    if (item === null || item === undefined) {
+      if (listShape && listShape.itemNonNull) {
+        throw new SimfinityError(`Required value ${fieldName}[] is missing`, 'REQUIRED_VALUE', 400);
+      }
+      continue;
+    }
+    for (const [memberName, member] of Object.entries(embeddedType.getFields())) {
+      const relation = member.extensions?.relation;
+      const memberList = getListShape(member.type);
+      if (relation && !relation.embedded && memberList) continue;
+      const storageName = getFieldStorageName(memberName, member);
+      if (item[storageName] === undefined && memberList) item[storageName] = [];
+      if (memberName === 'id' || member.extensions?.readOnly) continue;
+      const memberValue = item[storageName];
+      if (memberValue === null || memberValue === undefined) {
+        if (member.type instanceof GraphQLNonNull) {
+          throw new SimfinityError(`Required value ${memberName} is missing`, 'REQUIRED_VALUE', 400);
+        }
+      } else if (relation && relation.embedded && (!patch || Object.hasOwn(patch, storageName))) {
+        completeEmbeddedValue(memberName, member, memberValue);
+      }
+    }
+  }
+};
+
 const onUpdateSubject = async (Model, gqltype, controller, args, session, linkToParent, context) => {
   const materializedModel = await materializeModel(args, gqltype, linkToParent, 'UPDATE', session);
   const objectId = args.id;
@@ -704,8 +798,11 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
         if (newObjectData) {
           if (Array.isArray(newObjectData)) {
             materializedModel.modelArgs[fieldEntryName] = newObjectData;
+            completeEmbeddedValue(fieldEntryName, argTypes[fieldEntryName], newObjectData);
           } else {
             materializedModel.modelArgs[fieldEntryName] = { ...oldObjectData, ...newObjectData };
+            completeEmbeddedValue(fieldEntryName, argTypes[fieldEntryName],
+              materializedModel.modelArgs[fieldEntryName], newObjectData);
           }
         }
       }
@@ -921,9 +1018,203 @@ const executeScope = async (params) => {
   return scopeFunction({ type, args, operation, context });
 };
 
+// Copies AND/OR group lists with new group objects and arrays, leaving conditions and other values
+// shared.
+const copyFilterGroups = (groups) => (Array.isArray(groups) ? groups.map((group) => {
+  if (!group || typeof group !== 'object' || Array.isArray(group)) return group;
+  const copy = { ...group };
+  if (Array.isArray(group.conditions)) copy.conditions = [...group.conditions];
+  if (Object.hasOwn(group, 'AND')) copy.AND = copyFilterGroups(group.AND);
+  if (Object.hasOwn(group, 'OR')) copy.OR = copyFilterGroups(group.OR);
+  return copy;
+}) : groups);
+
+// Checks the filter, sort and aggregation paths a client supplied, before middleware and scopes
+// add trusted paths. Returns the scoped relations those paths enter, keyed by path, with the
+// client AND/OR groups whose conditions use each path, or `topLevel` for every other form.
+// graphql-js passes the same variable values to every resolver call of a request, so the client's
+// AND/OR groups are first copied onto this call's args, and joined scopes are only placed in those copies.
+const inspectClientPaths = (gqltype, args, operation) => {
+  for (const key of ['AND', 'OR']) {
+    if (Object.hasOwn(args, key)) args[key] = copyFilterGroups(args[key]);
+  }
+  const joinedScopes = new Map();
+  for (const { segments, group } of collectQueryPathEntries(args, operation)) {
+    walkQueryPath(gqltype, segments, ({ type, fieldName, field, index }) => {
+      const path = segments.slice(0, index + 1).join('.');
+      const queryable = field.extensions?.queryable;
+      if (queryable === false || (queryable !== true && hasApplicationResolver(type, fieldName))) {
+        throw forbiddenPath(`Query path ${path} uses the non-queryable field ${type.name}.${fieldName}`);
+      }
+      const relation = field.extensions?.relation;
+      if (!relation || relation.embedded) return;
+      const target = typesDict.types[unwrapListAndNonNull(field.type).name];
+      if (typeof target?.gqltype?.extensions?.scope?.find !== 'function') return;
+      if (!joinedScopes.has(path)) {
+        joinedScopes.set(path, {
+          target,
+          collection: getListShape(field.type) ? `${type.name}.${fieldName}` : null,
+          topLevel: false,
+          groups: new Set(),
+        });
+      }
+      const joined = joinedScopes.get(path);
+      if (group) joined.groups.add(group);
+      else joined.topLevel = true;
+    });
+  }
+  return joinedScopes;
+};
+
+// A joined scope must not repeat the rows it restricts: its paths may not cross a collection, nor
+// reach a non-embedded relation inside an embedded list, which is joined once per list item.
+const assertJoinedScopePaths = (groups, prefix, target) => {
+  const depth = prefix.split('.').length;
+  for (const segments of collectQueryPaths({ AND: groups })) {
+    let inList = false;
+    walkQueryPath(target.gqltype, segments.slice(depth), ({ type, fieldName, field }) => {
+      const relation = field.extensions?.relation;
+      const list = !!getListShape(field.type);
+      if (relation && !relation.embedded && (list || inList)) {
+        throw forbiddenPath(`Query path ${prefix} enters ${target.gqltype.name}, whose find scope filters through `
+          + `${list ? 'the collection' : 'the relation'} ${type.name}.${fieldName}${list ? '' : ' inside a list'}`);
+      }
+      inList ||= list;
+    });
+  }
+};
+
+const appendAndGroups = (owner, groups) => {
+  if (owner.AND != null && !Array.isArray(owner.AND)) {
+    throw new SimfinityError('AND requires an array', 'INVALID_FILTER_VALUE', 400);
+  }
+  owner.AND = [...(owner.AND || []), ...groups];
+};
+
+// The deepest AND/OR group nesting the backends accept; groups listed in args.AND/OR are at depth 0.
+const MAX_FILTER_GROUP_DEPTH = 5;
+const nestedGroups = (group) => [...[].concat(group.AND ?? []), ...[].concat(group.OR ?? [])];
+const groupDepth = (group) => Math.max(0, ...nestedGroups(group)
+  .filter((item) => item && typeof item === 'object').map((item) => groupDepth(item) + 1));
+
+// Maps each AND/OR group of the query to the deepest level it appears at.
+const collectFilterGroups = (args) => {
+  const found = new Map();
+  const visit = (group, depth) => {
+    if (!group || typeof group !== 'object' || found.get(group) >= depth) return;
+    found.set(group, depth);
+    if (depth <= MAX_FILTER_GROUP_DEPTH) for (const item of nestedGroups(group)) visit(item, depth + 1);
+  };
+  for (const item of nestedGroups(args)) visit(item, 0);
+  return found;
+};
+
+// Restricts referenced records reached by client paths with each target type's find scope. A path
+// used only in AND/OR group conditions restricts just those groups, so an OR alternative that does
+// not use it keeps its matches; any other use, a group that middleware or a scope detached, or a
+// group too deep to hold the scope groups within the backends' depth limit, restricts the whole query.
+const applyJoinedScopes = async (joinedScopes, params) => {
+  let queryGroups;
+  for (const [prefix, {
+    target, collection, topLevel, groups: owners,
+  }] of joinedScopes) {
+    const scopeArgs = {};
+    await executeScope({ type: target, args: scopeArgs, operation: 'find', context: params.context });
+    const groups = prefixScopeArgs(scopeArgs, prefix, target.gqltype.name);
+    if (!groups.length) continue;
+    if (collection) throw forbiddenPath(`Query path ${prefix} enters the scoped collection ${collection}`);
+    assertJoinedScopePaths(groups, prefix, target);
+    queryGroups ??= collectFilterGroups(params.args);
+    const addedDepth = 1 + Math.max(...groups.map(groupDepth));
+    if (topLevel || [...owners].some((owner) => !queryGroups.has(owner)
+      || queryGroups.get(owner) + addedDepth > MAX_FILTER_GROUP_DEPTH)) appendAndGroups(params.args, groups);
+    else for (const owner of owners) appendAndGroups(owner, groups);
+  }
+};
+
+// Unscoped relation reads of one request, grouped by related type until the promise jobs queued so
+// far have run, and keyed by cast ID. Nothing is cached: each batch is read once and dropped.
+const referenceBatches = new WeakMap();
+
+const readReferences = async (type, keys, batch, context) => {
+  let found = new Map();
+  try {
+    const records = await adapter.getByIds(type.model, keys.map((key) => batch.get(key)[0].id), { context });
+    for (const record of records) {
+      if (record != null) found.set(String(adapter.castId(record._id ?? record.id)), record);
+    }
+  } catch {
+    found = null;
+  }
+  // After a failed batch, each ID is read alone, so an error fails only the fields that use it.
+  const reads = new Map();
+  for (const key of keys) {
+    for (const { id, requiredId, resolve, reject } of batch.get(key)) {
+      if (found) {
+        resolve(found.get(key) ?? null);
+        continue;
+      }
+      if (!reads.has(id)) {
+        reads.set(id, Promise.resolve().then(() => adapter.getById(type.model, id, null, { requiredId, context })));
+      }
+      reads.get(id).then(resolve, reject);
+    }
+  }
+};
+
+const flushReferences = (type, batch, context) => {
+  const keys = [...batch.keys()];
+  const size = getQueryMaxPageSize();
+  for (let start = 0; start < keys.length; start += size) {
+    readReferences(type, keys.slice(start, start + size), batch, context);
+  }
+};
+
+const loadReference = (type, id, requiredId, context) => {
+  let key;
+  try {
+    key = String(adapter.castId(id));
+  } catch {
+    // An ID the adapter cannot cast is read alone, so only its field reports the error.
+    return adapter.getById(type.model, id, null, { requiredId, context });
+  }
+  // Casting may normalize (e.g. ObjectId hex case), so non-canonical IDs are read alone too.
+  if (key !== String(id)) return adapter.getById(type.model, id, null, { requiredId, context });
+  return new Promise((resolve, reject) => {
+    let batches = referenceBatches.get(context);
+    if (!batches) {
+      batches = new Map();
+      referenceBatches.set(context, batches);
+    }
+    let batch = batches.get(type);
+    if (!batch) {
+      batch = new Map();
+      batches.set(type, batch);
+      // As DataLoader does, flush once the promise jobs queued so far have run, so sibling calls
+      // that awaited middleware without I/O join the same batch.
+      Promise.resolve().then(() => process.nextTick(() => {
+        batches.delete(type);
+        flushReferences(type, batch, context);
+      }));
+    }
+    if (!batch.has(key)) batch.set(key, []);
+    batch.get(key).push({
+      id, requiredId, resolve, reject,
+    });
+  });
+};
+
+// `requiredId` marks a generated single-reference read. Middleware still runs per call; then, when the
+// adapter reads by ID in batches, and unless the type has a get_by_id scope or middleware changed the
+// ID, the read joins the request's batch.
 const resolveById = async (type, args, context, requiredId) => {
+  const requestedId = args.id;
   await executeMiddleware({ type, args, operation: 'get_by_id', context });
   if (!type.gqltype.extensions?.scope?.get_by_id) {
+    if (requiredId != null && args.id === requestedId && typeof context === 'object' && context !== null
+      && typeof adapter.getByIds === 'function' && type.gqltype.getFields().id) {
+      return loadReference(type, args.id, requiredId, context);
+    }
     return adapter.getById(type.model, args.id, null, { requiredId, context });
   }
   const queryArgs = { id: { operator: 'EQ', value: args.id } };
@@ -1069,7 +1360,7 @@ const buildRootQuery = (name, includedTypes) => {
       const wasAddedAsNoEnpointType = !type.simpleEntityEndpointName;
       if (!wasAddedAsNoEnpointType) {
         if (type.gqltype.getFields().id && !type.gqltype.getFields().id.resolve) {
-          type.gqltype.getFields().id.resolve = (parent) => parent._id;
+          type.gqltype.getFields().id.resolve = markGenerated((parent) => parent._id);
         }
 
         rootQueryArgs.fields[type.simpleEntityEndpointName] = {
@@ -1087,7 +1378,9 @@ const buildRootQuery = (name, includedTypes) => {
         rootQueryArgs.fields[type.listEntitiesEndpointName] = {
           type: new GraphQLList(type.gqltype),
           args: argsObject,
+          extensions: { simfinityQuery: { typeName: type.gqltype.name, operation: 'find' } },
           async resolve(parent, args, context) {
+            const joinedScopes = inspectClientPaths(type.gqltype, args, 'find');
             const params = {
               type,
               args,
@@ -1096,11 +1389,13 @@ const buildRootQuery = (name, includedTypes) => {
             };
             await executeMiddleware(params);
             await executeScope(params);
-            const wantsCount = !!(args.pagination && args.pagination.count);
+            await applyJoinedScopes(joinedScopes, params);
+            const queryArgs = params.args;
+            const wantsCount = !!(queryArgs.pagination && queryArgs.pagination.count);
 
-            const dataPromise = adapter.find(type.model, type.gqltype, args, null);
+            const dataPromise = adapter.find(type.model, type.gqltype, queryArgs, null);
             const countPromise = wantsCount
-              ? adapter.count(type.model, type.gqltype, args, null)
+              ? adapter.count(type.model, type.gqltype, queryArgs, null)
               : null;
 
             const [result, resultCount] = await Promise.all([dataPromise, countPromise]);
@@ -1119,7 +1414,9 @@ const buildRootQuery = (name, includedTypes) => {
         rootQueryArgs.fields[`${type.listEntitiesEndpointName}_aggregate`] = {
           type: new GraphQLList(QLTypeAggregationResult),
           args: aggregateArgsObject,
+          extensions: { simfinityQuery: { typeName: type.gqltype.name, operation: 'aggregate' } },
           async resolve(parent, args, context) {
+            const joinedScopes = inspectClientPaths(type.gqltype, args, 'aggregate');
             const params = {
               type,
               args,
@@ -1128,7 +1425,8 @@ const buildRootQuery = (name, includedTypes) => {
             };
             await executeMiddleware(params);
             await executeScope(params);
-            return adapter.aggregate(type.model, type.gqltype, args, null);
+            await applyJoinedScopes(joinedScopes, params);
+            return adapter.aggregate(type.model, type.gqltype, params.args, null);
           },
         };
       }
@@ -1185,8 +1483,15 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
     }
   });
 
+  const query = buildRootQuery('RootQueryType', includedQueryTypes);
+  Object.values(typesDict.types).forEach(({ gqltype }) => {
+    if (gqltype && !applicationResolvedFields.has(gqltype)) {
+      applicationResolvedFields.set(gqltype, listApplicationResolvedFields(gqltype));
+    }
+  });
+
   return new GraphQLSchema({
-    query: buildRootQuery('RootQueryType', includedQueryTypes),
+    query,
     mutation: buildMutation('Mutation', includedMutationTypes, includedCustomMutations),
   });
 };
@@ -1232,28 +1537,34 @@ const autoGenerateResolvers = (gqltype) => {
       if (connection.graphqlFieldName) delete argsObject[connection.graphqlFieldName];
 
       fieldEntry.args = formatArgs(Object.entries(argsObject));
-      fieldEntry.resolve = async (parent, args, context) => {
+      fieldEntry.extensions = {
+        ...fieldEntry.extensions,
+        simfinityQuery: { typeName: relatedType.name, operation: 'find' },
+      };
+      fieldEntry.resolve = markGenerated(async (parent, args, context) => {
         if (!relatedTypeInfo || !relatedTypeInfo.model) {
           throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
         }
+        const joinedScopes = inspectClientPaths(relatedType, args, 'find');
         const params = { type: relatedTypeInfo, args, operation: 'find', context };
         await executeMiddleware(params);
         await executeScope(params);
+        await applyJoinedScopes(joinedScopes, params);
         return adapter.findChildren(
           relatedTypeInfo.model,
           relatedTypeInfo.gqltype,
           connection.storageFieldName,
           parent.id || parent._id,
-          args,
+          params.args,
           null,
         );
-      };
+      });
     } else if (fieldEntry.type instanceof GraphQLObjectType
       || (fieldEntry.type instanceof GraphQLNonNull && fieldEntry.type.ofType instanceof GraphQLObjectType)) {
       const relatedType = unwrapNonNull(fieldEntry.type);
       const connectionField = relation.connectionField || fieldName;
 
-      fieldEntry.resolve = async (parent, args, context) => {
+      fieldEntry.resolve = markGenerated(async (parent, args, context) => {
         const relatedTypeInfo = typesDict.types[relatedType.name];
         if (!relatedTypeInfo || !relatedTypeInfo.model) {
           throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
@@ -1261,7 +1572,7 @@ const autoGenerateResolvers = (gqltype) => {
         const relatedId = parent[connectionField] || parent[fieldName];
         const id = relatedId?._id || relatedId;
         return id ? resolveById(relatedTypeInfo, { id: String(id) }, context, id) : null;
-      };
+      });
     }
   }
 };

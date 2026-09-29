@@ -14,8 +14,8 @@ Choose a plugin when constructing a runtime. Its configuration is bound once, an
 Install the SQL core and the PostgreSQL plugin as direct dependencies when importing both:
 
 ```sh
-npm install @simtlix/simfinity-sql@3.3.0 \
-  @simtlix/simfinity-postgres@3.3.0 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-sql@3.5.0 \
+  @simtlix/simfinity-postgres@3.5.0 graphql@^16.11.0 pg@^8.16.3
 ```
 
 ```javascript
@@ -109,9 +109,9 @@ The exported `SQLPlugin` TypeScript interface documents the complete contract. A
 | `deleteById` | `id` |
 | `deleteOwned` | `ownerId` |
 
-The driver provides `assertConfiguration(configuration)`, `query(configuration, statement, client?)`, `acquire(configuration)`, `begin(client)`, `commit(client)`, `rollback(client)`, `release(client)`, `isRetryable(error)` and `normalizeError(error)`. Queries resolve to `{ rows }`. The value hooks are `createId()`, `castId(value)`, `encodeScalar(field, value)`, `decodeScalar(field, value, gqlField)` and `encodeEmbedded(value)`.
+The driver provides `assertConfiguration(configuration)`, `query(configuration, statement, client?)`, `acquire(configuration)`, `begin(client)`, `commit(client)`, `rollback(client)`, `release(client, error?)`, `isRetryable(error)` and `normalizeError(error)`. Queries resolve to `{ rows }`. `release` receives the rollback failure when ROLLBACK did not complete; discard that connection instead of returning it to a pool. The value hooks are `createId()`, `castId(value)`, `encodeScalar(field, value)`, `decodeScalar(field, value, gqlField)` and `encodeEmbedded(value)`.
 
-SQL owns session validity and transaction orchestration; the plugin owns connection operations and error classification. PostgreSQL begins repeatable-read transactions and permits at most five retries of confirmed serialization/deadlock aborts. Unknown commit outcomes are not replayed. Supplied active sessions join the existing transaction; foreign and expired sessions are rejected.
+SQL owns session validity and transaction orchestration; the plugin owns connection operations and error classification. PostgreSQL begins repeatable-read transactions and permits at most five retries of confirmed serialization/deadlock aborts. Unknown commit outcomes and attempts whose rollback failed are not replayed. Supplied active sessions join the existing transaction; foreign and expired sessions are rejected. A session expires as soon as its callback settles, before COMMIT or ROLLBACK is sent, so un-awaited session work fails with `INVALID_SESSION` instead of running outside the transaction.
 
 ### Capabilities and failure behavior
 

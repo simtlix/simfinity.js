@@ -59,6 +59,17 @@ createdAt: {
 
 Excludes the field from both add and update input types. The field can only be set programmatically (e.g., in a controller hook).
 
+### `extensions.queryable`
+
+```javascript
+internalCode: {
+  type: GraphQLString,
+  extensions: { queryable: false },
+}
+```
+
+Controls client filter, sort, `groupId` and fact paths, which compare stored values. `inspectClientPaths` in `runtime.js` runs before middleware and throws `SimfinityError(..., 'FORBIDDEN_FILTER_PATH', 403)` when any path segment names a field with `queryable: false`, or a field with an application `resolve` unless it sets `queryable: true` (masking resolvers, manual relation resolvers, a custom `id` resolver). Only resolvers wrapped with `markGenerated` count as Simfinity's; `createSchema` snapshots application resolvers per type, so later in-place wrapping such as the auth plugin does not change the result. The generated filter argument remains in the schema; introspection does not expose `queryable`. `queryable: true` does not bypass auth path rules or joined `find` scopes. Paths added by middleware or scopes are trusted.
+
 ### `extensions.unique`
 
 ```javascript
@@ -131,4 +142,6 @@ const BookType = new GraphQLObjectType({
 });
 ```
 
-Scope functions modify query args in-place to enforce row-level security. The shared runtime calls `executeScope()` before compiling the MongoDB pipeline or PostgreSQL query. Flat scope predicates remain conjoined with caller logical groups; generated non-embedded relationships run target scopes with immutable identity/parent predicates.
+Scope functions modify query args in-place to enforce row-level security. The shared runtime calls `executeScope()` before compiling the MongoDB pipeline or PostgreSQL query. Flat scope predicates remain conjoined with caller logical groups; generated non-embedded relationships run target scopes with immutable identity/parent predicates. List, count, aggregate and collection-relation resolvers send the post-middleware `params.args` (the object the scope changed) to the adapter.
+
+Client paths through a non-embedded single reference to a type with a `find` scope get that scope via `applyJoinedScopes`: it runs with empty `args`, its conditions are prefixed with the relation path, and they are ANDed into the query or, for paths used only in `AND`/`OR` group conditions, into those groups. When the target's `find` scope adds conditions for the caller, a path into a non-embedded collection of that type, or into a type whose scope conditions cross a non-embedded collection or a reference inside an embedded list, fails with `FORBIDDEN_FILTER_PATH`. See `docs/guide/query-scope.md`.

@@ -43,6 +43,8 @@ These classes are available on `simfinity.auth`:
 | `ForbiddenError(message)` | `Access denied` | `FORBIDDEN` | 403 |
 | `createAuthError(message, code = 'FORBIDDEN')` | Supplied message | Supplied code | 401 for `UNAUTHENTICATED`; otherwise 403 |
 
+When the authorization plugin denies a filter, sort or aggregation path, it throws `ForbiddenError` with the message `Access denied to Type.field`. Simfinity and GraphQL errors that a rule throws itself, such as `UnauthenticatedError` from `requireAuth`, are kept. See [filter, sort and aggregation paths](/guide/authorization#filter-sort-and-aggregation-paths).
+
 ## InternalServerError
 
 ```javascript
@@ -78,6 +80,7 @@ The helper checks the error instance it receives. If your server wraps an applic
 | `MISSING_RELATION_EXTENSION` | An object field used during materialization lacks relationship metadata. |
 | `INVALID_FILTER_FIELD` | A filter or list-sort path names an unknown field. |
 | `INVALID_FILTER_PATH` | A filter path has an invalid structure or segment. |
+| `FORBIDDEN_FILTER_PATH` | Status 403. A client filter, sort, `groupId` or fact path names a non-queryable field, or enters a relationship whose `find` scope cannot be applied to that path. See [path restrictions](/guide/queries#path-restrictions). |
 | `MISSING_FILTER_PATH` | A logical condition on an object field omits its related field path. |
 | `INVALID_FILTER_VALUE` | A filter scalar, list, or logical group has an invalid shape or value. |
 | `INVALID_FILTER_OPERATOR` | A filter uses an unsupported operator. |

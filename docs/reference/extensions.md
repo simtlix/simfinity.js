@@ -13,6 +13,7 @@ Simfinity reads standard GraphQL `extensions` metadata when building models, inp
 | --- | --- | --- |
 | `relation` | Relationship configuration | Declares how an object or object collection is stored and resolved. |
 | `readOnly` | Boolean | Omits the field from generated create and update inputs. |
+| `queryable` | Boolean | `false` rejects client filter, sort and aggregation paths through the field; `true` allows them for a field with its own `resolve`. |
 | `unique` | Boolean | Adds a backend uniqueness structure for supported fields. |
 | `validations` | Operation-keyed validators | Runs field validation during materialization. |
 | `stateMachine` | Boolean, generated | Marks a state field managed by a connected state machine. |
@@ -53,6 +54,26 @@ createdBy: {
 
 The field remains in the output type and generated model. Assign it in a controller when it is server-owned. `readOnly` is an input-generation setting, not output authorization or a database-level immutability constraint.
 
+### queryable
+
+```javascript
+fields: () => ({
+  internalCode: {
+    type: GraphQLString,
+    extensions: { queryable: false },
+  },
+  title: {
+    type: GraphQLString,
+    extensions: { queryable: true },
+    resolve: (parent) => parent.title,
+  },
+}),
+```
+
+Client filter, sort, `groupId` and fact paths compare stored values, not resolver output. A field with its own `resolve`, such as a masking resolver, a manual relationship resolver or a custom `id` resolver, is therefore non-queryable unless it sets `queryable: true`; only the resolvers Simfinity generates keep a field queryable. Set `queryable: true` when the resolver returns the stored value, and `queryable: false` to make any field non-queryable.
+
+A client path with a non-queryable segment fails with `FORBIDDEN_FILTER_PATH` (403), although the generated filter argument remains in the schema. Paths added by middleware or scope functions are not checked. `queryable: true` does not bypass authorization rules or the `find` scopes of related types, and introspection does not expose it. See [path restrictions](/guide/queries#path-restrictions).
+
 ### unique
 
 ```javascript
@@ -85,7 +106,7 @@ The field-level shape is `{ CREATE: [validator], UPDATE: [validator] }`. Each va
 | `scope` | `{ find, get_by_id, aggregate }` callbacks | Adds filters to generated root reads. |
 | `indexes` | `{ fields: string[], unique?: boolean }[]` | Declares PostgreSQL composite indexes over stored scalar/reference fields; MongoDB uses its model index configuration. |
 
-Type validators receive `(typeName, args, modelArgs, session)`. Scope callbacks receive `{ type, args, operation, context }` and mutate `args` in place. See [query scope](/guide/query-scope) for supported operations and their authorization boundaries.
+Type validators receive `(typeName, args, modelArgs, session)`. Scope callbacks receive `{ type, args, operation, context }` and mutate `args` in place. A type's `find` scope also restricts the referenced records that client filter, sort and aggregation paths reach. See [query scope](/guide/query-scope) for supported operations, [relationship paths](/guide/query-scope#relationship-paths-in-filters-sorts-and-aggregations) and their authorization boundaries.
 
 ## Automatic MongoDB indexes
 

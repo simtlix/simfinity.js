@@ -4,6 +4,60 @@ import SimfinityError from './errors/simfinity.error.js';
 const fail = (message, code = 'INVALID_FILTER_VALUE') => { throw new SimfinityError(message, code, 400); };
 const operators = new Set(['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE']);
 const reserved = new Set(['AND', 'OR', 'sort', 'pagination', 'aggregation']);
+const listOf = (value) => (Array.isArray(value) ? value : []);
+
+/**
+ * Internal: the model paths named by generated query arguments, as `{ segments, group }` entries.
+ * Covers filter keys and relation terms, AND/OR conditions, list sort terms, and aggregation
+ * groupId and fact paths; aggregate sort terms name result keys. `group` is the AND/OR group
+ * object whose `conditions` hold the path, or null for the other forms. Malformed entries are
+ * left to the backends.
+ */
+export const collectQueryPathEntries = (args, operation = 'find') => {
+  const entries = [];
+  const add = (path, group = null) => {
+    if (typeof path === 'string' && path) entries.push({ segments: path.split('.'), group });
+  };
+  if (!args || typeof args !== 'object') return entries;
+  const visit = (group) => {
+    if (!group || typeof group !== 'object') return;
+    for (const condition of listOf(group.conditions)) {
+      if (typeof condition?.field !== 'string') continue;
+      add(condition.path != null && condition.path !== '' ? `${condition.field}.${condition.path}` : condition.field, group);
+    }
+    for (const item of [...listOf(group.AND), ...listOf(group.OR)]) visit(item);
+  };
+  for (const [name, value] of Object.entries(args)) {
+    if (reserved.has(name) || value == null) continue;
+    const terms = listOf(value.terms).filter((term) => typeof term?.path === 'string' && term.path);
+    if (terms.length) for (const term of terms) add(`${name}.${term.path}`);
+    else add(name);
+  }
+  for (const item of [...listOf(args.AND), ...listOf(args.OR)]) visit(item);
+  if (operation === 'aggregate') {
+    add(args.aggregation?.groupId);
+    for (const fact of listOf(args.aggregation?.facts)) add(fact?.path);
+  } else for (const term of listOf(args.sort?.terms)) add(term?.field);
+  return entries;
+};
+
+/** Internal: the segment arrays of {@link collectQueryPathEntries}. */
+export const collectQueryPaths = (args, operation = 'find') => (
+  collectQueryPathEntries(args, operation).map((entry) => entry.segments)
+);
+
+/** Internal: visits each declared GraphQL field a path names, stopping at an unknown or leaf segment. */
+export const walkQueryPath = (gqltype, segments, visit) => {
+  let type = gqltype;
+  for (const [index, fieldName] of segments.entries()) {
+    const fields = typeof type?.getFields === 'function' ? type.getFields() : null;
+    if (!fields || !Object.hasOwn(fields, fieldName)) return;
+    const field = fields[fieldName];
+    visit({ type, fieldName, field, index });
+    type = field.type;
+    while (type?.ofType) type = type.ofType;
+  }
+};
 
 export const resolveModelPath = (models, entityName, path) => {
   const parts = Array.isArray(path) ? path : typeof path === 'string' ? path.split('.') : [];

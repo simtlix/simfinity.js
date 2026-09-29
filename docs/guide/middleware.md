@@ -80,6 +80,6 @@ simfinity.use(async ({ operation, args }, next) => {
 });
 ```
 
-Mutate the existing `args` object. Replacing `params.args` is not a reliable way to replace the resolver's arguments, because the resolver retains its own reference.
+Prefer mutating the existing `args` object. Generated list queries (including their total count), aggregations and collection-relationship reads pass the `params.args` object left after the middleware chain to the query scope and the database adapter, so `find` and `aggregate` middleware may also replace it. Mutations, nested collection writes and `get_by_id` reads keep the resolver's own reference, so replacing `params.args` there has no effect. Client filter, sort and aggregation paths are checked before middleware runs, and paths that middleware adds are trusted; see [path restrictions](/guide/queries#path-restrictions).
 
 For record visibility, prefer the type's [query scope](/guide/query-scope). Generated relationship reads and nested collection writes invoke middleware with the target type, the same request context, and root-compatible argument shapes. Existing custom resolvers and direct programmatic data access remain responsible for invoking their own checks. Review middleware that assumes a request only invokes it for its root operation.

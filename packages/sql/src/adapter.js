@@ -99,6 +99,13 @@ export const createSQLAdapter = (sourcePlugin) => {
     toObject(record) { return record == null ? record : { ...record }; },
     saveRecord: safe((model, record, session) => transactions.withTransaction(session, (transaction) => records.create(nameOf(model), record, transaction))),
     getById: safe((model, id, session, options = {}) => transactions.withTransaction(session, (transaction) => records.getById(nameOf(model), id, transaction, options))),
+    // One transaction reads the rows by ID and hydrates them, owned records included, as getById does.
+    getByIds: safe((model, ids) => {
+      nameOf(model);
+      if (!ids.length) return [];
+      const args = { id: { operator: 'IN', value: ids }, pagination: { page: 1, size: ids.length } };
+      return transactions.withTransaction(null, (transaction) => execute(model, model.gqltype, args, transaction, 'find'));
+    }),
     prepareUpdate(set, unset) { return { ...set, ...(Object.keys(unset).length ? { $unset: { ...unset } } : {}) }; },
     update: safe((model, id, update, session) => records.update(nameOf(model), id, update, session)),
     delete: safe((model, id, session) => records.remove(nameOf(model), id, session)),

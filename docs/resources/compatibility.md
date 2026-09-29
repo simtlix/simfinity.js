@@ -15,11 +15,11 @@ This documentation covers Simfinity.js **{{ library.version }}**, for **MongoDB 
 
 | Package | Purpose | Release |
 | --- | --- | --- |
-| [@simtlix/simfinity-js](https://www.npmjs.com/package/@simtlix/simfinity-js) | MongoDB facade, including compatibility exports | 3.3.0 |
-| [@simtlix/simfinity-postgres](https://www.npmjs.com/package/@simtlix/simfinity-postgres) | PostgreSQL adapter with generated schema and FKs | 3.3.0 |
-| [@simtlix/simfinity-sql](https://www.npmjs.com/package/@simtlix/simfinity-sql) | Driver-free relational runtime and plugin contract | 3.3.0 |
-| [@simtlix/simfinity-core](https://www.npmjs.com/package/@simtlix/simfinity-core) | Shared runtime and helpers | 3.3.0 |
-| [@simtlix/simfinity-mcp](https://www.npmjs.com/package/@simtlix/simfinity-mcp) | Optional MCP integration for either database | 3.3.0 |
+| [@simtlix/simfinity-js](https://www.npmjs.com/package/@simtlix/simfinity-js) | MongoDB facade, including compatibility exports | {{ library.version }} |
+| [@simtlix/simfinity-postgres](https://www.npmjs.com/package/@simtlix/simfinity-postgres) | PostgreSQL adapter with generated schema and FKs | {{ library.version }} |
+| [@simtlix/simfinity-sql](https://www.npmjs.com/package/@simtlix/simfinity-sql) | Driver-free relational runtime and plugin contract | {{ library.version }} |
+| [@simtlix/simfinity-core](https://www.npmjs.com/package/@simtlix/simfinity-core) | Shared runtime and helpers | {{ library.version }} |
+| [@simtlix/simfinity-mcp](https://www.npmjs.com/package/@simtlix/simfinity-mcp) | Optional MCP integration for either database | {{ library.version }} |
 
 Follow [installation and downloads](../guide/databases#install-from-npm) or read the [latest stable release notes](https://github.com/simtlix/simfinity.js/releases/latest).
 
@@ -34,6 +34,18 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | Downloadable starters | Node.js 22 or newer, npm and the database selected in the corresponding quick start |
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22 or newer |
+
+## Upgrade to 3.5.0
+
+Keep all directly installed Simfinity packages at 3.5.0 and review these behavior changes:
+
+- Client filter, sort and aggregation paths now enforce field read rules and related-type scopes. Rules receive the identity of each path field in `info.fieldName`, `info.parentType` and `info.returnType`, with no parent and empty arguments. Parent-dependent rules deny such paths. See [authorization](../guide/authorization#filter-sort-and-aggregation-paths) and [scope restrictions](../guide/query-scope#relationship-paths-in-filters-sorts-and-aggregations).
+- Fields with an application-defined resolver reject these paths unless they set `extensions.queryable: true`; `queryable: false` blocks paths regardless of the resolver. Remove manual relationship resolvers that only load stored references, or explicitly allow querying fields whose resolver returns the stored value. `readOnly` still controls mutation inputs only. See [path restrictions](../guide/queries#path-restrictions).
+- Generated single-reference reads can batch within an object request context. Scoped targets and Mongoose models with any `find` or `findOne` pre/post hook retain individual reads, including when both operations share a hook function. See [relationships](../guide/relationships#query-related-records).
+- MongoDB uses the application's GraphQL and Mongoose peers. Install the optional MCP SDK explicitly for transports; `graphql-middleware` is no longer installed by Simfinity. See [installation](../guide/databases#install-from-npm).
+- Embedded updates enforce required fields when constructing replacement objects or list items; existing embedded objects still accept valid partial patches. SQL sessions reject statements after their callback settles, and a failed rollback discards the connection. See [mutations](../guide/mutations) and the [SQL plugin contract](../guide/sql-plugins#plugin-contract-version-1).
+
+The archived starters and Barber examples retain their documented package pins. Upgrade their Simfinity dependencies together before relying on 3.5.0 behavior.
 
 ## Upgrade from 3.2.0
 

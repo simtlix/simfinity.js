@@ -250,8 +250,8 @@ describe('MongoDB compatibility regressions', () => {
     expect(pipeline).toEqual(expect.arrayContaining([
       {
         $match: {
-          'author.name': 'Alice',
-          'author._id': authorId,
+          '__sf_l0.name': 'Alice',
+          '__sf_l0._id': authorId,
         },
       },
     ]));
@@ -260,8 +260,8 @@ describe('MongoDB compatibility regressions', () => {
       { path: 'name', operator: 'NE', value: 'Bob' },
     ] } }, BookType);
     expect(repeated).toContainEqual({ $match: { $and: [
-      { 'author.name': { $ne: 'Alice' } },
-      { 'author.name': { $ne: 'Bob' } },
+      { '__sf_l0.name': { $ne: 'Alice' } },
+      { '__sf_l0.name': { $ne: 'Bob' } },
     ] } });
   });
 });

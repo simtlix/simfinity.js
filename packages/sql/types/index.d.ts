@@ -157,7 +157,8 @@ export interface SQLDriver<Configuration extends object = SQLConfiguration, Clie
   begin(client: Client): void | Promise<unknown>;
   commit(client: Client): void | Promise<unknown>;
   rollback(client: Client): void | Promise<unknown>;
-  release(client: Client): void | Promise<unknown>;
+  /** Receives the rollback failure when ROLLBACK did not complete; the driver must then discard the connection instead of reusing it. */
+  release(client: Client, error?: unknown): void | Promise<unknown>;
   /** True only for confirmed transaction aborts safe to replay. */
   isRetryable(error: unknown): boolean;
   normalizeError(error: unknown): unknown;

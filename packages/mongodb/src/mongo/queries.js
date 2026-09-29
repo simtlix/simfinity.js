@@ -10,6 +10,8 @@ import mongoose from 'mongoose';
 
 import { SimfinityError, QLOperator, paginationStages } from '@simtlix/simfinity-core';
 
+import { resolveStorageScalar } from './models.js';
+
 const isNonNullOfType = (fieldEntryType, graphQLType) => (
   fieldEntryType instanceof GraphQLNonNull && fieldEntryType.ofType instanceof graphQLType
 );
@@ -47,14 +49,39 @@ const getConnectionStorageName = (childType, declaredFieldName) => {
 };
 
 const getEffectiveTypeName = (type) => (
-  type instanceof GraphQLScalarType && type.baseScalarType ? type.baseScalarType.name : type.name
+  type instanceof GraphQLScalarType ? resolveStorageScalar(type).name : type.name
 );
 
 const isGraphQLisoDate = (typeName) => (
   typeName === 'DateTime' || typeName === 'Date' || typeName === 'Time'
 );
 
+// GraphQL reserves `__` names, so these aliases never replace a stored field.
+const LOOKUP_ALIAS_PREFIX = '__sf_l';
+
 export const createMongoQueries = ({ getModel, getRegistrations }) => {
+// One alias per relation path for each query build, keyed by the build's `included` accumulator.
+const lookupAliases = new WeakMap();
+
+const allocateLookupAlias = (aggregationsIncluded, relationPath) => {
+  let aliases = lookupAliases.get(aggregationsIncluded);
+  if (!aliases) {
+    aliases = new Map();
+    lookupAliases.set(aggregationsIncluded, aliases);
+  }
+  if (!aliases.has(relationPath)) aliases.set(relationPath, `${LOOKUP_ALIAS_PREFIX}${aliases.size}`);
+  return aliases.get(relationPath);
+};
+
+const appendLookups = (aggregateClauses, aggregationsIncluded, lookups) => {
+  for (const [alias, { lookup, unwind }] of Object.entries(lookups)) {
+    if (!Object.hasOwn(aggregationsIncluded, alias)) {
+      aggregateClauses.push(lookup, unwind);
+      aggregationsIncluded[alias] = true;
+    }
+  }
+};
+
 const buildRelationLookup = ({
   collectionName, localField, foreignField, alias,
 }) => ({
@@ -127,7 +154,7 @@ const queryNamedType = (type) => {
 };
 
 // Resolve GraphQL paths and storage paths together; supplied models own ID casting.
-const resolveQueryPath = (gqltype, path) => {
+const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
   assertValidFilterPath(path);
   const parts = path.split('.');
   let currentType = gqltype;
@@ -153,7 +180,7 @@ const resolveQueryPath = (gqltype, path) => {
         const declaredField = relation.connectionField || part;
         const connField = isList ? getConnectionStorageName(fieldType, declaredField) : declaredField;
         const localLeaf = isList ? '_id' : connField;
-        const alias = mongoPath ? `${mongoPath.replaceAll('.', '_')}_${part}` : part;
+        const alias = allocateLookupAlias(aggregationsIncluded, parts.slice(0, index + 1).join('.'));
         aggregateClauses[alias] = buildRelationLookup({
           collectionName: relatedModel.collection.collectionName,
           localField: mongoPath ? `${mongoPath}.${localLeaf}` : localLeaf,
@@ -209,7 +236,7 @@ const castFilterValue = (value, resolved) => {
       const stored = resolved.storesStateName ? entry.name : entry.value;
       return schemaType ? schemaType.cast(stored) : stored;
     }
-    const parsed = (scalar.baseScalarType || scalar).parseValue(value);
+    const parsed = resolveStorageScalar(scalar).parseValue(value);
     return schemaType ? schemaType.cast(parsed) : parsed;
   } catch {
     throw filterError(`Invalid value for ${resolved.mongoPath}`);
@@ -239,7 +266,7 @@ const buildMatchesClause = (resolved, operator, value) => {
   return { [resolved.mongoPath]: OP_TO_MONGO[op](coerced) };
 };
 
-const buildQueryTerms = async (filterField, qlField, fieldName, gqltype) => {
+const buildQueryTerms = async (filterField, qlField, fieldName, gqltype, aggregationsIncluded) => {
   const aggregateClauses = {};
   const matchesClauses = [];
   if (!qlField) throw filterError(`Unknown filter field: ${fieldName}`, 'INVALID_FILTER_FIELD');
@@ -253,7 +280,7 @@ const buildQueryTerms = async (filterField, qlField, fieldName, gqltype) => {
   for (const term of terms) {
     if (!term || typeof term !== 'object' || Array.isArray(term)) throw filterError(`Invalid term for ${fieldName}`);
     if (isObject) assertValidFilterPath(term.path);
-    const resolved = resolveQueryPath(gqltype, isObject ? `${fieldName}.${term.path}` : fieldName);
+    const resolved = resolveQueryPath(gqltype, isObject ? `${fieldName}.${term.path}` : fieldName, aggregationsIncluded);
     Object.assign(aggregateClauses, resolved.aggregateClauses);
     matchesClauses.push(buildMatchesClause(resolved, term.operator, term.value));
   }
@@ -303,15 +330,10 @@ const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, agg
         filterInput = { operator: condition.operator, value: condition.value };
       }
 
-      const result = await buildQueryTerms(filterInput, qlField, condition.field, gqltype);
+      const result = await buildQueryTerms(filterInput, qlField, condition.field, gqltype, aggregationsIncluded);
       if (!result) continue;
 
-      for (const [prop, aggregate] of Object.entries(result.aggregateClauses)) {
-        if (!aggregationsIncluded[prop]) {
-          aggregateClauses.push(aggregate.lookup, aggregate.unwind);
-          aggregationsIncluded[prop] = true;
-        }
-      }
+      appendLookups(aggregateClauses, aggregationsIncluded, result.aggregateClauses);
       for (const matchClause of Object.values(result.matchesClauses)) {
         for (const [matchKey, match] of Object.entries(matchClause)) {
           parts.push({ [matchKey]: match });
@@ -357,15 +379,10 @@ const collectFiltersAndLookups = async (input, gqltype, aggregateClauses, aggreg
   for (const [key, filterField] of Object.entries(input)) {
     if (RESERVED_QUERY_KEYS.has(key)) continue;
     const qlField = fields[key];
-    const result = await buildQueryTerms(filterField, qlField, key, gqltype);
+    const result = await buildQueryTerms(filterField, qlField, key, gqltype, aggregationsIncluded);
     if (!result) continue;
 
-    for (const [prop, aggregate] of Object.entries(result.aggregateClauses)) {
-      if (!aggregationsIncluded[prop]) {
-        aggregateClauses.push(aggregate.lookup, aggregate.unwind);
-        aggregationsIncluded[prop] = true;
-      }
-    }
+    appendLookups(aggregateClauses, aggregationsIncluded, result.aggregateClauses);
     for (const matchClause of Object.values(result.matchesClauses)) {
       for (const [matchKey, match] of Object.entries(matchClause)) {
         if (Object.hasOwn(flatMatchConditions, matchKey)) {
@@ -419,13 +436,8 @@ const validateSortTerms = (sort) => {
 const buildSortClause = (sortTerms, gqltype, aggregateClauses, aggregationsIncluded) => {
   const sortExpressions = {};
   for (const sort of sortTerms) {
-    const resolved = resolveQueryPath(gqltype, sort.field);
-    for (const [alias, aggregate] of Object.entries(resolved.aggregateClauses)) {
-      if (!aggregationsIncluded[alias]) {
-        aggregateClauses.push(aggregate.lookup, aggregate.unwind);
-        aggregationsIncluded[alias] = true;
-      }
-    }
+    const resolved = resolveQueryPath(gqltype, sort.field, aggregationsIncluded);
+    appendLookups(aggregateClauses, aggregationsIncluded, resolved.aggregateClauses);
     sortExpressions[resolved.mongoPath] = sort.order === 'ASC' ? 1 : -1;
   }
   return { $sort: sortExpressions };
@@ -450,67 +462,14 @@ const buildQuery = async (input, gqltype, isCount) => {
 
   aggregateClauses.push(...paging);
 
+  // Joined documents only serve $match/$sort; returned rows keep their stored references.
+  const lookupAliasList = Object.keys(aggregationsIncluded);
+  if (lookupAliasList.length > 0) aggregateClauses.push({ $unset: lookupAliasList });
+
   return aggregateClauses;
 };
 
-const buildFieldPath = (gqltype, fieldPath) => {
-  assertValidFilterPath(fieldPath);
-  const pathParts = fieldPath.split('.');
-  const lookupPairs = [];
-  let currentPath = '';
-  let currentGQLType = gqltype;
-
-  for (const part of pathParts) {
-    const field = currentGQLType.getFields()[part];
-    if (!field) {
-      throw new Error(`Field ${part} not found in type ${currentGQLType.name}`);
-    }
-
-    const fieldType = unwrapListAndNonNull(field.type);
-    const relation = field.extensions?.relation;
-
-    if (fieldType instanceof GraphQLObjectType && relation && !relation.embedded) {
-      const { collectionName } = getModel(fieldType).collection;
-      const lookupAlias = currentPath ? `${currentPath}_${part}` : part;
-      const inverseList = isListType(field.type);
-      const declaredField = relation.connectionField || part;
-      const connField = inverseList
-        ? getConnectionStorageName(fieldType, declaredField)
-        : declaredField;
-      const localField = inverseList
-        ? (currentPath ? `${currentPath}._id` : '_id')
-        : (currentPath ? `${currentPath}.${connField}` : connField);
-
-      lookupPairs.push(buildRelationLookup({
-        collectionName,
-        localField,
-        foreignField: inverseList ? connField : '_id',
-        alias: lookupAlias,
-      }));
-
-      currentPath = lookupAlias;
-      currentGQLType = fieldType;
-    } else if (fieldType instanceof GraphQLObjectType && relation?.embedded) {
-      currentPath = currentPath ? `${currentPath}.${part}` : part;
-      currentGQLType = fieldType;
-    } else {
-      const leaf = part === 'id' ? '_id' : part;
-      currentPath = currentPath ? `${currentPath}.${leaf}` : leaf;
-    }
-  }
-
-  return { mongoPath: currentPath, lookupPairs };
-};
-
-const appendLookupPairs = (aggregateClauses, aggregationsIncluded, lookupPairs) => {
-  for (const { lookup, unwind } of lookupPairs) {
-    const alias = lookup.$lookup.as;
-    if (!aggregationsIncluded[alias]) {
-      aggregateClauses.push(lookup, unwind);
-      aggregationsIncluded[alias] = true;
-    }
-  }
-};
+const RESERVED_FACT_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
 
 const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
   const aggregateClauses = [];
@@ -520,21 +479,25 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
   const matchStage = await collectFiltersAndLookups(input, gqltype, aggregateClauses, aggregationsIncluded);
   if (matchStage) aggregateClauses.push(matchStage);
 
-  const { groupId, facts } = aggregationExpression;
-  const groupIdPath = buildFieldPath(gqltype, groupId);
-  appendLookupPairs(aggregateClauses, aggregationsIncluded, groupIdPath.lookupPairs);
+  const { groupId, facts } = aggregationExpression ?? {};
+  if (!groupId || !Array.isArray(facts) || facts.length === 0) throw filterError('Aggregation requires a groupId and facts');
+  const groupIdPath = resolveQueryPath(gqltype, groupId, aggregationsIncluded);
+  appendLookups(aggregateClauses, aggregationsIncluded, groupIdPath.aggregateClauses);
 
   const groupStage = { $group: { _id: `$${groupIdPath.mongoPath}` } };
+  const factNames = new Set();
 
-  facts.forEach((fact) => {
-    const factPath = buildFieldPath(gqltype, fact.path);
-    appendLookupPairs(aggregateClauses, aggregationsIncluded, factPath.lookupPairs);
-
-    const builder = AGG_OP_TO_MONGO[fact.operation];
-    if (!builder) {
-      throw new Error(`Unknown aggregation operation: ${fact.operation}`);
+  // Positional accumulator names keep a fact named `_id` from replacing the group key.
+  facts.forEach((fact, index) => {
+    if (!Object.hasOwn(AGG_OP_TO_MONGO, fact?.operation)) throw filterError('Invalid aggregate operation');
+    if (typeof fact.factName !== 'string' || !PATH_SEGMENT_RE.test(fact.factName)
+      || RESERVED_FACT_NAMES.has(fact.factName) || factNames.has(fact.factName)) {
+      throw filterError('Invalid or duplicate aggregation fact name');
     }
-    groupStage.$group[fact.factName] = builder(factPath.mongoPath);
+    factNames.add(fact.factName);
+    const factPath = resolveQueryPath(gqltype, fact.path, aggregationsIncluded);
+    appendLookups(aggregateClauses, aggregationsIncluded, factPath.aggregateClauses);
+    groupStage.$group[`fact_${index}`] = AGG_OP_TO_MONGO[fact.operation](factPath.mongoPath);
   });
 
   aggregateClauses.push(groupStage);
@@ -543,17 +506,16 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
     $project: {
       _id: 0,
       groupId: '$_id',
-      facts: Object.fromEntries(facts.map((fact) => [fact.factName, `$${fact.factName}`])),
+      facts: Object.fromEntries(facts.map((fact, index) => [fact.factName, `$fact_${index}`])),
     },
   });
 
   const sortTerms = input.sort ? validateSortTerms(input.sort) : null;
   if (sortTerms) {
-    const factNames = facts.map((fact) => fact.factName);
     const sortObject = {};
     sortTerms.forEach((sortTerm) => {
       const field = sortTerm.field || 'groupId';
-      const sortFieldPath = factNames.includes(field) ? `facts.${field}` : 'groupId';
+      const sortFieldPath = factNames.has(field) ? `facts.${field}` : 'groupId';
       sortObject[sortFieldPath] = sortTerm.order === 'ASC' ? 1 : -1;
     });
     aggregateClauses.push({ $sort: sortObject });

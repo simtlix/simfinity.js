@@ -108,10 +108,10 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.4.2
+npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.0
 ```
 
-**Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies.
+**Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies. Keep them within the ranges above so your application and Simfinity share a single Mongoose and GraphQL instance; npm reports an out-of-range version as a peer conflict. The MCP transports need the optional peer `@modelcontextprotocol/sdk@^1.13.0`, which is not installed automatically, and `graphql-middleware` is not a Simfinity dependency.
 
 ## PostgreSQL support
 
@@ -152,7 +152,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.4.2 @modelcontextprotocol/sdk@^1.13.0
+npm install @simtlix/simfinity-mcp@3.5.0 @modelcontextprotocol/sdk@^1.13.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
@@ -315,7 +315,7 @@ Empty strings, `false`, `0`, and empty arrays are persisted after validators acc
 
 ### Filtering and Querying
 
-Every relationship or embedded `terms` entry is combined with AND, including repeated paths such as `age GTE 18` and `age LTE 30`. These conditions remain ANDed with top-level logical groups and scope filters. Filter and list-sort paths must resolve to declared scalar or enum fields. `id` paths refer to the stored `_id`; comparisons use the connected Mongoose model's schema, so supplied string or numeric ID models retain their identifier representation.
+Every relationship or embedded `terms` entry is combined with AND, including repeated paths such as `age GTE 18` and `age LTE 30`. These conditions remain ANDed with top-level logical groups and scope filters. Filter and list-sort paths must resolve to declared scalar or enum fields. Client filter, sort and aggregation paths cannot name a field with `extensions.queryable: false` or an application-defined `resolve` unless it sets `extensions.queryable: true`; such paths fail with `FORBIDDEN_FILTER_PATH` (403). This covers masking resolvers, relationship fields with a manual resolver, and a custom `id` resolver. When upgrading, remove manual relationship resolvers that only load the related record, because Simfinity generates them, or set `queryable: true` on fields whose resolver returns the stored value. Paths through scoped relationships apply the target's scope, as described under [Query Scope](#-query-scope), and the authorization plugin checks field rules for every path segment. `id` paths refer to the stored `_id`; comparisons use the connected Mongoose model's schema, so supplied string or numeric ID models retain their identifier representation.
 
 Filter values must use the field's JSON scalar type. `IN` and `NIN` require flat lists, `BTW` requires exactly two non-null bounds, and `LIKE` requires a string search fragment. Literal objects, nested lists, null list elements, invalid operators, unknown paths, and malformed groups are rejected with a structured 400 error instead of being ignored. Explicit `null` remains supported by `EQ` and `NE`. Enum names or declared internal enum values are converted to the stored representation; state-machine `state` filters preserve stored state names. Date filters convert valid date values without mutating the query input. Validated string scalars support partial `LIKE` searches, and range filters use their base scalar type rather than the field's create/update validation constraints.
 
@@ -813,7 +813,8 @@ const BookType = new GraphQLObjectType({
 - **Single Object Relationships**: Automatically generates `findById()` resolvers using the field name or `connectionField`
 - **Collection Relationships**: Automatically generates `find()` resolvers using the `connectionField` to query related objects
 - **Lazy Loading**: Models are looked up at runtime, so types can be connected in any order
-- **Backwards Compatible**: Existing manual resolve methods are preserved and not overwritten
+- **Batched References**: Within a request with an object context, unscoped single references can share a batched read. MongoDB models with any `find` or `findOne` pre/post hook keep individual `findOne` reads, even when both operations share the same hook function: hooks can depend on the operation or filter shape. See the [relationship batching contract](https://simtlix.github.io/simfinity.js/guide/relationships.html#query-related-records).
+- **Backwards Compatible**: Existing manual resolve methods are preserved and not overwritten. A field with a manual resolver cannot be used in client filter, sort or aggregation paths unless it sets `extensions: { queryable: true }`
 - **Type Safety**: Clear error messages if related types aren't properly connected
 
 #### Connect Your Types
@@ -1336,7 +1337,8 @@ const EmailScalar = createValidatedScalar(
   'A valid email address',
   GraphQLString,
   (value) => {
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    // The lookahead keeps matching linear on hostile input such as 'a@' + '.'.repeat(n) + ' '.
+    const emailRegex = /^[^\s@]+@(?=[^\s@]*$)[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(value)) {
       throw new Error('Invalid email format');
     }
@@ -1925,6 +1927,7 @@ const EpisodeType = new GraphQLObjectType({
 - **Filter Structure**: Use the correct filter structure (`QLFilter` for scalars, `QLTypeFilterExpression` for relations)
 - **All Query Operations**: Scope applies to `find`, `aggregate`, and `get_by_id` operations
 - **Generated Relationships**: Non-embedded single relations run the target type's `get_by_id` middleware and scope; collection relations run its `find` middleware and scope with the same request context. A separate database predicate preserves the referenced ID or parent connection even when filters are changed, including by scope functions. A scoped-out single relation returns `null`; a collection omits scoped-out children.
+- **Relationship Paths**: When a client filter, sort, `groupId` or fact path crosses a non-embedded single reference to a type with a `find` scope, that scope runs with empty `args` and its conditions are ANDed below the relation path (`tenant` becomes `author.tenant`), into the query or, for a path used only in `AND`/`OR` group conditions, into each group that uses it. Rows whose referenced record is scoped out are omitted, also when sorting or grouping through the reference. While the target's `find` scope restricts the caller, a client path into that scoped collection relation fails with `FORBIDDEN_FILTER_PATH` (403), and so does a path into a type whose `find` scope filters through a non-embedded collection, such as membership-based tenancy, or through a reference inside an embedded list: such a join would repeat rows. Paths added by middleware and scopes are trusted.
 - **Custom Resolvers and Writes**: Existing relationship resolvers remain unchanged. Query scope does not authorize mutations; use global middleware or controller checks for write permissions, including permissions on nested children.
 - **Automatic Merging**: For `get_by_id`, the id filter is automatically combined with scope filters
 - **Context Access**: Use `context.user`, `context.ip`, or other context properties to determine scope
@@ -1993,6 +1996,8 @@ const permissions = {
 1. Check exact field rule: `permissions[TypeName][fieldName]`
 2. Fallback to wildcard: `permissions[TypeName]['*']`
 3. Apply default policy (ALLOW or DENY)
+
+The same resolution applies to each field that a generated list, aggregate or collection-relationship field names in its filter, `AND`/`OR`, list sort, `groupId` or fact paths, following related types (`posts(author: { terms: [{ path: "email" }] })` checks `Post.author` and `User.email`). These path rules run before the resolver with an `undefined` parent and empty `args`, so parent-dependent rules such as `isOwner` deny them. `info.fieldName`, `info.parentType` and `info.returnType` identify the path field being checked, so rules that select permissions by field or type keep applying; other operation metadata, including `path` and `fieldNodes`, still describes the invoking query. A custom rule that throws anything other than a Simfinity or GraphQL error also denies the path. Aggregate sort terms name result keys and are not checked; paths added by middleware or scopes are trusted.
 
 **Rule Types:**
 - **Function**: `(parent, args, ctx, info) => boolean | void | Promise<boolean | void>`
@@ -2253,6 +2258,7 @@ server.listen(4000);
 > **Deprecated:** `applyMiddleware` from `graphql-middleware` rebuilds the schema via `mapSchema`,
 > which can cause `"Schema must contain uniquely named types"` errors with Simfinity schemas.
 > Use `createAuthPlugin` with GraphQL Yoga / Envelop instead.
+> Simfinity does not install `graphql-middleware`; add it to your application to use this example.
 
 ```javascript
 const { applyMiddleware } = require('graphql-middleware');
@@ -3228,9 +3234,6 @@ const AuthorType = new GraphQLObjectType({
           displayField: 'title'
         },
       },
-      resolve(parent) {
-        return simfinity.getModel(BookType).find({ author: parent.id });
-      }
     },
   }),
 });
@@ -3261,9 +3264,6 @@ const BookType = new GraphQLObjectType({
           displayField: 'name'
         },
       },
-      resolve(parent) {
-        return simfinity.getModel(AuthorType).findById(parent.author);
-      }
     },
   }),
 });

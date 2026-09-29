@@ -5,7 +5,7 @@ description: Opt into transactional reference checks and restrict-delete behavio
 
 # MongoDB reference integrity
 
-Available from **Simfinity 3.4.0**. Install `@simtlix/simfinity-js@3.4.0` and keep any directly installed Simfinity packages at the same version.
+Available from **Simfinity 3.4.0**. Install `@simtlix/simfinity-js@3.5.0` and keep any directly installed Simfinity packages at the same version.
 
 MongoDB applications can opt into transactional reference integrity when creating their adapter. The setting is fixed for that runtime. Queries, mutation inputs, scopes, authorization and MCP schemas keep their existing shape.
 
@@ -96,7 +96,7 @@ Healthy supplied sessions remain caller-owned: the adapter does not commit, end 
 
 ## Existing databases and native writes
 
-Before first enabling protection, stop uncoordinated writers and resolve existing orphan references. The startup audit scans the registered persistent graph, rejects missing targets, and leaves existing data unchanged. For a large database, account for the audit cost and MongoDB transaction lifetime limits. Failed initialization leaves that adapter unavailable; fix the data/configuration and restart with a fresh adapter.
+Before first enabling protection, stop uncoordinated writers and resolve existing orphan references. The startup audit scans the registered persistent graph, rejects missing targets, and leaves existing data unchanged. It runs on every `initialize()`, not only when protection is first enabled. It reads only document IDs, the reserved lock field and declared reference paths, and checks distinct targets with batched queries inside one snapshot transaction. For a large database, account for the scan time and MongoDB transaction lifetime limits. Failed initialization leaves that adapter unavailable; fix the data/configuration and restart with a fresh adapter.
 
 All instances and writing scripts must use the same complete relationship graph and protection setting. Supplied models must share one MongoDB connection, have distinct physical collections, and use ObjectId primary keys and reference paths. Conflicting reserved field definitions or unsupported relation metadata fail initialization.
 

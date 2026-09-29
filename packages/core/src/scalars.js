@@ -2,6 +2,7 @@ import {
   GraphQLString, GraphQLInt, GraphQLFloat,
 } from 'graphql';
 import { createValidatedScalar } from './scalars/factory.js';
+import { isEmailFormat } from './scalars/email.js';
 
 /**
  * Email scalar - validates email format
@@ -12,8 +13,7 @@ export const EmailScalar = createValidatedScalar(
   'A valid email address',
   GraphQLString,
   (value) => {
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(value)) {
+    if (!isEmailFormat(value)) {
       throw new Error('Invalid email format');
     }
   },

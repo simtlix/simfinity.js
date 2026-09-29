@@ -205,6 +205,7 @@ export const initializeDatabase = async (pool, description, { mode = 'create' } 
   if (schema.startsWith('pg_') || schema === 'information_schema') throw new SimfinityError('System schemas cannot be managed', 'INVALID_DATABASE_SCHEMA', 400);
   const client = await pool.connect();
   const created = [];
+  let rollbackError;
   try {
     await client.query(mode === 'validate' ? 'BEGIN READ ONLY' : 'BEGIN');
     await client.query('SET LOCAL search_path = pg_catalog');
@@ -263,9 +264,10 @@ export const initializeDatabase = async (pool, description, { mode = 'create' } 
     await client.query('COMMIT');
     return { mode, created };
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
+    try { await client.query('ROLLBACK'); } catch (failure) { rollbackError = failure; }
     throw error;
   } finally {
-    client.release();
+    // A failed ROLLBACK can leave the transaction open; the error makes pg-pool destroy the connection.
+    client.release(rollbackError);
   }
 };
