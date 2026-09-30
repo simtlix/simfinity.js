@@ -40,11 +40,11 @@ const bookingType = new GraphQLObjectType({
     },
     startTime: {
       type: GraphQLString,
-      description: "Start time of the appointment (ISO date-time or 'HH:mm'), in the barbershop timezone.",
+      description: "Start time of the appointment in 24-hour 'HH:mm' format, in the barbershop timezone.",
     },
     endTime: {
       type: GraphQLString,
-      description: 'End time, computed automatically from the selected services\' durations.',
+      description: "End time in 'HH:mm', derived by the API from the start time and the services' catalog durations; a value sent in a mutation is ignored.",
     },
     totalPrice: {
       type: GraphQLFloat,

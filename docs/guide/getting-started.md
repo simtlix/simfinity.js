@@ -14,9 +14,9 @@ For transactional reference checks and restrict-delete behavior in MongoDB, opt 
 
 ## Download the starter
 
-[Download the v3.3.0 starters](/releases/simfinity-3.3.0-starters.zip) and extract them. The `mongodb` folder contains the files shown below and installs the released packages from npm. See [downloads and checksums](./databases#download-the-starters).
+[Download the v3.5.1 starters](/releases/simfinity-3.5.1-starters.zip) and extract them. The `mongodb` folder contains the files shown below and installs the released packages from npm. See [downloads and checksums](./databases#download-the-starters).
 
-For the published MongoDB release, the [original 3.0.1 starter](/simfinity-series-starter.zip) remains available; its schema and server support this page's operations. The rest of this site documents v3.5.0; see the [upgrade notes](../resources/compatibility#upgrade-to-3-5-0) before updating the archived starter.
+For the published MongoDB release, the [original 3.0.1 starter](/simfinity-series-starter.zip) remains available; its schema and server support this page's operations. The rest of this site documents v3.5.1; see the [upgrade notes](../resources/compatibility#upgrade-to-3-5-1) before updating the archived starter.
 
 | Before you begin | You will build |
 | --- | --- |
@@ -30,7 +30,7 @@ For the published MongoDB release, the [original 3.0.1 starter](/simfinity-serie
 Use a supported Node.js LTS release and npm. The library itself requires Node.js `>=18.18.0`.
 
 ```sh
-cd simfinity-3.3.0-starters/mongodb
+cd simfinity-3.5.1-starters/mongodb
 npm install
 ```
 

@@ -2,6 +2,7 @@
 
 import { useT } from "@/hooks/useT";
 import { cn } from "@/lib/cn";
+import { DAY_KEYS, WEEK_DISPLAY_ORDER } from "./businessHours";
 
 export interface BusinessHourSlot {
   dayOfWeek: number;
@@ -18,22 +19,13 @@ interface BusinessHoursEditorProps {
   disabled?: boolean;
 }
 
-const DAY_KEYS = [
-  "monday",
-  "tuesday",
-  "wednesday",
-  "thursday",
-  "friday",
-  "saturday",
-  "sunday",
-];
-
+/** One row per day in Monday-first display order, keyed by the stored day number. */
 function ensureAllDays(slots: BusinessHourSlot[]): BusinessHourSlot[] {
-  return DAY_KEYS.map((_, idx) => {
-    const existing = slots.find((s) => s.dayOfWeek === idx);
+  return WEEK_DISPLAY_ORDER.map((dayOfWeek) => {
+    const existing = slots.find((s) => s.dayOfWeek === dayOfWeek);
     return (
       existing ?? {
-        dayOfWeek: idx,
+        dayOfWeek,
         openTime: "09:00",
         closeTime: "18:00",
         isClosed: false,

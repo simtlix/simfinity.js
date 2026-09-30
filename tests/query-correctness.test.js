@@ -151,7 +151,7 @@ describe('query correctness', () => {
   });
 
   it('compares enum storage values, dates and custom scalar search fragments', async () => {
-    expect(match(await simfinity.buildQuery({ status: { value: 'ACTIVE' } }, typedFilters))).toEqual({ status: '7' });
+    expect(match(await simfinity.buildQuery({ status: { value: 'ACTIVE' } }, typedFilters))).toEqual({ status: 7 });
     expect(match(await simfinity.buildQuery({ email: { operator: 'LIKE', value: '@example.com' } }, typedFilters))).toEqual({ email: { $regex: '.*@example\\.com.*' } });
     expect(match(await simfinity.buildQuery({ age: { operator: 'GTE', value: 0 } }, typedFilters))).toEqual({ age: { $gte: 0 } });
     const input = { date: { operator: 'BTW', value: ['2025-01-01', '2025-12-31'] } };
@@ -165,7 +165,7 @@ describe('query correctness', () => {
   });
 
   it('accepts declared enum internal values as well as public names', async () => {
-    expect(match(await simfinity.buildQuery({ status: { value: 7 } }, typedFilters))).toEqual({ status: '7' });
+    expect(match(await simfinity.buildQuery({ status: { value: 7 } }, typedFilters))).toEqual({ status: 7 });
     expect(match(await simfinity.buildQuery({ state: { value: 7 } }, stateType))).toEqual({ state: 'ACTIVE' });
   });
 

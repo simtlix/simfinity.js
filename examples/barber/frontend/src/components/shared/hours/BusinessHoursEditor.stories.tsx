@@ -12,25 +12,18 @@ const meta: Meta<typeof BusinessHoursEditor> = {
 export default meta;
 type Story = StoryObj<typeof BusinessHoursEditor>;
 
+// dayOfWeek follows Date#getDay(): 0 = Sunday ... 6 = Saturday.
 const defaultSlots: BusinessHourSlot[] = [
-  { dayOfWeek: 0, openTime: "09:00", closeTime: "20:00", isClosed: false },
   { dayOfWeek: 1, openTime: "09:00", closeTime: "20:00", isClosed: false },
   { dayOfWeek: 2, openTime: "09:00", closeTime: "20:00", isClosed: false },
   { dayOfWeek: 3, openTime: "09:00", closeTime: "20:00", isClosed: false },
-  { dayOfWeek: 4, openTime: "10:00", closeTime: "22:00", isClosed: false },
-  { dayOfWeek: 5, openTime: "10:00", closeTime: "18:00", isClosed: false },
-  { dayOfWeek: 6, openTime: "09:00", closeTime: "18:00", isClosed: true },
+  { dayOfWeek: 4, openTime: "09:00", closeTime: "20:00", isClosed: false },
+  { dayOfWeek: 5, openTime: "10:00", closeTime: "22:00", isClosed: false },
+  { dayOfWeek: 6, openTime: "10:00", closeTime: "18:00", isClosed: false },
+  { dayOfWeek: 0, openTime: "09:00", closeTime: "18:00", isClosed: true },
 ];
 
 const withBreaksSlots: BusinessHourSlot[] = [
-  {
-    dayOfWeek: 0,
-    openTime: "09:00",
-    closeTime: "20:00",
-    isClosed: false,
-    breakStartTime: "13:00",
-    breakEndTime: "14:00",
-  },
   {
     dayOfWeek: 1,
     openTime: "09:00",
@@ -39,11 +32,19 @@ const withBreaksSlots: BusinessHourSlot[] = [
     breakStartTime: "13:00",
     breakEndTime: "14:00",
   },
-  { dayOfWeek: 2, openTime: "09:00", closeTime: "20:00", isClosed: false },
+  {
+    dayOfWeek: 2,
+    openTime: "09:00",
+    closeTime: "20:00",
+    isClosed: false,
+    breakStartTime: "13:00",
+    breakEndTime: "14:00",
+  },
   { dayOfWeek: 3, openTime: "09:00", closeTime: "20:00", isClosed: false },
-  { dayOfWeek: 4, openTime: "10:00", closeTime: "22:00", isClosed: false },
-  { dayOfWeek: 5, openTime: "10:00", closeTime: "18:00", isClosed: false },
-  { dayOfWeek: 6, openTime: "09:00", closeTime: "18:00", isClosed: true },
+  { dayOfWeek: 4, openTime: "09:00", closeTime: "20:00", isClosed: false },
+  { dayOfWeek: 5, openTime: "10:00", closeTime: "22:00", isClosed: false },
+  { dayOfWeek: 6, openTime: "10:00", closeTime: "18:00", isClosed: false },
+  { dayOfWeek: 0, openTime: "09:00", closeTime: "18:00", isClosed: true },
 ];
 
 export const Default: Story = {

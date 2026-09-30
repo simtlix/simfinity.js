@@ -6,7 +6,7 @@ import { useSimfinityClient } from '@/lib/simfinity';
 import { useT } from '@/hooks/useT';
 import { useFormState } from '@/hooks/useFormState';
 import { PageHeader } from '@/components/shared/page';
-import { BusinessHoursEditor } from '@/components/shared/hours';
+import { BusinessHoursEditor, DEFAULT_BUSINESS_HOURS } from '@/components/shared/hours';
 import { LocationPicker } from '@/components/shared/maps';
 import {
   FormField,
@@ -42,13 +42,6 @@ const SLOT_DURATIONS = [15, 20, 30, 45, 60, 90].map((m) => ({
 const BUFFER_OPTIONS = [0, 5, 10, 15, 20, 30].map((m) => ({
   value: String(m),
   label: `${m} min`,
-}));
-
-const DEFAULT_HOURS: BusinessHourSlot[] = Array.from({ length: 7 }, (_, i) => ({
-  dayOfWeek: i,
-  openTime: '09:00',
-  closeTime: '18:00',
-  isClosed: i === 0,
 }));
 
 type BarbershopForm = {
@@ -126,7 +119,7 @@ export default function AdminBarbershopEditPage() {
   const id = params.id as string;
 
   const form = useFormState(INITIAL);
-  const [businessHours, setBusinessHours] = useState<BusinessHourSlot[]>(DEFAULT_HOURS);
+  const [businessHours, setBusinessHours] = useState<BusinessHourSlot[]>(DEFAULT_BUSINESS_HOURS);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [shopName, setShopName] = useState('');

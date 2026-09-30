@@ -17,7 +17,7 @@ import {
   FormActions,
   FormToggle,
 } from '@/components/shared';
-import { BusinessHoursEditor, type BusinessHourSlot } from '@/components/shared/hours';
+import { BusinessHoursEditor, DEFAULT_BUSINESS_HOURS, type BusinessHourSlot } from '@/components/shared/hours';
 import { cn } from '@/lib/cn';
 
 type ProfessionalForm = {
@@ -29,13 +29,6 @@ type ProfessionalForm = {
 
 type ServiceItem = { id: string; name: string };
 
-const DEFAULT_HOURS: BusinessHourSlot[] = Array.from({ length: 7 }, (_, i) => ({
-  dayOfWeek: i,
-  openTime: '09:00',
-  closeTime: '18:00',
-  isClosed: i === 0,
-}));
-
 export default function EditProfessionalPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
@@ -45,7 +38,7 @@ export default function EditProfessionalPage() {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [businessHours, setBusinessHours] = useState<BusinessHourSlot[]>(DEFAULT_HOURS);
+  const [businessHours, setBusinessHours] = useState<BusinessHourSlot[]>(DEFAULT_BUSINESS_HOURS);
   const [allServices, setAllServices] = useState<ServiceItem[]>([]);
   const [selectedServiceIds, setSelectedServiceIds] = useState<Set<string>>(new Set());
 

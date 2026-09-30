@@ -22,6 +22,8 @@ Use a MongoDB replica set or sharded cluster for transactional mutations. The li
 
 Generated single-reference reads can be batched within a request. Models with any `find` or `findOne` pre/post query hook retain individual `findOne` reads, including hooks shared by both operations, to preserve access restrictions and other middleware behavior. See the [relationship contract](https://simtlix.github.io/simfinity.js/guide/relationships.html).
 
+Generated models store enum internal values with their own type (numbers, booleans or strings; other combinations as given) and support embedded fields named `type`. Range filters, sorts and aggregates on numeric and boolean enums follow that type; PostgreSQL uses their text form. Earlier versions stored numeric and boolean enum values as strings; convert existing documents once as described in the [schema guide](https://simtlix.github.io/simfinity.js/guide/schema.html#what-gets-generated).
+
 Mongoose 8.24.2 or later within version 8 is required to exclude the update-casting prototype-pollution vulnerability. Existing applications should update Mongoose and their dependency lockfile, then run `npm audit`; upgrading Simfinity does not refresh every transitive dependency already locked by the application.
 
 ## Optional transactional reference integrity

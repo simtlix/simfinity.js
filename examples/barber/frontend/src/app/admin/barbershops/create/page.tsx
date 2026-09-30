@@ -16,7 +16,7 @@ import {
   FormActions,
   FormImageUpload,
 } from '@/components/shared/form';
-import { BusinessHoursEditor } from '@/components/shared/hours';
+import { BusinessHoursEditor, DEFAULT_BUSINESS_HOURS } from '@/components/shared/hours';
 import type { BusinessHourSlot } from '@/components/shared/hours';
 import { LocationPicker } from '@/components/shared/maps';
 import { Button } from '@/components/shared/ui';
@@ -44,13 +44,6 @@ const SLOT_DURATIONS = [15, 20, 30, 45, 60, 90].map((m) => ({
 const BUFFER_OPTIONS = [0, 5, 10, 15, 20, 30].map((m) => ({
   value: String(m),
   label: `${m} min`,
-}));
-
-const DEFAULT_HOURS: BusinessHourSlot[] = Array.from({ length: 7 }, (_, i) => ({
-  dayOfWeek: i,
-  openTime: '09:00',
-  closeTime: '18:00',
-  isClosed: i === 0,
 }));
 
 type Owner = { id: string; name: string; email: string };
@@ -117,7 +110,7 @@ export default function AdminBarbershopCreatePage() {
   const [selectedOwnerId, setSelectedOwnerId] = useState('');
 
   const form = useFormState(INITIAL);
-  const [businessHours, setBusinessHours] = useState<BusinessHourSlot[]>(DEFAULT_HOURS);
+  const [businessHours, setBusinessHours] = useState<BusinessHourSlot[]>(DEFAULT_BUSINESS_HOURS);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
 

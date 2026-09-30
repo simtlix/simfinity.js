@@ -1,11 +1,11 @@
 ---
 title: PostgreSQL storage reference
-description: PostgreSQL types, generated foreign keys, embedded storage, schema validation, native APIs, and compatibility boundaries in Simfinity 3.5.0.
+description: PostgreSQL types, generated foreign keys, embedded storage, schema validation, native APIs, and compatibility boundaries in Simfinity 3.5.1.
 ---
 
 # PostgreSQL support
 
-Simfinity 3.5.0 provides PostgreSQL schema generation and GraphQL execution through the shared core and SQL runtime. PostgreSQL is the first [SQL plugin](guide/sql-plugins.md); its existing facade and generated 3.2.0 physical schema remain compatible. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.5.0 is available from npm; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
+Simfinity 3.5.1 provides PostgreSQL schema generation and GraphQL execution through the shared core and SQL runtime. PostgreSQL is the first [SQL plugin](guide/sql-plugins.md); its existing facade and generated 3.2.0 physical schema remain compatible. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.5.1 is available from npm; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
 
 Start with the canonical [PostgreSQL quick start](guide/postgresql.md) for a complete Yoga server, initialization choice, controller/session example, and pool shutdown. This page is the detailed storage and compatibility reference.
 
@@ -13,7 +13,7 @@ The intended backend choice is permanent application configuration. There is no 
 
 ## Packages and local setup
 
-Use the [v3.3.0 starters](guide/databases.md#download-the-starters) and run `npm install` in the `postgres` folder. For library development, `npm ci` at the repository root installs the workspaces. Packages are distributed together:
+Use the [v3.5.1 starters](guide/databases.md#download-the-starters) and run `npm install` in the `postgres` folder. For library development, `npm ci` at the repository root installs the workspaces. Packages are distributed together:
 
 | Package | Current exports and dependencies |
 | --- | --- |
@@ -23,7 +23,7 @@ Use the [v3.3.0 starters](guide/databases.md#download-the-starters) and run `npm
 | `@simtlix/simfinity-postgres` | `postgresPlugin`, `createPostgres`, default-module runtime facade, schema description/DDL/initialization, shared scalar factory and errors. Depends on SQL, core and `pg`; GraphQL peer. No MongoDB, Mongoose or MCP dependency. |
 | `@simtlix/simfinity-mcp` | Optional database-independent tool generation and transports. Depends on core; the MCP SDK is an optional peer. |
 
-All five packages are versioned together at version `3.5.0` with exact internal dependencies. The verified package set includes standalone consumer checks for SQL as well as both facades, covering MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; the starter requires Node.js 22+. PostgreSQL 15, 16, and 18 are covered by the release verification.
+All five packages are versioned together at version `3.5.1` with exact internal dependencies. The verified package set includes standalone consumer checks for SQL as well as both facades, covering MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; the starter requires Node.js 22+. PostgreSQL 15, 16, and 18 are covered by the release verification.
 
 ## Executable example
 
@@ -97,7 +97,7 @@ Nested collection mutations run child middleware (`{ input }` for save/update, `
 
 Aggregation returns `{ groupId, facts }`; SUM/AVG/COUNT use JavaScript numbers and COUNT counts contributing joined rows. Scalar-list leaves can be filtered and sorted through nested embedded lists, in JSONB and owned reference-bearing trees. Group projections preserve array order, duplicates, ragged shapes and explicit-null leaves while excluding absent child fields and null parent items. Arrays such as `[]`, `[null]`, `[[]]`, `[[null]]`, `[[1,2]]` and `[[1],[2]]` remain distinct group keys.
 
-Array-valued facts yield SUM `0` and AVG `null`; MIN/MAX compare the entire array lexicographically with typed/null ordering. Scalar MIN/MAX continue to support Boolean and UUID values. Result sorting (including default ascending `groupId`) selects the lowest/highest immediate element of an array; it does not compare the entire array as MIN/MAX do. An empty terminal array sorts below null. Add a second sort term when primary keys tie, since tied Mongo results have no guaranteed order. PostgreSQL uses generated immutable comparison helpers, not native JSONB length-first ordering. Date and enum aggregates return the same logical values as Mongo; state-machine aggregates expose stored state names even though PostgreSQL state columns hold enum internal values. Whole embedded-object sorting/grouping remains explicitly unsupported; arbitrary Mongo pipelines and unknown custom storage are outside this contract.
+Array-valued facts yield SUM `0` and AVG `null`; MIN/MAX compare the entire array lexicographically with typed/null ordering. Scalar MIN/MAX continue to support Boolean and UUID values. Result sorting (including default ascending `groupId`) selects the lowest/highest immediate element of an array; it does not compare the entire array as MIN/MAX do. An empty terminal array sorts below null. Add a second sort term when primary keys tie, since tied Mongo results have no guaranteed order. PostgreSQL uses generated immutable comparison helpers, not native JSONB length-first ordering. Date and string-enum aggregates return the same logical values as Mongo; numeric and boolean enums group as their text form on PostgreSQL but as native values on MongoDB (see [What gets generated](/guide/schema#what-gets-generated)); state-machine aggregates expose stored state names even though PostgreSQL state columns hold enum internal values. Whole embedded-object sorting/grouping remains explicitly unsupported; arbitrary Mongo pipelines and unknown custom storage are outside this contract.
 
 Generated and registered custom mutations run on one transaction client using repeatable-read isolation. Validators and hooks receive the same context and active session. The adapter retries confirmed serialization/deadlock aborts up to five times; middleware runs once, while transactional hooks/callbacks may run again. Each attempt receives fresh input-object/list/Date structures. Enum values and opaque custom scalar payloads retain their identity; treat those payloads as immutable. Keep external effects in retryable hooks idempotent.
 

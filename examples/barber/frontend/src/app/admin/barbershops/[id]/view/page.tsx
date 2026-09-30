@@ -10,6 +10,7 @@ import { PageHeader } from '@/components/shared/page';
 import { RejectModal } from '@/components/shared/modals';
 import { MapView } from '@/components/shared/maps';
 import { Button } from '@/components/shared/ui';
+import { mondayFirstIndex } from '@/components/shared/hours';
 
 type BusinessHour = {
   dayOfWeek: number;
@@ -84,8 +85,8 @@ export default function AdminBarbershopViewPage() {
 
   const scheduleDayLabel = (dayOfWeek: number) => {
     const raw = Number(dayOfWeek);
-    const idx = raw >= 1 && raw <= 7 ? raw - 1 : ((raw % 7) + 7) % 7;
-    return t(`scheduleWeekday${idx}`, `Day ${raw}`);
+    // Stored days use Date#getDay() (0 = Sunday); scheduleWeekday labels start on Monday.
+    return t(`scheduleWeekday${mondayFirstIndex(raw)}`, `Day ${raw}`);
   };
 
   const handleTransition = async (action: string) => {
@@ -332,7 +333,7 @@ export default function AdminBarbershopViewPage() {
             <div className="space-y-2">
               {shop.businessHours
                 .slice()
-                .sort((a, b) => a.dayOfWeek - b.dayOfWeek)
+                .sort((a, b) => mondayFirstIndex(a.dayOfWeek) - mondayFirstIndex(b.dayOfWeek))
                 .map((h) => (
                   <div key={h.dayOfWeek} className="flex items-center justify-between py-1.5">
                     <span className="text-sm text-on-surface font-medium">

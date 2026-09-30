@@ -178,22 +178,39 @@ describe('recalculatePriceAndEndTimeFromLines', () => {
     expect(doc.endTime).toBe('15:30');
   });
 
-  it('does nothing when lines is empty', () => {
+  it('leaves totalPrice alone without lines but still derives endTime', () => {
     const doc = { startTime: '10:00', lines: [] };
     recalculatePriceAndEndTimeFromLines(doc);
     expect(doc.totalPrice).toBeUndefined();
+    expect(doc.endTime).toBe('10:00');
   });
 
-  it('does nothing when lines is undefined', () => {
+  it('derives no endTime when lines and startTime are undefined', () => {
     const doc = {};
     recalculatePriceAndEndTimeFromLines(doc);
     expect(doc.totalPrice).toBeUndefined();
+    expect(doc.endTime).toBeNull();
   });
 
-  it('computes totalPrice but skips endTime when startTime is missing', () => {
-    const doc = { lines: [{ price: 100, durationMinutes: 30 }] };
+  it('computes totalPrice and clears endTime when startTime is missing', () => {
+    const doc = { endTime: '18:00', lines: [{ price: 100, durationMinutes: 30 }] };
     recalculatePriceAndEndTimeFromLines(doc);
     expect(doc.totalPrice).toBe(100);
-    expect(doc.endTime).toBeUndefined();
+    expect(doc.endTime).toBeNull();
+  });
+
+  it('replaces an endTime sent by the client, with or without lines', () => {
+    const empty = { startTime: '14:30', endTime: '17:30' };
+    recalculatePriceAndEndTimeFromLines(empty);
+    expect(empty.endTime).toBe('14:30');
+    const lined = { startTime: '10:00', endTime: '10:00', lines: [{ price: 25, durationMinutes: 30 }] };
+    recalculatePriceAndEndTimeFromLines(lined);
+    expect(lined.endTime).toBe('10:30');
+  });
+
+  it('stores a booking that ends at midnight as 24:00', () => {
+    const doc = { startTime: '23:30', lines: [{ price: 25, durationMinutes: 30 }] };
+    recalculatePriceAndEndTimeFromLines(doc);
+    expect(doc.endTime).toBe('24:00');
   });
 });

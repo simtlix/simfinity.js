@@ -139,11 +139,14 @@ export const permissions = {
     // Bookings — authenticated clients; shop actions restricted to owner/admin
     addbooking: requireAuthenticated(),
     updatebooking: requireAuthenticated(),
+    reschedule_booking: requireAuthenticated(),
     deletebooking: requireAuthenticated(),
     cancelbyclient_booking: requireAuthenticated(),
     cancelbyshop_booking: requireOwnerOrPlatformAdmin(),
     complete_booking: requireOwnerOrPlatformAdmin(),
     noshow_booking: requireOwnerOrPlatformAdmin(),
+    // Taken times only (no client data), for the signed-in booking flow
+    bookingAvailability: requireAuthenticated(),
 
     // Favorites — signed-in users only
     addfavorite: requireAuthenticated(),

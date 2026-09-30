@@ -140,12 +140,19 @@ export const barbershops = [
   },
 ];
 
+/** Next date at least two days ahead on `dayOfWeek` (0 = Sunday), so sample bookings stay bookable. */
+const upcoming = (dayOfWeek) => {
+  const date = new Date(Date.now() + 2 * 86_400_000);
+  date.setUTCDate(date.getUTCDate() + ((dayOfWeek - date.getUTCDay() + 7) % 7));
+  return date.toISOString().slice(0, 10);
+};
+
 export const sampleBookings = [
   {
     clientEmail: "cliente@demo.com",
     barbershopName: "The Heritage Club",
     serviceNames: ["Corte Clásico", "Barba Completa"],
-    scheduledDate: "2026-04-02",
+    scheduledDate: upcoming(4),
     startTime: "10:00",
     notes: "Primera visita",
     paymentMethod: "ON_SITE",
@@ -154,7 +161,7 @@ export const sampleBookings = [
     clientEmail: "cliente@demo.com",
     barbershopName: "Barba Roja Studio",
     serviceNames: ["Corte Moderno"],
-    scheduledDate: "2026-04-05",
+    scheduledDate: upcoming(6),
     startTime: "15:30",
     notes: "",
     paymentMethod: "ON_SITE",
@@ -163,7 +170,7 @@ export const sampleBookings = [
     clientEmail: "laura@demo.com",
     barbershopName: "El Noble Groomer",
     serviceNames: ["Corte Signature"],
-    scheduledDate: "2026-04-03",
+    scheduledDate: upcoming(5),
     startTime: "14:00",
     notes: "Quiero un cambio de look",
     paymentMethod: "ON_SITE",
@@ -172,7 +179,7 @@ export const sampleBookings = [
     clientEmail: "diego@demo.com",
     barbershopName: "The Heritage Club",
     serviceNames: ["Afeitado con Navaja"],
-    scheduledDate: "2026-04-04",
+    scheduledDate: upcoming(6),
     startTime: "11:00",
     notes: "",
     paymentMethod: "ON_SITE",

@@ -67,13 +67,26 @@ try {
   const bundle = await mutation('addbundle', { name: 'Deal', price: 15, barbershop: { id: shop.id }, services: [{ service: { id: service.id } }] }, 'id totalDurationMinutes', owner.accessToken);
   assert.equal(bundle.totalDurationMinutes, 30);
   await mutation('updatebundle', { id: bundle.id, price: 30 }, 'id', owner.accessToken, true);
-  const bookingInput = { barbershop: { id: shop.id }, professional: { id: professional.id }, scheduledDate: '2026-10-01', startTime: '10:00', lines: [{ service: { id: service.id }, price: 20, durationMinutes: 30 }, { bundle: { id: bundle.id }, price: 15, durationMinutes: 30 }] };
+  // The shop has no timezone or hours: bookings only need a future, free slot (UTC dates).
+  const futureDate = (days) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+  const bookingInput = { barbershop: { id: shop.id }, professional: { id: professional.id }, scheduledDate: futureDate(7), startTime: '10:00', lines: [{ service: { id: service.id }, price: 20, durationMinutes: 0 }, { bundle: { id: bundle.id }, price: 15, durationMinutes: 30 }] };
   const booking = await mutation('addbooking', bookingInput, 'id state totalPrice endTime client { id }', client.accessToken);
   assert.equal(booking.state, 'CONFIRMED'); assert.equal(booking.totalPrice, 35); assert.equal(booking.endTime, '11:00'); assert.equal(booking.client.id, client.user.id);
+  const overlap = await mutation('addbooking', { ...bookingInput, startTime: '10:30' }, 'id', otherClient.accessToken, true);
+  assert.equal(overlap.errors[0].extensions.code, 'BOOKING_SLOT_UNAVAILABLE');
+  const past = await mutation('addbooking', { ...bookingInput, scheduledDate: '2020-01-01' }, 'id', otherClient.accessToken, true);
+  assert.equal(past.errors[0].extensions.code, 'BOOKING_OUTSIDE_ADVANCE_WINDOW');
+  const availability = await mutation('bookingAvailability', { barbershopId: shop.id, date: bookingInput.scheduledDate }, 'startTime endTime professionalId', otherClient.accessToken);
+  assert.deepEqual(availability, [{ startTime: '10:00', endTime: '11:00', professionalId: professional.id }]);
+  // Concurrent creates for one professional and slot serialize on the professional row.
+  const raceInput = { ...bookingInput, startTime: '14:00' };
+  const raced = await Promise.all([client, otherClient].map((user) => request('mutation($input: bookingInput!) { addbooking(input: $input) { id } }', { input: raceInput }, user.accessToken)));
+  assert.equal(raced.filter((result) => !result.errors).length, 1, JSON.stringify(raced));
+  assert.equal(raced.find((result) => result.errors).errors[0].extensions.code, 'BOOKING_SLOT_UNAVAILABLE');
   const clearingResults = [];
-  for (const cleared of [[], null]) {
+  for (const [index, cleared] of [[], null].entries()) {
     const bookingFields = 'id totalPrice startTime endTime lines { price durationMinutes }';
-    const fixtureBooking = await mutation('addbooking', bookingInput, bookingFields, client.accessToken);
+    const fixtureBooking = await mutation('addbooking', { ...bookingInput, scheduledDate: futureDate(8 + index) }, bookingFields, client.accessToken);
     const unchangedBooking = await mutation('updatebooking', { id: fixtureBooking.id, notes: 'Keep lines' }, bookingFields, owner.accessToken);
     assert.equal(unchangedBooking.totalPrice, 35);
     assert.equal(unchangedBooking.endTime, '11:00');

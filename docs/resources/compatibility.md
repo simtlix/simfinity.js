@@ -35,6 +35,13 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22 or newer |
 
+## Upgrade to 3.5.1
+
+Keep all directly installed Simfinity packages at 3.5.1. When upgrading from an earlier version than 3.5.0, also review the [3.5.0 notes](#upgrade-to-3-5-0) below.
+
+- Generated MongoDB models store numeric and boolean enum values as numbers and booleans instead of strings. Documents written by earlier versions need a one-time conversion before lists, filters and aggregations match them; unique enum fields must be converted before new writes. See [What gets generated](../guide/schema#what-gets-generated).
+- An embedded MongoDB type can declare a field named `type`.
+
 ## Upgrade to 3.5.0
 
 Keep all directly installed Simfinity packages at 3.5.0 and review these behavior changes:
@@ -45,7 +52,7 @@ Keep all directly installed Simfinity packages at 3.5.0 and review these behavio
 - MongoDB uses the application's GraphQL and Mongoose peers. Install the optional MCP SDK explicitly for transports; `graphql-middleware` is no longer installed by Simfinity. See [installation](../guide/databases#install-from-npm).
 - Embedded updates enforce required fields when constructing replacement objects or list items; existing embedded objects still accept valid partial patches. SQL sessions reject statements after their callback settles, and a failed rollback discards the connection. See [mutations](../guide/mutations) and the [SQL plugin contract](../guide/sql-plugins#plugin-contract-version-1).
 
-The archived starters and Barber examples retain their documented package pins. Upgrade their Simfinity dependencies together before relying on 3.5.0 behavior.
+The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.1. Historical archives and the Barber examples retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
 
 ## Upgrade from 3.2.0
 

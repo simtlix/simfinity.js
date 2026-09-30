@@ -53,8 +53,10 @@ async function fixture() {
 }
 
 const bookingFields = 'id totalPrice startTime endTime lines { price durationMinutes }';
+// Confirmed bookings need a date; fixture shops have no hours or timezone, so any future UTC date fits.
+const nextWeek = new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
 async function booking(shop, service) {
-  return mutation('addbooking', { barbershop: { id: shop.id }, client: { id: user.id }, startTime: '10:00', lines: [{ service: { id: service.id }, price: 20, durationMinutes: 30 }] }, bookingFields);
+  return mutation('addbooking', { barbershop: { id: shop.id }, client: { id: user.id }, scheduledDate: nextWeek, startTime: '10:00', lines: [{ service: { id: service.id }, price: 20, durationMinutes: 30 }] }, bookingFields);
 }
 
 test('booking updates recalculate price and end time while unrelated updates preserve them', async () => {
@@ -67,12 +69,78 @@ test('booking updates recalculate price and end time while unrelated updates pre
   assert.equal(unchanged.endTime, '10:30');
   const moved = await mutation('updatebooking', { id: created.id, startTime: '11:00' }, bookingFields);
   assert.equal(moved.endTime, '11:30');
-  const replaced = await mutation('updatebooking', { id: created.id, lines: [{ price: 35, durationMinutes: 45 }] }, bookingFields);
+  const longCut = await model('service').create({ name: 'Long cut', price: 35, durationMinutes: 45, barbershop: shop._id });
+  const replaced = await mutation('updatebooking', { id: created.id, lines: [{ service: { id: String(longCut._id) }, price: 35, durationMinutes: 45 }] }, bookingFields);
   assert.equal(replaced.totalPrice, 35);
   assert.equal(replaced.endTime, '11:45');
   const stored = await model('booking').findById(created.id).lean();
   assert.equal(stored.totalPrice, 35);
   assert.equal(stored.endTime, '11:45');
+});
+
+test('confirmed bookings reject overlaps, expose only busy times and serialize concurrent creates', async () => {
+  const { shop, service } = await fixture();
+  await model('barbershop').updateOne({ _id: shop._id }, { bufferMinutes: 10 });
+  const [first, second] = await model('professional').create([{ name: 'First', barbershop: shop._id }, { name: 'Second', barbershop: shop._id }]);
+  const scheduledDate = new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
+  const add = (professional, startTime) => ({
+    barbershop: { id: shop.id }, client: { id: user.id }, scheduledDate, startTime,
+    ...(professional ? { professional: { id: String(professional._id) } } : {}),
+    lines: [{ service: { id: service.id }, price: 20, durationMinutes: 0 }],
+  });
+  const code = (result) => result.errors?.[0]?.extensions?.code;
+  const held = await mutation('addbooking', add(first, '10:00'), bookingFields);
+  assert.equal(held.endTime, '10:30', 'Durations come from the service, not the client');
+  assert.equal(code(await mutation('addbooking', add(first, '10:35'), 'id', true)), 'BOOKING_SLOT_UNAVAILABLE');
+  assert.equal(code(await mutation('addbooking', add(null, '10:00'), 'id', true)), 'BOOKING_SLOT_UNAVAILABLE');
+  assert.equal(code(await mutation('addbooking', { ...add(first, '10:00'), scheduledDate: '2020-01-01' }, 'id', true)), 'BOOKING_OUTSIDE_ADVANCE_WINDOW');
+  assert.equal(code(await mutation('addbooking', { ...add(first, '10:00'), scheduledDate: null }, 'id', true)), 'INVALID_BOOKING_TIME');
+  // A line without a reference, or with a negative duration, cannot shrink the booking onto another one.
+  for (const lines of [[{ service: { id: service.id }, price: 20 }, { price: 0, durationMinutes: -600 }], [{ service: { id: service.id }, price: 20, durationMinutes: -30 }]]) {
+    assert.equal(code(await mutation('addbooking', { ...add(first, '10:10'), lines }, 'id', true)), 'INVALID_BOOKING_LINE');
+  }
+  const moved = await mutation('addbooking', add(second, '10:00'), 'id');
+  assert.equal(code(await mutation('updatebooking', { id: moved.id, professional: { id: String(first._id) } }, 'id', true)), 'BOOKING_SLOT_UNAVAILABLE');
+  const busy = await mutation('bookingAvailability', { barbershopId: shop.id, date: scheduledDate, professionalId: String(first._id) }, 'startTime endTime professionalId');
+  assert.deepEqual(busy.map((range) => ({ ...range })), [{ startTime: '10:00', endTime: '10:30', professionalId: String(first._id) }]);
+
+  const race = (inputs) => Promise.all(inputs.map((input) => graphql({ schema, source: 'mutation($input: bookingInput!) { addbooking(input: $input) { id } }', variableValues: { input }, contextValue: context })));
+  for (const inputs of [[add(first, '14:00'), add(first, '14:00')], [add(null, '16:00'), add(second, '16:00')]]) {
+    const results = await race(inputs);
+    assert.equal(results.filter((result) => !result.errors).length, 1, JSON.stringify(results));
+    assert.equal(code(results.find((result) => result.errors)), 'BOOKING_SLOT_UNAVAILABLE');
+  }
+  const locked = await model('professional').collection.findOne({ _id: first._id });
+  assert.ok(locked._bookingScheduleLock > 0, 'The schedule lock writes the professional document');
+  assert.equal(await model('booking').countDocuments({ barbershop: shop._id, state: 'CONFIRMED' }), 4);
+});
+
+test('edits of a started booking skip the advance window unless the booking moves', async () => {
+  const { shop, service } = await fixture();
+  const [professional] = await model('professional').create([{ name: 'Started', barbershop: shop._id }]);
+  const scheduledDate = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  // Stored natively: the API no longer creates a booking whose time has passed.
+  const started = await model('booking').create({
+    barbershop: shop._id, professional: professional._id, client: user._id, scheduledDate, startTime: '10:00', endTime: '10:30',
+    state: 'CONFIRMED', totalPrice: 20, lines: [{ service: service._id, price: 20, durationMinutes: 30 }],
+  });
+  const id = String(started._id);
+  const line = { service: { id: service.id }, price: 20, durationMinutes: 0 };
+  // The dashboard edit form resends the unchanged date, time and professional with the notes.
+  const edited = await mutation('updatebooking', {
+    id, scheduledDate, startTime: '10:00', professional: { id: String(professional._id) }, notes: 'Running late',
+  }, 'notes startTime endTime');
+  assert.deepEqual({ ...edited }, { notes: 'Running late', startTime: '10:00', endTime: '10:30' });
+  // Only real slot changes take the schedule lock, so it counts the checks that ran.
+  const checks = async () => (await model('professional').collection.findOne({ _id: professional._id }))._bookingScheduleLock ?? 0;
+  assert.equal(await checks(), 0);
+  const extended = await mutation('updatebooking', { id, lines: [line, line] }, 'totalPrice endTime');
+  assert.deepEqual({ ...extended }, { totalPrice: 40, endTime: '11:00' });
+  assert.equal(await checks(), 1);
+  await mutation('updatebooking', { id, lines: [line, line], professional: { id: String(professional._id) } }, 'id');
+  assert.equal(await checks(), 1, 'Resent lines with the same services and durations are not rechecked');
+  const moved = await mutation('updatebooking', { id, startTime: '11:00' }, 'id', true);
+  assert.equal(moved.errors[0].extensions.code, 'BOOKING_OUTSIDE_ADVANCE_WINDOW');
 });
 
 for (const cleared of [[], null]) {
@@ -172,7 +240,10 @@ test('booking approval and bundle duration see records created in their active t
     session.startTransaction();
     const [shop] = await model('barbershop').create([{ name: 'Pending Shop', slug: randomUUID(), owner: user._id, state: 'APPROVED' }], { session });
     const [service] = await model('service').create([{ name: 'Pending Cut', price: 25, durationMinutes: 45, barbershop: shop._id }], { session });
-    const created = await simfinity.saveObject('booking', { barbershop: { id: String(shop._id) }, client: { id: user.id }, startTime: '10:00', lines: [{ price: 25, durationMinutes: 45 }] }, session, context);
+    const created = await simfinity.saveObject('booking', {
+      barbershop: { id: String(shop._id) }, client: { id: user.id }, scheduledDate: nextWeek, startTime: '10:00',
+      lines: [{ service: { id: String(service._id) }, price: 25, durationMinutes: 0 }],
+    }, session, context);
     assert.equal(created.endTime, '10:45');
     const bundle = await simfinity.saveObject('bundle', { name: 'Pending Deal', price: 20, barbershop: { id: String(shop._id) }, services: [{ service: { id: String(service._id) } }] }, session, context);
     assert.equal(bundle.totalDurationMinutes, 45);
