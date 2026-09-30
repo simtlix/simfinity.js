@@ -58,7 +58,7 @@ Run these from `examples/barber/mongodb` after `npm ci`:
 | `npm test` | Run backend unit and regression tests. |
 | `npm run test:query-mutations` | Check filters, combined aggregates and nested mutations against a disposable HTTP API; see the [shared runbook](../README.md#validate-changes). |
 | `npm run test:http` | Run `../tests/http-contract.mjs` against the running, seeded API. |
-| `npm run test:mongodb` | Check real transactions and derived booking, bundle, and review values in a temporary MongoDB database. |
+| `npm run test:mongodb` | Check real transactions, booking overlap rules and concurrent creates, and derived booking, bundle, and review values in a temporary MongoDB database. |
 | `npm run test:dataset` | Verify dataset load and deletion with a temporary API and MongoDB database. |
 | `npm run seed:admin` | Create or update the local admin account directly in MongoDB. |
 | `npm run seed:demo` | Create the minimal demo through the running GraphQL API. |
@@ -81,6 +81,8 @@ Integration checks use the configured `MONGO` deployment and create and remove t
 | `types/{entity}.stateMachine.js` | Shop approval and booking transitions. |
 | `auth/` | JWT request context, permission gates, and ownership checks. |
 | `dataset/`, `scripts/` | Synthetic fixtures and local operational commands. |
+
+`types/booking.schedule.js` holds the [booking rules](../README.md#booking-rules) shared by the booking controller and the `bookingAvailability` mutation in `types/customMutations.js`. Both read bookings with native Mongoose queries, outside the client booking scope. Before its overlap query, the controller increments a hidden `_bookingScheduleLock` counter on the professional document, or on the shop and all its professionals for a booking without one, in the same transaction. A concurrent booking for that schedule then hits a write conflict; Simfinity retries it with a fresh snapshot that sees the committed booking. Simfinity retries at once, up to five times, so the controller first waits 20–100 ms at random to spread concurrent retries apart. If every retry conflicts, the API returns `BOOKING_SCHEDULE_BUSY`.
 
 MongoDB ObjectIds are exposed as GraphQL `ID`. Shared frontend code treats them as opaque strings. The PostgreSQL example expresses the same domain with UUID identities and separate native database code; see [the comparison](../README.md#what-to-compare).
 

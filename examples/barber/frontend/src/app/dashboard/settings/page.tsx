@@ -6,7 +6,7 @@ import { useT } from '@/hooks/useT';
 import { useFormState } from '@/hooks/useFormState';
 import { useBarbershop } from '@/lib/barbershopContext';
 import { PageHeader } from '@/components/shared/page';
-import { BusinessHoursEditor } from '@/components/shared/hours';
+import { BusinessHoursEditor, DEFAULT_BUSINESS_HOURS } from '@/components/shared/hours';
 import { LocationPicker } from '@/components/shared/maps';
 import {
   FormField,
@@ -95,13 +95,6 @@ const INITIAL: SettingsForm = {
   cancellationFeePercent: '0',
 };
 
-const DEFAULT_HOURS: BusinessHourSlot[] = Array.from({ length: 7 }, (_, i) => ({
-  dayOfWeek: i,
-  openTime: '09:00',
-  closeTime: '18:00',
-  isClosed: i === 6,
-}));
-
 const FIELDS_QUERY =
   'id name slug description logoUrl coverImageUrl latitude longitude ' +
   'address { street number city state zip country } ' +
@@ -123,7 +116,7 @@ export default function OwnerSettingsPage() {
   const t = useT('dashboard');
   const { selectedBarbershop } = useBarbershop();
 
-  const [businessHours, setBusinessHours] = useState<BusinessHourSlot[]>(DEFAULT_HOURS);
+  const [businessHours, setBusinessHours] = useState<BusinessHourSlot[]>(DEFAULT_BUSINESS_HOURS);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState('');

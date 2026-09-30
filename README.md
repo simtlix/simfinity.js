@@ -108,7 +108,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.0
+npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.1
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies. Keep them within the ranges above so your application and Simfinity share a single Mongoose and GraphQL instance; npm reports an out-of-range version as a peer conflict. The MCP transports need the optional peer `@modelcontextprotocol/sdk@^1.13.0`, which is not installed automatically, and `graphql-middleware` is not a Simfinity dependency.
@@ -143,7 +143,7 @@ The repository root is a private npm workspace for shared tests, documentation a
 The [shared development and publication contract](docs/resources/contributing.md#development-and-publication-contract) applies to contributors and coding agents: when a task includes publication, completion requires the GitHub tag and published release, verified packages in both registries, and the applicable documentation deployment. This rule is tracked in `AGENTS.md` and the always-applied Cursor workflow rule.
 
 
-Enum filters resolve member names first, then declared internal values by strict equality, on both backends. For example, with `ONE: { value: 'TWO' }` and `TWO: { value: 'two' }`, filter `"TWO"` selects member `TWO`. Numeric internal values require numbers, not numeric strings. This applies to scalar lists, embedded/reference leaves and state filters across EQ, NE, LT, LTE, GT, GTE, BTW, IN and NIN. LIKE accepts string fields only. PostgreSQL writes and state guards continue to use internal enum values.
+Enum filters resolve member names first, then declared internal values by strict equality, on both backends. For example, with `ONE: { value: 'TWO' }` and `TWO: { value: 'two' }`, filter `"TWO"` selects member `TWO`. Numeric internal values require numbers, not numeric strings. This applies to scalar lists, embedded/reference leaves and state filters across EQ, NE, LT, LTE, GT, GTE, BTW, IN and NIN. LIKE accepts string fields only. PostgreSQL writes and state guards continue to use internal enum values. Generated MongoDB models store numeric and boolean enum values as numbers and booleans, so MongoDB range filters, sorts and aggregate `groupId` values follow that type while PostgreSQL uses their text form (`"10"` before `"2"`); convert documents written by earlier versions as described in the [schema guide](docs/guide/schema.md#what-gets-generated).
 
 The shared runtime preserves the v3.1 contract: generated relationships run target middleware/scopes with protected identity and parent filters; nested mutations enforce child middleware and persisted ownership; standalone `saveObject()` wraps the complete workflow in a transaction. Accepted empty strings are preserved. Both facades expose `configureQueryLimits()` for bounded pagination.
 
@@ -152,7 +152,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.0 @modelcontextprotocol/sdk@^1.13.0
+npm install @simtlix/simfinity-mcp@3.5.1 @modelcontextprotocol/sdk@^1.13.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.

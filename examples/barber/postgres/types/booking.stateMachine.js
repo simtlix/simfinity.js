@@ -23,6 +23,12 @@ export const BookingStateEnum = new GraphQLEnumType({
 export const bookingStateMachine = {
   initialState: BookingStateEnum.getValue('CONFIRMED'),
   actions: {
+    reschedule: {
+      description:
+        'Move a currently confirmed booking after checking its new slot (CONFIRMED -> CONFIRMED). Rejects bookings cancelled or completed since the client loaded them.',
+      from: BookingStateEnum.getValue('CONFIRMED'),
+      to: BookingStateEnum.getValue('CONFIRMED'),
+    },
     complete: {
       description:
         'Mark a confirmed booking as completed after the service was delivered (CONFIRMED -> COMPLETED). Performed by the barbershop.',

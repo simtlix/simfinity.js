@@ -59,7 +59,7 @@ Run these from `examples/barber/postgres` after `npm ci`:
 | `npm test` | Run unit, scope, ownership, and controller regressions. |
 | `npm run test:query-mutations` | Check filters, combined aggregates and nested mutations against a disposable HTTP API; see the [shared runbook](../README.md#validate-changes). |
 | `npm run test:http` | Run `../tests/http-contract.mjs` against the running, seeded API. |
-| `npm run test:postgres` | Exercise PostgreSQL storage, FKs, transactions, GraphQL, and MCP in a temporary schema. |
+| `npm run test:postgres` | Exercise PostgreSQL storage, FKs, transactions, booking overlap rules and concurrent creates, GraphQL, and MCP in a temporary schema. |
 | `npm run test:dataset` | Start a temporary API and verify dataset loading and FK-ordered deletion. |
 | `npm run test:frontend-queries` | Validate the shared dashboard selections against the GraphQL schema. |
 | `npm run seed:admin` | Create or update the local admin account. |
@@ -88,6 +88,8 @@ const [user] = await UserModel.find(
 ```
 
 Native methods do not provide Mongoose chaining or MongoDB aggregation pipelines. They bypass the GraphQL application boundary, so keep native writes inside an authorized workflow. Scopes, controllers, relationships, and state machines express the same domain as the MongoDB example; adapter-specific operations remain separate.
+
+`types/booking.schedule.js` holds the [booking rules](../README.md#booking-rules) shared by the booking controller and the `bookingAvailability` mutation in `types/customMutations.js`. Both read bookings through the native model, outside the client booking scope. Before its overlap query, the controller runs `UPDATE … SET id = id` on the professional row, or on the shop row and all its professionals for a booking without one, through the active session. A concurrent REPEATABLE READ transaction for that schedule waits and then fails with a serialization error; Simfinity retries it, up to five times, with a fresh snapshot that sees the committed booking. The controller reports that error as `BOOKING_SCHEDULE_BUSY` and keeps its SQLSTATE, so Simfinity still retries it and returns `BOOKING_SCHEDULE_BUSY`, as the MongoDB API does, if every retry fails. Each retry round lets about one waiting booking through, so a large burst of simultaneous bookings for one professional can exhaust the retries.
 
 ## Inspect generated schema artifacts
 

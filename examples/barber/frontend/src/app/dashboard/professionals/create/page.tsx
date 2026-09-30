@@ -16,7 +16,7 @@ import {
   FormSection,
   FormActions,
 } from '@/components/shared';
-import { BusinessHoursEditor, type BusinessHourSlot } from '@/components/shared/hours';
+import { BusinessHoursEditor, DEFAULT_BUSINESS_HOURS, type BusinessHourSlot } from '@/components/shared/hours';
 
 type ProfessionalForm = {
   name: string;
@@ -24,20 +24,13 @@ type ProfessionalForm = {
   photoUrl: string;
 };
 
-const DEFAULT_HOURS: BusinessHourSlot[] = Array.from({ length: 7 }, (_, i) => ({
-  dayOfWeek: i,
-  openTime: '09:00',
-  closeTime: '18:00',
-  isClosed: i === 0,
-}));
-
 export default function CreateProfessionalPage() {
   const router = useRouter();
   const client = useSimfinityClient();
   const t = useT('professionals');
   const { selectedBarbershop } = useBarbershop();
   const [saving, setSaving] = useState(false);
-  const [businessHours, setBusinessHours] = useState<BusinessHourSlot[]>(DEFAULT_HOURS);
+  const [businessHours, setBusinessHours] = useState<BusinessHourSlot[]>(DEFAULT_BUSINESS_HOURS);
 
   const { values, errors, setValue, setError, clearErrors } = useFormState<ProfessionalForm>({
     name: '',

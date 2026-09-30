@@ -7,7 +7,14 @@ import { format } from "date-fns";
 import { es } from "date-fns/locale";
 import { RequireAuth } from "@/lib/requireAuth";
 import { useT } from "@/hooks/useT";
-import { computeAvailableSlots } from "@/lib/slotUtils";
+import {
+  computeAvailableSlots,
+  shopNow,
+  type BusinessHour,
+  type BusyRange,
+  type ShopNow,
+} from "@/lib/slotUtils";
+import { ORIGINAL_KEPT, SLOT_ERROR_CODES, bookingErrorCode, bookingErrorMessage } from "@/lib/bookingErrors";
 import {
   StepIndicator,
   ServiceSelectionCard,
@@ -64,22 +71,22 @@ type ProfessionalData = {
   bio?: string;
   photoUrl?: string;
   specialty?: string;
-};
-
-type BusinessHour = {
-  dayOfWeek?: number;
-  openTime?: string;
-  closeTime?: string;
-  isClosed?: boolean;
+  businessHours?: BusinessHour[];
 };
 
 type BarbershopData = {
   id: string;
   name: string;
   slug: string;
-  slotDurationMinutes?: number;
+  timezone?: string | null;
+  slotDurationMinutes?: number | null;
+  bufferMinutes?: number | null;
+  minAdvanceHours?: number | null;
+  maxAdvanceDays?: number | null;
   businessHours?: BusinessHour[];
 };
+
+const HOURS_FIELDS = "businessHours { dayOfWeek openTime closeTime isClosed breakStartTime breakEndTime }";
 
 const NO_PREFERENCE_ID = "__any__";
 
@@ -110,7 +117,11 @@ function BookingFlow() {
   const [selectedTime, setSelectedTime] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [confirmationCode, setConfirmationCode] = useState("");
-  const [availableSlots, setAvailableSlots] = useState<{ time: string; available: boolean }[]>([]);
+  const [bookingError, setBookingError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<{ ranges: BusyRange[]; now: ShopNow } | null>(null);
+  const [availabilityVersion, setAvailabilityVersion] = useState(0);
+  // A confirmed booking of this shop being rescheduled; the action rechecks its current state.
+  const [rescheduleTarget, setRescheduleTarget] = useState<string | null>(null);
   const [slotsLoading, setSlotsLoading] = useState(false);
 
   useEffect(() => {
@@ -122,7 +133,7 @@ function BookingFlow() {
         const shop = (await client.getById(
           "barbershop",
           barbershopId,
-          "id name slug slotDurationMinutes businessHours { dayOfWeek openTime closeTime isClosed } services { id name description durationMinutes price category { name } } bundles { id name description price totalDurationMinutes services { service { id name } } } professionals { id name bio photoUrl isActive }",
+          `id name slug timezone slotDurationMinutes bufferMinutes minAdvanceHours maxAdvanceDays ${HOURS_FIELDS} services { id name description durationMinutes price category { name } } bundles { id name description price totalDurationMinutes services { service { id name } } } professionals { id name bio photoUrl isActive ${HOURS_FIELDS} }`,
         )) as Record<string, unknown> | null;
 
         if (cancelled) return;
@@ -165,6 +176,7 @@ function BookingFlow() {
                 name: String(p.name ?? ""),
                 bio: p.bio ? String(p.bio) : undefined,
                 photoUrl: p.photoUrl ? String(p.photoUrl) : undefined,
+                businessHours: (p.businessHours ?? undefined) as BusinessHour[] | undefined,
               })),
           );
 
@@ -186,10 +198,15 @@ function BookingFlow() {
               const booking = (await client.getById(
                 "booking",
                 rescheduleId,
-                "id lines { service { id } price durationMinutes } professional { id }",
+                "id state barbershop { id } lines { service { id } price durationMinutes } professional { id }",
               )) as Record<string, unknown> | null;
 
               if (!cancelled && booking) {
+                // Any other booking only prefills the form, and confirming books a new appointment.
+                const bookingShopId = (booking.barbershop as { id?: string } | null)?.id;
+                if (booking.state === "CONFIRMED" && bookingShopId != null && String(bookingShopId) === String(shop.id)) {
+                  setRescheduleTarget(String(booking.id));
+                }
                 const lines = (booking.lines ?? []) as Record<string, unknown>[];
                 const serviceIds = new Set(
                   lines
@@ -219,42 +236,38 @@ function BookingFlow() {
     return () => { cancelled = true; };
   }, [client, barbershopId, bundleParam, rescheduleId]);
 
+  // The booking scope limits a client's `bookings` query to their own rows, so taken
+  // times of every client come from the narrow `bookingAvailability` operation.
   useEffect(() => {
     if (!barbershop?.id || !selectedDate) {
-      setAvailableSlots([]);
+      setBusy(null);
       return;
     }
     let cancelled = false;
-    const dateStr = format(selectedDate, "yyyy-MM-dd");
+    const date = format(selectedDate, "yyyy-MM-dd");
 
     (async () => {
       setSlotsLoading(true);
       try {
-        const bookings = (await client
-          .find("booking")
-          .where("barbershop", [{ path: "id", operator: "EQ", value: barbershop.id }])
-          .where("scheduledDate", "EQ", dateStr)
-          .where("state", "EQ", "CONFIRMED")
-          .fields("startTime endTime")
-          .exec()) as { startTime?: string; endTime?: string }[];
-
-        if (cancelled) return;
-        const slots = computeAvailableSlots(
-          barbershop.businessHours ?? [],
-          barbershop.slotDurationMinutes ?? 30,
-          dateStr,
-          bookings,
-        );
-        setAvailableSlots(slots);
+        // The booking being rescheduled does not block its own new time, as on the server.
+        const input = rescheduleTarget
+          ? { barbershopId: barbershop.id, date, excludeBookingId: rescheduleTarget }
+          : { barbershopId: barbershop.id, date };
+        const ranges = (await client.customMutation(
+          "bookingAvailability",
+          { input },
+          "startTime endTime professionalId",
+        )) as BusyRange[] | null;
+        if (!cancelled) setBusy({ ranges: ranges ?? [], now: shopNow(barbershop.timezone) });
       } catch {
-        if (!cancelled) setAvailableSlots([]);
+        if (!cancelled) setBusy(null);
       } finally {
         if (!cancelled) setSlotsLoading(false);
       }
     })();
 
     return () => { cancelled = true; };
-  }, [client, barbershop, selectedDate]);
+  }, [client, barbershop, selectedDate, availabilityVersion, rescheduleTarget]);
 
   const steps = useMemo(
     () =>
@@ -288,8 +301,25 @@ function BookingFlow() {
     }
   }, [currentIdx, setStep, router]);
 
+  // A chosen time is only valid for the date, professional and duration it was offered for.
+  const selectDate = useCallback((date: Date) => {
+    setSelectedDate(date);
+    setSelectedTime(null);
+  }, []);
+
+  const selectProfessional = useCallback((id: string) => {
+    setSelectedProfessionalId(id);
+    setSelectedTime(null);
+  }, []);
+
+  const selectTime = useCallback((time: string) => {
+    setSelectedTime(time);
+    setBookingError(null);
+  }, []);
+
   const toggleService = useCallback((id: string) => {
     if (selectedBundleId) setSelectedBundleId(null);
+    setSelectedTime(null);
     setSelectedServiceIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -300,6 +330,7 @@ function BookingFlow() {
 
   const toggleBundle = useCallback(
     (bundleId: string) => {
+      setSelectedTime(null);
       if (selectedBundleId === bundleId) {
         setSelectedBundleId(null);
         setSelectedServiceIds(new Set());
@@ -350,6 +381,24 @@ function BookingFlow() {
     [professionals, selectedProfessionalId],
   );
 
+  const availableSlots = useMemo(() => {
+    if (!barbershop || !selectedDate || !busy) return [];
+    const date = format(selectedDate, "yyyy-MM-dd");
+    return computeAvailableSlots({
+      date,
+      durationMinutes: totalDuration,
+      professionalId: selectedProfessional?.id ?? null,
+      busy: busy.ranges,
+      businessHours: barbershop.businessHours,
+      professionalHours: selectedProfessional?.businessHours,
+      slotDurationMinutes: barbershop.slotDurationMinutes,
+      bufferMinutes: barbershop.bufferMinutes,
+      minAdvanceHours: barbershop.minAdvanceHours,
+      maxAdvanceDays: barbershop.maxAdvanceDays,
+      now: busy.now,
+    });
+  }, [barbershop, selectedDate, busy, totalDuration, selectedProfessional]);
+
   const canContinue = useMemo(() => {
     switch (currentStep) {
       case "services":
@@ -372,16 +421,9 @@ function BookingFlow() {
   const handleConfirm = useCallback(async () => {
     if (!barbershop || !selectedDate || !selectedTime) return;
     setSubmitting(true);
+    setBookingError(null);
     try {
-      if (rescheduleId) {
-        try {
-          await client.transition("booking", "cancelbyclient", rescheduleId, {}, "id");
-        } catch {
-          /* old booking may already be cancelled */
-        }
-      }
-
-      const proId = selectedProfessionalId === NO_PREFERENCE_ID ? undefined : selectedProfessionalId;
+      const proId = selectedProfessionalId === NO_PREFERENCE_ID ? null : selectedProfessionalId;
 
       const lines =
         selectedBundle
@@ -399,25 +441,44 @@ function BookingFlow() {
             }));
 
       const payload: Record<string, unknown> = {
-        barbershop: { id: barbershop.id },
         scheduledDate: format(selectedDate, "yyyy-MM-dd"),
         startTime: selectedTime,
         lines,
       };
-      if (proId) payload.professional = { id: proId };
       if (notes.trim()) payload.notes = notes.trim();
 
-      const result = (await client.add("booking", payload, "id confirmationCode")) as {
-        id?: string;
-        confirmationCode?: string;
-      } | null;
+      // The action checks that the booking is still confirmed inside the transaction, then checks
+      // and moves its slot without counting itself. A rejection does not change the booking.
+      const result = (rescheduleTarget
+        ? await client.transition(
+            "booking",
+            "reschedule",
+            rescheduleTarget,
+            { ...payload, professional: proId ? { id: proId } : null },
+            "id confirmationCode state",
+          )
+        : await client.add(
+            "booking",
+            { ...payload, barbershop: { id: barbershop.id }, ...(proId ? { professional: { id: proId } } : {}) },
+            "id confirmationCode state",
+          )) as { id?: string; confirmationCode?: string } | null;
 
       setConfirmationCode(result?.confirmationCode ?? "—");
       setStep("confirmation");
-    } catch {
+    } catch (error) {
+      // The API rechecks the slot; explain a rejection and, when the time is gone, offer fresh times.
+      const code = bookingErrorCode(error);
+      const message = bookingErrorMessage(code, Boolean(rescheduleTarget));
+      const reason = t(message.key, message.fallback);
+      setBookingError(rescheduleTarget && code !== "BAD_REQUEST" ? `${reason} ${t(ORIGINAL_KEPT.key, ORIGINAL_KEPT.fallback)}` : reason);
       setSubmitting(false);
+      if (SLOT_ERROR_CODES.includes(code)) {
+        setSelectedTime(null);
+        setAvailabilityVersion((version) => version + 1);
+        setStep("time");
+      }
     }
-  }, [barbershop, client, notes, rescheduleId, selectedBundle, selectedDate, selectedProfessionalId, selectedServices, selectedTime, setStep]);
+  }, [barbershop, client, notes, rescheduleTarget, selectedBundle, selectedDate, selectedProfessionalId, selectedServices, selectedTime, setStep, t]);
 
   if (loading) {
     return (
@@ -544,14 +605,14 @@ function BookingFlow() {
           )}
 
           {currentStep === "date" && (
-            <StepDate selectedDate={selectedDate} onSelect={setSelectedDate} t={t} />
+            <StepDate selectedDate={selectedDate} onSelect={selectDate} t={t} />
           )}
 
           {currentStep === "professional" && (
             <StepProfessional
               professionals={professionals}
               selectedId={selectedProfessionalId}
-              onSelect={setSelectedProfessionalId}
+              onSelect={selectProfessional}
               t={t}
             />
           )}
@@ -561,7 +622,7 @@ function BookingFlow() {
               slots={availableSlots}
               slotsLoading={slotsLoading}
               selectedTime={selectedTime}
-              onSelect={setSelectedTime}
+              onSelect={selectTime}
               t={t}
             />
           )}
@@ -585,6 +646,15 @@ function BookingFlow() {
               notes={notes}
               onNotesChange={setNotes}
             />
+          )}
+
+          {(currentStep === "review" || currentStep === "time") && bookingError && (
+            <div
+              role="alert"
+              className="mt-6 max-w-lg rounded-lg border border-error/25 bg-error/10 px-3 py-2 text-sm text-error"
+            >
+              {bookingError}
+            </div>
           )}
 
           {currentStep === "confirmation" && (

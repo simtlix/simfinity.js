@@ -24,7 +24,7 @@ There is **no** `simfinitySetup/` folder, **no** `registerFormCustomization`, an
 | Simfinity (runtime) | `src/lib/simfinity/` | `SimfinityClientProvider`, `I18nProvider`, hooks (mirrors former fe-components subset) |
 | GraphQL client API | `@simtlix/simfinity-js-client` | ^1.1.0 |
 | Component dev | Storybook 10 | `@storybook/nextjs-vite` |
-| Tests | Vitest 4 (Storybook browser tests + `npm run test:unit`), Playwright | `src/lib/cn.test.ts` for class-merge helper |
+| Tests | Vitest 4 (Storybook browser tests + `npm run test:unit`), Playwright | Unit tests for the class-merge, business-hours, booking-slot and booking-error helpers |
 
 ## Getting started
 
@@ -161,7 +161,7 @@ npm run build
 npm run start          # production server on 4401; use -- -p 4501 for PostgreSQL
 ```
 
-`typecheck` generates Next.js route types before strict TypeScript checking. Vitest's unit project runs the inherited class-merge helper tests. Storybook configuration, browser tests, and all component stories remain available via `npm run build-storybook` and `npx vitest run --project storybook` (requires a Playwright browser).
+`typecheck` generates Next.js route types before strict TypeScript checking. Vitest's unit project runs the class-merge, business-hours, booking-slot and booking-error helper tests. Storybook configuration, browser tests, and all component stories remain available via `npm run build-storybook` and `npx vitest run --project storybook` (requires a Playwright browser).
 
 With the selected full stack running:
 
@@ -171,7 +171,7 @@ GRAPHQL_ENDPOINT=http://localhost:4400/graphql PLAYWRIGHT_BASE_URL=http://localh
 GRAPHQL_ENDPOINT=http://localhost:4500/graphql PLAYWRIGHT_BASE_URL=http://localhost:4501 DEMO_SHOP_SLUG=barber-demo npm run test:e2e
 ```
 
-Playwright checks home and search pages, actual client login, a complete booking against the seeded API, and the mobile shop layout. It creates a real demo appointment for the next month's 15th using the first available slot, then validates the mutation response ID and confirmation screen. The booking screenshot is written to `test-results/booking-confirmed.png`. Run these tests only against disposable example data; repeated runs create additional bookings.
+Playwright checks home and search pages, actual client login, a complete booking against the seeded API, a reschedule, and the mobile shop layout. It creates a real demo appointment for the next month's 15th using the first available slot, then validates the mutation response ID and confirmation screen. The reschedule test books the next month's 16th through the API, lets a second client take the time chosen on the page, and checks that the rejected `reschedule_booking` leaves the booking unchanged and that the next choice moves the same booking; It also cancels the original booking after the form loads and checks that the page reports the state change instead of confirming an unreserved time. It deletes its bookings and the second client afterwards. The booking screenshot is written to `test-results/booking-confirmed.png`. Run these tests only against disposable example data; repeated runs create additional bookings.
 
 ## License
 

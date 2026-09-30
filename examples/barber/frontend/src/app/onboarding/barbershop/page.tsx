@@ -7,7 +7,7 @@ import { useAuth } from '@/lib/authContext';
 import { useT } from '@/hooks/useT';
 import { useFormState } from '@/hooks/useFormState';
 import { StepIndicator } from '@/components/shared/booking';
-import { BusinessHoursEditor } from '@/components/shared/hours';
+import { BusinessHoursEditor, DEFAULT_BUSINESS_HOURS } from '@/components/shared/hours';
 import { LocationPicker } from '@/components/shared/maps';
 import {
   FormField,
@@ -110,13 +110,6 @@ const INITIAL: FormData = {
   longitude: '',
 };
 
-const DEFAULT_HOURS: BusinessHourSlot[] = Array.from({ length: 7 }, (_, i) => ({
-  dayOfWeek: i,
-  openTime: '09:00',
-  closeTime: '18:00',
-  isClosed: i === 6,
-}));
-
 export default function OnboardingBarbershopPage() {
   const router = useRouter();
   const client = useSimfinityClient();
@@ -124,7 +117,7 @@ export default function OnboardingBarbershopPage() {
   const t = useT('onboarding');
 
   const [stepIdx, setStepIdx] = useState(0);
-  const [businessHours, setBusinessHours] = useState<BusinessHourSlot[]>(DEFAULT_HOURS);
+  const [businessHours, setBusinessHours] = useState<BusinessHourSlot[]>(DEFAULT_BUSINESS_HOURS);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
 

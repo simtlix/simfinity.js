@@ -13,10 +13,11 @@ const fixture = () => {
   const Kind = new GraphQLEnumType({ name: 'FilterKind', values: { ONE: { value: 'TWO' }, TWO: { value: 'two' } } });
   const Plain = new GraphQLEnumType({ name: 'FilterPlain', values: { ONE: { value: 'one' }, TWO: { value: 'two' } } });
   const Numeric = new GraphQLEnumType({ name: 'FilterNumeric', values: { ONE: { value: 1 }, TWO: { value: 2 } } });
+  const Level = new GraphQLEnumType({ name: 'FilterLevel', values: { TWO: { value: 2 }, TEN: { value: 10 } } });
   const Leaf = new GraphQLObjectType({ name: 'FilterLeaf', fields: { kinds: { type: new GraphQLList(Kind) } } });
   const Target = new GraphQLObjectType({ name: 'FilterTarget', fields: { id: { type: GraphQLID }, kind: { type: Kind } } });
   const Root = new GraphQLObjectType({ name: 'FilterRoot', fields: {
-    id: { type: GraphQLID }, key: { type: GraphQLString }, kind: { type: Kind }, plain: { type: Plain }, numeric: { type: Numeric },
+    id: { type: GraphQLID }, key: { type: GraphQLString }, kind: { type: Kind }, plain: { type: Plain }, numeric: { type: Numeric }, level: { type: Level },
     kinds: { type: new GraphQLList(Kind) }, leaves: { type: new GraphQLList(Leaf), extensions: { relation: { embedded: true } } },
     target: { type: Target, extensions: { relation: { embedded: false } } },
   } });
@@ -54,9 +55,9 @@ describe.skipIf(!mongoUri || !postgresUri)('enum filter differential parity', ()
       b.schema = api.createSchema();
       if (api.initializeDatabase) await api.initializeDatabase();
       else for (const { model } of api.getRegistrations()) if (model) await model.createCollection();
-      for (const [key, kind, numeric, plain] of [['first', 'TWO', 1, 'one'], ['second', 'two', 2, 'two'], ['null', null, null, null]]) {
+      for (const [key, kind, numeric, plain, level] of [['first', 'TWO', 1, 'one', 2], ['second', 'two', 2, 'two', 10], ['null', null, null, null, null]]) {
         const target = await api.getModel(f.Target).create({ kind });
-        await api.getModel(f.Root).create({ key, kind, plain, numeric, kinds: [kind], leaves: [{ kinds: [kind] }], target: target._id || target.id });
+        await api.getModel(f.Root).create({ key, kind, plain, numeric, level, kinds: [kind], leaves: [{ kinds: [kind] }], target: target._id || target.id });
       }
       await api.getModel(f.Root).create({ key: 'missing' });
       for (const key of ['first', 'second']) {
@@ -94,6 +95,44 @@ describe.skipIf(!mongoUri || !postgresUri)('enum filter differential parity', ()
       for (const operator of ['IN', 'NIN']) await compare(field, operator, []);
     }
     expect(await compare('kind', 'IN', ['ONE', 'TWO'])).toEqual(['first', 'second']);
+  });
+  it('reads numeric enum values back through list and single reads', async () => {
+    const source = '{items(sort:{terms:[{field:"key",order:ASC}]}){id key numeric}}';
+    const results = await Promise.all(backends.map((b) => execute(b, source)));
+    for (const result of results) expect(result.errors).toBeUndefined();
+    const values = results.map(({ data }) => data.items.map(({ key, numeric }) => ({ key, numeric })));
+    expect(values[1]).toEqual(values[0]);
+    expect(values[0]).toContainEqual({ key: 'first', numeric: 'ONE' });
+    for (const [index, b] of backends.entries()) {
+      const { id } = results[index].data.items.find(({ key }) => key === 'second');
+      const single = await execute(b, `{item(id:"${id}"){numeric}}`);
+      expect(single.errors).toBeUndefined();
+      expect(single.data.item).toEqual({ numeric: 'TWO' });
+    }
+  });
+  // Documented divergence: MongoDB stores numeric enums as numbers, PostgreSQL stores every enum as text.
+  it('pins how each backend compares, sorts and groups multi-digit numeric enums', async () => {
+    const both = 'AND:[{conditions:[{field:"level",operator:IN,value:["TWO","TEN"]}]}]';
+    const expected = [
+      { lt: ['first'], gte: ['second'], sorted: ['first', 'second'], groups: [2, 10] },
+      { lt: [], gte: ['first', 'second'], sorted: ['second', 'first'], groups: ['10', '2'] },
+    ];
+    for (const [index, b] of backends.entries()) {
+      const run = async (source) => {
+        const result = await execute(b, source);
+        expect(result.errors).toBeUndefined();
+        return result.data;
+      };
+      const keys = async (filter, field = 'key') => (await run(`{items(${filter},sort:{terms:[{field:"${field}",order:ASC}]}){key}}`))
+        .items.map(({ key }) => key);
+      const aggregate = await run(`{items_aggregate(${both},aggregation:{groupId:"level",facts:[{operation:COUNT,path:"id",factName:"n"}]}){groupId}}`);
+      expect({
+        lt: await keys('AND:[{conditions:[{field:"level",operator:LT,value:"TEN"}]}]'),
+        gte: await keys('AND:[{conditions:[{field:"level",operator:GTE,value:"TEN"}]}]'),
+        sorted: await keys(both, 'level'),
+        groups: aggregate.items_aggregate.map(({ groupId }) => groupId),
+      }).toEqual(expected[index]);
+    }
   });
   it.each([
     ['numeric', 'EQ', '1'], ['kind', 'EQ', 'unknown'], ['kind', 'LIKE', 'two'], ['numeric', 'LIKE', 'ONE'],

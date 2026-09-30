@@ -282,12 +282,13 @@ await check('omitted booking lines survive a partial update', async () => {
   assert.deepEqual(read.lines, booking.lines);
   assert.equal(read.totalPrice, 51);
 });
-await check('booking line replacement updates references and derived values', async () => {
-  await mutate('updatebooking', { id: booking.id, lines: [{ service: { id: services.A.id }, price: 0, durationMinutes: 0 }] }, 'id', owner.accessToken);
+await check('booking line replacement updates references and derives durations from the catalog', async () => {
+  // Service A lasts 15 minutes in the catalog; the API replaces the client's 0 and ignores the sent endTime.
+  await mutate('updatebooking', { id: booking.id, endTime: '10:00', lines: [{ service: { id: services.A.id }, price: 0, durationMinutes: 0 }] }, 'id', owner.accessToken);
   const read = await readBooking();
   assert.equal(read.totalPrice, 0);
-  assert.equal(read.endTime, '10:00');
-  assert.deepEqual(read.lines, [{ price: 0, durationMinutes: 0, service: { id: services.A.id } }]);
+  assert.equal(read.endTime, '10:15');
+  assert.deepEqual(read.lines, [{ price: 0, durationMinutes: 15, service: { id: services.A.id } }]);
 });
 for (const value of [[], null]) await check(`booking lines ${JSON.stringify(value)} clear totals and preserve shape`, async () => {
   await mutate('updatebooking', { id: booking.id, lines: value }, 'id', owner.accessToken);

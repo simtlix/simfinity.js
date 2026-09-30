@@ -1,13 +1,13 @@
 ---
 title: Database compatibility contract
-description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.5.0.
+description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.5.1.
 ---
 
 # Database compatibility contract
 
-This ledger records the v3.5.0 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
+This ledger records the v3.5.1 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
 
-The test paths below are available in the [v3.5.0 source](https://github.com/simtlix/simfinity.js/tree/v3.5.0). To try the API, use the [released starters](guide/databases.md#download-the-starters).
+The test paths below are available in the [v3.5.1 source](https://github.com/simtlix/simfinity.js/tree/v3.5.1). To try the API, use the [released starters](guide/databases.md#download-the-starters).
 
 When running the source tests, set `SIMFINITY_MONGODB_URI` and `SIMFINITY_POSTGRES_URI` to disposable databases for the cross-backend suites. Set `SIMFINITY_TEST_MONGODB_URI` to a separate disposable MongoDB database for upstream opt-in regressions. Mongo setup drops its configured databases, so these URIs must never identify application data. When a variable is absent, its integration suites are reported as skipped.
 
@@ -41,7 +41,7 @@ PostgreSQL owner/embedded reads use one repeatable-read snapshot. Generated and 
 
 PostgreSQL identities are UUIDs and native models/sessions are not Mongoose objects. Optional root scalar storage uses SQL NULL for absence. Embedded records preserve absent versus explicit-null fields through private presence markers, materialize descendant list defaults and minimize empty inline objects; native hooks/code still use plain records rather than Mongoose documents. Required typed database columns and real FKs are stronger storage constraints than the Mongo generator. Native methods and pipeline helpers are outside GraphQL API parity.
 
-Unsupported schema mappings are rejected before DDL: implicit many-to-many reciprocal lists, non-embedded collections inside embeddeds, embedded cycles, nested list wrappers, whole embedded-object uniqueness, unrecognized custom scalar storage and conflicting metadata. Whole embedded-object sorting/grouping remains unsupported. Scalar-list leaves inside nested embedded lists support filters/sorts and ragged group projections. Array facts use SUM=0/AVG=null, joined-row COUNT and whole-array lexicographic MIN/MAX. Aggregate sorting selects immediate array extrema, including default groupId order; ties need an additional sort term. Date/enum outputs and state-name aggregates retain Mongo's logical JSON values. Generated immutable comparison helpers and private presence columns are validated during initialization; existing schemas need an explicit migration. See [PostgreSQL documentation](postgresql.md) for setup and details.
+Unsupported schema mappings are rejected before DDL: implicit many-to-many reciprocal lists, non-embedded collections inside embeddeds, embedded cycles, nested list wrappers, whole embedded-object uniqueness, unrecognized custom scalar storage and conflicting metadata. Whole embedded-object sorting/grouping remains unsupported. Scalar-list leaves inside nested embedded lists support filters/sorts and ragged group projections. Array facts use SUM=0/AVG=null, joined-row COUNT and whole-array lexicographic MIN/MAX. Aggregate sorting selects immediate array extrema, including default groupId order; ties need an additional sort term. Date and string-enum outputs and state-name aggregates retain Mongo's logical JSON values. For numeric and boolean enums, PostgreSQL compares, sorts and groups the text form (aggregate `groupId` `"10"`, sorted before `"2"`), while MongoDB uses numbers and booleans. Generated immutable comparison helpers and private presence columns are validated during initialization; existing schemas need an explicit migration. See [PostgreSQL documentation](postgresql.md) for setup and details.
 
 Reference and nested writes retain the generated GraphQL input shapes. The live fixture creates a parent with an ObjectId reference and nested child, patches an embedded object, updates and deletes the child through the parent mutation, clears the reference, reads generated relation fields, and deletes the parent. Scalar list order and duplicates remain storage data. Aggregate queries retain `{ groupId, facts }`, default ascending ordering by `groupId` (ties are unspecified), and MongoDB numeric results.
 

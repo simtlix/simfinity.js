@@ -60,6 +60,10 @@ The minimal seed creates an approved shop with slug `barber-demo`, a service nam
 
 This is a local MVP with synthetic data. Payment is on site, and the reminder job is a stub. The example demonstrates application patterns rather than a production deployment configuration.
 
+Both APIs validate confirmed bookings on the server. A booking must fit the shop's hours, narrowed by the professional's own hours, outside both breaks, respect the advance window and buffer, and not overlap another confirmed booking of the same professional. Each line must reference one service or bundle, durations come from the catalog, the API always derives `endTime` and ignores one sent by the client, and concurrent bookings for one schedule are serialized in the database transaction. Updates are rechecked only when they change the booking's time, professional or services, so edit forms can resend unchanged fields. Because clients cannot read other clients' bookings, the booking page reads taken times from the `bookingAvailability` mutation, which returns only times and professional IDs to signed-in users. Rescheduling updates the existing booking in one mutation, so a rejected new time leaves the original booking confirmed. See the [booking rules](https://github.com/simtlix/simfinity.js/blob/master/examples/barber/README.md#booking-rules).
+
+The booking page reschedules through `reschedule_booking`, a `CONFIRMED -> CONFIRMED` state action that checks the current state and new slot in the same transaction. If the shop cancels or completes the booking while the form is open, the action rejects and the page reports the state change. A slot rejection preserves the original booking. Professional hours narrow the shop's window only when both opening and closing times are set; partial rows still contribute closed days and breaks.
+
 ## From the homepage to the running app
 
 The homepage's interactive example follows a simplified shop profile and its embedded opening hours. After seeding either stack, run this query in its GraphiQL endpoint to explore the complete app:

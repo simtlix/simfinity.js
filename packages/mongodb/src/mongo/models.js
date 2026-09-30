@@ -53,7 +53,24 @@ const withUnique = (fieldEntry, mongoType) => (fieldEntry.extensions && fieldEnt
   ? { type: mongoType, unique: true }
   : mongoType);
 
-const generateSchemaDefinition = (gqlType) => {
+const isPlainObject = (value) => value != null && Object.getPrototypeOf(value) === Object.prototype;
+
+// Store enum internal values with their own type, so reads can serialize them. A state machine
+// persists state names in `state`. State machines are not known when models are generated, so every
+// field named `state` keeps accepting names when values are not strings.
+const enumStorageType = (enumType, fieldName) => {
+  const values = enumType.getValues().map(({ value }) => value);
+  if (values.every((value) => typeof value === 'string')) return String;
+  // Mixed keeps values by identity only for primitives; others stay String so the write is rejected.
+  const primitive = (value) => value === null || ['string', 'number', 'boolean'].includes(typeof value);
+  if (!values.every(primitive)) return String;
+  if (fieldName === 'state') return mongoose.Schema.Types.Mixed;
+  if (values.every((value) => typeof value === 'number')) return Number;
+  if (values.every((value) => typeof value === 'boolean')) return Boolean;
+  return mongoose.Schema.Types.Mixed;
+};
+
+const generateSchemaDefinition = (gqlType, nested = false) => {
   const argTypes = gqlType.getFields();
   const schemaArg = {};
 
@@ -62,10 +79,10 @@ const generateSchemaDefinition = (gqlType) => {
 
     if (matchesScalar(type, GraphQLID)) {
       schemaArg[fieldEntryName] = mongoose.Schema.Types.ObjectId;
-    } else if (matchesScalar(type, GraphQLString)
-      || type instanceof GraphQLEnumType
-      || isNonNullOfType(type, GraphQLEnumType)) {
+    } else if (matchesScalar(type, GraphQLString)) {
       schemaArg[fieldEntryName] = withUnique(fieldEntry, String);
+    } else if (type instanceof GraphQLEnumType || isNonNullOfType(type, GraphQLEnumType)) {
+      schemaArg[fieldEntryName] = withUnique(fieldEntry, enumStorageType(unwrapNonNull(type), fieldEntryName));
     } else if (matchesScalar(type, GraphQLInt) || matchesScalar(type, GraphQLFloat)) {
       schemaArg[fieldEntryName] = withUnique(fieldEntry, Number);
     } else if (matchesScalar(type, GraphQLBoolean)) {
@@ -80,7 +97,11 @@ const generateSchemaDefinition = (gqlType) => {
           if (entryType === gqlType) {
             throw new Error('A type cannot have a field of its same type and embedded');
           }
-          schemaArg[fieldEntryName] = generateSchemaDefinition(entryType);
+          const definition = generateSchemaDefinition(entryType, true);
+          // A nested object under a `type` key can only be a subdocument; like other embedded objects, it has no _id.
+          schemaArg[fieldEntryName] = nested && fieldEntryName === 'type'
+            ? new mongoose.Schema(definition, { _id: false })
+            : definition;
         }
       }
     } else if (getListItemType(type)) {
@@ -90,12 +111,14 @@ const generateSchemaDefinition = (gqlType) => {
           if (itemType === gqlType) {
             throw new Error('A type cannot have a field of its same type and embedded');
           }
-          schemaArg[fieldEntryName] = [generateSchemaDefinition(itemType)];
+          schemaArg[fieldEntryName] = [generateSchemaDefinition(itemType, true)];
         }
       } else if (listItemMatchesScalar(type, GraphQLID)) {
         schemaArg[fieldEntryName] = [mongoose.Schema.Types.ObjectId];
-      } else if (listItemMatchesScalar(type, GraphQLString) || itemType instanceof GraphQLEnumType) {
+      } else if (listItemMatchesScalar(type, GraphQLString)) {
         schemaArg[fieldEntryName] = [String];
+      } else if (itemType instanceof GraphQLEnumType) {
+        schemaArg[fieldEntryName] = [enumStorageType(itemType)];
       } else if (listItemMatchesScalar(type, GraphQLBoolean)) {
         schemaArg[fieldEntryName] = [Boolean];
       } else if (listItemMatchesScalar(type, GraphQLInt) || listItemMatchesScalar(type, GraphQLFloat)) {
@@ -108,6 +131,12 @@ const generateSchemaDefinition = (gqlType) => {
     }
   }
 
+  // In a nested definition, Mongoose reads a `type` key as the type of the whole embedded path.
+  // Declare a field named `type` with an option object; plain objects here already are one.
+  if (nested && Object.hasOwn(schemaArg, 'type') && !isPlainObject(schemaArg.type)) {
+    schemaArg.type = { type: schemaArg.type };
+  }
+
   return schemaArg;
 };
 
@@ -116,20 +145,22 @@ const findObjectIdFields = (schemaDefinition, parentPath = '') => {
 
   for (const [fieldName, fieldDefinition] of Object.entries(schemaDefinition)) {
     const currentPath = parentPath ? `${parentPath}.${fieldName}` : fieldName;
+    // Look through option objects, including those that declare an embedded field named `type`.
+    let definition = fieldDefinition;
+    if (isPlainObject(definition) && definition.type && !isPlainObject(definition.type)) {
+      definition = definition.type;
+    }
+    if (definition instanceof mongoose.Schema) definition = definition.obj;
 
-    if (fieldDefinition === mongoose.Schema.Types.ObjectId) {
+    if (definition === mongoose.Schema.Types.ObjectId) {
       objectIdFields.push(currentPath);
-    } else if (typeof fieldDefinition === 'object' && fieldDefinition !== null) {
-      if (Array.isArray(fieldDefinition)) {
-        const arrayElement = fieldDefinition[0];
-        if (typeof arrayElement === 'object' && arrayElement !== null) {
-          objectIdFields.push(...findObjectIdFields(arrayElement, currentPath));
-        }
-      } else if (fieldDefinition.type === mongoose.Schema.Types.ObjectId) {
-        objectIdFields.push(currentPath);
-      } else if (!fieldDefinition.type) {
-        objectIdFields.push(...findObjectIdFields(fieldDefinition, currentPath));
+    } else if (Array.isArray(definition)) {
+      const arrayElement = definition[0];
+      if (typeof arrayElement === 'object' && arrayElement !== null) {
+        objectIdFields.push(...findObjectIdFields(arrayElement, currentPath));
       }
+    } else if (isPlainObject(definition)) {
+      objectIdFields.push(...findObjectIdFields(definition, currentPath));
     }
   }
 

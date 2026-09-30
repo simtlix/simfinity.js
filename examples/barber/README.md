@@ -55,6 +55,32 @@ All three accounts use the password **`demo1234`**:
 
 The accounts, passwords, addresses, and dataset are synthetic local demo fixtures. This MVP demonstrates application patterns; it is not a production deployment recipe. Payments are on site, and the reminder job is a stub.
 
+Business hours store JavaScript day numbers (`0` = Sunday). Earlier frontend builds labeled every weekday in the hours editor one day late, and hours saved with them are not migrated automatically: review and re-save them, or reset and re-seed the stack.
+
+## Booking rules
+
+Both APIs check a confirmed booking when it is created and when an update changes its shop, date, start time, professional or services. They compare stored and new values, so an edit form can resend unchanged fields, for example to save notes on a booking already in progress:
+
+- When it is created or moved to another date or start time, it needs a `scheduledDate` (`YYYY-MM-DD`) and a `startTime` (`HH:mm`), and it must start at least `minAdvanceHours` from now and at most `maxAdvanceDays` ahead, in the shop's `timezone` (UTC when the shop has none). The shop must be `APPROVED`, as it must be for a booking moved to another shop. A booking that keeps its time, for example one that gets another service, is checked only against the rules below.
+- Its services plus the shop's `bufferMinutes` must fit that weekday's opening hours and avoid the break. A professional's own row for the weekday narrows the shop's: the day is closed when either row closes it, it opens at the later opening and closes at the earlier closing, and both breaks apply. Closed days reject bookings; a weekday on which neither the shop nor the professional has a row has no hour limits. A closing or break end of `24:00` means midnight.
+- It must not overlap another confirmed booking of the same professional, buffer included. A booking without a professional holds the whole shop.
+
+Each booking line must reference exactly one service or bundle, and a `durationMinutes` sent with it must be a whole, non-negative number; otherwise the API rejects the create or line update with `INVALID_BOOKING_LINE`. The API then derives line durations from the referenced services and bundles instead of the request, and always stores `endTime` as the start time plus those durations (`24:00` for a booking that ends at midnight): an `endTime` sent to `addbooking` or `updatebooking` is ignored, so it can neither shorten nor stretch the held time. Only a MongoDB line whose reference no longer resolves keeps its captured duration, because MongoDB accepts dangling references. The API also stores `startTime` as zero-padded 24-hour `HH:mm` (`9:00` becomes `09:00`). Rejections use the codes `BOOKING_SLOT_UNAVAILABLE`, `BOOKING_OUTSIDE_HOURS`, `BOOKING_OUTSIDE_ADVANCE_WINDOW`, `INVALID_BOOKING_TIME`, `INVALID_BOOKING_LINE` and `INVALID_BOOKING_PROFESSIONAL`, plus `INVALID_BOOKING_BARBERSHOP` for a booking nested in a barbershop mutation that names another shop. Concurrent bookings for the same schedule are serialized inside the database transaction; when retries run out, both APIs return `BOOKING_SCHEDULE_BUSY` and the client can try again. See the backend READMEs. Existing bookings are not revalidated or migrated; when one is checked again, a negative line duration stored by an earlier version counts as zero.
+
+Clients cannot read other clients' bookings, so the booking page asks `bookingAvailability` for taken times. It requires a signed-in user and returns only the start time, end time and professional ID of confirmed bookings for an approved shop and date, in clock order; `professionalId` narrows it to the ranges that block that professional. `excludeBookingId` leaves out one booking when the signed-in user is its client; other bookings are never left out. A malformed `barbershopId` or `excludeBookingId` returns `NOT_VALID_ID` from both APIs. When the API rejects the chosen time, the page explains why, reloads the taken times and returns to the time step. Simfinity 3.3.0 registers custom mutations but not custom queries, so this read-only operation is a mutation. It is also an MCP tool.
+
+```graphql
+mutation BusyTimes {
+  bookingAvailability(input: { barbershopId: "<shop id>", date: "2026-10-15" }) {
+    startTime
+    endTime
+    professionalId
+  }
+}
+```
+
+To reschedule, the booking page calls `reschedule_booking` with its new date, time, professional and services. This `CONFIRMED -> CONFIRMED` action checks the booking's current state inside the transaction, then validates and moves its slot. Its overlap check ignores the booking itself, so the new time may overlap the old one. A rejected slot leaves the booking at its original time; if the shop has cancelled or completed it since the form loaded, the action rejects with `BAD_REQUEST` and the page explains that it can no longer be rescheduled. The booking keeps its ID and confirmation code. A booking already known to be non-confirmed when the page loads only prefills the form; confirming that form creates a new booking. Generic `updatebooking` remains available for historical-record edits.
+
 ## Configure and develop
 
 The example root [`.env.example`](.env.example) controls Compose host ports, bind address, public hostname, PostgreSQL password, and JWT secrets. Ports bind to `127.0.0.1` by default. After changing ports or `PUBLIC_HOST`, rebuild the stack: Next.js embeds the browser's GraphQL URL at build time.
@@ -117,7 +143,7 @@ The scopes preserve caller filters and intersect them with server restrictions. 
 
 **Reference integrity differs:** PostgreSQL FKs reject an embedded reference to a nonexistent service and roll back the mutation. The MongoDB example uses the default integrity mode and can store that reference and resolve it to null on reads; Mongoose references are not foreign keys. The matrix checks this difference explicitly. Simfinity 3.4.0 adds an opt-in [transactional Mongo integrity adapter](../../docs/guide/mongodb-integrity.md); these examples remain pinned to 3.3.0 and keep their existing defaults.
 
-These tests exercise login, scopes, booking, and MCP against a real backend and create test records. Both backends also have real-database checks for transactions, derived domain values, and dataset loading/deletion. PostgreSQL adds storage, foreign-key, and frontend-query checks; see the backend READMEs. The frontend has its own unit, type, build, and browser checks.
+These tests exercise login, scopes, booking rules and availability, and MCP against a real backend and create test records. Both backends also have real-database checks for transactions, derived domain values, and dataset loading/deletion. PostgreSQL adds storage, foreign-key, and frontend-query checks; see the backend READMEs. The frontend has its own unit, type, build, and browser checks.
 
 The dedicated [Barber workflow](../../.github/workflows/barber.yml) owns these apps' validation, including a database matrix and browser checks against both backends. It also runs `npm run test:security` for each application, auditing both runtime and development dependencies in its own lockfile. Root library lint and Vitest discovery exclude `examples/`; root package release checks do not install or publish these apps. Example changes do not require an npm library release.
 
@@ -151,7 +177,7 @@ docker compose -f compose.postgres.yaml down --volumes
 
 Start and seed that stack again for a fresh demo. These commands target the named project in the selected Compose file.
 
-`dataset:load` loads the larger synthetic fixture through GraphQL after `seed:admin`. `dataset:delete` removes all records of the covered catalog and activity types at its configured endpoint, including records created through the UI, while retaining user accounts. Use these commands only against a disposable example database.
+`dataset:load` loads the larger synthetic fixture through GraphQL after `seed:admin`. Its sample bookings are dated two to eight days after the load, on open weekdays, so they satisfy the booking rules. `dataset:delete` removes all records of the covered catalog and activity types at its configured endpoint, including records created through the UI, while retaining user accounts. Use these commands only against a disposable example database.
 
 ## Source and license
 
