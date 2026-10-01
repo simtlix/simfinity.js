@@ -77,7 +77,7 @@ All helpers below are exported by `@simtlix/simfinity-core/auth` and are also av
 | `createRule(predicate, message = 'Access denied', code = 'FORBIDDEN')` | Creates a rule from a predicate; only `true` or `undefined` allows access. |
 | `allow()` / `deny(message)` | Unconditionally permits or denies a field. |
 
-`requireRole` accepts `{ userPath: 'user', rolePath: 'role' }`. `requirePermission` accepts `{ userPath: 'user', permissionsPath: 'permissions' }`. Paths may be dotted strings or extractor functions. `rolePath` resolves inside the user, so use `'profile.role'`, not `'user.profile.role'`.
+`requireRole` accepts `{ userPath: 'user', rolePath: 'role' }`. `requirePermission` accepts `{ userPath: 'user', permissionsPath: 'permissions' }`. Paths may be dotted strings or extractor functions. `rolePath` resolves inside the user, so use `'profile.role'`, not `'user.profile.role'`. Both helpers copy their required lists when created; changing the original arrays later does not change the rule. User claims are checked on every call.
 
 Invalid required roles or permissions (including `null`, `undefined`, empty strings, empty arrays, or non-string entries) throw `TypeError` when the helper is created. Malformed permission claims deny access: use `['posts:read']`, not the string `'posts:read'`. Substrings and embedded wildcard characters such as `'posts:*'` do not grant other permissions. Composition helpers and `createRule` require function arguments, and `composeRules` and `anyRule` throw `TypeError` without any rule; use `allow()` for an intentional grant. `anyRule` may continue after a denied result or error to another granting rule.
 
@@ -124,6 +124,8 @@ Expressions are JSON objects or booleans; strings such as `'ROLE:admin'` are not
 Reference paths support the `parent`, `args`, and `ctx` roots, dotted fields, document getters, and numeric array indices. Empty segments and the `__proto__`, `prototype`, and `constructor` segments are invalid. Missing references and runtime `in` operands that are not arrays cannot become grants through negation; invalid results propagate through AND. A valid `anyOf` branch can still grant access independently, such as a published post with no logged-in user.
 
 The factories and `createRuleFromExpression` throw `TypeError` for malformed ASTs, including unknown operators in any nested branch. `isPolicyExpression` validates the whole AST; direct `evaluateExpression` calls return `false` for malformed ASTs. Valid `false` expressions remain negatable (`{ not: false }` is true).
+
+Created expression rules classify each operand as a literal or reference once. Adding `ref` to a literal afterwards does not turn it into a reference; object literals continue to compare by identity.
 
 ## Schema integration
 

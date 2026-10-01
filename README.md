@@ -108,7 +108,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.1
+npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.2
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies. Keep them within the ranges above so your application and Simfinity share a single Mongoose and GraphQL instance; npm reports an out-of-range version as a peer conflict. The MCP transports need the optional peer `@modelcontextprotocol/sdk@^1.13.0`, which is not installed automatically, and `graphql-middleware` is not a Simfinity dependency.
@@ -152,7 +152,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.1 @modelcontextprotocol/sdk@^1.13.0
+npm install @simtlix/simfinity-mcp@3.5.2 @modelcontextprotocol/sdk@^1.13.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
@@ -2059,7 +2059,7 @@ const permissions = {
 
 Requires the user to have a specific role. Supports custom paths:
 
-The required role must be a nonempty string or nonempty array of nonempty strings; invalid configuration throws `TypeError`. The user's single role value must match an allowed string exactly.
+The required role must be a nonempty string or nonempty array of nonempty strings; invalid configuration throws `TypeError`. The user's single role value must match an allowed string exactly. The helper copies the required list when created, so later changes to the original array do not alter the rule.
 
 ```javascript
 const permissions = {
@@ -2081,7 +2081,7 @@ const permissions = {
 
 Requires the user to have specific permission(s). Supports custom paths:
 
-The required permission must be a nonempty string or nonempty array of nonempty strings; invalid configuration throws `TypeError`. The user's claim must be an array of nonempty strings. Entries match exactly; only a standalone `'*'` entry grants every permission. A claim such as `'posts:read'` must be supplied as `['posts:read']`. String claims, substrings, and embedded wildcard characters do not grant access.
+The required permission must be a nonempty string or nonempty array of nonempty strings; invalid configuration throws `TypeError`. The helper copies the required list when created, while user claims are checked on every call. The user's claim must be an array of nonempty strings. Entries match exactly; only a standalone `'*'` entry grants every permission. A claim such as `'posts:read'` must be supplied as `['posts:read']`. String claims, substrings, and embedded wildcard characters do not grant access.
 
 ```javascript
 const permissions = {
@@ -2187,6 +2187,7 @@ Use `{ ref: 'path' }` to reference values:
 - `eq` and `in` require exactly two operands; `in` requires an array or a reference resolving to an array. A literal `in` array may contain only strings, finite numbers, bigints, booleans, `null` and MongoDB ObjectIds, and literal operands cannot contain nested `{ ref }` values, because literals are never resolved. A rule keeps the list items it validated. `allOf` and `anyOf` require arrays of valid expressions; `not` requires a valid expression
 - Unknown operators or malformed nested expressions invalidate the entire configured policy, even inside an otherwise granting `anyOf`
 - Factories reject malformed expressions with `TypeError`; `isPolicyExpression` validates the complete AST, and direct `evaluateExpression` calls return `false` for malformed ASTs
+- Created rules classify operands as literals or references once. Adding `ref` to a literal later does not turn it into a reference; object literals keep their identity for equality
 - Missing references and invalid runtime membership operands cannot grant access, including under `not` or repeated negation. They propagate through `allOf` and implicit AND. A separate valid `anyOf` branch can still grant access, such as a published post without an authenticated user
 - Explicit `null`, `false`, `0`, and empty-string comparison values remain valid; equality is strict. MongoDB `ObjectId` values compare by their hexadecimal string, so an ObjectId matches the same ID as a string or as another ObjectId instance. Values of different types never match (such as `'42'` and `42`), and such a comparison is invalid, so `not` cannot turn it into a grant; `null` remains comparable with any value. `in` compares each array item the same way for plain arrays and Mongoose arrays; when no item matches, it is invalid if any non-null item has a different type than the value, or if the value is a list or plain object. Use `requireAuth()` or `isOwner()` for identity checks rather than treating two explicit null IDs as ownership
 - Boolean expressions and logical identities remain valid: `{ allOf: [] }` is true, `{ anyOf: [] }` is false, and `{ not: false }` is true. Multiple operator keys form an implicit AND

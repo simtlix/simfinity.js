@@ -1,13 +1,13 @@
 ---
 title: Database compatibility contract
-description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.5.1.
+description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.5.2.
 ---
 
 # Database compatibility contract
 
-This ledger records the v3.5.1 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
+This ledger records the v3.5.2 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
 
-The test paths below are available in the [v3.5.1 source](https://github.com/simtlix/simfinity.js/tree/v3.5.1). To try the API, use the [released starters](guide/databases.md#download-the-starters).
+The test paths below are available in the [v3.5.2 source](https://github.com/simtlix/simfinity.js/tree/v3.5.2). To try the API, use the [released starters](guide/databases.md#download-the-starters).
 
 When running the source tests, set `SIMFINITY_MONGODB_URI` and `SIMFINITY_POSTGRES_URI` to disposable databases for the cross-backend suites. Set `SIMFINITY_TEST_MONGODB_URI` to a separate disposable MongoDB database for upstream opt-in regressions. Mongo setup drops its configured databases, so these URIs must never identify application data. When a variable is absent, its integration suites are reported as skipped.
 
