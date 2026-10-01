@@ -4,6 +4,8 @@
  * distinct from false, so negation cannot turn an invalid comparison into a grant.
  */
 
+import { normalizeObjectId } from './object-id.js';
+
 const invalidResult = Symbol('invalid policy result');
 
 const isValidRef = (refPath) => {
@@ -25,6 +27,27 @@ const isValidValue = (value) => {
 const isDenseArray = value => Array.isArray(value)
   && Array.from({ length: value.length }, (_, index) => Object.hasOwn(value, index)).every(Boolean);
 
+const isPlainValue = value => value !== null && typeof value === 'object'
+  && (Array.isArray(value) || [Object.prototype, null].includes(Object.getPrototypeOf(value)));
+
+// Literals are compared as they are, so a `{ ref }` nested inside one would never be resolved.
+const containsReference = (value, seen = new Set()) => {
+  if (!isPlainValue(value) || seen.has(value)) return false;
+  if (isReference(value)) return true;
+  seen.add(value);
+  return Object.values(value).some(item => containsReference(item, seen));
+};
+
+const isMembershipItem = value => value === null || ['string', 'boolean', 'bigint'].includes(typeof value)
+  || (typeof value === 'number' && Number.isFinite(value)) || normalizeObjectId(value) !== undefined;
+
+const isValidComparison = (operator, operand) => {
+  if (!isDenseArray(operand) || operand.length !== 2 || !operand.every(isValidValue)) return false;
+  if (operand.some(value => !isReference(value) && containsReference(value))) return false;
+  if (operator !== 'in' || isReference(operand[1])) return true;
+  return isDenseArray(operand[1]) && operand[1].every(isMembershipItem);
+};
+
 const validateExpression = (expression, ancestors = new Set()) => {
   if (typeof expression === 'boolean') return true;
   if (expression === null || typeof expression !== 'object' || Array.isArray(expression)) return false;
@@ -38,8 +61,7 @@ const validateExpression = (expression, ancestors = new Set()) => {
     switch (operator) {
       case 'eq':
       case 'in':
-        return isDenseArray(operand) && operand.length === 2 && operand.every(isValidValue)
-          && (operator !== 'in' || Array.isArray(operand[1]) || isReference(operand[1]));
+        return isValidComparison(operator, operand);
       case 'allOf':
       case 'anyOf':
         return isDenseArray(operand) && operand.every(expr => validateExpression(expr, ancestors));
@@ -70,14 +92,38 @@ const resolveValue = (value, context) => {
   return isReference(value) ? resolveRef(value.ref, context) : value;
 };
 
+// Registered ObjectIds compare by hexadecimal value; every other value compares strictly.
+const comparable = value => normalizeObjectId(value) ?? value;
+
+// Strict equality never matches values of different types, such as a string and a number or a
+// primitive and a list. Such a comparison is invalid, so `not` cannot turn it into a grant.
+// null stays comparable with anything, as an explicit check for a missing value.
+const isMismatch = (left, right) => left !== null && right !== null && typeof left !== typeof right;
+
+const evaluateMembership = (target, list) => {
+  // A list or plain object is not a member value.
+  if (!Array.isArray(list) || isPlainValue(target)) return invalidResult;
+  // Never call the list's own includes: Mongoose arrays cast and compare loosely.
+  let mismatched = false;
+  for (let index = 0; index < list.length; index++) {
+    const item = comparable(list[index]);
+    if (item === target) return true;
+    if (isMismatch(target, item)) mismatched = true;
+  }
+  // Without a match, an item of another type means the list could not be checked reliably.
+  return mismatched ? invalidResult : false;
+};
+
 const evaluateComparison = (operator, operands, context) => {
   const left = resolveValue(operands[0], context);
   const right = resolveValue(operands[1], context);
   if (left === undefined || right === undefined || typeof left === 'function' || typeof right === 'function') {
     return invalidResult;
   }
-  if (operator === 'eq') return left === right;
-  return Array.isArray(right) ? right.includes(left) : invalidResult;
+  const target = comparable(left);
+  if (operator === 'in') return evaluateMembership(target, right);
+  const other = comparable(right);
+  return isMismatch(target, other) ? invalidResult : target === other;
 };
 
 const evaluateAllOf = (expressions, context) => {
@@ -140,12 +186,35 @@ export const evaluateExpression = (expression, context) => {
 /** Check the complete AST, including boolean literals and every nested branch. */
 export const isPolicyExpression = value => validateExpression(value);
 
+const snapshotValue = value => (isReference(value) ? Object.freeze({ ref: value.ref }) : value);
+
+// A literal membership list is copied like the operators, so only its validated items are compared.
+const snapshotOperands = (operator, operand) => Object.freeze(operand.map((value, index) => (
+  operator === 'in' && index === 1 && !isReference(value) ? Object.freeze([...value]) : snapshotValue(value)
+)));
+
+/**
+ * Copy the validated structure, so evaluation needs no revalidation and later changes to the
+ * configured object cannot make it malformed. Other literal operands keep their identity.
+ */
+const snapshotExpression = (expression) => {
+  if (typeof expression === 'boolean') return expression;
+  const snapshot = {};
+  for (const [operator, operand] of Object.entries(expression)) {
+    if (operator === 'not') snapshot[operator] = snapshotExpression(operand);
+    else if (operator === 'eq' || operator === 'in') snapshot[operator] = snapshotOperands(operator, operand);
+    else snapshot[operator] = Object.freeze(operand.map(snapshotExpression));
+  }
+  return Object.freeze(snapshot);
+};
+
 /** Create a rule, rejecting malformed policies at configuration time. */
 export const createRuleFromExpression = (expression) => {
   if (!isPolicyExpression(expression)) {
     throw new TypeError('Invalid authorization policy expression');
   }
-  return (parent, args, ctx) => evaluateExpression(expression, { parent, args, ctx });
+  const snapshot = snapshotExpression(expression);
+  return (parent, args, ctx) => evaluateValidatedExpression(snapshot, { parent, args, ctx }) === true;
 };
 
 const expressions = {

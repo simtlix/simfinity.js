@@ -255,11 +255,14 @@ export const auth: {
     permissions: PermissionSchema,
     options?: AuthPluginOptions,
   ): (resolve: any, parent: any, args: any, ctx: any, info: any) => Promise<any>;
-  /** @deprecated Use createAuthPlugin instead. Field middleware object for graphql-middleware. */
+  /**
+   * @deprecated Use createAuthPlugin instead. The same graphql-middleware function as
+   * createAuthMiddleware, which applies wildcard rules and the default policy to every field.
+   */
   createFieldMiddleware(
     permissions: PermissionSchema,
     options?: AuthPluginOptions,
-  ): Record<string, Record<string, any>>;
+  ): (resolve: any, parent: any, args: any, ctx: any, info: any) => Promise<any>;
   resolvePath(obj: any, pathOrFn: string | ((obj: any) => any)): any;
   requireAuth(userPath?: string): AuthRuleFunction;
   /** Required roles must be nonempty strings; invalid configuration throws TypeError. */
@@ -269,7 +272,9 @@ export const auth: {
     permission: string | string[],
     options?: { userPath?: string; permissionsPath?: string },
   ): AuthRuleFunction;
+  /** Requires at least one rule function; throws TypeError otherwise. */
   composeRules(...rules: AuthRuleFunction[]): AuthRuleFunction;
+  /** Requires at least one rule function; throws TypeError otherwise. */
   anyRule(...rules: AuthRuleFunction[]): AuthRuleFunction;
   /** Compares nonempty string, finite number, or MongoDB ObjectId identities; missing IDs deny. */
   isOwner(ownerField?: string, userIdField?: string, options?: { userPath?: string }): AuthRuleFunction;

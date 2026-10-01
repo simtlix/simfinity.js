@@ -35,6 +35,17 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22 or newer |
 
+## Upgrade notes for the next release
+
+These authorization changes apply to `@simtlix/simfinity-core/auth` and the runtime `auth` namespaces:
+
+- Policy expressions compare MongoDB `ObjectId` values by their hexadecimal string in `eq` and `in`, and `in` compares items the same way for plain arrays and Mongoose arrays. Comparing values of different types, such as `'42'` with `42` or a string with a list, is invalid, so `not` no longer turns it into a grant; `null` remains comparable with any value. A list or plain object on the left of `in` is invalid. Policies that already compare normalized strings behave as before. See [JSON policy expressions](../guide/authorization#json-policy-expressions).
+- A literal `in` array may contain only strings, finite numbers, bigints, booleans, `null` and MongoDB ObjectIds, and literal operands cannot contain nested `{ ref }` values. Such policies now throw `TypeError` at configuration time. A rule keeps the list items it validated; later changes to the configured array have no effect.
+- `composeRules()` and `anyRule()` throw `TypeError` when called without rules. Use `allow()` for an intentional grant.
+- `createAuthPlugin` wraps each field once per plugin instance. In a schema processed by other plugin instances only, its wrappers defer to theirs, so separate instances no longer combine their rules on shared types; a schema no instance processed still enforces every wrapper. Allowed fields without rules or query paths keep their original resolver. Simfinity's `extensions` metadata introspection is no longer denied under `DENY`, unless the permission map names `FieldExtensionsType` or `RelationType`. A field whose rules are all synchronous, or an unwrapped field with no rule under `ALLOW`, starts its resolver before the rules of the following sibling fields run; keep the context values that rules read stable while resolvers run. See [schema integration](../guide/authorization#schema-integration).
+- The deprecated `createFieldMiddleware` returns the same function as `createAuthMiddleware`, so `'*'` rules and the default policy apply to every field instead of only the named ones.
+- Root-query permissions must use the schema's type name. Simfinity names its query root `RootQueryType`; the plugin warns once when a permission map uses `Query` for a schema without that type.
+
 ## Upgrade to 3.5.1
 
 Keep all directly installed Simfinity packages at 3.5.1. When upgrading from an earlier version than 3.5.0, also review the [3.5.0 notes](#upgrade-to-3-5-0) below.

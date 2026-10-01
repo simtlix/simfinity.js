@@ -26,6 +26,22 @@ export const resolvePath = (obj, pathOrFn) => {
   return undefined;
 };
 
+// Built-in rules also expose a check that returns true, false or a factory for the denial error.
+// anyRule uses it so a denial that a later rule overrides never builds and throws an error.
+const CHECK = Symbol('simfinity.auth.check');
+
+const ruleFromCheck = (check) => {
+  const rule = (parent, args, ctx, info) => {
+    const result = check(parent, args, ctx, info);
+    if (typeof result === 'function') throw result();
+    return result;
+  };
+  rule[CHECK] = check;
+  return rule;
+};
+
+const unauthenticated = () => new UnauthenticatedError('You must be logged in to access this resource');
+
 /**
  * Rule that requires the user to be authenticated
  * Checks for user existence at the specified path in context
@@ -37,16 +53,10 @@ export const resolvePath = (obj, pathOrFn) => {
  * requireAuth('session.currentUser') // checks ctx.session.currentUser
  */
 export const requireAuth = (userPath = 'user') => {
-  return (_parent, _args, ctx) => {
-    if (!ctx) {
-      throw new UnauthenticatedError('You must be logged in to access this resource');
-    }
-    const user = resolvePath(ctx, userPath);
-    if (!user) {
-      throw new UnauthenticatedError('You must be logged in to access this resource');
-    }
+  return ruleFromCheck((_parent, _args, ctx) => {
+    if (!ctx || !resolvePath(ctx, userPath)) return unauthenticated;
     return true;
-  };
+  });
 };
 
 /**
@@ -67,24 +77,34 @@ export const requireRole = (role, options = {}) => {
     throw new TypeError('Required roles must be a nonempty string or array of nonempty strings');
   }
   const { userPath = 'user', rolePath = 'role' } = options;
+  const forbidden = () => new ForbiddenError(`Requires role: ${roles.join(' or ')}`);
 
-  return (_parent, _args, ctx) => {
-    if (!ctx) {
-      throw new UnauthenticatedError('You must be logged in to access this resource');
-    }
+  return ruleFromCheck((_parent, _args, ctx) => {
+    if (!ctx) return unauthenticated;
     const user = resolvePath(ctx, userPath);
-    if (!user) {
-      throw new UnauthenticatedError('You must be logged in to access this resource');
-    }
+    if (!user) return unauthenticated;
 
     const userRole = resolvePath(user, rolePath);
+    return roles.includes(userRole) ? true : forbidden;
+  });
+};
 
-    if (!roles.includes(userRole)) {
-      throw new ForbiddenError(`Requires role: ${roles.join(' or ')}`);
-    }
-
-    return true;
-  };
+/**
+ * Validate the claims and find the required permissions they hold in one pass, without copying
+ * them. Returns null for malformed claims (including holes) and true for a standalone '*' entry.
+ * Nothing is cached: a context can outlive a request, and claims can change in place.
+ */
+const findHeldPermissions = (claims, requiredPermissions) => {
+  if (!Array.isArray(claims)) return null;
+  let wildcard = false;
+  const held = new Set();
+  for (let index = 0; index < claims.length; index++) {
+    const claim = claims[index];
+    if (typeof claim !== 'string' || claim.length === 0) return null;
+    if (claim === '*') wildcard = true;
+    else if (requiredPermissions.includes(claim)) held.add(claim);
+  }
+  return wildcard || held;
 };
 
 /**
@@ -107,35 +127,25 @@ export const requirePermission = (permission, options = {}) => {
   }
   const { userPath = 'user', permissionsPath = 'permissions' } = options;
 
-  return (_parent, _args, ctx) => {
-    if (!ctx) {
-      throw new UnauthenticatedError('You must be logged in to access this resource');
-    }
+  return ruleFromCheck((_parent, _args, ctx) => {
+    if (!ctx) return unauthenticated;
     const user = resolvePath(ctx, userPath);
-    if (!user) {
-      throw new UnauthenticatedError('You must be logged in to access this resource');
+    if (!user) return unauthenticated;
+
+    const held = findHeldPermissions(resolvePath(user, permissionsPath), requiredPermissions);
+    if (held === null) {
+      return () => new ForbiddenError('User permissions must be an array of nonempty strings');
     }
 
-    const userPermissions = resolvePath(user, permissionsPath);
-    if (!Array.isArray(userPermissions)
-      || Array.from(userPermissions).some(perm => typeof perm !== 'string' || perm.length === 0)) {
-      throw new ForbiddenError('User permissions must be an array of nonempty strings');
-    }
-
-    // Check if user has wildcard permission
-    if (userPermissions.includes('*')) {
+    // A wildcard entry grants every permission
+    if (held === true) {
       return true;
     }
 
     // All required permissions must be present
-    for (const perm of requiredPermissions) {
-      if (!userPermissions.includes(perm)) {
-        throw new ForbiddenError(`Missing permission: ${perm}`);
-      }
-    }
-
-    return true;
-  };
+    const missing = requiredPermissions.find(perm => !held.has(perm));
+    return missing === undefined ? true : () => new ForbiddenError(`Missing permission: ${missing}`);
+  });
 };
 
 /**
@@ -144,6 +154,10 @@ export const requirePermission = (permission, options = {}) => {
  * @returns {Function} Composed rule function
  */
 export const composeRules = (...rules) => {
+  // With no rules the composition would grant everything; use allow() for an intentional grant.
+  if (rules.length === 0) {
+    throw new TypeError('composeRules requires at least one rule');
+  }
   if (rules.some(rule => typeof rule !== 'function')) {
     throw new TypeError('composeRules requires rule functions');
   }
@@ -166,25 +180,38 @@ export const composeRules = (...rules) => {
  * @returns {Function} Combined rule function
  */
 export const anyRule = (...rules) => {
+  if (rules.length === 0) {
+    throw new TypeError('anyRule requires at least one rule');
+  }
   if (rules.some(rule => typeof rule !== 'function')) {
     throw new TypeError('anyRule requires rule functions');
   }
   return async (parent, args, ctx, info) => {
     let lastError = null;
+    // A built-in rule's denial is kept as a factory and only built if it is the error thrown.
+    let lastErrorIsFactory = false;
 
     for (const rule of rules) {
       try {
-        const result = await rule(parent, args, ctx, info);
-        if (result === true || result === undefined) {
+        const check = rule[CHECK];
+        const result = check ? check(parent, args, ctx, info) : await rule(parent, args, ctx, info);
+        if (check && typeof result === 'function') {
+          lastError = result;
+          lastErrorIsFactory = true;
+        } else if (result === true || result === undefined) {
           return true; // At least one rule passed
         }
       } catch (error) {
         lastError = error;
+        lastErrorIsFactory = false;
         // Continue to next rule
       }
     }
 
     // No rule passed - throw the last error or return false
+    if (lastErrorIsFactory) {
+      throw lastError();
+    }
     if (lastError) {
       throw lastError;
     }
@@ -214,14 +241,10 @@ const normalizeOwnerId = (value) => {
 export const isOwner = (ownerField = 'userId', userIdField = 'id', options = {}) => {
   const { userPath = 'user' } = options;
 
-  return (parent, _args, ctx) => {
-    if (!ctx) {
-      throw new UnauthenticatedError('You must be logged in to access this resource');
-    }
+  return ruleFromCheck((parent, _args, ctx) => {
+    if (!ctx) return unauthenticated;
     const user = resolvePath(ctx, userPath);
-    if (!user) {
-      throw new UnauthenticatedError('You must be logged in to access this resource');
-    }
+    if (!user) return unauthenticated;
 
     // Get ownerId from parent (using path or function)
     const ownerId = normalizeOwnerId(resolvePath(parent, ownerField));
@@ -234,7 +257,7 @@ export const isOwner = (ownerField = 'userId', userIdField = 'id', options = {})
     }
 
     return ownerId === userId;
-  };
+  });
 };
 
 /**
@@ -276,9 +299,8 @@ export const allow = () => {
  * @returns {Function} Rule function that always throws ForbiddenError
  */
 export const deny = (message = 'Access denied') => {
-  return () => {
-    throw new ForbiddenError(message);
-  };
+  const forbidden = () => new ForbiddenError(message);
+  return ruleFromCheck(() => forbidden);
 };
 
 // Export all rules as an object for convenience
