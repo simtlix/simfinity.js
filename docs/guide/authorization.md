@@ -71,15 +71,15 @@ All helpers below are exported by `@simtlix/simfinity-core/auth` and are also av
 | `requireAuth(userPath = 'user')` | Requires a truthy user in context. |
 | `requireRole(role, options)` | Accepts a nonempty role string or nonempty array of role strings; compares exactly against the user's single role value. |
 | `requirePermission(permission, options)` | Requires every permission when given a nonempty array; claims must be arrays of nonempty strings, and a standalone `'*'` entry grants all. |
-| `composeRules(...rules)` | Requires every rule to pass. |
-| `anyRule(...rules)` | Requires at least one rule to pass. |
+| `composeRules(...rules)` | Requires every rule to pass. Needs at least one rule. |
+| `anyRule(...rules)` | Requires at least one rule to pass. Needs at least one rule. |
 | `isOwner(ownerField = 'userId', userIdField = 'id', options)` | Compares an owner ID on the parent result with the current user's ID. |
 | `createRule(predicate, message = 'Access denied', code = 'FORBIDDEN')` | Creates a rule from a predicate; only `true` or `undefined` allows access. |
 | `allow()` / `deny(message)` | Unconditionally permits or denies a field. |
 
-`requireRole` accepts `{ userPath: 'user', rolePath: 'role' }`. `requirePermission` accepts `{ userPath: 'user', permissionsPath: 'permissions' }`. Paths may be dotted strings or extractor functions. `rolePath` resolves inside the user, so use `'profile.role'`, not `'user.profile.role'`.
+`requireRole` accepts `{ userPath: 'user', rolePath: 'role' }`. `requirePermission` accepts `{ userPath: 'user', permissionsPath: 'permissions' }`. Paths may be dotted strings or extractor functions. `rolePath` resolves inside the user, so use `'profile.role'`, not `'user.profile.role'`. Both helpers copy their required lists when created; changing the original arrays later does not change the rule. User claims are checked on every call.
 
-Invalid required roles or permissions (including `null`, `undefined`, empty strings, empty arrays, or non-string entries) throw `TypeError` when the helper is created. Malformed permission claims deny access: use `['posts:read']`, not the string `'posts:read'`. Substrings and embedded wildcard characters such as `'posts:*'` do not grant other permissions. Composition helpers and `createRule` require function arguments; `anyRule` may continue after a denied result or error to another granting rule.
+Invalid required roles or permissions (including `null`, `undefined`, empty strings, empty arrays, or non-string entries) throw `TypeError` when the helper is created. Malformed permission claims deny access: use `['posts:read']`, not the string `'posts:read'`. Substrings and embedded wildcard characters such as `'posts:*'` do not grant other permissions. Composition helpers and `createRule` require function arguments, and `composeRules` and `anyRule` throw `TypeError` without any rule; use `allow()` for an intentional grant. `anyRule` may continue after a denied result or error to another granting rule.
 
 ```javascript
 const canEdit = auth.requireRole(['admin', 'editor'], {
@@ -117,18 +117,24 @@ const permissions = {
 };
 ```
 
-Expressions are JSON objects or booleans; strings such as `'ROLE:admin'` are not a supported policy language. Equality is strict, so normalize IDs before comparing an ObjectId to a string. Explicit `null`, `false`, `0`, and empty-string operands remain valid. For required identity checks, use `requireAuth()` or `isOwner()` explicitly; two explicit null values comparing equal do not establish ownership.
+Expressions are JSON objects or booleans; strings such as `'ROLE:admin'` are not a supported policy language. Equality is strict, except that MongoDB `ObjectId` values compare by their hexadecimal string: an ObjectId matches the same ID as a string or as another ObjectId instance. Values of different types never match, such as the string `'42'` and the number `42`, or a string and a list. Such a comparison is invalid, like a missing reference, so `not` cannot turn it into a grant. `null` remains comparable with any value. Explicit `null`, `false`, `0`, and empty-string operands remain valid. For required identity checks, use `requireAuth()` or `isOwner()` explicitly; two explicit null values comparing equal do not establish ownership.
 
-`eq` and `in` take exactly two operands. The right side of `in` must be an array or a reference to an array. `allOf` and `anyOf` take arrays of valid expressions, while `not` takes one valid expression. Empty logical arrays retain their identities: `allOf: []` is true and `anyOf: []` is false. Multiple operator keys form an implicit AND.
+`eq` and `in` take exactly two operands. The right side of `in` must be an array or a reference to an array. A literal `in` array may contain only strings, finite numbers, bigints, booleans, `null` and MongoDB ObjectIds; the rule keeps the items it validated, so later changes to the configured array have no effect. `in` compares each item like `eq`, for plain arrays and Mongoose arrays alike. When no item matches, it is invalid if any non-null item has a different type than the value; it is also invalid when the value itself is a list or plain object. Literal operands cannot contain nested `{ ref }` values, because literals are never resolved. `allOf` and `anyOf` take arrays of valid expressions, while `not` takes one valid expression. Empty logical arrays retain their identities: `allOf: []` is true and `anyOf: []` is false. Multiple operator keys form an implicit AND.
 
 Reference paths support the `parent`, `args`, and `ctx` roots, dotted fields, document getters, and numeric array indices. Empty segments and the `__proto__`, `prototype`, and `constructor` segments are invalid. Missing references and runtime `in` operands that are not arrays cannot become grants through negation; invalid results propagate through AND. A valid `anyOf` branch can still grant access independently, such as a published post with no logged-in user.
 
 The factories and `createRuleFromExpression` throw `TypeError` for malformed ASTs, including unknown operators in any nested branch. `isPolicyExpression` validates the whole AST; direct `evaluateExpression` calls return `false` for malformed ASTs. Valid `false` expressions remain negatable (`{ not: false }` is true).
 
+Created expression rules classify each operand as a literal or reference once. Adding `ref` to a literal afterwards does not turn it into a reference; object literals continue to compare by identity.
+
 ## Schema integration
 
-`createAuthPlugin` wraps resolvers in place through Envelop's `onSchemaChange` hook. Reusing the same plugin and schema does not wrap it twice.
+`createAuthPlugin` wraps resolvers in place through Envelop's `onSchemaChange` hook. A plugin instance wraps each field once, even when several schema objects share the same types, such as a `toConfig()` copy or a second `createSchema()` call. In a schema processed by other plugin instances only, its wrappers defer to theirs, so separate instances keep separate permission maps. A schema that no plugin instance processed still enforces the rules of every wrapper on its shared fields. Fields with no rule under `ALLOW` and no filter, sort or aggregation paths keep their original resolver. The plugin does not wrap introspection types or Simfinity's `extensions` field metadata types (`FieldExtensionsType` and `RelationType`), so metadata introspection works under `DENY`; name those types in the permission map to protect them.
 
-Do not apply `graphql-middleware`'s `applyMiddleware` or schema-cloning transforms such as `mapSchema` to a Simfinity schema. Simfinity extends GraphQL introspection globally, and rebuilding the schema can duplicate those introspection types. The older `createAuthMiddleware` and `createFieldMiddleware` exports are deprecated.
+A field whose rules are all synchronous, or an unwrapped field with no rule under `ALLOW`, starts its resolver right away, before the rules of the following sibling fields run. Fields with filter, sort or aggregation paths start after those paths are checked. Keep the context values that rules read stable while resolvers run.
+
+If the permission map has a `Query` key but the schema's query root has another name, the plugin logs a warning once.
+
+Do not apply `graphql-middleware`'s `applyMiddleware` or schema-cloning transforms such as `mapSchema` to a Simfinity schema. Simfinity extends GraphQL introspection globally, and rebuilding the schema can duplicate those introspection types. The older `createAuthMiddleware` and `createFieldMiddleware` exports are deprecated. `createFieldMiddleware` returns the same function as `createAuthMiddleware`, so wildcard rules and the default policy apply to every field.
 
 For standalone MCP execution, install the auth plugin through `schemaPlugins`; see [MCP authorization](/guide/mcp#preserve-authorization).

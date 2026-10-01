@@ -28,10 +28,10 @@ const yoga = createYoga({ schema, plugins: [authPlugin] });
 
 **How it works:**
 1. On `onSchemaChange({ schema })`, iterates all types in `schema.getTypeMap()`
-2. Skips non-`GraphQLObjectType` types and `__`-prefixed introspection types
+2. Skips non-`GraphQLObjectType` types, `__`-prefixed introspection types and Simfinity's `extensions` metadata types (matched by identity through `__Field`) unless the permission map names them
 3. For each field, looks up rules from the permission map via `getFieldRules()`
-4. Wraps `field.resolve` in-place (mutates the schema, no rebuild)
-5. Uses a `WeakSet` to prevent double-wrapping if `onSchemaChange` fires again
+4. Wraps `field.resolve` in-place (mutates the schema, no rebuild); under `ALLOW`, a field with no rule and no `simfinityQuery` paths keeps its resolver
+5. Wraps each field once per plugin instance (a `WeakMap` of installed wrappers), because schemas built from the same types share field objects; a wrapper passes through only when `info.schema` was processed by another auth plugin instance and not by its own; schemas no instance processed keep enforcing
 
 **`defaultPolicy`**: exactly `'DENY'` (default) or `'ALLOW'`, applied only when no exact or wildcard rule is configured. Factories throw `TypeError` for other values and for malformed permission maps or configured rules. A configured `null`, `undefined`, unknown object, or empty rule array cannot fall back to the default policy.
 
@@ -66,7 +66,7 @@ const permissions = {
 2. Fall back to `permissions[typeName]['*']` (wildcard)
 3. If neither exists, return `null` (applies `defaultPolicy`)
 
-Each rule receives `(parent, args, ctx, info)`. Only `true` or `undefined` grants access; all other results deny, including `null`, zero, empty strings, and truthy objects. Throwing denies with an error. This applies equally to direct functions, `composeRules`, `anyRule`, and `createRule`, including async results. Composition helpers and `createRule` reject nonfunction arguments at creation.
+Each rule receives `(parent, args, ctx, info)`. Only `true` or `undefined` grants access; all other results deny, including `null`, zero, empty strings, and truthy objects. Throwing denies with an error. This applies equally to direct functions, `composeRules`, `anyRule`, and `createRule`, including async results. Composition helpers and `createRule` reject nonfunction arguments at creation; `composeRules` and `anyRule` also reject an empty rule list.
 
 ## Query Path Rules (`authorizeQueryPaths`)
 
@@ -118,4 +118,4 @@ const permissions = {
 ## Deprecated APIs
 
 - `createAuthMiddleware()` -- uses `graphql-middleware`'s `applyMiddleware` which causes duplicate type errors with Simfinity's introspection patch. Use `createAuthPlugin` instead.
-- `createFieldMiddleware()` -- same issue. Use `createAuthPlugin` instead.
+- `createFieldMiddleware()` -- same issue; it returns the same function as `createAuthMiddleware`. Use `createAuthPlugin` instead.

@@ -155,7 +155,7 @@ npm run test:security --prefix examples/barber/postgres
 npm run test:security --prefix examples/barber/frontend
 ```
 
-Use Node.js 24 and the committed lockfiles. The MongoDB example requires Mongoose `^8.24.2`; both backends require Multer `^2.3.0`; Vitest and its browser/coverage packages require `^4.1.11`. These minima exclude the reviewed vulnerable direct versions. Applications still consume the exact released Simfinity 3.3.0 packages; database selection, seeding and API behavior remain unchanged.
+Use Node.js 24 and the committed lockfiles. The MongoDB example requires Mongoose `^8.24.2`; both backends require Multer `^2.3.0`; Vitest and its browser/coverage packages require `^4.1.11`; the frontend requires Next.js `^16.3.8`. These minima exclude the reviewed vulnerable direct versions. Applications still consume the exact released Simfinity 3.3.0 packages; database selection, seeding and API behavior remain unchanged.
 
 ## Stop or reset one stack
 

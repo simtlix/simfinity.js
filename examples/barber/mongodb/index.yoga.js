@@ -58,7 +58,7 @@ const mcpHandler = await simfinity.createHTTPMCPHandler(schema, {
   // permission rules. createAuthPlugin wraps the schema's resolvers from its
   // onSchemaChange hook (which Envelop fires for Yoga); schemaPlugins fires it
   // for the in-process MCP execution path too. Sharing the instance means the
-  // shared schema is wrapped exactly once (the plugin guards with a WeakSet).
+  // shared schema is wrapped exactly once (the plugin wraps each field once).
   schemaPlugins: [authPlugin],
 });
 app.post('/mcp', express.json(), mcpHandler);

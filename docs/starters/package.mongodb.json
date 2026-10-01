@@ -10,9 +10,9 @@
     "mcp": "node mcp.js"
   },
   "dependencies": {
-    "@simtlix/simfinity-core": "3.5.1",
-    "@simtlix/simfinity-js": "3.5.1",
-    "@simtlix/simfinity-mcp": "3.5.1",
+    "@simtlix/simfinity-core": "3.5.2",
+    "@simtlix/simfinity-js": "3.5.2",
+    "@simtlix/simfinity-mcp": "3.5.2",
     "graphql": "^16.11.0",
     "graphql-yoga": "^5.0.0",
     "mongoose": "^8.24.2"

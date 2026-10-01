@@ -9,13 +9,12 @@
  * - Default allow/deny policies
  *
  * @example
- * import { auth } from '@simtlix/simfinity-js';
+ * import { createAuthPlugin, requireAuth, requireRole } from '@simtlix/simfinity-core/auth';
  * import { createYoga } from 'graphql-yoga';
  *
- * const { createAuthPlugin, requireAuth, requireRole } = auth;
- *
+ * // Simfinity names its roots `RootQueryType` and `Mutation`.
  * const permissions = {
- *   Query: {
+ *   RootQueryType: {
  *     series: requireAuth(),
  *     seasons: requireAuth(),
  *   },
@@ -32,7 +31,7 @@
  * const yoga = createYoga({ schema, plugins: [authPlugin] });
  */
 
-import { GraphQLError, GraphQLObjectType, defaultFieldResolver } from 'graphql';
+import { GraphQLError, GraphQLObjectType, defaultFieldResolver, __Field } from 'graphql';
 import SimfinityError from '../errors/simfinity.error.js';
 import { UnauthenticatedError, ForbiddenError, createAuthError } from './errors.js';
 import { isPolicyExpression, createRuleFromExpression, evaluateExpression } from './expressions.js';
@@ -127,6 +126,27 @@ const normalizeRule = (rule) => {
 
 const isPermissionMap = value => value !== null && typeof value === 'object'
   && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+
+/**
+ * Simfinity adds an `extensions` field to introspection's `__Field`. Its object types are shared by
+ * every schema in the process and describe the schema itself, so authorization skips them like
+ * `__` types unless the permission map names them. They are matched by identity.
+ */
+const isSimfinityMetadataType = (type) => {
+  const extensionsType = __Field.getFields().extensions?.type;
+  if (!(extensionsType instanceof GraphQLObjectType)) return false;
+  return type === extensionsType || type === extensionsType.getFields().relation?.type;
+};
+
+const isExemptMetadataType = (permissions, type) => isSimfinityMetadataType(type)
+  && !Object.hasOwn(permissions, type.name);
+
+// Schemas processed by any auth plugin instance. A wrapper defers to the other instances only in
+// these schemas; in a schema no instance processed, every wrapper keeps enforcing its rules.
+const authorizedSchemas = new WeakSet();
+
+const isThenable = value => value !== null && (typeof value === 'object' || typeof value === 'function')
+  && typeof value.then === 'function';
 
 const validateConfiguration = (permissions, defaultPolicy) => {
   if (defaultPolicy !== 'ALLOW' && defaultPolicy !== 'DENY') {
@@ -262,6 +282,7 @@ export const createAuthMiddleware = (permissions, options = {}) => {
    * Returns a middleware object keyed by type name, each containing field resolvers
    */
   return async (resolve, parent, args, ctx, info) => {
+    if (isExemptMetadataType(permissions, info.parentType)) return resolve(parent, args, ctx, info);
     const typeName = info.parentType.name;
     const fieldName = info.fieldName;
 
@@ -305,35 +326,20 @@ export const createAuthMiddleware = (permissions, options = {}) => {
 };
 
 /**
- * Creates a field-level middleware object from a permission schema.
- * This can be used with graphql-middleware's applyMiddleware.
+ * Creates graphql-middleware authorization for every object field of a schema.
+ *
+ * It returns the same function as {@link createAuthMiddleware}. graphql-middleware applies a
+ * function middleware to every field, so `'*'` rules and the default policy also apply to fields
+ * the permission map does not name. A map of only the named fields would leave the others open.
  *
  * @deprecated Use {@link createAuthPlugin} instead. `applyMiddleware` from graphql-middleware
  * can cause duplicate-type errors when the schema contains custom introspection extensions.
  *
  * @param {PermissionSchema} permissions - The permission schema
  * @param {AuthMiddlewareOptions} [options={}] - Middleware options
- * @returns {Object} Field middleware object compatible with graphql-middleware
+ * @returns {Function} A graphql-middleware compatible middleware function
  */
-export const createFieldMiddleware = (permissions, options = {}) => {
-  const middleware = createAuthMiddleware(permissions, options);
-  const fieldMiddleware = {};
-
-  for (const typeName of Object.keys(permissions)) {
-    fieldMiddleware[typeName] = {};
-
-    const typePerms = permissions[typeName];
-    for (const fieldName of Object.keys(typePerms)) {
-      if (fieldName === '*') {
-        // Wildcard rules are handled by the middleware internally
-        continue;
-      }
-      fieldMiddleware[typeName][fieldName] = middleware;
-    }
-  }
-
-  return fieldMiddleware;
-};
+export const createFieldMiddleware = (permissions, options = {}) => createAuthMiddleware(permissions, options);
 
 /**
  * Creates an Envelop-compatible authorization plugin that wraps schema resolvers in-place.
@@ -347,21 +353,25 @@ export const createFieldMiddleware = (permissions, options = {}) => {
  * @returns {Object} An Envelop plugin with an `onSchemaChange` hook
  *
  * @example
- * import { auth } from '@simtlix/simfinity-js';
+ * import { createAuthPlugin, requireAuth, requireRole } from '@simtlix/simfinity-core/auth';
  * import { createYoga } from 'graphql-yoga';
  *
+ * // Keys are the schema's type names: Simfinity names its query root `RootQueryType`.
  * const permissions = {
- *   Query: {
- *     users: requireAuth(),
- *     adminDashboard: requireRole('ADMIN')
+ *   RootQueryType: {
+ *     series: requireAuth(),
+ *     serie: requireAuth(),
  *   },
- *   User: {
+ *   Mutation: {
+ *     deleteserie: requireRole('ADMIN'),
+ *   },
+ *   serie: {
  *     '*': requireAuth(),
- *     email: requireRole('ADMIN')
- *   }
+ *     budget: requireRole('ADMIN'),
+ *   },
  * };
  *
- * const authPlugin = auth.createAuthPlugin(permissions, { defaultPolicy: 'DENY' });
+ * const authPlugin = createAuthPlugin(permissions, { defaultPolicy: 'DENY' });
  * const yoga = createYoga({ schema, plugins: [authPlugin] });
  */
 export const createAuthPlugin = (permissions, options = {}) => {
@@ -374,57 +384,108 @@ export const createAuthPlugin = (permissions, options = {}) => {
 
   const log = debug ? console.log.bind(console, '[auth]') : () => {};
   const processedSchemas = new WeakSet();
+  // Schemas built from the same types share their field objects, so each field is wrapped once.
+  const wrappers = new WeakMap();
+  let warnedAboutQueryRoot = false;
+
+  const warnAboutQueryRoot = (schema) => {
+    if (warnedAboutQueryRoot || !Object.hasOwn(permissions, 'Query') || schema.getType('Query')) return;
+    const queryRoot = schema.getQueryType()?.name;
+    if (!queryRoot) return;
+    warnedAboutQueryRoot = true;
+    console.warn(`[auth] Permissions for type "Query" match no type in the schema. Its query root is named "${queryRoot}"; did you mean "${queryRoot}"?`);
+  };
+
+  const createFieldResolver = (schema, typeName, fieldName, rules, query, originalResolve) => {
+    const key = `${typeName}.${fieldName}`;
+    const denied = () => Promise.reject(new ForbiddenError(`Access denied to ${key}`));
+
+    // Errors keep reaching GraphQL as rejections, as they did when the whole check was async.
+    const resolveField = (parent, args, ctx, info) => {
+      try {
+        return originalResolve(parent, args, ctx, info);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    };
+
+    const grant = (parent, args, ctx, info) => {
+      if (!query) return resolveField(parent, args, ctx, info);
+      return authorizeQueryPaths(permissions, defaultPolicy, info?.schema ?? schema, query, args, ctx, info)
+        .then(() => resolveField(parent, args, ctx, info));
+    };
+
+    // Rules run in order and synchronously until one returns a promise.
+    const runRules = (index, parent, args, ctx, info) => {
+      for (let current = index; current < rules.length; current++) {
+        if (debug) log(`Executing rule for ${key}`);
+        let result;
+        try {
+          result = rules[current](parent, args, ctx, info);
+        } catch (error) {
+          return Promise.reject(error);
+        }
+        if (isThenable(result)) {
+          return Promise.resolve(result).then(value => (
+            value === true || value === undefined ? runRules(current + 1, parent, args, ctx, info) : deny()
+          ));
+        }
+        if (result !== true && result !== undefined) return deny();
+      }
+      if (debug) log(`Access granted to ${key}`);
+      return grant(parent, args, ctx, info);
+    };
+
+    const deny = () => {
+      if (debug) log(`Rule denied access to ${key}`);
+      return denied();
+    };
+
+    return (parent, args, ctx, info) => {
+      // In a schema that only other auth plugin instances processed, their rules apply, not these.
+      if (info?.schema && authorizedSchemas.has(info.schema) && !processedSchemas.has(info.schema)) {
+        return originalResolve(parent, args, ctx, info);
+      }
+      if (debug) log(`Checking ${key}`);
+
+      if (rules === null) {
+        if (debug) log(`No rules for ${key}, applying default policy: ${defaultPolicy}`);
+        return defaultPolicy === 'DENY' ? denied() : grant(parent, args, ctx, info);
+      }
+      return runRules(0, parent, args, ctx, info);
+    };
+  };
 
   const wrapSchemaResolvers = (schema) => {
     if (processedSchemas.has(schema)) return;
     validateConfiguration(permissions, defaultPolicy);
+    warnAboutQueryRoot(schema);
 
     const typeMap = schema.getTypeMap();
 
     for (const [typeName, type] of Object.entries(typeMap)) {
-      if (!(type instanceof GraphQLObjectType) || typeName.startsWith('__')) continue;
+      if (!(type instanceof GraphQLObjectType) || typeName.startsWith('__') || isExemptMetadataType(permissions, type)) continue;
 
       const fields = type.getFields();
 
       for (const [fieldName, field] of Object.entries(fields)) {
+        // Skip fields this plugin already wraps; a resolver replaced since then is wrapped again.
+        const wrapper = wrappers.get(field);
+        if (wrapper !== undefined && wrapper === field.resolve) continue;
+
         const rules = getFieldRules(permissions, typeName, fieldName);
-        const originalResolve = field.resolve || defaultFieldResolver;
         const query = field.extensions?.simfinityQuery;
+        // An allowed field with no rule and no client query paths has nothing to check.
+        if (rules === null && defaultPolicy === 'ALLOW' && !query && !debug) continue;
 
-        field.resolve = async (parent, args, ctx, info) => {
-          log(`Checking ${typeName}.${fieldName}`);
-
-          if (rules === null) {
-            log(`No rules for ${typeName}.${fieldName}, applying default policy: ${defaultPolicy}`);
-
-            if (defaultPolicy === 'DENY') {
-              throw new ForbiddenError(`Access denied to ${typeName}.${fieldName}`);
-            }
-
-            await authorizeQueryPaths(permissions, defaultPolicy, schema, query, args, ctx, info);
-            return originalResolve(parent, args, ctx, info);
-          }
-
-          for (const rule of rules) {
-            log(`Executing rule for ${typeName}.${fieldName}`);
-
-            const allowed = await executeRule(rule, parent, args, ctx, info);
-
-            if (!allowed) {
-              log(`Rule denied access to ${typeName}.${fieldName}`);
-              throw new ForbiddenError(`Access denied to ${typeName}.${fieldName}`);
-            }
-          }
-
-          await authorizeQueryPaths(permissions, defaultPolicy, schema, query, args, ctx, info);
-          log(`Access granted to ${typeName}.${fieldName}`);
-
-          return originalResolve(parent, args, ctx, info);
-        };
+        const resolver = createFieldResolver(schema, typeName, fieldName, rules, query, field.resolve || defaultFieldResolver);
+        field.resolve = resolver;
+        wrappers.set(field, resolver);
       }
     }
 
     processedSchemas.add(schema);
+    authorizedSchemas.add(schema);
   };
 
   return {
