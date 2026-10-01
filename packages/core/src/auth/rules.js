@@ -26,9 +26,11 @@ export const resolvePath = (obj, pathOrFn) => {
   return undefined;
 };
 
-// Built-in rules also expose a check that returns true, false or a factory for the denial error.
+// Built-in rules also have a check that returns true, false or a factory for the denial error.
 // anyRule uses it so a denial that a later rule overrides never builds and throws an error.
-const CHECK = Symbol('simfinity.auth.check');
+// Checks are keyed by the rule function itself: a property would be copied by Object.assign or
+// read through a Proxy, and anyRule would then skip the checks of a wrapping function.
+const checks = new WeakMap();
 
 const ruleFromCheck = (check) => {
   const rule = (parent, args, ctx, info) => {
@@ -36,7 +38,7 @@ const ruleFromCheck = (check) => {
     if (typeof result === 'function') throw result();
     return result;
   };
-  rule[CHECK] = check;
+  checks.set(rule, check);
   return rule;
 };
 
@@ -72,7 +74,8 @@ export const requireAuth = (userPath = 'user') => {
  * requireRole('ADMIN', { userPath: 'auth.user', rolePath: 'roles.primary' })
  */
 export const requireRole = (role, options = {}) => {
-  const roles = Array.isArray(role) ? role : [role];
+  // Copy the list, so changing the caller's array later cannot bypass this validation.
+  const roles = Object.freeze(Array.isArray(role) ? Array.from(role) : [role]);
   if (roles.length === 0 || Array.from(roles).some(value => typeof value !== 'string' || value.length === 0)) {
     throw new TypeError('Required roles must be a nonempty string or array of nonempty strings');
   }
@@ -120,7 +123,8 @@ const findHeldPermissions = (claims, requiredPermissions) => {
  * requirePermission('posts:read', { userPath: 'auth.user', permissionsPath: 'grants' })
  */
 export const requirePermission = (permission, options = {}) => {
-  const requiredPermissions = Array.isArray(permission) ? permission : [permission];
+  // Copy the list, so changing the caller's array later cannot bypass this validation.
+  const requiredPermissions = Object.freeze(Array.isArray(permission) ? Array.from(permission) : [permission]);
   if (requiredPermissions.length === 0
     || Array.from(requiredPermissions).some(perm => typeof perm !== 'string' || perm.length === 0)) {
     throw new TypeError('Required permissions must be a nonempty string or array of nonempty strings');
@@ -193,7 +197,7 @@ export const anyRule = (...rules) => {
 
     for (const rule of rules) {
       try {
-        const check = rule[CHECK];
+        const check = checks.get(rule);
         const result = check ? check(parent, args, ctx, info) : await rule(parent, args, ctx, info);
         if (check && typeof result === 'function') {
           lastError = result;

@@ -420,6 +420,30 @@ describe('Authorization policy safety', () => {
       expect(rule(null, {}, { user: { role: 'admin' } })).toBe(true);
     });
 
+    test('keep literal operands literal when the configured object changes', () => {
+      const literal = { kind: 'approved' };
+      const expression = { eq: [{ ref: 'ctx.approval' }, literal] };
+      const rule = createRuleFromExpression(expression);
+      const ctx = { approval: { kind: 'unapproved' } };
+      expect(rule(null, {}, ctx)).toBe(false);
+      literal.ref = 'ctx.approval';
+      expect(isPolicyExpression(expression)).toBe(false);
+      expect(evaluateExpression(expression, { ctx })).toBe(false);
+      expect(rule(null, {}, ctx)).toBe(false);
+      // The literal keeps its identity for equality.
+      expect(rule(null, {}, { approval: literal })).toBe(true);
+    });
+
+    test('copy operand arrays without calling their own methods', () => {
+      class Raw extends Array {
+        map() { return this; }
+      }
+      const literal = { kind: 'approved' };
+      const rule = createRuleFromExpression({ eq: Raw.from([{ ref: 'ctx.approval' }, literal]) });
+      literal.ref = 'ctx.approval';
+      expect(rule(null, {}, { approval: true })).toBe(false);
+    });
+
     test('keep the validated membership list when the configured list changes', () => {
       const allowedUsers = ['user-1'];
       const rule = createRuleFromExpression({ in: [{ ref: 'ctx.user.id' }, allowedUsers] });
@@ -448,6 +472,17 @@ describe('Authorization policy safety', () => {
       await expect(anyRule(deny('Closed'), () => false)({}, {}, {})).rejects.toThrow('Closed');
     });
 
+    test('anyRule runs functions that copy or proxy a built-in rule', async () => {
+      const ctx = { user: { id: 'user-1' } };
+      const decorated = Object.assign(async () => false, requireAuth());
+      const proxied = new Proxy(requireAuth(), { apply: () => false });
+      for (const rule of [decorated, proxied]) {
+        expect(await rule(null, {}, ctx)).toBe(false);
+        await expect(anyRule(rule)(null, {}, ctx)).resolves.toBe(false);
+        expectDenied(await executePolicy(anyRule(rule), {}, ctx));
+      }
+    });
+
     test('built-in rules still throw their denial when called directly', () => {
       expect(() => requireAuth()(null, {}, {})).toThrow(UnauthenticatedError);
       expect(() => requireRole('ADMIN')(null, {}, { user: { role: 'USER' } })).toThrow('Requires role: ADMIN');
@@ -465,6 +500,18 @@ describe('Authorization policy safety', () => {
       expect(() => rule(null, {}, ctx)).toThrow('Missing permission: posts:read');
       ctx.user.permissions.push('posts:read', '');
       expect(() => rule(null, {}, ctx)).toThrow('User permissions must be an array of nonempty strings');
+    });
+
+    test('role and permission helpers keep the lists they validated', () => {
+      const roles = ['ADMIN'];
+      const permissions = ['posts:delete'];
+      const roleRule = requireRole(roles);
+      const permissionRule = requirePermission(permissions);
+      roles.push(undefined);
+      permissions.length = 0;
+      expect(() => roleRule(null, {}, { user: {} })).toThrow('Requires role: ADMIN');
+      expect(() => permissionRule(null, {}, { user: { permissions: ['posts:read'] } }))
+        .toThrow('Missing permission: posts:delete');
     });
 
     test('requirePermission keeps denying malformed claims used repeatedly in a request', () => {

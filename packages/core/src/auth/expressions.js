@@ -87,8 +87,21 @@ const resolveRef = (refPath, context) => {
   return value;
 };
 
+/**
+ * An operand of a created rule. The literal or reference classification is made once, when the
+ * rule is created, so mutating a literal object afterwards cannot turn it into a reference.
+ */
+class CompiledOperand {
+  constructor(reference, value) {
+    this.reference = reference;
+    this.value = value;
+    Object.freeze(this);
+  }
+}
+
 /** Resolve a literal or reference without coercing its value. */
 const resolveValue = (value, context) => {
+  if (value instanceof CompiledOperand) return value.reference ? resolveRef(value.value, context) : value.value;
   return isReference(value) ? resolveRef(value.ref, context) : value;
 };
 
@@ -186,12 +199,23 @@ export const evaluateExpression = (expression, context) => {
 /** Check the complete AST, including boolean literals and every nested branch. */
 export const isPolicyExpression = value => validateExpression(value);
 
-const snapshotValue = value => (isReference(value) ? Object.freeze({ ref: value.ref }) : value);
+// Copy by index with built-in methods only, so an Array subclass cannot alter the copy.
+const copyArray = (array, transform = value => value) => Array.from(
+  { length: array.length },
+  (_, index) => transform(array[index], index),
+);
 
-// A literal membership list is copied like the operators, so only its validated items are compared.
-const snapshotOperands = (operator, operand) => Object.freeze(operand.map((value, index) => (
-  operator === 'in' && index === 1 && !isReference(value) ? Object.freeze([...value]) : snapshotValue(value)
-)));
+const compileOperand = (operator, value, index) => {
+  if (isReference(value)) return new CompiledOperand(true, value.ref);
+  // A literal membership list is copied, so only its validated items are compared.
+  if (operator === 'in' && index === 1) return new CompiledOperand(false, Object.freeze(copyArray(value)));
+  // Other literals keep their identity, which equality compares.
+  return new CompiledOperand(false, value);
+};
+
+const snapshotOperands = (operator, operand) => Object.freeze(
+  copyArray(operand, (value, index) => compileOperand(operator, value, index)),
+);
 
 /**
  * Copy the validated structure, so evaluation needs no revalidation and later changes to the
@@ -203,7 +227,7 @@ const snapshotExpression = (expression) => {
   for (const [operator, operand] of Object.entries(expression)) {
     if (operator === 'not') snapshot[operator] = snapshotExpression(operand);
     else if (operator === 'eq' || operator === 'in') snapshot[operator] = snapshotOperands(operator, operand);
-    else snapshot[operator] = Object.freeze(operand.map(snapshotExpression));
+    else snapshot[operator] = Object.freeze(copyArray(operand, snapshotExpression));
   }
   return Object.freeze(snapshot);
 };
