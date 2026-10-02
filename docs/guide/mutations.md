@@ -27,7 +27,7 @@ mutation {
 
 `SerieInput` is generated from the type. It excludes the entity `id`, fields marked `readOnly`, and a `state` field managed by a state machine. Required scalar, enum, embedded-object, and list fields remain required on creation. Lists preserve item nullability: `[String!]!` becomes `[String!]!` on create and `[String!]` on update.
 
-Nested inputs follow the relationship's storage model: embedded objects accept their fields, references accept `{ id }`, and referenced collections accept `added`, `updated`, and `deleted`. See [relationships](./relationships).
+Nested inputs follow the relationship's storage model: embedded objects accept their fields, references accept `{ id }`, and referenced collections accept `added`, `updated`, and `deleted`. See [relationships](./relationships). To bound how many nested collection operations one mutation may carry, see [limit nested collection operations](#limit-nested-collection-operations).
 
 ## Update selected fields
 
@@ -89,6 +89,18 @@ On MongoDB, an `UnknownTransactionCommitResult` retries only the commit, up to f
 Multiple root mutation fields in a GraphQL request are not one shared transaction. If a later field fails, an earlier field may already have committed. Use a custom mutation when a business operation needs a single transaction spanning several writes.
 
 Controllers, validators, and state actions can run again on a retry. Keep their database work on the supplied session and design external side effects separately from the transaction. See [controllers](./controllers#transactions-and-side-effects).
+
+## Limit nested collection operations
+
+Each nested `added`, `updated` or `deleted` entry runs its own middleware, hooks and database writes inside the parent's transaction. A large nested input can therefore hold a long transaction. Cap it once at startup:
+
+```javascript
+simfinity.configureMutationLimits({ maxNestedOperations: 100 });
+```
+
+Simfinity counts the `added`, `updated` and `deleted` entries of non-embedded collection fields at every nesting level of one generated add, update or state-action mutation, including `null` entries. The check runs after root middleware and before the transaction starts. A mutation over the limit fails with `NESTED_OPERATIONS_EXCEEDED` (400) and writes nothing.
+
+The setting is process-wide and shared by every runtime. It is unlimited by default. `0` forbids nested operations, and calling `configureMutationLimits()` without arguments restores the default. Unknown or misspelled options, such as `maxNestedOperation`, throw `INVALID_MUTATION_LIMITS` (400) and keep the current limit, so a typo cannot silently remove it. Root deletes, `saveObject()`, custom mutations and embedded lists are not counted. See the [API reference](../reference/api#configuremutationlimits).
 
 ## Add a custom mutation
 

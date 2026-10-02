@@ -1,5 +1,6 @@
 import SimfinityError from './errors/simfinity.error.js';
 import { isEmailFormat } from './scalars/email.js';
+import { compilePattern, matchesPattern } from './scalars/pattern.js';
 
 /**
  * Creates a validation object that works for both 'save' (CREATE) and 'update' (UPDATE) operations.
@@ -74,7 +75,7 @@ export const maxLength = (name, max) => {
 };
 
 export const pattern = (name, regex, message) => {
-  const regexObj = typeof regex === 'string' ? new RegExp(regex) : regex;
+  const regexObj = compilePattern(regex);
   const errorMessage = message || `${name} format is invalid`;
 
   return createValidator(async (typeName, fieldName, value) => {
@@ -82,7 +83,7 @@ export const pattern = (name, regex, message) => {
       throw new SimfinityError(`${name} must be a string`, 'VALIDATION_ERROR', 400);
     }
 
-    if (!regexObj.test(value)) {
+    if (!matchesPattern(regexObj, value)) {
       throw new SimfinityError(errorMessage, 'VALIDATION_ERROR', 400);
     }
   }, false); // Optional
@@ -109,8 +110,7 @@ export const url = () => {
     try {
       // Use URL constructor for better validation
       new URL(value);
-    } catch (e) {
-        console.log('Invalid URL format', e);
+    } catch {
       throw new SimfinityError('Invalid URL format', 'VALIDATION_ERROR', 400);
     }
   }, false); // Optional

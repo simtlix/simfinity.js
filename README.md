@@ -145,7 +145,7 @@ The [shared development and publication contract](docs/resources/contributing.md
 
 Enum filters resolve member names first, then declared internal values by strict equality, on both backends. For example, with `ONE: { value: 'TWO' }` and `TWO: { value: 'two' }`, filter `"TWO"` selects member `TWO`. Numeric internal values require numbers, not numeric strings. This applies to scalar lists, embedded/reference leaves and state filters across EQ, NE, LT, LTE, GT, GTE, BTW, IN and NIN. LIKE accepts string fields only. PostgreSQL writes and state guards continue to use internal enum values. Generated MongoDB models store numeric and boolean enum values as numbers and booleans, so MongoDB range filters, sorts and aggregate `groupId` values follow that type while PostgreSQL uses their text form (`"10"` before `"2"`); convert documents written by earlier versions as described in the [schema guide](docs/guide/schema.md#what-gets-generated).
 
-The shared runtime preserves the v3.1 contract: generated relationships run target middleware/scopes with protected identity and parent filters; nested mutations enforce child middleware and persisted ownership; standalone `saveObject()` wraps the complete workflow in a transaction. Accepted empty strings are preserved. Both facades expose `configureQueryLimits()` for bounded pagination.
+The shared runtime preserves the v3.1 contract: generated relationships run target middleware/scopes with protected identity and parent filters; nested mutations enforce child middleware and persisted ownership; standalone `saveObject()` wraps the complete workflow in a transaction. Accepted empty strings are preserved. Both facades expose `configureQueryLimits()` for bounded pagination and `configureMutationLimits()` for bounded nested writes.
 
 Choose the backend at application setup. The existing package continues to use MongoDB; PostgreSQL uses `createPostgres({ pool, schema })`, the same `connect(null, Type, ...)`/`createSchema()` signatures, and an awaited `initializeDatabase()` before serving requests. See the canonical [PostgreSQL quick start](docs/guide/postgresql.md), detailed [storage reference](docs/postgresql.md), and [compatibility contract](docs/compatibility.md) before adopting this version.
 
@@ -247,7 +247,7 @@ const schema = simfinity.createSchema(
 
 Importing Simfinity initializes its global `__Field.extensions` introspection field safely whether GraphQL's fields have already been materialized or a schema already exists. Repeated module evaluation with the same GraphQL peer reuses the existing extension field and metadata types. Application field metadata is preserved.
 
-The extension remains shared by every schema using that GraphQL peer; Simfinity's type and middleware registries belong to each runtime instance. Schemas constructed after import include `FieldExtensionsType` and `RelationType` in their type maps. Earlier schemas keep their original type maps: ordinary operations and direct metadata selections work, but named fragments on the new metadata types require a schema constructed after import.
+The extension remains shared by every schema using that GraphQL peer; Simfinity's type and middleware registries belong to each runtime instance. A `GraphQLObjectType` belongs to the first runtime whose schema generates its relation resolvers, or reaches it while one of its non-embedded relation fields has no resolver, such as an unregistered custom mutation result. Registering it in another runtime, reaching it from another runtime's schema, or copying its relation fields with `toConfig()` after that runtime generated them, throws `TYPE_BOUND_TO_OTHER_RUNTIME`. Give each runtime its own type objects, for example from a factory function. Types without non-embedded relation fields, and types whose relations all have your own resolvers, can be shared; see [types belong to one runtime](docs/guide/schema.md#types-belong-to-one-runtime). Schemas constructed after import include `FieldExtensionsType` and `RelationType` in their type maps. Earlier schemas keep their original type maps: ordinary operations and direct metadata selections work, but named fragments on the new metadata types require a schema constructed after import.
 
 Schema-cloning tools remain unsupported. In a process that has imported Simfinity, `buildClientSchema()` on a post-import schema's introspection result can also fail with duplicate metadata type names. Use Envelop plugins and in-place resolver wrapping; see the [introspection metadata reference](docs/reference/extensions.md).
 
@@ -275,7 +275,12 @@ The mode is fixed at startup. All writers must share the same graph/mode; raw Mo
 ```javascript
 // Prevent automatic MongoDB collection creation (useful for testing)
 simfinity.preventCreatingCollection(true);
+
+// Cap the nested added/updated/deleted entries of one generated mutation (process-wide; unlimited by default)
+simfinity.configureMutationLimits({ maxNestedOperations: 100 });
 ```
+
+A mutation over the limit fails with `NESTED_OPERATIONS_EXCEEDED` (400) before its transaction starts. Call `configureMutationLimits()` without arguments to remove the limit. Unknown options, such as a misspelled `maxNestedOperation`, throw `INVALID_MUTATION_LIMITS` (400) and keep the current limit.
 
 ## 📋 Basic Usage
 
@@ -1054,7 +1059,7 @@ mutation {
 }
 ```
 
-For non-embedded collections, each `added`, `updated`, or `deleted` child runs the target type's global middleware with the request context. The operation and argument shapes match root mutations: `save`/`update` receive `{ input }`, and `delete` receives `{ id }`. Updated and deleted children must already belong to the current parent in the transaction; a missing child raises `NOT_VALID_ID`, and a different parent raises `FORBIDDEN`. Nested updates cannot move a child between parents. A rejection aborts the parent mutation and its child changes.
+For non-embedded collections, each `added`, `updated`, or `deleted` child runs the target type's global middleware with the request context. The operation and argument shapes match root mutations: `save`/`update` receive `{ input }`, and `delete` receives `{ id }`. Updated and deleted children must already belong to the current parent in the transaction; a missing child raises `NOT_VALID_ID`, and a different parent raises `FORBIDDEN`. Nested updates cannot move a child between parents. A rejection aborts the parent mutation and its child changes. To cap how many `added`, `updated` and `deleted` entries one mutation may carry across all nesting levels, call `simfinity.configureMutationLimits({ maxNestedOperations })` at startup; see [limit nested collection operations](docs/guide/mutations.md#limit-nested-collection-operations).
 
 ## ✅ Validations
 
@@ -1110,7 +1115,7 @@ const PersonType = new GraphQLObjectType({
 **String Validators:**
 - `validators.stringLength(name, min, max)` - Validates string length with min/max bounds (required for CREATE)
 - `validators.maxLength(name, max)` - Validates maximum string length
-- `validators.pattern(name, regex, message)` - Validates against a regex pattern
+- `validators.pattern(name, regex, message)` - Validates against a regex pattern (each value is tested from its first character, whatever the `g`/`y` flags; a pattern that is not a `RegExp` or a string throws `TypeError`)
 - `validators.email()` - Validates email format
 - `validators.url()` - Validates URL format
 
@@ -1321,7 +1326,7 @@ const PersonType = new GraphQLObjectType({
 - `scalars.createBoundedStringScalar(name, min, max)` - String with length bounds
 - `scalars.createBoundedIntScalar(name, min, max)` - Integer with range validation
 - `scalars.createBoundedFloatScalar(name, min, max)` - Float with range validation
-- `scalars.createPatternStringScalar(name, pattern, message)` - String with regex pattern validation
+- `scalars.createPatternStringScalar(name, pattern, message)` - String with regex pattern validation (same pattern rules as `validators.pattern`)
 
 #### Creating Custom Scalars Manually
 
@@ -1368,6 +1373,8 @@ const UserType = new GraphQLObjectType({
 });
 ```
 
+The validation callback receives the base scalar's parsed value for variables and inline literals (for example, a `Date` from a DateTime base), and the resolver's value before serialization for output. Inline literal kinds follow the root of the chain of validated scalars, so a scalar built on `PositiveIntScalar` accepts integer literals, and Float-rooted scalars accept both `4` and `4.0`. Custom root scalars decide their own literals, even with a hand-set `baseScalarType` storage hint. See [validated scalars](docs/reference/scalars.md#createvalidatedscalar).
+
 ### Custom Error Classes
 
 Create domain-specific error classes:
@@ -1396,6 +1403,15 @@ class NotFoundError extends SimfinityError {
   }
 }
 ```
+
+To normalize errors in your GraphQL server, pass `simfinity.buildErrorFormatter(callback)` to its error-formatting option. For an error raised while resolving a field, it classifies the raised value, such as the one a resolver threw; other errors are classified as they are:
+
+- A `SimfinityError` keeps its code and status.
+- A request `GraphQLError`, such as a syntax, validation or variable error, keeps its message and extensions, including the `http` status Yoga adds. So does a `GraphQLError` raised while resolving a field, but only when it has its own string `extensions.code` or a `SimfinityError` cause. Its code is its own `extensions.code`, or `BAD_REQUEST`, and its status is its `extensions.status`, or 500 for `INTERNAL_SERVER_ERROR` and 400 otherwise; a `SimfinityError` cause, such as one thrown by a custom scalar, supplies them instead. Input rejected by Simfinity's validated scalars, such as an invalid `EmailScalar` value, is therefore `BAD_REQUEST` (400), and the hidden `originalError` of an application `GraphQLError` is never exposed. A code the server already set is kept, such as Yoga's `GRAPHQL_PARSE_FAILED` or Apollo Server's `BAD_USER_INPUT`.
+- Any other `GraphQLError` raised while resolving a field, such as one a resolver threw without a code or one graphql-js raised because it could not serialize or type-check the resolved value, becomes an `InternalServerError` that keeps the message and the error as its cause. Some graphql-js messages print the resolved value.
+- Any other `Error` becomes an `InternalServerError` that keeps the message and the error as its cause; a non-Error value becomes `Unexpected error value` with no cause. Under Yoga, whose executor turns a thrown non-Error value into an `Error` with the value's text, that text becomes the `InternalServerError` message instead.
+
+The callback receives the classified error and can return a replacement. To hide unexpected messages, branch on `error instanceof simfinity.InternalServerError`. The formatter returns a `GraphQLError` whose `originalError` is the classified error. See [buildErrorFormatter](docs/reference/errors.md#builderrorformatter), [server integration](docs/reference/errors.md#connect-it-to-your-server) and [server differences](docs/reference/errors.md#server-differences).
 
 ## 🔄 State Machines
 
@@ -1807,6 +1823,8 @@ const PrivateDocumentType = new GraphQLObjectType({
 
 ### Scope Function Parameters
 
+`extensions.scope` must be a plain object whose keys are `find`, `get_by_id` or `aggregate` and whose values are functions. Omit a key to leave that operation unscoped. Any other shape, such as a misspelled `getById` key, a key set to `undefined` (`{ find: undefined }`), an array, a bare function or `scope: undefined`, throws `INVALID_SCOPE` (500) from `connect()`, `addNoEndpointType()` or `createSchema()`. Non-enumerable keys are checked too. A scope changed into an invalid shape later fails every read of that type instead of being skipped.
+
 Scope functions receive the same parameters as middleware for consistency:
 
 ```javascript
@@ -2040,6 +2058,8 @@ const {
 
 Requires the user to be authenticated. Supports custom user paths in context:
 
+Paths in `requireAuth`, `requireRole`, `requirePermission` and `isOwner` are dotted strings or synchronous extractor functions. An `async` extractor throws `TypeError` when the helper is created. A path that yields a promise at runtime, such as an un-awaited `ctx.user`, denies with `TypeError` instead of granting access; await the user in your context factory.
+
 ```javascript
 const permissions = {
   RootQueryType: {
@@ -2057,7 +2077,7 @@ const permissions = {
 
 #### requireRole(role, options?)
 
-Requires the user to have a specific role. Supports custom paths:
+Requires the user to have a specific role. Supports custom paths (dotted strings or synchronous extractors):
 
 The required role must be a nonempty string or nonempty array of nonempty strings; invalid configuration throws `TypeError`. The user's single role value must match an allowed string exactly. The helper copies the required list when created, so later changes to the original array do not alter the rule.
 
@@ -2079,7 +2099,7 @@ const permissions = {
 
 #### requirePermission(permission, options?)
 
-Requires the user to have specific permission(s). Supports custom paths:
+Requires the user to have specific permission(s). Supports custom paths (dotted strings or synchronous extractors):
 
 The required permission must be a nonempty string or nonempty array of nonempty strings; invalid configuration throws `TypeError`. The helper copies the required list when created, while user claims are checked on every call. The user's claim must be an array of nonempty strings. Entries match exactly; only a standalone `'*'` entry grants every permission. A claim such as `'posts:read'` must be supplied as `['posts:read']`. String claims, substrings, and embedded wildcard characters do not grant access.
 
@@ -2134,7 +2154,7 @@ const permissions = {
 
 Checks if the authenticated user owns the resource:
 
-IDs must be nonempty strings, finite numbers (including zero), or Mongoose `ObjectId` instances. Numbers compare by their string representation, and ObjectIds compare by hexadecimal value. Missing/null IDs, empty strings, arrays, booleans, and arbitrary objects deny access. Use the path or extractor arguments to obtain a supported ID from a custom identity object.
+IDs must be nonempty strings, finite numbers (including zero), or Mongoose `ObjectId` instances. Numbers compare by their string representation, and ObjectIds compare by hexadecimal value. Missing/null IDs, empty strings, arrays, booleans, and arbitrary objects deny access. Use the path or synchronous extractor arguments to obtain a supported ID from a custom identity object.
 
 ```javascript
 const permissions = {
@@ -2187,15 +2207,16 @@ Use `{ ref: 'path' }` to reference values:
 - `eq` and `in` require exactly two operands; `in` requires an array or a reference resolving to an array. A literal `in` array may contain only strings, finite numbers, bigints, booleans, `null` and MongoDB ObjectIds, and literal operands cannot contain nested `{ ref }` values, because literals are never resolved. A rule keeps the list items it validated. `allOf` and `anyOf` require arrays of valid expressions; `not` requires a valid expression
 - Unknown operators or malformed nested expressions invalidate the entire configured policy, even inside an otherwise granting `anyOf`
 - Factories reject malformed expressions with `TypeError`; `isPolicyExpression` validates the complete AST, and direct `evaluateExpression` calls return `false` for malformed ASTs
-- Created rules classify operands as literals or references once. Adding `ref` to a literal later does not turn it into a reference; object literals keep their identity for equality
+- Created rules classify operands as literals or references once. Adding `ref` to a literal later does not turn it into a reference. Date literals are copied and compare by time; other object literals keep their identity for equality
 - Missing references and invalid runtime membership operands cannot grant access, including under `not` or repeated negation. They propagate through `allOf` and implicit AND. A separate valid `anyOf` branch can still grant access, such as a published post without an authenticated user
 - Explicit `null`, `false`, `0`, and empty-string comparison values remain valid; equality is strict. MongoDB `ObjectId` values compare by their hexadecimal string, so an ObjectId matches the same ID as a string or as another ObjectId instance. Values of different types never match (such as `'42'` and `42`), and such a comparison is invalid, so `not` cannot turn it into a grant; `null` remains comparable with any value. `in` compares each array item the same way for plain arrays and Mongoose arrays; when no item matches, it is invalid if any non-null item has a different type than the value, or if the value is a list or plain object. Use `requireAuth()` or `isOwner()` for identity checks rather than treating two explicit null IDs as ownership
+- `Date` values compare by time, also in referenced `in` lists. A Date compared with any non-null value that is not a valid Date is invalid, and an invalid Date never matches. NaN never matches: comparing it with a non-null value is invalid, and a literal NaN operand throws `TypeError` at configuration time. Promise operands are invalid
 - Boolean expressions and logical identities remain valid: `{ allOf: [] }` is true, `{ anyOf: [] }` is false, and `{ not: false }` is true. Multiple operator keys form an implicit AND
 - No `eval()` or `Function()` - pure object traversal
 
 ### Integration with GraphQL Yoga / Envelop
 
-The recommended way to use the auth system is via the Envelop plugin, which works natively with GraphQL Yoga and any Envelop-based server. The plugin wraps resolvers in-place without rebuilding the schema, avoiding compatibility issues. A plugin instance wraps each field once, even when several schemas share the same types. In a schema that only other plugin instances processed, its wrappers defer to theirs; a schema no instance processed keeps enforcing every wrapper's rules. Fields with no rule under `ALLOW` and no filter, sort or aggregation paths keep their original resolver. Simfinity's `extensions` metadata types are not wrapped unless the permission map names them. A field whose rules are all synchronous, or an unwrapped field with no rule under `ALLOW`, starts its resolver before the rules of the following sibling fields run.
+The recommended way to use the auth system is via the Envelop plugin, which works natively with GraphQL Yoga and any Envelop-based server. The plugin wraps resolvers in-place without rebuilding the schema, avoiding compatibility issues. Every schema type must come from the graphql module the plugin uses: a type from another copy, such as a second installed version or its ESM and CommonJS builds loaded together, makes `onSchemaChange` throw `TypeError` before any field is wrapped. A plugin instance wraps each field once, even when several schemas share the same types. In a schema that only other plugin instances processed, its wrappers defer to theirs; a schema no instance processed keeps enforcing every wrapper's rules. Fields with no rule under `ALLOW` and no filter, sort or aggregation paths keep their original resolver. Simfinity's `extensions` metadata types are not wrapped unless the permission map names them. A field whose rules are all synchronous, or an unwrapped field with no rule under `ALLOW`, starts its resolver before the rules of the following sibling fields run.
 
 ```javascript
 const { createYoga } = require('graphql-yoga');
@@ -2338,13 +2359,13 @@ Middlewares provide a powerful way to intercept and process all GraphQL operatio
 
 ### Adding Middlewares
 
-Register middlewares using `simfinity.use()`. Middlewares execute in the order they're registered:
+Register middlewares using `simfinity.use()`. Middlewares execute in the order they're registered. `use()` accepts only functions; any other value throws `INVALID_MIDDLEWARE` (500):
 
 ```javascript
 // Basic logging middleware
-simfinity.use((params, next) => {
-  console.log(`Executing ${params.operation} on ${params.type?.name || 'custom mutation'}`);
-  next();
+simfinity.use(async (params, next) => {
+  console.log(`Executing ${params.operation} on ${params.type?.gqltype.name || 'custom mutation'}`);
+  await next();
 });
 ```
 
@@ -2355,20 +2376,20 @@ Each middleware receives a `params` object containing:
 Generated non-embedded relationship reads and nested collection mutations also invoke middleware for the related type. Middleware and scope callbacks are awaited. Nested child operations use the same argument shapes and request context as their root equivalents; review middleware that previously assumed it ran only once per root operation.
 
 ```javascript
-simfinity.use((params, next) => {
+simfinity.use(async (params, next) => {
   // params object contains:
   const {
-    type,        // Type information (model, gqltype, controller, etc.)
+    type,        // Registered type metadata: gqltype, model, controller, etc. Absent for custom mutations
     args,        // GraphQL arguments passed to the operation
-    operation,   // Operation type: 'save', 'update', 'delete', 'get_by_id', 'find', 'state_changed', 'custom_mutation'
+    operation,   // Operation type: 'save', 'update', 'delete', 'get_by_id', 'find', 'aggregate', 'state_changed', 'custom_mutation'
     context,     // GraphQL context object (includes request info, user data, etc.)
     actionName,  // For state machine actions (only present for state_changed operations)
     actionField, // State machine action details (only present for state_changed operations)
     entry        // Custom mutation name (only present for custom_mutation operations)
   } = params;
   
-  // Always call next() to continue the middleware chain
-  next();
+  // Await next() to continue the middleware chain
+  await next();
 });
 ```
 
@@ -2377,12 +2398,13 @@ simfinity.use((params, next) => {
 #### 1. Authentication & Authorization
 
 ```javascript
-simfinity.use((params, next) => {
+simfinity.use(async (params, next) => {
   const { context, operation, type } = params;
   
   // Skip authentication for read operations
   if (operation === 'get_by_id' || operation === 'find') {
-    return next();
+    await next();
+    return;
   }
   
   // Check if user is authenticated
@@ -2391,35 +2413,32 @@ simfinity.use((params, next) => {
   }
   
   // Check permissions for specific types
-  if (type?.name === 'User' && context.user.role !== 'admin') {
+  if (type?.gqltype.name === 'User' && context.user.role !== 'admin') {
     throw new simfinity.SimfinityError('Admin access required', 'FORBIDDEN', 403);
   }
   
-  next();
+  await next();
 });
 ```
 
 #### 2. Request Logging & Monitoring
 
 ```javascript
-simfinity.use((params, next) => {
-  const { operation, type, args, context } = params;
-  const startTime = Date.now();
+simfinity.use(async (params, next) => {
+  const { operation, type } = params;
   
-  console.log(`[${new Date().toISOString()}] Starting ${operation}${type ? ` on ${type.name}` : ''}`);
+  console.log(`[${new Date().toISOString()}] Preparing ${operation}${type ? ` on ${type.gqltype.name}` : ''}`);
   
-  // Continue with the operation
-  next();
-  
-  const duration = Date.now() - startTime;
-  console.log(`[${new Date().toISOString()}] Completed ${operation} in ${duration}ms`);
+  // Continue the middleware chain. The database operation runs after the whole chain returns,
+  // so measure complete request duration in your GraphQL server's execution hooks instead.
+  await next();
 });
 ```
 
 #### 3. Input Validation & Sanitization
 
 ```javascript
-simfinity.use((params, next) => {
+simfinity.use(async (params, next) => {
   const { operation, args, type } = params;
   
   // Validate input for save operations
@@ -2432,12 +2451,12 @@ simfinity.use((params, next) => {
     });
     
     // Validate required business rules
-    if (type?.name === 'Book' && args.input.title && args.input.title.length < 3) {
+    if (type?.gqltype.name === 'Book' && args.input.title && args.input.title.length < 3) {
       throw new simfinity.SimfinityError('Book title must be at least 3 characters', 'VALIDATION_ERROR', 400);
     }
   }
   
-  next();
+  await next();
 });
 ```
 
@@ -2446,7 +2465,7 @@ simfinity.use((params, next) => {
 ```javascript
 const requestCounts = new Map();
 
-simfinity.use((params, next) => {
+simfinity.use(async (params, next) => {
   const { context, operation } = params;
   const userId = context.user?.id || context.ip;
   const now = Date.now();
@@ -2466,14 +2485,14 @@ simfinity.use((params, next) => {
     requestCounts.set(userId, recentRequests);
   }
   
-  next();
+  await next();
 });
 ```
 
 #### 5. Audit Trail
 
 ```javascript
-simfinity.use((params, next) => {
+simfinity.use(async (params, next) => {
   const { operation, type, args, context } = params;
   
   // Log all mutations for audit purposes
@@ -2482,7 +2501,7 @@ simfinity.use((params, next) => {
       timestamp: new Date(),
       user: context.user?.id,
       operation,
-      type: type?.name,
+      type: type?.gqltype.name,
       entityId: args.id || 'new',
       data: operation === 'delete' ? null : args.input,
       ip: context.ip,
@@ -2493,54 +2512,57 @@ simfinity.use((params, next) => {
     console.log('AUDIT:', JSON.stringify(auditEntry));
   }
   
-  next();
+  await next();
 });
 ```
 
 ### Multiple Middlewares
 
-Middlewares execute in registration order. Each middleware must call `next()` to continue the chain:
+Middlewares execute in registration order. Each middleware awaits `next()` to continue the chain:
 
 ```javascript
 // Middleware 1: Authentication
-simfinity.use((params, next) => {
+simfinity.use(async (params, next) => {
   console.log('1. Checking authentication...');
   // Authentication logic here
-  next(); // Continue to next middleware
+  await next(); // Continue to next middleware
 });
 
 // Middleware 2: Authorization  
-simfinity.use((params, next) => {
+simfinity.use(async (params, next) => {
   console.log('2. Checking permissions...');
   // Authorization logic here
-  next(); // Continue to next middleware
+  await next(); // Continue to next middleware
 });
 
 // Middleware 3: Logging
-simfinity.use((params, next) => {
+simfinity.use(async (params, next) => {
   console.log('3. Logging request...');
   // Logging logic here
-  next(); // Continue to GraphQL operation
+  await next(); // The operation runs after the chain returns
 });
 ```
+
+The rest of the chain runs at most once, even if a middleware calls `next()` twice. The runtime awaits it even if a middleware calls `next()` without awaiting it, and its errors still cancel the operation instead of becoming unhandled rejections. Call `next()` before the middleware returns or its promise settles: a `next()` called later, for example from `setTimeout(next)`, does nothing, so the remaining middleware is skipped and the operation still runs.
 
 ### Error Handling in Middlewares
 
 Middlewares can throw errors to stop the operation:
 
 ```javascript
-simfinity.use((params, next) => {
+simfinity.use(async (params, next) => {
   const { context, operation } = params;
   
+  // Validation logic
+  if (!context.user && operation !== 'find') {
+    throw new simfinity.SimfinityError('Authentication required', 'UNAUTHORIZED', 401);
+  }
+
   try {
-    // Validation logic
-    if (!context.user && operation !== 'find') {
-      throw new simfinity.SimfinityError('Authentication required', 'UNAUTHORIZED', 401);
-    }
-    
-    next(); // Continue only if validation passes
+    await next(); // Continue only if validation passes
   } catch (error) {
-    // Error automatically bubbles up to GraphQL error handling
+    // An error from a later middleware still cancels the operation, even when caught here.
+    console.error('Middleware chain failed', error);
     throw error;
   }
 });
@@ -2551,11 +2573,11 @@ simfinity.use((params, next) => {
 Execute middleware logic conditionally based on operation type or context:
 
 ```javascript
-simfinity.use((params, next) => {
+simfinity.use(async (params, next) => {
   const { operation, type, context } = params;
   
   // Only apply to specific types
-  if (type?.name === 'SensitiveData') {
+  if (type?.gqltype.name === 'SensitiveData') {
     // Special handling for sensitive data
     if (!context.user?.hasHighSecurity) {
       throw new simfinity.SimfinityError('High security clearance required', 'FORBIDDEN', 403);
@@ -2568,14 +2590,14 @@ simfinity.use((params, next) => {
     console.log(`Mutation ${operation} executing...`);
   }
   
-  next();
+  await next();
 });
 ```
 
 ### Best Practices
 
-1. **Always call `next()`**: Failing to call `next()` will hang the request
-2. **Handle errors gracefully**: Use try-catch blocks for error-prone operations
+1. **Await `next()`**: Call it before the middleware returns. Omitting `next()`, or calling it later from a callback, skips the remaining middleware, but the operation still runs. Throw an error to cancel it
+2. **Handle errors deliberately**: Catching an error around `next()` does not let the operation continue; use it for logging
 3. **Keep middlewares focused**: Each middleware should handle one concern
 4. **Order matters**: Register middlewares in logical order (auth → validation → logging)
 5. **Performance consideration**: Middlewares run on every operation, keep them lightweight
@@ -2699,7 +2721,7 @@ Each generated tool follows MCP best practices so an agent can use it without ex
 
 - **`description`**: reuses the GraphQL type/field descriptions and adds an actionable summary. List and aggregate tools spell out the available filter operators (`EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE`), `AND`/`OR` groups, pagination and sorting; aggregate tools additionally document the `SUM/COUNT/AVG/MIN/MAX` operations and the `aggregation` argument.
 - **`title`**: a human-readable label (e.g. `List Book`, `Create Book`, `Aggregate Book`).
-- **`inputSchema`**: JSON Schema derived from the GraphQL arguments (scalars, enums, input objects, lists, non-null wrappers, and recursive filter types such as `QLFilterGroup` via `$defs`/`$ref`). Nullable arguments, input fields and list items accept explicit `null`; non-null positions reject it. Nullable references use `anyOf` with a null alternative. GraphQL type and field descriptions are propagated, with curated descriptions for synthetic types. `Date`/`DateTime`/`Time` scalars use the matching JSON Schema `format`. Defaulted arguments are optional; representable defaults appear in the schema and generated GraphQL variables, with enum member names rather than internal values. Omitted opaque scalar defaults that have no GraphQL literal representation use the field's original default.
+- **`inputSchema`**: JSON Schema derived from the GraphQL arguments (scalars, enums, input objects, lists, non-null wrappers, and recursive filter types such as `QLFilterGroup` via `$defs`/`$ref`). Nullable arguments, input fields and list items accept explicit `null`; non-null positions reject it. Nullable references use `anyOf` with a null alternative. GraphQL type and field descriptions are propagated, with curated descriptions for synthetic types. `Date`/`DateTime`/`Time` scalars use the matching JSON Schema `format`. Defaulted arguments are optional; representable defaults appear in the schema and generated GraphQL variables, with enum member names rather than internal values. Omitted opaque scalar defaults that have no GraphQL literal representation use the field's original default. Validated scalars, including chains built on other validated scalars, use the JSON type of their root scalar; a custom scalar's description is published unless the field or argument has its own.
 - **`outputSchema`**: JSON Schema describing the returned data (mirroring the auto-generated selection set), with type/field descriptions. Every nullable GraphQL position also accepts `null` (e.g. `type: ['string', 'null']`; enums get `null` appended), so validating MCP clients accept the `null`s GraphQL legitimately returns in `structuredContent` (get-by-id misses, unset optional fields).
 - **`annotations`**: behavioral hints — queries are `readOnlyHint: true`, `delete*` is `destructiveHint: true`, `update*` is `idempotentHint: true`. Generated CRUD mutations are recognized by the placeholder descriptions Simfinity stamps on them, so a custom mutation that happens to be named `updateReport` (and carries its own description) keeps that description and gets no inferred hints.
 
@@ -2800,9 +2822,9 @@ The handler catches all errors itself: `onError` is for logging/metrics, and a J
 | `includeId` | `true` | Select a scalar or enum `id` as a fallback when nothing else is selectable; otherwise use `__typename`. |
 | `toolNamePrefix` | — | Prefix prepended to every published tool name (e.g. `'catalog_'`). Must match `/^[a-zA-Z0-9_-]+$/`; the resulting names must match `/^[a-zA-Z0-9_-]{1,128}$/` (`MCP_INVALID_TOOL_NAME` otherwise). |
 | `toolOverrides` | `{}` | Per-tool overrides keyed by tool (or unprefixed field) name: `{ description, title, annotations, selectionDepth, includeId, selection }`. See [Customizing tools](#customizing-tools). |
-| `toolMiddleware` | — | Array of koa-style `async (call, next)` functions run around every tool call. See [Tool middleware](#tool-middleware). |
+| `toolMiddleware` | — | A koa-style `async (call, next)` function, or an array of them, run around every tool call. A single function is a one-element stack. Validated at setup (`MCP_INVALID_MIDDLEWARE`, also for an empty slot in a sparse array) and copied, so later changes to the array have no effect. See [Tool middleware](#tool-middleware). |
 | `limits` | — | Guardrails: `{ maxPageSize, defaultPagination, maxResultBytes }`. See [Limits](#limits). |
-| `schemaPlugins` | — | Envelop-style plugins whose `onSchemaChange` hook is applied once before serving (in-process execution only). See [Authentication](#authentication). |
+| `schemaPlugins` | — | Envelop-style plugins whose `onSchemaChange` hook is applied once before serving (in-process execution only). Entries are validated before any hook runs (`MCP_INVALID_SCHEMA_PLUGIN`, also for a misspelling of `onSchemaChange` on a plugin that lacks it); `false`/`null`/`undefined` entries are skipped; asynchronous hooks are awaited. Typed Envelop/Yoga `Plugin` arrays and class instances, including ones with `call` or `apply` members, are accepted by the TypeScript declarations (`SchemaPluginObject`); functions and promises are not. See [Authentication](#authentication). |
 | `serverName` / `serverVersion` | `'simfinity-mcp'` / `'1.0.0'` | Identity reported by the MCP server. |
 | `transportOptions` | — | `createHTTPMCPHandler` only: stateless SDK transport options (e.g. `enableDnsRebindingProtection`, `allowedHosts`, `allowedOrigins`). Setting `sessionIdGenerator`, `onsessioninitialized`, `onsessionclosed` or `eventStore` raises `MCP_INVALID_TRANSPORT_OPTIONS` at setup. |
 | `onError` | — | `createHTTPMCPHandler` only: `(err, req, res)` callback invoked when a request fails; the handler still responds with a JSON-RPC internal error (HTTP 500) if headers were not sent. |
@@ -2869,7 +2891,7 @@ const { callTool } = simfinity.generateMCPTools(schema, {
 ```
 
 - `maxPageSize`: rejects calls whose `pagination.size` exceeds the cap.
-- `defaultPagination`: injected only for tools that have a `pagination` argument, and only when the caller did not send one. `page` and `size` are both required (QLPagination declares them non-null), and `size` must not exceed `maxPageSize` — that misconfiguration throws `MCP_INVALID_LIMITS` at setup.
+- `defaultPagination`: injected only for tools that have a `pagination` argument, and only when the caller did not send one. `page` and `size` are both required (QLPagination declares them non-null), and `size` must not exceed `maxPageSize` — that misconfiguration throws `MCP_INVALID_LIMITS` at setup: from `generateMCPTools`/`createMCPServer`, and when `createHTTPMCPHandler` creates the handler.
 - `maxResultBytes`: caps the UTF-8 byte length of the pretty-printed logical payload: `data` on success, or `{ errors, data? }` on failure. Oversized errors and partial data are replaced by `MCP_RESULT_TOO_LARGE`. This diagnostic and pagination-limit diagnostics are exempt from the cap, so even a tiny cap can return an actionable error. The cap excludes MCP envelope overhead, the duplicate `structuredContent`, and middleware-created results; it runs after execution and does not limit database work or remote download size.
 
 ### Tool middleware
@@ -2900,6 +2922,8 @@ const { callTool } = simfinity.generateMCPTools(schema, {
 ```
 
 Middleware can mutate `call.args` before calling `next()`, short-circuit by returning a result, or throw. Calling `next()` twice rejects with `MCP_MIDDLEWARE_ERROR`.
+
+Pass a function or an array of functions. Every function runs, whatever its declared parameter count. A non-array value or a non-function entry (including `null` from `cond && mw`, and an empty slot in a sparse array such as `[a, , b]`) throws `MCP_INVALID_MIDDLEWARE` at setup. The stack is captured at setup.
 
 ### Remote execution
 
@@ -2958,6 +2982,14 @@ await simfinity.startStdioMCPServer(schema, {
   schemaPlugins: [createAuthPlugin(permissions, { defaultPolicy: 'ALLOW' })],
 });
 ```
+
+MCP calls only `onSchemaChange`, so pass the factory result (`createAuthPlugin(...)`), not the factory. These setup rules apply:
+
+- A function, an array, a promise (an object with a `then` method or getter), a non-function `onSchemaChange`, a non-array `schemaPlugins` value or an object with no plugin hooks throws `MCP_INVALID_SCHEMA_PLUGIN` before any hook runs.
+- So does a misspelling of `onSchemaChange` on a plugin without a function `onSchemaChange`: an own or inherited method or getter whose name starts with `onSchema` in any letter case, or is at most two edits from `onSchemaChange` ignoring case, such as `onSchemaChanged`, `onSchemChange` or `onShemaChange`. The message suggests `onSchemaChange`. Helpers such as `onSchemaReady` next to a working `onSchemaChange` are accepted. Validation reads `onSchemaChange` directly and inspects every other property, `then` included, through its descriptor, so it calls no other getter.
+- Plugins carrying other hooks (`on*`, `instrumentation`, `requestDidStart`, `serverWillStart`) get a one-time console warning naming the ignored hooks; plugins added via `onPluginInit`/`addPlugin` are not installed.
+- `replaceSchema` with a different schema throws `MCP_UNSUPPORTED_SCHEMA_REPLACEMENT`.
+- An asynchronous `onSchemaChange` is awaited: `createMCPServer`, `startStdioMCPServer` and `createHTTPMCPHandler` resolve after installation and reject if it fails. `generateMCPTools` stays synchronous; its calls wait for installation and reject with the installer's error if it failed. Envelop and Yoga do not await `onSchemaChange`, so plugins shared with Yoga should still install synchronously.
 
 Mounting the MCP handler next to a running Envelop/Yoga server that shares the same `schema` object also works: Yoga fires `onSchemaChange` at startup and `createAuthPlugin` wraps the resolvers in place, so the MCP tools execute the already-wrapped schema.
 
@@ -3294,8 +3326,8 @@ const app = express();
 app.use('/graphql', graphqlHTTP({
   schema,
   graphiql: true,
-  formatError: simfinity.buildErrorFormatter((err) => {
-    console.log(err);
+  customFormatErrorFn: simfinity.buildErrorFormatter((err) => {
+    console.error(err.getCode(), err.message);
   })
 }));
 

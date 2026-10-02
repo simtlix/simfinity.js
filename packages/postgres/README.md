@@ -6,7 +6,7 @@ All Simfinity packages are released together. Install from npm and keep their ve
 
 ## Runtime
 
-Create an instance, register the same GraphQL object types used by Simfinity, build the schema, and await database initialization before serving operations:
+Create an instance, register the same GraphQL object type definitions used by Simfinity (each instance needs its own type objects), build the schema, and await database initialization before serving operations:
 
 ```javascript
 import pg from 'pg';

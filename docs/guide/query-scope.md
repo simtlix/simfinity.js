@@ -75,6 +75,10 @@ async function scope({ type, args, operation, context }) {
 | `operation` | `find`, `get_by_id`, or `aggregate`. |
 | `context` | The application's GraphQL context. |
 
+`extensions.scope` must be a plain object, or an object with a null prototype. Its keys must be `find`, `get_by_id` or `aggregate`, and each value must be a function. Omit a key to leave that operation unscoped. To combine several restrictions, call them from one function; arrays of scope functions are not supported.
+
+`connect()`, `addNoEndpointType()` and `createSchema()` reject any other shape with `INVALID_SCOPE` (500), so a scope can never be skipped silently. This includes misspelled keys such as `getById` or `findAll`, a key set to `undefined`, an array, a bare function, a class instance, and `scope: undefined` or `scope: null`; omit the key or the property instead. Every own string key is checked, including non-enumerable keys defined with `Object.defineProperty()`. The TypeScript `TypeScopes` type accepts `{ find: undefined }`, but the runtime rejects it at startup, so add the key only when it has a function, for example `const scope: TypeScopes = { find: tenantScope }; if (multiTenant) scope.get_by_id = tenantScope;`. Scopes are checked again on every read. If a scope is changed into an invalid shape after `createSchema()`, every read of that type fails with `INVALID_SCOPE`, including relation reads and filter paths that join it.
+
 Use GraphQL field names for filters. A scalar filter has `{ operator, value }`. A related-object filter uses `{ terms: [{ path, operator, value }] }`, as described in [queries](/guide/queries).
 
 Assigning a filter to an existing argument replaces the caller's filter. Append a server restriction as an AND group, as above, to retain both. For a server rule containing OR, append `{ OR: scopeBranches }` to `args.AND`; assigning `args.OR` would discard the caller's OR. The Barber examples use `intersectScopeFilter` in each backend's `types/scopeHelpers.js` to preserve scalar, relation, ID and logical filters.

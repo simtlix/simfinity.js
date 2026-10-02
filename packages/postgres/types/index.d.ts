@@ -21,10 +21,15 @@ export type {
   FieldValidations,
   FieldValidator,
   MiddlewareContext,
+  MutationLimitsOptions,
   PermissionSchema,
   PolicyExpression,
+  ScopeFunction,
+  ScopeOperation,
+  ScopeParams,
   StateMachine,
   TypePermissions,
+  TypeScopes,
 } from '@simtlix/simfinity-core';
 
 export interface DatabaseColumn {
@@ -180,3 +185,8 @@ export const withTransaction: PostgresRuntime['withTransaction'];
 export function initializeDatabase(options?: InitializationOptions): Promise<InitializationResult>;
 
 export const configureQueryLimits: Runtime['configureQueryLimits'];
+/**
+ * The same process-wide setter as every runtime's configureMutationLimits. Unknown or misspelled
+ * options throw INVALID_MUTATION_LIMITS (400) and keep the current limit.
+ */
+export const configureMutationLimits: Runtime['configureMutationLimits'];

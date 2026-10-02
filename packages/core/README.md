@@ -8,14 +8,19 @@ For relational storage, `@simtlix/simfinity-sql` builds on core and delegates ph
 
 ## Runtime
 
-`createRuntime(adapter)` creates an isolated Simfinity runtime. Each instance owns its registrations, generated input types, middleware, scopes, hooks, custom mutations, and state machines. It exposes:
+`createRuntime(adapter)` creates a Simfinity runtime. Each instance owns its registrations, generated input types, middleware, scopes, hooks, custom mutations, and state machines; the GraphQL type objects it builds resolvers for are bound to it, and query and mutation limits are process-wide. It exposes:
 
 - `connect`, `addNoEndpointType`, and `createSchema` for registration and schema creation;
 - `getModel`, `getType`, `getInputType`, and `getRegistrations` for runtime inspection;
 - `use`, `registerMutation`, and `saveObject` for middleware and write orchestration;
-- `preventCreatingCollection` to pass validation-only storage setup to an adapter.
+- `preventCreatingCollection` to pass validation-only storage setup to an adapter;
+- `configureQueryLimits` and `configureMutationLimits` for the process-wide page-size and nested-operation limits.
 
 The adapter supplies model creation, identifiers, transactions, record reads and writes, queries, counts, aggregations, and inverse collection reads. `DatabaseAdapter`, `Runtime`, controller, middleware, registration, and state-machine interfaces are exported in the TypeScript declarations. A runtime binds one adapter; create another runtime to use another database or configuration. An adapter can also define `getByIds(model, ids, { context })`, which returns the records it finds in `getById` shape and any order; the runtime then batches generated single-reference reads per request and type, matching records by `castId`, splitting batches at `maxPageSize`, and reading an ID with `getById` when a batch read fails or when `castId` would normalize it.
+
+When a runtime first creates a schema, it binds each GraphQL object type whose non-embedded relation fields receive its generated resolvers. It also reserves each reachable object type that still has a non-embedded relation field without a resolver, such as an unregistered custom mutation result. Registering a bound or reserved type in another runtime, or building another runtime's schema that reaches it through fields, interfaces, union members or custom mutation results, throws `TYPE_BOUND_TO_OTHER_RUNTIME` (409). `createSchema()` also rejects a type with a relation field copied, by `toConfig()` or a field spread, after another runtime generated that field's resolver. Create type objects once per runtime, for example with a factory function. Types without non-embedded relation fields, and types whose relation fields all have application resolvers, can be shared, and another runtime can use a `toConfig()` copy made before the first runtime built its schema. A shared custom mutation result type with an unresolved relation field is rejected.
+
+Registration and `createSchema()` validate `extensions.scope` (`INVALID_SCOPE`) and reject list or embedded relations to unregistered types (`UNREGISTERED_RELATION_TARGET`); `use()` rejects non-functions (`INVALID_MIDDLEWARE`).
 
 Generated and custom mutations run through `adapter.withTransaction`. Retried attempts receive fresh clones of GraphQL input objects, lists, and dates while enum values keep their identity. An adapter can define `stateValue` when its persisted enum representation differs from GraphQL enum names.
 
@@ -27,4 +32,4 @@ Importing the runtime installs Simfinity's `__Field.extensions` introspection fi
 
 `createQueryPlan` and `resolveModelPath` turn Simfinity filter, sort, pagination, and aggregation inputs into a driver-neutral plan resolved against that metadata.
 
-The package also exports the `auth`, `validators`, `scalars`, and `plugins` helper namespaces alongside `createValidatedScalar`, `SimfinityError`, `InternalServerError`, `buildErrorFormatter`, `QLOperator`, `QLSort`, and `QLValue`. Database packages reuse these exports so helpers, errors, and globally named GraphQL types retain one identity.
+The package also exports the `auth`, `validators`, `scalars`, and `plugins` helper namespaces alongside `createValidatedScalar`, `SimfinityError`, `InternalServerError`, `buildErrorFormatter`, `configureQueryLimits`, `configureMutationLimits`, `QLOperator`, `QLSort`, and `QLValue`. `buildErrorFormatter` returns a `GraphQLError` whose `originalError` is the classified Simfinity error. Database packages reuse these exports so helpers, errors, and globally named GraphQL types retain one identity.

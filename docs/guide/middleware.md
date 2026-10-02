@@ -23,7 +23,7 @@ simfinity.use(async ({ operation, type, context }, next) => {
 });
 ```
 
-Register middleware once during application startup. Registrations belong to the selected runtime and apply to its generated operations. The MongoDB facade and PostgreSQL module facade each expose a default runtime; a `createPostgres()` instance owns its own registrations. Register middleware on the same runtime used to register your types.
+Register middleware once during application startup. `use()` accepts only functions; any other value, such as `null` from `enabled && middleware`, throws `INVALID_MIDDLEWARE` (500). Registrations belong to the selected runtime and apply to its generated operations. The MongoDB facade and PostgreSQL module facade each expose a default runtime; a `createPostgres()` instance owns its own registrations. Register middleware on the same runtime used to register your types.
 
 For MongoDB, `simfinity` is the namespace imported from `@simtlix/simfinity-js`. For PostgreSQL, use the instance returned by `createPostgres()` in the [PostgreSQL quick start](./postgresql). Both expose `use()` and the shared `auth.ForbiddenError`.
 
@@ -34,6 +34,13 @@ For root reads and generated non-embedded relationship reads, the sequence is mi
 ::: warning What next() means
 `next()` advances to the next registered middleware. The database resolver executes after the entire middleware chain returns. Code after `await next()` still runs before database execution, and omitting `next()` only skips the remaining middleware. Throw an error to cancel the operation.
 :::
+
+Middleware runs in registration order, and the runtime waits for the whole chain before the operation runs:
+
+- The rest of the chain runs at most once. Calling `next()` again returns the same promise.
+- The runtime awaits the rest of the chain even if a middleware calls `next()` without awaiting it, and an error from the rest of the chain cancels the operation. If the middleware awaits other work after an un-awaited `next()`, that error cancels the operation when the middleware finishes; it never becomes an unhandled rejection. If the middleware itself throws or rejects after an un-awaited `next()`, the runtime still waits for the rest of the chain to settle, then rejects the operation with the middleware's own error.
+- An error thrown by a later middleware cancels the operation, even if an earlier middleware catches it around `await next()`. Use that `try`/`catch` for logging, not to recover.
+- Call `next()` before your middleware returns, or before the promise it returns settles. A `next()` called after that, for example from `setTimeout(next)` or another callback, does nothing and returns a resolved promise. The remaining middleware is skipped, exactly as when `next()` is omitted, and the operation still runs. Write middleware as `async` functions that `await next()`.
 
 Use [controllers](/guide/controllers) for before/after persistence hooks. Use your GraphQL server's execution hooks to measure complete request duration. MCP's separate [tool middleware](/reference/mcp#tool-middleware) wraps actual tool execution and has a different contract.
 

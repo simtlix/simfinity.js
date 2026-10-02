@@ -229,6 +229,34 @@ describe('Scalar Factory Functions', () => {
       expect(() => AlphanumericScalar.serialize('ABC123')).not.toThrow();
       expect(() => AlphanumericScalar.serialize('abc-123')).toThrow('Must be alphanumeric');
     });
+
+    test('a global regex accepts every valid value on every coercion path', () => {
+      const SlugScalar = scalars.createPatternStringScalar('StatefulSlug', /^[a-z]+$/g, 'Invalid slug');
+      for (const value of ['alpha', 'beta', 'gamma', 'delta']) {
+        expect(SlugScalar.parseValue(value)).toBe(value);
+        expect(SlugScalar.parseLiteral({ kind: Kind.STRING, value })).toBe(value);
+        expect(SlugScalar.serialize(value)).toBe(value);
+      }
+    });
+
+    test('a sticky regex does not carry lastIndex between values', () => {
+      const pattern = /[0-9]{3}/y;
+      const CodeScalar = scalars.createPatternStringScalar('StickyCode', pattern, 'Invalid code');
+      expect(CodeScalar.parseValue('123')).toBe('123');
+      expect(() => CodeScalar.parseValue('abc123')).toThrow('Invalid code');
+      pattern.lastIndex = 3;
+      expect(() => CodeScalar.parseValue('abc123')).toThrow('Invalid code');
+      expect(pattern.lastIndex).toBe(3);
+    });
+
+    test.each([[{ test: () => true }], [123], [null]])('rejects the unsupported pattern %j at creation', (unsupported) => {
+      expect(() => scalars.createPatternStringScalar('BadPattern', unsupported)).toThrow(TypeError);
+    });
+  });
+
+  test('wrong-type variables report the base scalar error before validation', () => {
+    expect(() => scalars.EmailScalar.parseValue(5)).toThrow('String cannot represent a non string value: 5');
+    expect(() => scalars.createBoundedIntScalar('Quantity', 0, 10).parseValue('5')).toThrow('Int cannot represent non-integer value: "5"');
   });
 });
 

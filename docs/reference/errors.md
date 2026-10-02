@@ -59,17 +59,86 @@ This subclass uses code `INTERNAL_SERVER_ERROR` and retains the cause. It does n
 ## buildErrorFormatter
 
 ```javascript
-import { buildErrorFormatter } from '@simtlix/simfinity-core';
+import { buildErrorFormatter, InternalServerError } from '@simtlix/simfinity-core';
 
-const normalizeError = buildErrorFormatter((error) => {
-  console.error(error.getCode(), error.message);
-  // Return a replacement error, or return nothing to keep this error.
+const formatError = buildErrorFormatter((error) => {
+  if (error instanceof InternalServerError) {
+    console.error(error.getCause() ?? error);
+    // Hide the unexpected message from clients.
+    return new InternalServerError('Unexpected error');
+  }
+  return undefined; // Keep the error.
 });
 ```
 
-The returned function preserves `SimfinityError` instances and wraps other errors in `InternalServerError`, retaining the original message and cause. It is a standalone helper; integrate it into your server's own error-handling hook.
+The returned function takes the error your GraphQL server reports and classifies it. GraphQL servers report an error raised while resolving a field as a field error: the `GraphQLError` that graphql-js creates around the raised value, with the field `path` and the same message. For a field error, the formatter classifies the value that was raised, such as the one a resolver threw. Any other input, including a request error from a syntax, validation or variable problem, is classified as it is:
 
-The helper checks the error instance it receives. If your server wraps an application error inside `GraphQLError.originalError`, choose the appropriate underlying error before normalizing it. This helper does not automatically redact unexpected-error messages.
+| Classified value | Result |
+| --- | --- |
+| `SimfinityError` | The same error, with its code and status. |
+| `GraphQLError`: a request error, or one raised while resolving a field that has its own string `extensions.code` or a `SimfinityError` cause | A `SimfinityError` with the error's own message and extensions, including extensions your server added, such as Yoga's `http` status. Its code and status are described below. Its `originalError` is never exposed. |
+| Any other `GraphQLError` raised while resolving a field, such as one a resolver threw without a code, or one graphql-js raised because it could not complete the resolved value | `InternalServerError` with the same message and no status; the `GraphQLError` is its cause. |
+| Any other `Error` | `InternalServerError` with the same message and no status; the original error is its cause. |
+| A value that is not an `Error`, including one a resolver threw | `InternalServerError('Unexpected error value')` with no cause. The value is not printed. Some servers turn the value into an `Error` first; see [server differences](#server-differences). |
+
+graphql-js raises its own `GraphQLError`, without a code, while resolving a field when it cannot complete the value a resolver returned: a built-in scalar or enum cannot serialize it, an `isTypeOf` check rejects it, an abstract type cannot be resolved, or a list field returns a value that is not iterable. Some of these messages print the returned value, such as `Expected value of type "User" but got: { … }`, which can include fields the client did not select. They are `InternalServerError`s, so the masking callback above hides them. To show clients a `GraphQLError` that your resolver throws, give it an `extensions.code`.
+
+A classified `GraphQLError` keeps its own message. Its code, and separately its status, is the first one available from:
+
+1. A `SimfinityError` reached by following `originalError` through `GraphQLError`s only, such as one a custom scalar threw.
+2. The error's own string `extensions.code`, or integer `extensions.status`.
+
+Without either, as for most request errors, the code is `BAD_REQUEST`, and the status is 500 for the code `INTERNAL_SERVER_ERROR` or 400 for any other code.
+
+As a result:
+
+- Input that a scalar rejects is `BAD_REQUEST` (400), whether it is sent as a variable or as an inline literal, unless your server already gave the error its own code; see [server differences](#server-differences). This includes Simfinity's validated scalars, such as `EmailScalar`, `URLScalar`, the bounded and pattern scalars, and any `createValidatedScalar` scalar, which throw plain `Error`s. The message is GraphQL's, such as `Variable "$input" got invalid value "nope" at "input.email"; Expected type "Email_String". Invalid email format`.
+- An application error such as `new GraphQLError('Could not create user', { originalError: dbError, extensions: { code: 'CONFLICT' } })` keeps its message and its `CONFLICT` code. The `dbError` message is never sent to clients.
+- The same `GraphQLError` thrown by a resolver without `extensions.code` is an `InternalServerError`, so the callback above masks it.
+- With GraphQL Yoga, request errors keep the `http` status that Yoga adds, so the integration below responds with HTTP 400 for invalid variables.
+
+The callback receives the classified error. Return an error to replace it, or return nothing to keep it. A returned `GraphQLError` is used as is. The formatter wraps every unexpected error in an `InternalServerError`, including a code-less `GraphQLError` raised while resolving a field, so branch on `error instanceof InternalServerError` to mask them, as above; an `InternalServerError` your own code throws is masked too. An application error that sets the `INTERNAL_SERVER_ERROR` code itself, such as a `GraphQLError` with that `extensions.code` or `new SimfinityError(message, 'INTERNAL_SERVER_ERROR', 500)`, is not an `InternalServerError`: it has no `getCause()`, and the callback above keeps its message.
+
+The function returns a `GraphQLError` that keeps the input's locations and path. Its `originalError` is the classified or replacement error, and its `extensions` are a copy of that error's extensions. It serializes to `{ message, locations, path, extensions }`; the cause is never serialized. In your own code, read `formatted.originalError` and `formatted.extensions.code` rather than comparing the result with its input.
+
+The helper keeps the message of unexpected errors. Mask them in the callback, as above. It recognizes errors from the graphql copy Simfinity imports; with two installed copies of graphql, every error is classified as `INTERNAL_SERVER_ERROR`.
+
+### Connect it to your server
+
+Pass the function to your server's error-formatting option:
+
+```javascript
+// graphql-http
+const handler = createHandler({ schema, formatError });
+
+// express-graphql
+app.use('/graphql', graphqlHTTP({ schema, customFormatErrorFn: formatError }));
+
+// GraphQL Yoga: this replaces Yoga's default masking
+const yoga = createYoga({ schema, maskedErrors: { maskError: (error) => formatError(error) } });
+
+// Apollo Server 4 expects a plain formatted error
+const server = new ApolloServer({
+  schema,
+  formatError: (_formatted, error) => formatError(error).toJSON(),
+});
+```
+
+Envelop's `useErrorHandler` is a logging hook. It receives an object with an `errors` list, and its return value does not change the response. Do not pass the formatter to it directly. To log normalized errors, iterate the list:
+
+```javascript
+useErrorHandler(({ errors }) => {
+  errors.forEach((error) => console.error(formatError(error)));
+});
+```
+
+### Server differences
+
+The outcomes above describe the errors graphql-js produces. Some servers change errors before the formatter sees them, or never pass them to it:
+
+- **Request error codes.** A code the server already set is the error's own `extensions.code`, so it is kept instead of `BAD_REQUEST`. Yoga sets `GRAPHQL_PARSE_FAILED` on syntax errors, and Apollo Server sets codes such as `GRAPHQL_VALIDATION_FAILED` and `BAD_USER_INPUT`.
+- **Yoga validation errors.** Yoga does not pass validation errors, including an invalid inline literal for a scalar, to `maskError`. They keep Yoga's own response, with the `GRAPHQL_VALIDATION_FAILED` code. Variable errors do reach the formatter and become `BAD_REQUEST`, with HTTP 400.
+- **Non-`Error` values.** Yoga's executor turns a value that is not an `Error`, thrown by a resolver, into an `Error` before graphql-js wraps it: a string becomes the message, and an object with a `message` property keeps that message. The formatter then returns an `InternalServerError` with that text instead of `Unexpected error value`. Mask `InternalServerError` in the callback, as above, so that text is not sent to clients.
 
 ## Core error codes
 
@@ -87,8 +156,14 @@ The helper checks the error instance it receives. If your server wraps an applic
 | `INVALID_SORT` | A sort has no terms or an unsupported direction. |
 | `INVALID_PAGINATION` | Page, size, computed skip, or maximum page-size validation fails. |
 | `INVALID_QUERY_LIMITS` | The configured maximum page size is not a positive safe integer. |
+| `INVALID_MUTATION_LIMITS` | Status 400. `configureMutationLimits()` received options that are not a plain object, an option other than `maxNestedOperations` (such as the misspelled `maxNestedOperation`), or a `maxNestedOperations` that is not `null` or a non-negative safe integer. The current limit is kept. |
+| `NESTED_OPERATIONS_EXCEEDED` | Status 400. A generated add, update or state-action mutation has more nested `added`, `updated` and `deleted` entries than `maxNestedOperations`. See [limit nested collection operations](/guide/mutations#limit-nested-collection-operations). |
 | `FILTER_DEPTH_EXCEEDED` | A recursive filter group exceeds the supported nesting limit. |
+| `TYPE_BOUND_TO_OTHER_RUNTIME` | Status 409. `connect()`, `addNoEndpointType()` or `createSchema()` received, or would expose, an object type that another runtime bound by generating its relation resolvers, or reserved because its schema reached the type with an unresolved relation field. `createSchema()` also raises it for a field copied with `toConfig()` after another runtime generated its relation resolver, when the copy keeps that resolver or its `extensions` object (`Field Type.field was copied from a relation field that another Simfinity runtime generated, …`). Create separate type objects for each runtime. See [types belong to one runtime](/guide/schema#types-belong-to-one-runtime). |
+| `INVALID_SCOPE` | Status 500. `extensions.scope` is not a plain object whose keys are `find`, `get_by_id` or `aggregate` functions. Raised by `connect()`, `addNoEndpointType()` and `createSchema()`, and by reads of a type whose scope was changed afterwards. See [query scope](/guide/query-scope#callback-contract). |
+| `INVALID_MIDDLEWARE` | Status 500. `use()` received a value that is not a function. |
+| `UNREGISTERED_RELATION_TARGET` | Status 500. `createSchema()` found a list relation, embedded object or embedded list whose type was not registered with `connect()` or `addNoEndpointType()`. |
 | `NOT_VALID_ID` | A state action targets a record that does not exist. |
-| `BAD_REQUEST` | A state action is not allowed from the record's current state. |
+| `BAD_REQUEST` | A state action is not allowed from the record's current state. `buildErrorFormatter` also uses `BAD_REQUEST` (400) for GraphQL syntax, validation and variable errors, including input rejected by a scalar, and for any `GraphQLError` without its own code. |
 
 This table covers intentional core errors; GraphQL coercion and backend drivers can also produce their own errors. PostgreSQL constraint errors are normalized without leaking SQL or constraint details. MCP returns execution failures as tool results and throws some setup/dispatch errors; see [MCP error handling](/reference/mcp#results-and-errors).

@@ -87,4 +87,4 @@ In-process [MCP calls](/reference/mcp#results-and-errors) capture list counts se
 
 These plugins do not start an HTTP server or authenticate credentials. `envelopCountPlugin` and `apolloCountPlugin` only expose counts. The auth plugin requires a host that invokes its Envelop schema hook.
 
-For standalone MCP, pass auth plugins in `schemaPlugins`. That option invokes `onSchemaChange` only; it is not a complete Envelop execution lifecycle and does not run the count plugin's `onExecute` hook.
+For standalone MCP, pass auth plugins in `schemaPlugins`. That option invokes `onSchemaChange` only; it is not a complete Envelop execution lifecycle and does not run the count plugin's `onExecute` hook. Passing the count plugin, or any plugin with request hooks, to `schemaPlugins` logs a one-time console warning naming the ignored hooks.

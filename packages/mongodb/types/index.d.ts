@@ -14,6 +14,7 @@ import type {
 } from 'graphql';
 import type {
   DatabaseAdapter,
+  MutationLimitsOptions,
   RuntimeRegistration,
   SimfinityError,
 } from '@simtlix/simfinity-core';
@@ -35,9 +36,14 @@ export type {
   EnvelopSchemaPlugin,
   FieldValidations,
   FieldValidator,
+  MutationLimitsOptions,
   PermissionSchema,
   PolicyExpression,
+  ScopeFunction,
+  ScopeOperation,
+  ScopeParams,
   TypePermissions,
+  TypeScopes,
 } from '@simtlix/simfinity-core';
 export * from '@simtlix/simfinity-mcp';
 export { default as mcp } from '@simtlix/simfinity-mcp';
@@ -74,7 +80,12 @@ export interface StateMachine {
   [key: string]: any;
 }
 
-/** Register a Mongoose model + GraphQL type pair, exposing single and list endpoints. */
+/**
+ * Register a Mongoose model + GraphQL type pair, exposing single and list endpoints.
+ * Throws INVALID_SCOPE (500) for an invalid `extensions.scope`, and TYPE_BOUND_TO_OTHER_RUNTIME
+ * (409) when another runtime bound the type by generating its relation resolvers, or reserved it
+ * because its schema reached the type with an unresolved relation field.
+ */
 export function connect(
   model: any,
   gqltype: GraphQLObjectType,
@@ -85,13 +96,18 @@ export function connect(
   stateMachine?: StateMachine | null,
 ): void;
 
-/** Register a GraphQL type without exposing root endpoints (e.g. embedded/related types). */
+/** Register a GraphQL type without exposing root endpoints (e.g. embedded/related types). Throws like connect(). */
 export function addNoEndpointType(gqltype: GraphQLObjectType): void;
 
 /**
  * Build the executable GraphQLSchema from every connected type. The first two
  * allowlists are matched against the GraphQLObjectType INSTANCES passed to
- * connect(); only custom mutations are matched by name.
+ * connect(); only custom mutations are matched by name. Scopes are validated
+ * (INVALID_SCOPE), and reachable types bound or reserved by another runtime, or
+ * holding a field copied with toConfig() after another runtime generated its
+ * relation resolver, keeping the generated resolver or its extensions, are rejected (TYPE_BOUND_TO_OTHER_RUNTIME), before models
+ * are created; a list or embedded relation to an unregistered type throws
+ * UNREGISTERED_RELATION_TARGET.
  */
 export function createSchema(
   includedQueryTypes?: GraphQLObjectType[] | null,
@@ -122,6 +138,10 @@ export interface SimfinityMiddlewareContext {
  * Register middleware before generated operations, including related-type reads and nested child writes.
  * Nested operations keep root argument shapes and the GraphQL request context.
  * Await next() to advance the middleware chain; throw to reject before the operation executes.
+ * A non-function throws INVALID_MIDDLEWARE (500). The rest of the chain runs at most once and is
+ * awaited even when next() is not; its errors cancel the operation, even if a middleware catches them.
+ * Call next() before the middleware returns or its promise settles: a later call, such as
+ * setTimeout(next), does nothing, so the remaining middleware is skipped.
  */
 export function use(
   middleware: (
@@ -141,6 +161,15 @@ export interface QueryLimitsOptions {
 
 /** Configure at startup. Invalid configuration throws INVALID_QUERY_LIMITS (400). */
 export function configureQueryLimits(options?: QueryLimitsOptions): void;
+
+/**
+ * Process-wide limit on nested added/updated/deleted entries per generated add, update or
+ * state-action mutation; unlimited by default, restored by calling it without options.
+ * Invalid configuration, including an unknown or misspelled option key, throws
+ * INVALID_MUTATION_LIMITS (400) and keeps the current limit; a mutation over the limit
+ * fails with NESTED_OPERATIONS_EXCEEDED (400) before its transaction starts.
+ */
+export function configureMutationLimits(options?: MutationLimitsOptions): void;
 
 /**
  * Get the generated create input type, preserving field and list-item non-null

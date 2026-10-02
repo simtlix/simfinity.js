@@ -39,7 +39,7 @@ const result = await callTool('series', {
 
 `callTool(name, args = {}, extra)` accepts the published tool name. `extra` carries per-call metadata, including an optional `AbortSignal`. `getOperation(name)` returns the prebuilt GraphQL document.
 
-Input schemas accept explicit `null` at nullable arguments, input fields and list items. Non-null positions reject null, including opaque scalars; nullable `$ref` values use `anyOf` with a null alternative. Recursive input types retain shared `$defs`. Defaulted arguments are optional and generated variable defaults use GraphQL literals, including external enum names. Opaque scalar defaults without a literal representation use the field's default when the variable is omitted. Explicit null never substitutes for omission at non-null positions.
+Input schemas accept explicit `null` at nullable arguments, input fields and list items. Non-null positions reject null, including opaque scalars; nullable `$ref` values use `anyOf` with a null alternative. Recursive input types retain shared `$defs`. Defaulted arguments are optional and generated variable defaults use GraphQL literals, including external enum names. Opaque scalar defaults without a literal representation use the field's default when the variable is omitted. Explicit null never substitutes for omission at non-null positions. Validated scalars, including chains built on other validated scalars, use the JSON type of their root scalar. A custom scalar's description is published unless the field or argument has its own.
 
 ## Generation options
 
@@ -52,9 +52,9 @@ Input schemas accept explicit `null` at nullable arguments, input fields and lis
 | `includeId` | `true` | Include a scalar/enum ID as a fallback; use `__typename` if no leaf is selectable. |
 | `toolOverrides` | `{}` | Per-tool title, description, annotations, selection depth, ID fallback, or explicit selection. |
 | `limits` | Unset | Pagination and serialized result-size controls. |
-| `toolMiddleware` | Unset | Middleware surrounding actual tool execution. |
+| `toolMiddleware` | Unset | A middleware function or array surrounding actual tool execution; validated and copied at setup. |
 | `context` | `{}` | In-process GraphQL context value or factory. |
-| `schemaPlugins` | Unset | Plugins whose `onSchemaChange` hook is invoked in in-process mode. |
+| `schemaPlugins` | Unset | Plugins whose `onSchemaChange` hook is invoked in in-process mode; validated before any hook runs, falsy entries skipped, a misspelling of `onSchemaChange` on a plugin that lacks it rejected, asynchronous hooks awaited. Typed as `EnvelopSchemaPlugin` or `SchemaPluginObject` entries, so Envelop and Yoga `Plugin` arrays and class instances compile, including ones with `call` or `apply` members; functions and promises do not. |
 | `execution` | `{ mode: 'in-process' }` | Local schema execution or remote GraphQL HTTP execution. |
 
 Tool names must contain only letters, digits, underscores, and hyphens, with a maximum length of 128. A prefix must use the same character set. If query and mutation fields generate the same name, the first tool wins and the duplicate is skipped with a warning.
@@ -96,7 +96,7 @@ const limits = {
 | `defaultPagination` | Injected when a tool has a pagination argument and the caller supplies none. Provide both `page` and `size`. |
 | `maxResultBytes` | Caps pretty-printed UTF-8 JSON for successful `data` or the error payload `{ errors, data? }`; oversized payloads return `MCP_RESULT_TOO_LARGE`. |
 
-A default page size above `maxPageSize` raises `MCP_INVALID_LIMITS` when the executor is created. Configure positive bounds appropriate for your application. A page-size cap by itself does not add pagination to unpaginated calls; pair it with `defaultPagination` when you need bounded defaults. Result-size checking happens after execution, so it does not limit database work.
+A default page size above `maxPageSize` raises `MCP_INVALID_LIMITS` when the executor, server or HTTP handler is created. Configure positive bounds appropriate for your application. A page-size cap by itself does not add pagination to unpaginated calls; pair it with `defaultPagination` when you need bounded defaults. Result-size checking happens after execution, so it does not limit database work.
 
 The size cap covers the logical payload, including errors and partial data. It excludes MCP envelope overhead, the duplicate `structuredContent`, and middleware-created results. Limit diagnostics (`MCP_RESULT_TOO_LARGE` and `MCP_PAGE_SIZE_EXCEEDED`) are exempt so a tiny cap still produces an actionable error. The cap does not limit remote downloads or undo completed mutations.
 
@@ -121,11 +121,22 @@ const generated = mcp.generateMCPTools(schema, {
 
 Return the result from `next()`. Calling it twice, or returning no result from the completed chain, throws `MCP_MIDDLEWARE_ERROR`. This contract differs from Simfinity's [global middleware](/guide/middleware), which runs before the database resolver.
 
+Pass one function or an array of functions. Every function runs, whatever its declared parameter count. A non-array value or a non-function entry, including `null` from `condition && middleware` and an empty slot in a sparse array such as `[a, , b]` or `new Array(2)`, throws `MCP_INVALID_MIDDLEWARE` naming the index when the tools, server or HTTP handler are created. The stack is copied at setup, so later changes to the array have no effect.
+
 ## Execution and context
 
 In-process execution calls GraphQL directly against the supplied schema. `context` may be an object or an async factory `(extra) => context`. For the HTTP handler, a factory is invoked as `(req, extra) => context`, which allows application authentication to populate context per call.
 
-Pass [authorization plugins](/guide/authorization) in `schemaPlugins` for standalone in-process execution. Only `onSchemaChange` is invoked; resolver wrapping is supported, schema replacement and a full Envelop request lifecycle are not.
+Pass [authorization plugins](/guide/authorization) in `schemaPlugins` for standalone in-process execution. Only `onSchemaChange` is invoked; resolver wrapping is supported, a full Envelop request lifecycle is not.
+
+- Every entry is validated before any hook runs. `false`, `null` and `undefined` entries are skipped. A non-array value, a function (pass the factory's result, such as `createAuthPlugin(permissions)`), an array, a promise (any object with a `then` method or getter), a non-function `onSchemaChange`, or an object with no plugin hooks throws `MCP_INVALID_SCHEMA_PLUGIN`.
+- On a plugin without a function `onSchemaChange`, a misspelling of it also throws `MCP_INVALID_SCHEMA_PLUGIN`, with a hint to use `onSchemaChange`. A misspelling is an own or inherited method or getter whose name starts with `onSchema` in any letter case, or is at most two edits from `onSchemaChange` ignoring case, where swapping two adjacent letters counts as one edit: for example `onSchemaChanged`, `onschemaChange`, `onSchemChange` or `onShemaChange`. A property under such a name that is neither a method nor a getter is not treated as a misspelling.
+- Next to a function `onSchemaChange`, other `onSchema*` members, such as an `onSchemaReady` or `onSchemaChangeImpl` helper, are accepted. Like any other `on*` member, they appear in the one-time warning described below.
+- Validation reads `onSchemaChange` directly and inspects every other property, including `then`, through its property descriptor, so it calls no getter other than `onSchemaChange`. A hook defined as a getter counts as present, and an entry with a `then` getter is rejected as a promise without running it.
+- A plugin with other hooks (`on*`, `instrumentation`, `requestDidStart` or `serverWillStart`) gets one console warning naming the hooks MCP ignores. Plugins it would add through `onPluginInit`/`addPlugin` are not installed.
+- `replaceSchema` accepts only the schema MCP was given; any other schema throws `MCP_UNSUPPORTED_SCHEMA_REPLACEMENT`. Wrap resolvers in place instead.
+- A promise returned by `onSchemaChange` is awaited. `createMCPServer`, `startStdioMCPServer` and `createHTTPMCPHandler` resolve after installation and reject if it fails. `generateMCPTools` stays synchronous; its tool calls wait for installation and reject with the installer's error if it failed. Envelop and Yoga do not await `onSchemaChange`, so keep installation synchronous for plugins you share with them.
+- Hooks run only after the other options and every entry are validated, so a configuration error is reported before any hook changes the schema.
 
 ### Remote execution
 
@@ -186,7 +197,9 @@ For a counted list call, in-process execution isolates the count per call and re
 | `MCP_REMOTE_INVALID_RESPONSE` | Remote response is not valid JSON or lacks a GraphQL response shape. |
 | `MCP_TOOL_NOT_FOUND` | Thrown for an unknown published tool name. |
 | `MCP_CALL_CANCELLED` | Thrown when the call's signal is already aborted before execution. |
-| `MCP_MIDDLEWARE_ERROR` | Thrown for an invalid tool middleware chain. |
+| `MCP_MIDDLEWARE_ERROR` | Thrown during a call when middleware calls `next()` twice or the chain returns no result. |
+| `MCP_INVALID_MIDDLEWARE` | Invalid `toolMiddleware` configuration, including an empty slot in a sparse array; thrown at setup. |
+| `MCP_INVALID_SCHEMA_PLUGIN`, `MCP_UNSUPPORTED_SCHEMA_REPLACEMENT` | Invalid `schemaPlugins` configuration, including a misspelling of `onSchemaChange` on a plugin that lacks it, or a plugin replacing the schema; thrown at setup. |
 | `MCP_INVALID_SCHEMA`, `MCP_INVALID_TOOL_NAME`, `MCP_INVALID_LIMITS` | Configuration or generation errors. |
 | `MCP_INVALID_EXECUTION_MODE`, `MCP_MISSING_ENDPOINT` | Invalid execution configuration. |
 | `MCP_INVALID_TRANSPORT_OPTIONS` | Stateful transport settings supplied to the stateless HTTP factory. |

@@ -15,6 +15,7 @@ Authorization is shared by MongoDB and PostgreSQL. Import public helpers from `@
 - `expressions.js` -- Policy expression DSL: `evaluateExpression`, `isPolicyExpression`, `createRuleFromExpression`
 - `errors.js` -- `UnauthenticatedError`, `ForbiddenError` (extend `SimfinityError`)
 - `object-id.js` -- internal registration and normalization of authentic ObjectId implementations; no BSON/Mongoose dependency
+- `thenable.js` -- internal, not exported. `isThenable` is used by rules, expressions and the plugin. `discardThenable` is used by `rules.js` and `expressions.js` only: it attaches a rejection handler to native promises from any realm through `Promise.prototype.then.call`, and never touches other thenables (calling their `then()` could run a lazy query builder)
 
 ## `createAuthPlugin(permissions, options)` -- Envelop Plugin
 
@@ -27,7 +28,7 @@ const yoga = createYoga({ schema, plugins: [authPlugin] });
 ```
 
 **How it works:**
-1. On `onSchemaChange({ schema })`, iterates all types in `schema.getTypeMap()`
+1. On `onSchemaChange({ schema })`, first checks every non-`__` type against the local graphql classes; a type from another graphql copy throws `TypeError` in every NODE_ENV, before any field is wrapped, and the schema is not marked processed. It then iterates all types in `schema.getTypeMap()`
 2. Skips non-`GraphQLObjectType` types, `__`-prefixed introspection types and Simfinity's `extensions` metadata types (matched by identity through `__Field`) unless the permission map names them
 3. For each field, looks up rules from the permission map via `getFieldRules()`
 4. Wraps `field.resolve` in-place (mutates the schema, no rebuild); under `ALLOW`, a field with no rule and no `simfinityQuery` paths keeps its resolver
@@ -81,7 +82,7 @@ Generated list, aggregate and collection-relationship fields carry `extensions.s
 
 | Helper | Description |
 |--------|-------------|
-| `requireAuth(userPath?)` | Checks `ctx[userPath]` exists (default: `'user'`) |
+| `requireAuth(userPath?)` | Checks `ctx[userPath]` is truthy (default: `'user'`); a promise/thenable denies with `TypeError` |
 | `requireRole(role, options?)` | Exact membership against one user role. Required roles must be nonempty strings. Options: `{ userPath, rolePath }` |
 | `requirePermission(perm, options?)` | Requires every permission; claims must be arrays of nonempty strings with exact membership. Only a standalone `'*'` entry grants all |
 | `composeRules(...rules)` | AND: all rules must pass |
@@ -90,6 +91,8 @@ Generated list, aggregate and collection-relationship fields carry `extensions.s
 | `createRule(predicate, errorMessage?, errorCode?)` | Custom rule from predicate function |
 | `allow()` | Always returns `true` |
 | `deny(message?)` | Always throws `ForbiddenError` |
+
+Helper paths are dotted strings or synchronous extractors. Async extractor functions throw `TypeError` at creation; a thenable at the end of a path denies with `TypeError('Authorization paths must return values synchronously; …')`. `readPath` passes it to `discardThenable`, so a native promise gets a rejection handler and other thenables are never touched; never call `then()` on them. A promise met partway along a path is not detected. Checks stay synchronous for `anyRule`.
 
 ## Policy Expressions (from `expressions.js`)
 
@@ -112,7 +115,7 @@ const permissions = {
 - Boolean expressions, multiple operator keys (implicit AND), and empty logical identities remain supported (`allOf: []` is true, `anyOf: []` is false)
 - References use `parent`, `args`, or `ctx`, with dotted fields, numeric array indices, and document getters. Empty segments and `__proto__`, `prototype`, or `constructor` segments are invalid
 - Missing references yield an internal invalid result, distinct from false. Invalid results remain invalid through `not` and AND; a valid `anyOf` grant can still succeed independently (for example, public content without a logged-in user)
-- Explicit null/false/zero/empty-string literals remain valid and `eq` remains strict. Use `isOwner` for identity validation instead of relying on null equality
+- Explicit null/false/zero/empty-string literals remain valid and `eq` remains strict except ObjectIds (hex) and Dates (time, cross-realm). NaN, thenables and Date/non-Date comparisons are invalid; `null` stays comparable, except with a thenable; a thenable `{ ref }` value or `in` list item that a comparison reads goes through `discardThenable` (`in` stops at the first match, so later items are not read); literal NaN operands are rejected at configuration; Date literals are copied at rule creation. Use `isOwner` for identity validation instead of relying on null equality
 - `requireRole` and `requirePermission` reject missing, empty, or non-string required values with `TypeError`. Malformed permission claims deny with `ForbiddenError`
 
 ## Deprecated APIs

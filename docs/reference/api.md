@@ -27,6 +27,7 @@ Shared examples can import the selected instance from [your application’s runt
 | Inspect a create input | [getInputType](#getinputtype) | Generated `GraphQLInputObjectType` |
 | Create in an owned or existing transaction | [saveObject](#saveobject) | Saved object |
 | Set the maximum query page size | [configureQueryLimits](#configurequerylimits) | Process-wide configuration |
+| Cap nested collection operations | [configureMutationLimits](#configuremutationlimits) | Process-wide configuration |
 
 ## createMongoAdapter
 
@@ -47,6 +48,18 @@ simfinity.configureQueryLimits({ maxPageSize: 500 });
 
 Sets the process-wide maximum for explicit list and aggregate page sizes. Configure it once at startup. `maxPageSize` must be a positive safe integer and defaults to 1000; calling without arguments resets that default. Invalid configuration throws `INVALID_QUERY_LIMITS` (400). Unpaged lists use `Math.min(100, maxPageSize)` and unpaged aggregate queries remain unbounded. See [pagination](/guide/queries#pagination-and-total-count) for request validation and compatibility details.
 
+## configureMutationLimits
+
+```javascript
+simfinity.configureMutationLimits({ maxNestedOperations: 100 });
+```
+
+Caps the nested collection operations of one generated mutation. Configure it once at startup. Like `configureQueryLimits`, the setting is process-wide: every runtime and facade shares it.
+
+`maxNestedOperations` is a non-negative safe integer, or `null` for no limit, which is the default. `0` forbids nested operations while plain creates and updates still work. Calling the function without arguments, with `{}` or with `{ maxNestedOperations: null }` restores the default. Options that are not a plain object, any option other than `maxNestedOperations` (such as the misspelled `maxNestedOperation`), or an invalid value throw `INVALID_MUTATION_LIMITS` (400) and keep the current limit.
+
+The limit applies to generated add, update and state-action mutations. Simfinity counts the `added`, `updated` and `deleted` entries of non-embedded collection fields at every nesting level, including `null` entries. It counts after root middleware and before the transaction starts, and a mutation over the limit fails with `NESTED_OPERATIONS_EXCEEDED` (400) without writing anything. Root deletes, `saveObject()`, custom mutations and embedded lists are not counted. See [limit nested collection operations](/guide/mutations#limit-nested-collection-operations).
+
 ## connect
 
 ```javascript
@@ -61,12 +74,12 @@ simfinity.connect(
 );
 ```
 
-Registers a `GraphQLObjectType` and its generated operations. Returns `undefined`.
+Registers a `GraphQLObjectType` and its generated operations. Returns `undefined`. It throws `INVALID_SCOPE` (500) for an invalid [`extensions.scope`](/guide/query-scope#callback-contract) and `TYPE_BOUND_TO_OTHER_RUNTIME` (409) for a type that another runtime bound or reserved; a rejected type is not registered.
 
 | Parameter | Type | Required | Behavior |
 | --- | --- | --- | --- |
 | `model` | Mongoose model or `null` | Yes | MongoDB accepts an existing model; pass `null` to generate storage. PostgreSQL requires `null`. |
-| `gqltype` | `GraphQLObjectType` | Yes | The exact type instance to register. |
+| `gqltype` | `GraphQLObjectType` | Yes | The exact type instance to register. A type is bound to the first runtime whose schema generates its relation resolvers, or reserved by the first schema that reaches it with an unresolved relation field. |
 | `simpleEntityEndpointName` | `string` | Yes | Single-record query name and CRUD suffix; no inferred default. |
 | `listEntitiesEndpointName` | `string` | Yes | List query name and aggregation prefix; no inferred default. |
 | `controller` | Controller object or `null` | No | [Lifecycle hooks](/guide/controllers); omitted hooks add no application behavior. |
@@ -85,7 +98,7 @@ This creates `serie`, `series`, `series_aggregate`, `addserie`, `updateserie`, a
 simfinity.addNoEndpointType(gqltype);
 ```
 
-Registers a supporting object type without root CRUD endpoints. Use it for embedded or supporting types needed by connected types. Model creation is conditional on the persistent graph: a scalar-only value type embedded in an owner stays inline, while a supporting type referenced by a connected type receives backend storage without gaining root operations.
+Registers a supporting object type without root CRUD endpoints. Use it for embedded or supporting types needed by connected types. It validates the type like `connect()`. Model creation is conditional on the persistent graph: a scalar-only value type embedded in an owner stays inline, while a supporting type referenced by a connected type receives backend storage without gaining root operations.
 
 ## createSchema
 
@@ -98,6 +111,8 @@ const schema = simfinity.createSchema(
 ```
 
 Builds models, generated resolvers, input types, and an executable `GraphQLSchema`. The root names are `RootQueryType` and `Mutation`.
+
+Before it creates any model, `createSchema()` validates the scope of every registered type (`INVALID_SCOPE`) and rejects the schema with `TYPE_BOUND_TO_OTHER_RUNTIME` when it reaches, through fields, interfaces, union members or custom mutation results, a type that another runtime bound or reserved, or a field copied with `toConfig()` after another runtime generated its relation resolver. A list relation, embedded object or embedded list whose type is not registered throws `UNREGISTERED_RELATION_TARGET` (500). The first schema binds the types whose relation resolvers it generates to this runtime, and reserves reachable types that still have an unresolved relation field; see [types belong to one runtime](/guide/schema#types-belong-to-one-runtime).
 
 | Argument | Matching behavior |
 | --- | --- |
@@ -190,10 +205,10 @@ MongoDB-owned transactions retry transient failures up to five times after the f
 
 | Export | Purpose |
 | --- | --- |
-| `use(middleware)` | Register a global [pre-operation middleware](/guide/middleware). |
+| `use(middleware)` | Register a global [pre-operation middleware](/guide/middleware). Throws `INVALID_MIDDLEWARE` (500) for a non-function. |
 | `preventCreatingCollection(prevent)` | MongoDB toggles explicit collection creation. On PostgreSQL, call it before `createSchema()` to force read-only storage validation during initialization. |
 | `createValidatedScalar(name, description, baseScalarType, validate)` | Create a [validated scalar](/reference/scalars#createvalidatedscalar). |
-| `buildErrorFormatter(callback)` | Create an [error normalization function](/reference/errors#builderrorformatter). |
+| `buildErrorFormatter(callback)` | Create an [error formatter](/reference/errors#builderrorformatter) for your GraphQL server. The formatter returns a `GraphQLError` whose `originalError` is the classified Simfinity error. |
 | `buildQuery(input, gqltype, isCount = false)` | Build a MongoDB aggregation pipeline from list-query arguments. Does not execute scopes or middleware. Relation lookups use reserved `__sf_lN` aliases, removed by a trailing `$unset` stage. |
 | `buildFilterGroupMatch(group, gqltype, clauses, included, depth = 0)` | Low-level recursive filter compiler; mutates the supplied lookup accumulators. Use one `included` object per `clauses` array; callers must `$unset` the reserved `__sf_lN` aliases it adds. |
 

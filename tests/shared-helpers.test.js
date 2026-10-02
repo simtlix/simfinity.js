@@ -13,6 +13,15 @@ describe('shared helper facades', () => {
     expect(postgres.scalars).toBe(core.scalars);
     expect(postgres.validators).toBe(core.validators);
     expect(postgres.plugins).toBe(core.plugins);
+    expect(postgres.buildErrorFormatter).toBe(core.buildErrorFormatter);
+    expect(mongo.buildErrorFormatter).toBe(core.buildErrorFormatter);
+  });
+
+  it('shares one process-wide mutation limit setter', () => {
+    expect(core.configureMutationLimits).toBeTypeOf('function');
+    expect(postgres.configureMutationLimits).toBe(core.configureMutationLimits);
+    expect(mongo.configureMutationLimits).toBe(core.configureMutationLimits);
+    expect(postgres.createPostgres().configureMutationLimits).toBe(core.configureMutationLimits);
   });
 
   it('exposes the shared helpers on PostgreSQL instances', () => {

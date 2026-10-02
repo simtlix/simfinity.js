@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { GraphQLID, GraphQLObjectType, GraphQLString, graphql } from 'graphql';
+import {
+  GraphQLID, GraphQLList, GraphQLObjectType, GraphQLString, graphql, printSchema,
+} from 'graphql';
 import { createPostgres } from '../packages/postgres/src/index.js';
 
 describe('PostgreSQL instance configuration', () => {
@@ -27,5 +29,54 @@ describe('PostgreSQL instance configuration', () => {
     expect(result.errors?.[0].extensions.code).toBe('DATABASE_NOT_INITIALIZED');
     expect(pool.connect).not.toHaveBeenCalled();
     expect(pool.query).not.toHaveBeenCalled();
+  });
+});
+
+const libraryTypes = (prefix) => {
+  const Author = new GraphQLObjectType({
+    name: `${prefix}Author`,
+    fields: () => ({
+      id: { type: GraphQLID },
+      name: { type: GraphQLString },
+      books: { type: new GraphQLList(Book), extensions: { relation: { embedded: false, connectionField: 'author' } } },
+    }),
+  });
+  const Book = new GraphQLObjectType({
+    name: `${prefix}Book`,
+    fields: () => ({
+      id: { type: GraphQLID },
+      title: { type: GraphQLString },
+      author: { type: Author, extensions: { relation: { embedded: false, connectionField: 'author' } } },
+    }),
+  });
+  return { Author, Book };
+};
+const instance = (schema) => createPostgres({ pool: { connect: vi.fn(), query: vi.fn() }, schema });
+const registerLibrary = (api, { Author, Book }) => {
+  api.connect(null, Author, 'author', 'authors');
+  api.connect(null, Book, 'book', 'books');
+};
+
+describe('PostgreSQL instances and GraphQL types', () => {
+  it('rejects types whose relations another instance resolves', () => {
+    const types = libraryTypes('TenantShared');
+    const first = instance('tenant_a');
+    registerLibrary(first, types);
+    first.createSchema();
+    const second = instance('tenant_b');
+
+    expect(() => second.connect(null, types.Author, 'author', 'authors'))
+      .toThrow(expect.objectContaining({ extensions: expect.objectContaining({ code: 'TYPE_BOUND_TO_OTHER_RUNTIME' }) }));
+    expect(second.getRegistrations()).toHaveLength(0);
+  });
+
+  it('builds identical schemas for instances with their own type objects', () => {
+    const schemas = ['tenant_a', 'tenant_b'].map((name) => {
+      const api = instance(name);
+      registerLibrary(api, libraryTypes('TenantOwn'));
+      return api.createSchema();
+    });
+
+    expect(printSchema(schemas[1])).toBe(printSchema(schemas[0]));
   });
 });

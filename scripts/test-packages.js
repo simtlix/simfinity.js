@@ -70,6 +70,7 @@ const coreSource = `import assert from 'node:assert/strict';
     SimfinityError,
     buildErrorFormatter,
     auth,
+    configureMutationLimits,
     createRuntime,
     createValidatedScalar,
     describeModels,
@@ -78,6 +79,7 @@ const coreSource = `import assert from 'node:assert/strict';
     validators,
   } from '@simtlix/simfinity-core';
   import {
+    GraphQLError,
     GraphQLID,
     GraphQLInt,
     GraphQLObjectType,
@@ -104,10 +106,24 @@ const coreSource = `import assert from 'node:assert/strict';
   assert.equal(QLSort.name, 'QLSort');
   assert.equal(QLValue.name, 'QLValue');
   const known = new SimfinityError('known', 'KNOWN', 400);
-  assert.equal(buildErrorFormatter()(known), known);
+  const formattedKnown = buildErrorFormatter()(known);
+  assert(formattedKnown instanceof GraphQLError);
+  assert.equal(formattedKnown.originalError, known);
+  assert.equal(formattedKnown.toJSON().extensions.code, 'KNOWN');
   const unknown = buildErrorFormatter()(new Error('unknown'));
-  assert(unknown instanceof InternalServerError);
-  assert.equal(unknown.getCause().message, 'unknown');
+  assert(unknown.originalError instanceof InternalServerError);
+  assert.equal(unknown.originalError.getCause().message, 'unknown');
+  assert.equal(JSON.stringify(unknown).includes('cause'), false);
+  const invalidQuery = graphqlSync({ schema, source: '{ missing }' });
+  assert.equal(buildErrorFormatter()(invalidQuery.errors[0]).toJSON().extensions.code, 'BAD_REQUEST');
+  assert.equal(runtime.configureMutationLimits, configureMutationLimits);
+  configureMutationLimits({ maxNestedOperations: 10 });
+  assert.throws(() => configureMutationLimits({ maxNestedOperations: -1 }), (error) => error.getCode() === 'INVALID_MUTATION_LIMITS');
+  assert.throws(() => configureMutationLimits({ maxNestedOperation: 10 }), (error) => error.getCode() === 'INVALID_MUTATION_LIMITS');
+  configureMutationLimits();
+  const masking = buildErrorFormatter((error) => (error instanceof InternalServerError ? new InternalServerError('Unexpected error') : undefined));
+  assert.equal(masking(new Error('secret')).message, 'Unexpected error');
+  assert.equal(masking(known).message, 'known');
   assert.equal(typeof auth.createAuthPlugin, 'function');
   assert.equal(typeof validators.email, 'function');
   assert.equal(scalars.EmailScalar.name, 'Email_String');
@@ -167,8 +183,9 @@ const postgresSource = `import assert from 'node:assert/strict';
     plugins,
     scalars,
     validators,
+    configureMutationLimits,
   } from '@simtlix/simfinity-postgres';
-  import { createRuntime } from '@simtlix/simfinity-core';
+  import { configureMutationLimits as coreConfigureMutationLimits, createRuntime } from '@simtlix/simfinity-core';
   import { createSQL } from '@simtlix/simfinity-sql';
   import {
     GraphQLID,
@@ -193,6 +210,8 @@ const postgresSource = `import assert from 'node:assert/strict';
   assert.equal(api.plugins, plugins);
   assert.equal(api.scalars, scalars);
   assert.equal(api.validators, validators);
+  assert.equal(api.configureMutationLimits, configureMutationLimits);
+  assert.equal(configureMutationLimits, coreConfigureMutationLimits);
   api.connect(null, bookType, 'postgresBook', 'postgresBooks');
   const schema = api.createSchema();
   const beforeReady = await graphql({ schema, source: '{ postgresBooks { id } }' });
@@ -242,8 +261,8 @@ const postgresSource = `import assert from 'node:assert/strict';
     assert(introspection.data.__type.fields.some((field) => field.name === 'extensions'));
   }
   const formatted = buildErrorFormatter()(new Error('postgres'));
-  assert(formatted instanceof InternalServerError);
-  assert(formatted instanceof SimfinityError);`;
+  assert(formatted.originalError instanceof InternalServerError);
+  assert(formatted.originalError instanceof SimfinityError);`;
 
 const mongoSource = `import assert from 'node:assert/strict';
   import * as legacyEntry from '@simtlix/simfinity-js/src/index.js';
@@ -288,7 +307,8 @@ const mongoSource = `import assert from 'node:assert/strict';
   });
   assert.equal(introspection.errors, undefined);
   assert(introspection.data.__type.fields.some((field) => field.name === 'extensions'));
-  assert(simfinity.buildErrorFormatter()(new Error('root')) instanceof simfinity.InternalServerError);`;
+  assert(simfinity.buildErrorFormatter()(new Error('root')).originalError instanceof simfinity.InternalServerError);
+  assert.equal(simfinity.configureMutationLimits, runtime.configureMutationLimits);`;
 
 const mcpSource = `import assert from 'node:assert/strict';
   import {
@@ -311,6 +331,14 @@ const mcpSource = `import assert from 'node:assert/strict';
   const result = await generated.callTool('greeting');
   assert.equal(result.structuredContent.greeting, 'hello');
   assert.deepEqual(Object.keys(result.structuredContent), ['greeting']);
+  assert.throws(
+    () => generateMCPTools(schema, { schemaPlugins: [{ onSchemaChanged() {} }] }),
+    (error) => error.getCode() === 'MCP_INVALID_SCHEMA_PLUGIN',
+  );
+  assert.throws(
+    () => generateMCPTools(schema, { toolMiddleware: new Array(1) }),
+    (error) => error.getCode() === 'MCP_INVALID_MIDDLEWARE',
+  );
   await assert.rejects(
     () => createMCPServer(schema),
     (error) => error.getCode() === 'MCP_SDK_NOT_INSTALLED',
@@ -337,6 +365,7 @@ const coreTypes = `import {
   SimfinityError,
   auth,
   buildErrorFormatter,
+  configureMutationLimits,
   createRuntime,
   plugins,
   scalars,
@@ -344,12 +373,16 @@ const coreTypes = `import {
   type AuthRuleFunction,
   type DatabaseAdapter,
   type FieldValidations,
+  type MutationLimitsOptions,
+  type TypeScopes,
 } from '@simtlix/simfinity-core';
 import {
   GraphQLEnumType,
+  GraphQLError,
   GraphQLInputObjectType,
   GraphQLObjectType,
   GraphQLString,
+  type GraphQLFormattedError,
 } from 'graphql';
 type Model = { name: string };
 type Session = { active: boolean };
@@ -374,6 +407,32 @@ const type = new GraphQLObjectType({ name: 'TypedCoreBook', fields: { title: { t
 runtime.connect(null, type, 'typedCoreBook', 'typedCoreBooks');
 const model: Model | null | undefined = runtime.getModel(type);
 const formatted: Error = buildErrorFormatter()(new Error('typed'));
+const graphQLError: GraphQLError = buildErrorFormatter((error) => { void error.getCode(); })('any value');
+const shape: GraphQLFormattedError = graphQLError.toJSON();
+const limits: MutationLimitsOptions = { maxNestedOperations: 100 };
+configureMutationLimits(limits);
+runtime.configureMutationLimits({ maxNestedOperations: null });
+runtime.configureMutationLimits();
+// @ts-expect-error The limit is a number or null.
+configureMutationLimits({ maxNestedOperations: '100' });
+// @ts-expect-error The only option is maxNestedOperations.
+configureMutationLimits({ maxNestedOperation: 100 });
+const formatError = buildErrorFormatter((error) => {
+  if (error instanceof InternalServerError) {
+    console.error(error.getCause() ?? error);
+    return new InternalServerError('Unexpected error');
+  }
+  return undefined;
+});
+const maskedError: GraphQLError = formatError(new Error('typed'));
+const tenantScope = ({ args }: { args: Record<string, any> }) => { args.tenantId = { operator: 'EQ', value: 'tenant' }; };
+const conditionalScopes: TypeScopes = { find: tenantScope };
+if (maskedError.message === 'tenant') conditionalScopes.get_by_id = tenantScope;
+const scopes: TypeScopes = { find: ({ args, operation, context }) => { args.tenantId = { operator: 'EQ', value: context?.tenantId ?? operation }; } };
+// @ts-expect-error Scope keys are find, get_by_id and aggregate.
+const misspelledScopes: TypeScopes = { getById: () => undefined };
+const owner: AuthRuleFunction = auth.isOwner((post: { authorId: string }) => post.authorId, (user: { id: string }) => user.id, { userPath: (ctx: { user?: unknown }) => ctx.user });
+const roleRule: AuthRuleFunction = auth.requireRole('admin', { rolePath: (user: { profile: { role: string } }) => user.profile.role });
 const known: SimfinityError = new InternalServerError('known');
 const operator: GraphQLEnumType = QLOperator;
 const sort: GraphQLInputObjectType = QLSort;
@@ -382,7 +441,7 @@ const rule: AuthRuleFunction = auth.requireAuth();
 const validations: FieldValidations = validators.email();
 const scalarName: string = scalars.EmailScalar.name;
 const countPlugin = plugins.envelopCountPlugin();
-void [model, formatted, known, operator, sort, valueName, rule, validations, scalarName, countPlugin];`;
+void [model, formatted, graphQLError, shape, scopes, misspelledScopes, owner, roleRule, known, operator, sort, valueName, rule, validations, scalarName, countPlugin, conditionalScopes];`;
 
 const sqlTypes = `import {
   createSQL,
@@ -395,6 +454,8 @@ const sqlTypes = `import {
   type SQLPlugin,
   type SQLRecordOperation,
   type SQLStatement,
+  type MutationLimitsOptions,
+  type TypeScopes,
 } from '@simtlix/simfinity-sql';
 import { describeModels } from '@simtlix/simfinity-core';
 import { GraphQLID, GraphQLObjectType, GraphQLString } from 'graphql';
@@ -473,7 +534,10 @@ void model?.find({ title: { value: 'book' } });
 const badOperation: SQLRecordOperation = { kind: 'deleteById', table: 'book', id: 'id' };
 // @ts-expect-error Only version 1 is currently supported.
 const badPlugin: SQLPlugin<Configuration, Client, Description> = { ...plugin, apiVersion: 2 };
-void [capability, scalar, description, badOperation, badPlugin];`;
+const limits: MutationLimitsOptions = { maxNestedOperations: 0 };
+api.configureMutationLimits(limits);
+const scopes: TypeScopes = { aggregate: async ({ args }) => { args.AND = []; } };
+void [capability, scalar, description, badOperation, badPlugin, scopes];`;
 
 const postgresTypes = `import { Pool, type PoolClient } from 'pg';
 import { createSQL } from '@simtlix/simfinity-sql';
@@ -488,8 +552,10 @@ import {
   plugins,
   scalars,
   validators,
+  configureMutationLimits,
   type AuthRuleFunction,
   type DatabaseDescription,
+  type TypeScopes,
   type InitializationResult,
   type PostgresModel,
   type PostgresRuntime,
@@ -527,11 +593,15 @@ configure({ pool });
 connect(null, type, 'defaultTypedPostgresBook', 'defaultTypedPostgresBooks');
 const defaultSchema = createSchema();
 const defaultReady: Promise<InitializationResult> = initializeDatabase({ mode: 'validate' });
-void [schema, model, ready, lowLevel, defaultSchema, defaultReady, rule, email, scalarName, countPlugin];`;
+configureMutationLimits({ maxNestedOperations: 100 });
+api.configureMutationLimits();
+const scopes: TypeScopes = { get_by_id: ({ args }) => { args.id = { operator: 'EQ', value: args.id?.value }; } };
+void [schema, model, ready, lowLevel, defaultSchema, defaultReady, rule, email, scalarName, countPlugin, scopes];`;
 
 const mongoTypes = `import {
   InternalServerError,
   buildErrorFormatter,
+  configureMutationLimits,
   createMongoAdapter,
   createRuntime,
   generateMCPTools,
@@ -543,6 +613,8 @@ const mongoTypes = `import {
   validators,
   type AuthRuleFunction,
   type GeneratedMCPTools,
+  type MutationLimitsOptions,
+  type TypeScopes,
 } from '@simtlix/simfinity-js';
 import { GraphQLObjectType, GraphQLString } from 'graphql';
 const runtime = createRuntime(createMongoAdapter());
@@ -564,14 +636,20 @@ const email = validators.email();
 const scalarName: string = scalars.EmailScalar.name;
 const countPlugin = plugins.envelopCountPlugin();
 const generated: GeneratedMCPTools = generateMCPTools(runtime.createSchema());
-void [registrations, inputType, formatted, internal, rule, email, scalarName, countPlugin, generated, protection, ready];`;
+const limits: MutationLimitsOptions = { maxNestedOperations: 100 };
+configureMutationLimits(limits);
+runtime.configureMutationLimits();
+const scopes: TypeScopes = { find: async ({ args, context }) => { args.owner = { operator: 'EQ', value: context.user.id }; } };
+void [registrations, inputType, formatted, internal, rule, email, scalarName, countPlugin, generated, protection, ready, scopes];`;
 
 const mcpTypes = `import mcp, {
+  createHTTPMCPHandler,
   createMCPServer,
   generateMCPTools,
   type GeneratedMCPTools,
   type MCPServer,
 } from '@simtlix/simfinity-mcp';
+import { plugins } from '@simtlix/simfinity-core';
 import { GraphQLObjectType, GraphQLSchema, GraphQLString } from 'graphql';
 const schema = new GraphQLSchema({
   query: new GraphQLObjectType({
@@ -580,9 +658,30 @@ const schema = new GraphQLSchema({
   }),
 });
 const generated: GeneratedMCPTools = generateMCPTools(schema);
+class ClassPlugin { onSchemaChange() {} }
+const sharedPlugins: GeneratedMCPTools = generateMCPTools(schema, {
+  schemaPlugins: [new ClassPlugin(), plugins.envelopCountPlugin(), plugins.createAuthPlugin({})],
+});
+// @ts-expect-error A plugin factory must be called.
+generateMCPTools(schema, { schemaPlugins: [plugins.createAuthPlugin] });
+// @ts-expect-error A promise must be awaited first.
+generateMCPTools(schema, { schemaPlugins: [Promise.resolve(plugins.createAuthPlugin({}))] });
+class CallApplyPlugin { onSchemaChange() {} call() {} apply() {} }
+interface EnvelopStylePlugin {
+  onSchemaChange?: (payload: { schema: GraphQLSchema; replaceSchema: (schema: GraphQLSchema) => void }) => void;
+  onExecute?: (payload: { args: unknown }) => void;
+  instrumentation?: { execute?: (payload: unknown, wrapped: () => void) => void };
+}
+declare const envelopStylePlugins: EnvelopStylePlugin[];
+const memberPlugins: GeneratedMCPTools = generateMCPTools(schema, {
+  schemaPlugins: [new CallApplyPlugin(), ...envelopStylePlugins],
+});
 const server: Promise<MCPServer> = createMCPServer(schema);
 const sameGenerator: typeof generateMCPTools = mcp.generateMCPTools;
-void [generated, server, sameGenerator];`;
+const singleMiddleware: GeneratedMCPTools = generateMCPTools(schema, { toolMiddleware: (call, next) => next() });
+const optionalPlugins: GeneratedMCPTools = generateMCPTools(schema, { schemaPlugins: [{ async onSchemaChange() {} }, false, null, undefined] });
+const handler = createHTTPMCPHandler(schema, { toolMiddleware: [(call, next) => next()] });
+void [generated, server, sameGenerator, singleMiddleware, optionalPlugins, handler, sharedPlugins, memberPlugins];`;
 
 const cases = [
   {

@@ -103,10 +103,10 @@ The field-level shape is `{ CREATE: [validator], UPDATE: [validator] }`. Each va
 | Extension | Value | Effect |
 | --- | --- | --- |
 | `validations` | `{ CREATE, UPDATE }` validator arrays | Validates the full input and materialized model after field validation. |
-| `scope` | `{ find, get_by_id, aggregate }` callbacks | Adds filters to generated root reads. |
+| `scope` | Plain object with optional `find`, `get_by_id` and `aggregate` functions | Adds filters to generated root reads. Any other shape throws `INVALID_SCOPE`. |
 | `indexes` | `{ fields: string[], unique?: boolean }[]` | Declares PostgreSQL composite indexes over stored scalar/reference fields; MongoDB uses its model index configuration. |
 
-Type validators receive `(typeName, args, modelArgs, session)`. Scope callbacks receive `{ type, args, operation, context }` and mutate `args` in place. A type's `find` scope also restricts the referenced records that client filter, sort and aggregation paths reach. See [query scope](/guide/query-scope) for supported operations, [relationship paths](/guide/query-scope#relationship-paths-in-filters-sorts-and-aggregations) and their authorization boundaries.
+Type validators receive `(typeName, args, modelArgs, session)`. Scope callbacks receive `{ type, args, operation, context }` and mutate `args` in place. Omit a key to leave an operation unscoped; misspelled keys, non-function values, arrays and `scope: undefined` or `null` throw `INVALID_SCOPE` (500) at registration and `createSchema()`, and on reads if the scope is changed later. A type's `find` scope also restricts the referenced records that client filter, sort and aggregation paths reach. See [query scope](/guide/query-scope) for supported operations, [relationship paths](/guide/query-scope#relationship-paths-in-filters-sorts-and-aggregations) and their authorization boundaries.
 
 ## Automatic MongoDB indexes
 

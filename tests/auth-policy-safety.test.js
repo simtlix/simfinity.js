@@ -3,6 +3,7 @@ import {
   GraphQLNonNull, GraphQLObjectType, GraphQLSchema, GraphQLString, graphql,
 } from 'graphql';
 import { createRequire } from 'node:module';
+import { runInNewContext } from 'node:vm';
 import mongoose from 'mongoose';
 import '../packages/core/src/introspection.js';
 import auth from '../packages/mongodb/src/auth/index.js';
@@ -124,6 +125,8 @@ describe('Authorization policy safety', () => {
       { in: [1, [1, , 2]] },
       { not: { eq: [{ ref: 'ctx.user' }, { id: { ref: 'parent.ownerId' } }] } },
       { eq: [[{ ref: 'ctx.user.id' }], ['user-1']] },
+      // NaN equals nothing, so a literal NaN operand could only grant through negation.
+      { eq: [{ ref: 'ctx.score' }, NaN] },
     ];
 
     test.each(malformed.map(value => [value]))('rejects malformed rules before serving %#', (expression) => {
@@ -403,9 +406,231 @@ describe('Authorization policy safety', () => {
     });
 
     test('other objects keep strict identity', () => {
-      const date = new Date(0);
-      expect(evaluateExpression({ eq: [{ ref: 'ctx.at' }, date] }, { ctx: { at: date } })).toBe(true);
-      expect(evaluateExpression({ eq: [{ ref: 'ctx.at' }, new Date(0)] }, { ctx: { at: date } })).toBe(false);
+      const flags = new Map();
+      expect(evaluateExpression({ eq: [{ ref: 'ctx.flags' }, flags] }, { ctx: { flags } })).toBe(true);
+      expect(evaluateExpression({ eq: [{ ref: 'ctx.flags' }, new Map()] }, { ctx: { flags } })).toBe(false);
+    });
+
+    test.each([
+      [{ not: { eq: [{ ref: 'ctx.score' }, { ref: 'ctx.min' }] } }, { score: 5, min: NaN }],
+      [{ not: { eq: [{ ref: 'ctx.score' }, { ref: 'ctx.min' }] } }, { score: NaN, min: NaN }],
+      [{ not: { eq: [{ ref: 'ctx.score' }, 5] } }, { score: NaN }],
+      [{ not: { in: [{ ref: 'ctx.score' }, { ref: 'ctx.blocked' }] } }, { score: 5, blocked: [NaN] }],
+      [{ not: { in: [{ ref: 'ctx.score' }, [1, 2]] } }, { score: NaN }],
+    ])('NaN never compares, so negation cannot grant %#', async (expression, ctx) => {
+      expect(evaluateExpression(expression, { ctx })).toBe(false);
+      expectDenied(await executePolicy(expression, {}, ctx));
+    });
+
+    describe('dates', () => {
+      const instant = Date.UTC(2026, 0, 1);
+      const unchanged = { eq: [{ ref: 'parent.updatedAt' }, { ref: 'ctx.since' }] };
+      const seen = { in: [{ ref: 'ctx.since' }, { ref: 'parent.history' }] };
+      const parent = () => ({ updatedAt: new Date(instant), history: [new Date(instant - 1), new Date(instant)] });
+
+      test('compare by time in eq, in and not', async () => {
+        for (const since of [new Date(instant), runInNewContext(`new Date(${instant})`)]) {
+          expect(evaluateExpression(unchanged, { parent: parent(), ctx: { since } })).toBe(true);
+          expect(evaluateExpression(seen, { parent: parent(), ctx: { since } })).toBe(true);
+          expectDenied(await executePolicy({ not: unchanged }, parent(), { since }));
+          expectDenied(await executePolicy({ not: seen }, parent(), { since }));
+        }
+        const later = { since: new Date(instant + 1) };
+        expect(evaluateExpression(unchanged, { parent: parent(), ctx: later })).toBe(false);
+        expect(evaluateExpression(seen, { parent: parent(), ctx: later })).toBe(false);
+        const { result } = await executePolicy({ not: unchanged }, parent(), later);
+        expect(result.errors).toBeUndefined();
+      });
+
+      test.each([
+        ['an invalid Date', new Date(Number.NaN)],
+        ['a number', instant],
+        ['an ISO string', new Date(instant).toISOString()],
+        ['a list', [new Date(instant)]],
+        ['an object', { time: instant }],
+        ['a spoofed Date tag', { [Symbol.toStringTag]: 'Date', getTime: () => instant }],
+      ])('a Date compared with %s never grants through negation', async (_kind, since) => {
+        for (const expression of [unchanged, seen]) {
+          expect(evaluateExpression({ not: expression }, { parent: parent(), ctx: { since } })).toBe(false);
+          expectDenied(await executePolicy({ not: expression }, parent(), { since }));
+        }
+      });
+
+      test('an invalid Date is never equal, even to itself', () => {
+        const invalid = new Date(Number.NaN);
+        const context = { parent: { updatedAt: invalid }, ctx: { since: invalid } };
+        expect(evaluateExpression(unchanged, context)).toBe(false);
+        expect(evaluateExpression({ not: unchanged }, context)).toBe(false);
+      });
+
+      test('membership reads the target Date once, not once for every list item', () => {
+        const getTime = vi.spyOn(Date.prototype, 'getTime');
+        try {
+          const history = [new Date(instant - 2), new Date(instant - 1), new Date(instant)];
+          expect(evaluateExpression(seen, { parent: { history }, ctx: { since: new Date(instant) } })).toBe(true);
+          expect(getTime).toHaveBeenCalledTimes(history.length + 1);
+        } finally {
+          getTime.mockRestore();
+        }
+      });
+
+      test('literal Dates compare by time and ignore later changes to the configured Date', () => {
+        const literal = new Date(instant);
+        const rule = createRuleFromExpression({ eq: [{ ref: 'ctx.since' }, literal] });
+        expect(rule(null, {}, { since: new Date(instant) })).toBe(true);
+        literal.setTime(0);
+        expect(rule(null, {}, { since: new Date(instant) })).toBe(true);
+        expect(rule(null, {}, { since: new Date(0) })).toBe(false);
+      });
+    });
+  });
+
+  describe('asynchronous values', () => {
+    const pending = () => Promise.resolve(null);
+    const expectConfigurationError = ({ result, protectedReads }) => {
+      expect(result.data.post.content).toBeNull();
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toMatch(/synchronously/);
+      expect(protectedReads).toBe(0);
+    };
+
+    test('helpers reject async extractor functions when they are created', () => {
+      const extractor = async ctx => ctx.user;
+      expect(() => requireAuth(extractor)).toThrow(TypeError);
+      expect(() => requireRole('admin', { userPath: extractor })).toThrow(TypeError);
+      expect(() => requireRole('admin', { rolePath: extractor })).toThrow(TypeError);
+      expect(() => requirePermission('posts:read', { userPath: extractor })).toThrow(TypeError);
+      expect(() => requirePermission('posts:read', { permissionsPath: extractor })).toThrow(TypeError);
+      expect(() => isOwner(extractor)).toThrow(TypeError);
+      expect(() => isOwner('authorId', extractor)).toThrow(TypeError);
+      expect(() => isOwner('authorId', 'id', { userPath: extractor })).toThrow(TypeError);
+    });
+
+    test.each([
+      ['requireAuth with an unawaited context user', () => requireAuth(), {}, { user: pending() }],
+      ['requireAuth with a promise-returning extractor', () => requireAuth(ctx => ctx.session), {}, { session: pending() }],
+      ['requireAuth with a thenable user', () => requireAuth(), {}, { user: { then: resolve => resolve(null) } }],
+      ['requireRole', () => requireRole('admin', { rolePath: user => user.loadRole() }), {},
+        { user: { loadRole: () => Promise.resolve('admin') } }],
+      ['requirePermission', () => requirePermission('posts:read', { permissionsPath: user => user.loadClaims() }), {},
+        { user: { loadClaims: () => Promise.resolve(['posts:read']) } }],
+      ['isOwner', () => isOwner(post => post.loadAuthor()), { loadAuthor: () => Promise.resolve('user-1') },
+        { user: { id: 'user-1' } }],
+    ])('%s denies a promise instead of reading it as a value', async (_name, createHelper, parent, ctx) => {
+      expect(() => createHelper()(parent, {}, ctx)).toThrow(TypeError);
+      expectConfigurationError(await executePolicy(createHelper(), parent, ctx));
+      await expect(anyRule(deny('Closed'), createHelper())(parent, {}, ctx)).rejects.toThrow(TypeError);
+    });
+
+    test.each([
+      ['this realm', () => Promise.reject(new Error('session store unavailable'))],
+      ['another realm', () => runInNewContext('Promise.reject(new Error("session store unavailable"))')],
+    ])('a rejected extractor promise from %s cannot become an unhandled rejection', async (_name, reject) => {
+      const unhandled = vi.fn();
+      process.on('unhandledRejection', unhandled);
+      try {
+        const rule = requireRole('admin', { userPath: reject });
+        expect(() => rule(null, {}, {})).toThrow(TypeError);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.off('unhandledRejection', unhandled);
+      }
+    });
+
+    // Query builders such as Mongoose queries or Knex builders run their query when then() is called.
+    class LazyQuery {
+      constructor() { this.executions = 0; }
+      then(resolve, reject) {
+        this.executions++;
+        return Promise.resolve(null).then(resolve, reject);
+      }
+    }
+
+    test.each([
+      ['requireAuth', query => [requireAuth(), {}, { user: query }]],
+      ['requireRole', query => [requireRole('admin'), {}, { user: { role: query } }]],
+      ['requirePermission', query => [requirePermission('posts:read'), {}, { user: { permissions: query } }]],
+      ['isOwner with an owner query', query => [isOwner('author'), { author: query }, { user: { id: 'user-1' } }]],
+      ['isOwner with a user id query', query => [isOwner('authorId'), { authorId: 'user-1' }, { user: { id: query } }]],
+    ])('%s denies a lazy thenable without running it', async (_name, setup) => {
+      const query = new LazyQuery();
+      const [rule, parent, ctx] = setup(query);
+      expect(() => rule(parent, {}, ctx)).toThrow(TypeError);
+      expectConfigurationError(await executePolicy(rule, parent, ctx));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(query.executions).toBe(0);
+    });
+
+    test('a denied check never calls the then method of a promise subclass or a spoofed promise', async () => {
+      // A lazy promise subclass starts its work on the first then(), like the p-lazy package.
+      const executor = vi.fn(resolve => resolve(null));
+      class LazyPromise extends Promise {
+        constructor(lazyExecutor) {
+          super(resolve => resolve());
+          this.lazyExecutor = lazyExecutor;
+        }
+
+        then(onFulfilled, onRejected) {
+          this.started ??= new Promise(this.lazyExecutor);
+          return this.started.then(onFulfilled, onRejected);
+        }
+      }
+      const spoofed = { [Symbol.toStringTag]: 'Promise', then: vi.fn() };
+      for (const user of [new LazyPromise(executor), spoofed]) {
+        expect(() => requireAuth()(null, {}, { user })).toThrow(TypeError);
+      }
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(executor).not.toHaveBeenCalled();
+      expect(spoofed.then).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      { not: { eq: [{ ref: 'ctx.user' }, null] } },
+      { not: { in: [{ ref: 'ctx.user' }, []] } },
+      { not: { in: ['admin', { ref: 'ctx.roles' }] } },
+      { eq: [{ ref: 'ctx.user' }, { ref: 'ctx.user' }] },
+    ])('expressions never compare promises %#', async (expression) => {
+      const ctx = { user: pending(), roles: [Promise.resolve('admin')] };
+      expect(evaluateExpression(expression, { ctx })).toBe(false);
+      expectDenied(await executePolicy(expression, {}, ctx));
+    });
+
+    test.each([
+      ['a parent ref', { not: { eq: [{ ref: 'parent.author' }, null] } }],
+      ['a context ref', { eq: [{ ref: 'ctx.session' }, 'x'] }],
+      ['a ref compared with a missing value', { eq: [{ ref: 'ctx.missing' }, { ref: 'ctx.session' }] }],
+      ['a membership list item', { not: { in: ['admin', { ref: 'ctx.roles' }] } }],
+    ])('expressions deny %s that yields a rejected promise without an unhandled rejection', async (_name, expression) => {
+      const unhandled = vi.fn();
+      process.on('unhandledRejection', unhandled);
+      // Getters that start a load on every read, like a lazy relation, and the load fails.
+      const fail = () => Promise.reject(new Error('lazy load failed'));
+      const parent = { get author() { return fail(); } };
+      const ctx = {
+        get session() { return fail(); },
+        get roles() { return ['editor', fail(), runInNewContext('Promise.reject(new Error("lazy load failed"))')]; },
+      };
+      try {
+        expect(evaluateExpression(expression, { parent, args: {}, ctx })).toBe(false);
+        expectDenied(await executePolicy(expression, parent, ctx));
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.off('unhandledRejection', unhandled);
+      }
+    });
+
+    test.each([
+      { not: { eq: [{ ref: 'ctx.user' }, null] } },
+      { not: { in: ['admin', { ref: 'ctx.roles' }] } },
+    ])('expressions deny a lazy thenable without running it %#', async (expression) => {
+      const query = new LazyQuery();
+      const ctx = { user: query, roles: [query] };
+      expect(evaluateExpression(expression, { ctx })).toBe(false);
+      expectDenied(await executePolicy(expression, {}, ctx));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(query.executions).toBe(0);
     });
   });
 
@@ -671,6 +896,41 @@ describe('Authorization policy safety', () => {
       } finally {
         warn.mockRestore();
       }
+    });
+  });
+
+  describe('graphql module copies', () => {
+    // Vitest loads the ESM graphql build for imports; require loads the separate CommonJS build.
+    const cjs = createRequire(import.meta.url)('graphql');
+
+    test('rejects a schema built by another graphql copy instead of leaving it unprotected', () => {
+      expect(cjs.GraphQLObjectType).not.toBe(GraphQLObjectType);
+      const resolve = () => 'secret';
+      const schema = new cjs.GraphQLSchema({
+        query: new cjs.GraphQLObjectType({
+          name: 'Query', fields: { secret: { type: cjs.GraphQLString, resolve } },
+        }),
+      });
+      for (const defaultPolicy of ['ALLOW', 'DENY']) {
+        const plugin = createAuthPlugin({ Query: { secret: deny() } }, { defaultPolicy });
+        expect(() => plugin.onSchemaChange({ schema })).toThrow(/different copy of the graphql module/);
+        // Nothing was marked as processed, so a later call checks the schema again.
+        expect(() => plugin.onSchemaChange({ schema })).toThrow(TypeError);
+      }
+      expect(schema.getQueryType().getFields().secret.resolve).toBe(resolve);
+    });
+
+    test('rejects a schema that mixes local object types with another copy\'s scalars', () => {
+      const resolve = () => 'secret';
+      const Money = new cjs.GraphQLScalarType({ name: 'Money' });
+      const schema = new GraphQLSchema({
+        query: new GraphQLObjectType({
+          name: 'Query', fields: { secret: { type: GraphQLString, resolve }, price: { type: Money } },
+        }),
+      });
+      expect(() => createAuthPlugin({ Query: { secret: deny() } }, { defaultPolicy: 'ALLOW' })
+        .onSchemaChange({ schema })).toThrow(/Cannot authorize type Money/);
+      expect(schema.getQueryType().getFields().secret.resolve).toBe(resolve);
     });
   });
 

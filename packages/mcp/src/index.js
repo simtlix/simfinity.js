@@ -10,6 +10,7 @@ import {
   GraphQLEnumType,
   GraphQLInputObjectType,
   GraphQLObjectType,
+  isSpecifiedScalarType,
 } from 'graphql';
 import { SimfinityError } from '@simtlix/simfinity-core';
 
@@ -62,17 +63,24 @@ const SIMFINITY_ARG_DOCS = Object.assign(Object.create(null), {
 });
 
 /**
- * Resolve the JSON Schema primitive type for a GraphQL scalar. Custom validated
- * scalars (created via createValidatedScalar) expose a `baseScalarType`, which is
- * used to derive the underlying primitive. Date-like scalars (the names
- * Simfinity maps to Mongoose Date) carry a string `format`. Unknown/opaque
- * scalars map to an empty schema, meaning "any value is accepted", with a
- * curated description where one exists (e.g. QLValue).
+ * Follow validated-scalar chains (createValidatedScalar exposes
+ * `baseScalarType`) to their root scalar; a cyclic chain stops where it
+ * repeats. Local counterpart of the MongoDB adapter's resolveStorageScalar,
+ * which MCP must not import.
  * @param {import('graphql').GraphQLScalarType} type
- * @returns {Object} JSON Schema fragment
+ * @returns {{ name: string }}
  */
-const scalarToJSONSchema = (type) => {
-  const name = type.baseScalarType ? type.baseScalarType.name : type.name;
+const resolveRootScalar = (type) => {
+  let base = type;
+  const visited = new Set();
+  while (base && base.baseScalarType && !visited.has(base)) {
+    visited.add(base);
+    base = base.baseScalarType;
+  }
+  return base;
+};
+
+const scalarPrimitiveSchema = (name) => {
   switch (name) {
     case 'Int':
       return { type: 'integer' };
@@ -89,11 +97,29 @@ const scalarToJSONSchema = (type) => {
       return { type: 'string', format: 'date-time' };
     case 'Time':
       return { type: 'string', format: 'time' };
-    default: {
-      const doc = SIMFINITY_FILTER_DOCS[name];
-      return doc ? { description: doc } : {};
-    }
+    default:
+      return null;
   }
+};
+
+/**
+ * Resolve the JSON Schema primitive type for a GraphQL scalar. Custom validated
+ * scalars (created via createValidatedScalar, possibly chained) expose a
+ * `baseScalarType`; the root of that chain derives the underlying primitive.
+ * Date-like scalars (the names Simfinity maps to Mongoose Date) carry a string
+ * `format`. Unknown/opaque scalars map to an empty schema, meaning "any value
+ * is accepted". A custom scalar's own description is published, falling back
+ * to a curated one where it exists (e.g. QLValue); the generic descriptions of
+ * the GraphQL built-in scalars are omitted.
+ * @param {import('graphql').GraphQLScalarType} type
+ * @returns {Object} JSON Schema fragment
+ */
+const scalarToJSONSchema = (type) => {
+  const root = resolveRootScalar(type);
+  const schema = scalarPrimitiveSchema(root.name) || {};
+  const description = (!isSpecifiedScalarType(type) && type.description)
+    || SIMFINITY_FILTER_DOCS[root.name];
+  return description ? { ...schema, description } : schema;
 };
 
 const withDescription = (schema, description) => {
@@ -836,20 +862,232 @@ const resolveExecution = (execution) => {
   return { mode, execution: resolved };
 };
 
+const isThenable = (value) => value !== null
+  && (typeof value === 'object' || typeof value === 'function')
+  && typeof value.then === 'function';
+
+/** Short description of a configuration value for setup error messages. */
+const describeValue = (value) => {
+  if (Array.isArray(value)) {
+    return 'an array';
+  }
+  if (isThenable(value)) {
+    return 'a promise';
+  }
+  if (typeof value === 'function') {
+    return value.name ? `function ${value.name}` : 'a function';
+  }
+  return value === null ? 'null' : typeof value;
+};
+
+// Envelop, Yoga, whatwg-node server and Apollo hooks that MCP does not run.
+// Their presence marks an entry as a plausible shared plugin, which is warned
+// about instead of rejected.
+const IGNORED_PLUGIN_HOOK_RE = /^on[A-Z]/;
+const IGNORED_PLUGIN_KEYS = new Set(['instrumentation', 'requestDidStart', 'serverWillStart']);
+// No Envelop, Yoga or Apollo hook other than onSchemaChange starts with
+// onSchema or is within this edit distance of it, so on an entry without
+// onSchemaChange such a key is a misspelling that would leave resolvers unwrapped.
+const SCHEMA_HOOK = 'onschemachange';
+const MAX_SCHEMA_HOOK_TYPOS = 2;
+const warnedSchemaPlugins = new WeakSet();
+
+/**
+ * Optimal string alignment distance: insertions, deletions, substitutions and
+ * transpositions of adjacent characters each cost one edit.
+ */
+const editDistance = (a, b) => {
+  const rows = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j += 1) {
+    rows[0][j] = j;
+  }
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j <= b.length; j += 1) {
+      rows[i][j] = Math.min(
+        rows[i - 1][j] + 1,
+        rows[i][j - 1] + 1,
+        rows[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        rows[i][j] = Math.min(rows[i][j], rows[i - 2][j - 2] + 1);
+      }
+    }
+  }
+  return rows[a.length][b.length];
+};
+
+/** A key that, ignoring letter case, starts with onSchema or is a near miss of onSchemaChange. */
+const isMisspelledSchemaHook = (key) => {
+  const lower = key.toLowerCase();
+  return key !== 'onSchemaChange' && (lower.startsWith('onschema')
+    || (Math.abs(lower.length - SCHEMA_HOOK.length) <= MAX_SCHEMA_HOOK_TYPOS
+      && editDistance(lower, SCHEMA_HOOK) <= MAX_SCHEMA_HOOK_TYPOS));
+};
+
+/**
+ * Own and inherited property descriptors by name; the nearest one wins
+ * (class-based plugins keep hooks on the prototype). Reading descriptors
+ * never runs a getter.
+ */
+const pluginDescriptors = (plugin) => {
+  const descriptors = new Map();
+  for (let proto = plugin; proto && proto !== Object.prototype; proto = Object.getPrototypeOf(proto)) {
+    for (const key of Object.getOwnPropertyNames(proto)) {
+      if (key !== 'constructor' && !descriptors.has(key)) {
+        descriptors.set(key, Object.getOwnPropertyDescriptor(proto, key));
+      }
+    }
+  }
+  return descriptors;
+};
+
+/** An accessor counts as a declared hook without being invoked. */
+const isDeclaredHook = (descriptor) => Boolean(descriptor)
+  && (typeof descriptor.get === 'function' || descriptor.value != null);
+
+/** A method, or an accessor that may return one; the accessor is not invoked. */
+const isFunctionOrAccessor = (descriptor) => Boolean(descriptor)
+  && (typeof descriptor.get === 'function' || typeof descriptor.value === 'function');
+
+const invalidSchemaPlugin = (message) => new SimfinityError(message, 'MCP_INVALID_SCHEMA_PLUGIN', 500);
+
+/**
+ * Validate every `schemaPlugins` entry before any hook runs, so an invalid
+ * entry can never leave the schema partially wrapped. Falsy entries are
+ * skipped (the `enabled && plugin` pattern Envelop tolerates). Entries with
+ * other recognized plugin hooks but no `onSchemaChange` are warned about once
+ * per plugin object; entries that look like no plugin at all, or that lack
+ * `onSchemaChange` but declare a misspelling of it (a method or getter whose
+ * name starts with `onSchema`, or is at most two edits away from
+ * `onSchemaChange`, ignoring case), are rejected. Only `onSchemaChange` is
+ * read; other properties, `then` included, are inspected through their
+ * descriptors, so getters never run.
+ * @param {Array<Object>|null|undefined} schemaPlugins
+ * @returns {Array<Object>} plugins exposing an `onSchemaChange` hook
+ */
+const normalizeSchemaPlugins = (schemaPlugins) => {
+  if (schemaPlugins == null) {
+    return [];
+  }
+  if (!Array.isArray(schemaPlugins)) {
+    throw invalidSchemaPlugin(`schemaPlugins must be an array of plugin objects, got ${describeValue(schemaPlugins)}`);
+  }
+  const installers = [];
+  schemaPlugins.forEach((plugin, index) => {
+    if (!plugin) {
+      return;
+    }
+    if (typeof plugin === 'function') {
+      throw invalidSchemaPlugin(`schemaPlugins[${index}] is ${describeValue(plugin)}, not a plugin object; call the plugin factory (e.g. createAuthPlugin(permissions)) and pass its result`);
+    }
+    if (typeof plugin !== 'object' || Array.isArray(plugin)) {
+      throw invalidSchemaPlugin(`schemaPlugins[${index}] must be a plugin object, got ${describeValue(plugin)}`);
+    }
+    const descriptors = pluginDescriptors(plugin);
+    // Checked through the descriptor, so a `then` getter is not invoked.
+    if (isFunctionOrAccessor(descriptors.get('then'))) {
+      throw invalidSchemaPlugin(`schemaPlugins[${index}] must be a plugin object, got a promise`);
+    }
+    if (plugin.onSchemaChange != null && typeof plugin.onSchemaChange !== 'function') {
+      throw invalidSchemaPlugin(`schemaPlugins[${index}].onSchemaChange must be a function, got ${describeValue(plugin.onSchemaChange)}`);
+    }
+    const keys = [...descriptors.keys()];
+    const hasSchemaHook = typeof plugin.onSchemaChange === 'function';
+    // Next to a working onSchemaChange, onSchema* helpers leave nothing unwrapped.
+    const misspelled = !hasSchemaHook && keys.find((key) => isMisspelledSchemaHook(key)
+      && isFunctionOrAccessor(descriptors.get(key)));
+    if (misspelled) {
+      throw invalidSchemaPlugin(`schemaPlugins[${index}] declares ${misspelled}, which MCP does not recognize; did you mean onSchemaChange?`);
+    }
+    const ignored = keys.filter((key) => key !== 'onSchemaChange'
+      && (IGNORED_PLUGIN_HOOK_RE.test(key) || IGNORED_PLUGIN_KEYS.has(key))
+      && isDeclaredHook(descriptors.get(key)));
+    if (hasSchemaHook) {
+      installers.push(plugin);
+    } else if (ignored.length === 0) {
+      throw invalidSchemaPlugin(`schemaPlugins[${index}] has no onSchemaChange hook and no other plugin hooks (keys: ${keys.join(', ') || 'none'})`);
+    }
+    if (ignored.length && !warnedSchemaPlugins.has(plugin)) {
+      warnedSchemaPlugins.add(plugin);
+      const nested = ignored.includes('onPluginInit') ? ' Plugins it would register with addPlugin are not installed either.' : '';
+      console.warn(`[simfinity-mcp] schemaPlugins[${index}]: MCP invokes only onSchemaChange and ignores ${ignored.join(', ')}.${nested} In-process tool calls run without that behavior.`);
+    }
+  });
+  return installers;
+};
+
 /**
  * Apply Envelop-style schema plugins (e.g. simfinity's createAuthPlugin) to the
  * schema by invoking their `onSchemaChange` hooks. In a regular GraphQL server
  * Envelop fires these hooks at startup; standalone MCP servers execute via bare
  * `graphql()` and would otherwise silently skip resolver-wrapping plugins such
- * as field-level auth.
+ * as field-level auth. MCP executes the schema it was given, so `replaceSchema`
+ * accepts only that same schema (a no-op, as in Envelop) and otherwise throws
+ * MCP_UNSUPPORTED_SCHEMA_REPLACEMENT.
  * @param {import('graphql').GraphQLSchema} schema
  * @param {Array<Object>} schemaPlugins
+ * @returns {Promise<void>|null} settles once asynchronous hooks finish; null
+ *   when every hook completed synchronously
  */
 const applySchemaPlugins = (schema, schemaPlugins) => {
-  for (const plugin of schemaPlugins || []) {
-    if (plugin && typeof plugin.onSchemaChange === 'function') {
-      plugin.onSchemaChange({ schema, replaceSchema: () => {} });
+  const installers = normalizeSchemaPlugins(schemaPlugins);
+  const replaceSchema = (next) => {
+    if (next !== schema) {
+      throw new SimfinityError('schemaPlugins cannot replace the schema: MCP executes the schema passed to it. Wrap resolvers in place instead.', 'MCP_UNSUPPORTED_SCHEMA_REPLACEMENT', 500);
     }
+  };
+  const pending = [];
+  try {
+    for (const plugin of installers) {
+      const result = plugin.onSchemaChange({ schema, replaceSchema });
+      if (isThenable(result)) {
+        pending.push(result);
+      }
+    }
+  } catch (err) {
+    // The synchronous failure is the setup error; earlier asynchronous hooks
+    // must not surface later as unhandled rejections.
+    pending.forEach((result) => { Promise.resolve(result).catch(() => {}); });
+    throw err;
+  }
+  return pending.length ? Promise.all(pending).then(() => undefined) : null;
+};
+
+/**
+ * Validate `toolMiddleware` at setup and snapshot it. A single function is a
+ * one-element stack; anything else must be an array of functions.
+ * @param {Function|Array<Function>|null|undefined} toolMiddleware
+ * @returns {Array<Function>|null} a copy of the stack, or null when empty
+ */
+const normalizeToolMiddleware = (toolMiddleware) => {
+  if (toolMiddleware == null) {
+    return null;
+  }
+  const list = typeof toolMiddleware === 'function' ? [toolMiddleware] : toolMiddleware;
+  if (!Array.isArray(list)) {
+    throw new SimfinityError(`toolMiddleware must be a function or an array of functions, got ${describeValue(toolMiddleware)}`, 'MCP_INVALID_MIDDLEWARE', 500);
+  }
+  // An index loop visits holes in sparse arrays, which forEach would skip.
+  for (let index = 0; index < list.length; index += 1) {
+    if (typeof list[index] !== 'function') {
+      const got = index in list ? describeValue(list[index]) : 'an empty array slot';
+      throw new SimfinityError(`toolMiddleware[${index}] must be a function, got ${got}`, 'MCP_INVALID_MIDDLEWARE', 500);
+    }
+  }
+  return list.length ? [...list] : null;
+};
+
+/**
+ * Reject inconsistent `limits` at setup: otherwise every unpaginated call
+ * would get an isError blaming the caller for a page size the server itself
+ * injected.
+ * @param {Object} [limits]
+ */
+const validateLimits = (limits = {}) => {
+  if (limits.defaultPagination && limits.maxPageSize
+      && typeof limits.defaultPagination.size === 'number'
+      && limits.defaultPagination.size > limits.maxPageSize) {
+    throw new SimfinityError(`limits.defaultPagination.size (${limits.defaultPagination.size}) exceeds limits.maxPageSize (${limits.maxPageSize})`, 'MCP_INVALID_LIMITS', 500);
   }
 };
 
@@ -857,7 +1095,7 @@ const applySchemaPlugins = (schema, schemaPlugins) => {
  * Compose `toolMiddleware` functions (koa-style `(call, next)`) around the
  * terminal executor. Middleware may inspect/modify `call.args`, short-circuit
  * by returning a result without calling `next()`, or throw.
- * @param {Array<Function>|undefined} middlewares
+ * @param {Array<Function>|null} middlewares stack from {@link normalizeToolMiddleware}
  * @param {Function} terminal `(call) => Promise<CallToolResult>`
  * @returns {Function}
  */
@@ -904,21 +1142,17 @@ const limitErrorResult = (message, code) => ({
  * @param {'in-process'|'remote'} params.mode
  * @param {Object} params.execution
  * @param {Object|Function} params.context GraphQL context value or factory
- * @param {Object} [params.limits] result/pagination guardrails
- * @param {Array<Function>} [params.toolMiddleware]
+ * @param {Object} [params.limits] result/pagination guardrails, already
+ *   checked by {@link validateLimits}
+ * @param {Array<Function>|null} [params.toolMiddleware] stack from
+ *   {@link normalizeToolMiddleware}
+ * @param {Promise<void>|null} [params.ready] pending schemaPlugins
+ *   installation that every call awaits before running
  * @returns {Function} async `(name, args, extra) => CallToolResult`
  */
 const createCallTool = ({
-  schema, toolIndex, mode, execution, context, limits = {}, toolMiddleware,
+  schema, toolIndex, mode, execution, context, limits = {}, toolMiddleware, ready,
 }) => {
-  if (limits.defaultPagination && limits.maxPageSize
-      && typeof limits.defaultPagination.size === 'number'
-      && limits.defaultPagination.size > limits.maxPageSize) {
-    // Fail at setup: otherwise every unpaginated call would get an isError
-    // blaming the caller for a page size the server itself injected.
-    throw new SimfinityError(`limits.defaultPagination.size (${limits.defaultPagination.size}) exceeds limits.maxPageSize (${limits.maxPageSize})`, 'MCP_INVALID_LIMITS', 500);
-  }
-
   const terminal = async (call) => {
     const entry = toolIndex[call.name];
     if (!entry) {
@@ -1017,6 +1251,9 @@ const createCallTool = ({
     const entry = toolIndex[name];
     if (!entry) {
       throw new SimfinityError(`Unknown MCP tool: ${name}`, 'MCP_TOOL_NOT_FOUND', 404);
+    }
+    if (ready) {
+      await ready;
     }
     return run({
       name, args, extra, kind: entry.kind, operation: entry.operation,
@@ -1140,6 +1377,42 @@ const buildToolDefinitions = (schema, options = {}) => {
 };
 
 /**
+ * Validate the options, build the tool definitions and start the schemaPlugins
+ * installation shared by {@link generateMCPTools} and {@link createMCPServer}.
+ * Configuration is validated before any plugin hook runs.
+ * @param {import('graphql').GraphQLSchema} schema
+ * @param {Object} [options]
+ * @returns {{ generated: { tools: Array, callTool: Function, getOperation: Function },
+ *   ready: Promise<void>|null }} `ready` is pending while asynchronous
+ *   `onSchemaChange` hooks run, and null when none are pending
+ */
+const prepareMCPTools = (schema, options = {}) => {
+  const { mode, execution } = resolveExecution(options.execution);
+  const toolMiddleware = normalizeToolMiddleware(options.toolMiddleware);
+  validateLimits(options.limits);
+  const { tools, toolIndex } = buildToolDefinitions(schema, options);
+  const ready = mode === 'in-process' ? applySchemaPlugins(schema, options.schemaPlugins) : null;
+  const callTool = createCallTool({
+    schema,
+    toolIndex,
+    mode,
+    execution,
+    context: options.context ?? {},
+    limits: options.limits,
+    toolMiddleware,
+    ready,
+  });
+  const getOperation = (name) => {
+    const entry = toolIndex[name];
+    if (!entry) {
+      throw new SimfinityError(`Unknown MCP tool: ${name}`, 'MCP_TOOL_NOT_FOUND', 404);
+    }
+    return entry.operation;
+  };
+  return { generated: { tools, callTool, getOperation }, ready };
+};
+
+/**
  * Generate MCP tool definitions and an executor from a Simfinity-generated
  * GraphQLSchema. Every root Query and Mutation field becomes a tool whose name
  * matches the GraphQL field name (e.g. `addbook`, `books`, `process_order`),
@@ -1174,41 +1447,33 @@ const buildToolDefinitions = (schema, options = {}) => {
  *   field) name: `{ description, title, annotations, selectionDepth, includeId,
  *   selection }`. An explicit `selection` replaces the generated selection set
  *   (and omits the outputSchema, which could no longer be guaranteed accurate).
- * @param {Array<Function>} [options.toolMiddleware] koa-style
+ * @param {Function|Array<Function>} [options.toolMiddleware] koa-style
  *   `(call, next) => result` functions run around every tool execution;
- *   `call` is `{ name, args, extra, kind, operation }`.
+ *   `call` is `{ name, args, extra, kind, operation }`. A single function is a
+ *   one-element stack. The stack is validated (MCP_INVALID_MIDDLEWARE) and
+ *   copied at setup.
  * @param {{ maxPageSize?: number, defaultPagination?: Object,
  *   maxResultBytes?: number }} [options.limits] guardrails: reject oversized
  *   pages/logical result payloads (including errors), inject default pagination
  *   when the caller sends none. Limit diagnostics themselves are exempt.
- * @param {Array<Object>} [options.schemaPlugins] Envelop-style plugins (e.g.
- *   simfinity's createAuthPlugin) whose `onSchemaChange` hook is applied before
- *   serving, so resolver-wrapping plugins also apply to in-process execution.
+ * @param {Array<Object|false|null|undefined>} [options.schemaPlugins]
+ *   Envelop-style plugins (e.g. simfinity's createAuthPlugin) whose
+ *   `onSchemaChange` hook is applied before serving, so resolver-wrapping
+ *   plugins also apply to in-process execution. Entries are validated first
+ *   (MCP_INVALID_SCHEMA_PLUGIN); calls wait for asynchronous hooks and reject
+ *   when one fails.
  * @returns {{ tools: Array, callTool: Function, getOperation: Function }}
  */
 export const generateMCPTools = (schema, options = {}) => {
-  const { mode, execution } = resolveExecution(options.execution);
-  if (mode === 'in-process') {
-    applySchemaPlugins(schema, options.schemaPlugins);
+  const { generated, ready } = prepareMCPTools(schema, options);
+  if (ready) {
+    // Every call awaits `ready` and rejects with the installer's error; this
+    // handler only keeps an unused failed installation from crashing the process.
+    ready.catch((err) => {
+      console.warn('[simfinity-mcp] An asynchronous schemaPlugins installer failed; every tool call will reject:', err);
+    });
   }
-  const { tools, toolIndex } = buildToolDefinitions(schema, options);
-  const callTool = createCallTool({
-    schema,
-    toolIndex,
-    mode,
-    execution,
-    context: options.context ?? {},
-    limits: options.limits,
-    toolMiddleware: options.toolMiddleware,
-  });
-  const getOperation = (name) => {
-    const entry = toolIndex[name];
-    if (!entry) {
-      throw new SimfinityError(`Unknown MCP tool: ${name}`, 'MCP_TOOL_NOT_FOUND', 404);
-    }
-    return entry.operation;
-  };
-  return { tools, callTool, getOperation };
+  return generated;
 };
 
 const isModuleNotFound = (err) => !!err && (err.code === 'ERR_MODULE_NOT_FOUND' || err.code === 'MODULE_NOT_FOUND');
@@ -1289,11 +1554,15 @@ const newServerInstance = (sdk, tools, callTool, options) => {
  * @param {import('graphql').GraphQLSchema} schema
  * @param {Object} [options] same options as {@link generateMCPTools}, plus
  *   `serverName` and `serverVersion`.
- * @returns {Promise<Object>} an SDK Server instance (call `server.connect(transport)`)
+ * @returns {Promise<Object>} an SDK Server instance (call `server.connect(transport)`),
+ *   resolved once asynchronous schemaPlugins hooks finish (rejects if one fails)
  */
 export const createMCPServer = async (schema, options = {}) => {
   const sdk = await loadSdkCore();
-  const { tools, callTool } = generateMCPTools(schema, options);
+  const { generated: { tools, callTool }, ready } = prepareMCPTools(schema, options);
+  if (ready) {
+    await ready;
+  }
   return newServerInstance(sdk, tools, callTool, options);
 };
 
@@ -1333,6 +1602,8 @@ export const startStdioMCPServer = async (schema, options = {}) => {
  * request. When `options.context` is a function it is invoked as
  * `(req, extra) => context` for every call, where `req` is the Express request,
  * enabling per-request authentication (e.g. reading an Authorization header).
+ * `toolMiddleware`, `limits` and `schemaPlugins` are validated, and
+ * asynchronous schemaPlugins hooks awaited, before the handler is returned.
  *
  * @param {import('graphql').GraphQLSchema} schema
  * @param {Object} [options] same options as {@link createMCPServer}; in HTTP mode
@@ -1366,10 +1637,12 @@ export const createHTTPMCPHandler = async (schema, options = {}) => {
   }
 
   const { mode, execution } = resolveExecution(options.execution);
-  if (mode === 'in-process') {
-    applySchemaPlugins(schema, options.schemaPlugins);
-  }
+  const toolMiddleware = normalizeToolMiddleware(options.toolMiddleware);
+  validateLimits(options.limits);
   const { tools, toolIndex } = buildToolDefinitions(schema, options);
+  if (mode === 'in-process') {
+    await applySchemaPlugins(schema, options.schemaPlugins);
+  }
 
   return async (req, res) => {
     try {
@@ -1383,7 +1656,7 @@ export const createHTTPMCPHandler = async (schema, options = {}) => {
         execution,
         context,
         limits: options.limits,
-        toolMiddleware: options.toolMiddleware,
+        toolMiddleware,
       });
       const server = newServerInstance(sdk, tools, callTool, options);
       const transport = new StreamableHTTPServerTransport({
