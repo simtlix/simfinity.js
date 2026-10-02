@@ -73,6 +73,19 @@ const schema = new GraphQLSchema({
           throw new GraphQLError('Lookup failed for alice@example.com');
         },
       },
+      locatedCodeless: {
+        type: GraphQLString,
+        // graphql-js passes a thrown error that already has a path without wrapping it.
+        resolve: () => {
+          throw new GraphQLError('Database secret: token=private', { path: ['locatedCodeless'] });
+        },
+      },
+      locatedApplication: {
+        type: GraphQLString,
+        resolve: () => {
+          throw new GraphQLError('Shop is closed', { path: ['locatedApplication'], extensions: { code: 'SHOP_CLOSED' } });
+        },
+      },
       simfinityCause: {
         type: GraphQLString,
         resolve: () => {
@@ -294,6 +307,61 @@ describe('buildErrorFormatter', () => {
       expect(callback.mock.calls[0][0]).toBeInstanceOf(InternalServerError);
       expect(serialize(formatted)).toMatchObject({ message: 'Unexpected error', path: ['codeless'] });
       expect(JSON.stringify(formatted)).not.toContain('alice@example.com');
+    });
+
+    test('masks a code-less GraphQLError a resolver threw with its own path', async () => {
+      const callback = vi.fn();
+      const error = await firstError('{ locatedCodeless }');
+      expect(error.originalError).toBeUndefined();
+
+      const formatted = masking(callback)(error);
+
+      expect(callback.mock.calls[0][0]).toBeInstanceOf(InternalServerError);
+      expect(serialize(formatted)).toMatchObject({ message: 'Unexpected error', path: ['locatedCodeless'] });
+      expect(JSON.stringify(formatted)).not.toContain('token=private');
+    });
+
+    test('masks an execution error that a server reports without a path', () => {
+      // How Yoga's executor reports an error a subscription's source stream raised.
+      const sourceError = new Error('connect ECONNREFUSED 10.0.0.5:6379 password=redis-secret');
+      const callback = vi.fn();
+
+      const formatted = masking(callback)(new GraphQLError(sourceError.message, { originalError: sourceError }));
+
+      expect(callback.mock.calls[0][0]).toBeInstanceOf(InternalServerError);
+      expect(callback.mock.calls[0][0].getCause()).toBe(sourceError);
+      expect(serialize(formatted)).toMatchObject({ message: 'Unexpected error', extensions: { code: 'INTERNAL_SERVER_ERROR' } });
+      expect(JSON.stringify(formatted)).not.toContain('redis-secret');
+    });
+
+    test('keeps a coded GraphQLError with its own path and a cause with the same message', () => {
+      const cause = new Error('Could not create user');
+      const callback = vi.fn();
+      const error = new GraphQLError(cause.message, {
+        path: ['createUser'], originalError: cause, extensions: { code: 'CONFLICT' },
+      });
+
+      const formatted = masking(callback)(error);
+
+      expect(callback.mock.calls[0][0]).not.toBeInstanceOf(InternalServerError);
+      expect(serialize(formatted)).toMatchObject({
+        message: 'Could not create user',
+        path: ['createUser'],
+        extensions: { code: 'CONFLICT', status: 400 },
+      });
+    });
+
+    test('keeps a coded GraphQLError a resolver threw with its own path', async () => {
+      const callback = vi.fn();
+
+      const formatted = masking(callback)(await firstError('{ locatedApplication }'));
+
+      expect(callback.mock.calls[0][0]).not.toBeInstanceOf(InternalServerError);
+      expect(serialize(formatted)).toMatchObject({
+        message: 'Shop is closed',
+        path: ['locatedApplication'],
+        extensions: { code: 'SHOP_CLOSED', status: 400 },
+      });
     });
 
     test.each([

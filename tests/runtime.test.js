@@ -1141,12 +1141,15 @@ describe('runtime type ownership', () => {
     });
 
     test.each([
-      ['without a resolver', withoutResolver],
-      ['with an application resolver', (field) => ({ ...field, resolve: () => null })],
-    ])('accepts an interface field copied from a bound type %s', async (label, copyField) => {
-      const prefix = `OwnedInterfaceCopy${label.includes('application') ? 'App' : 'Bare'}`;
+      ['without a resolver', withoutResolver, 'Bare'],
+      ['with an application resolver', (field) => ({ ...field, resolve: () => null }), 'App'],
+      // graphql-js never runs an interface field's resolver, so the generated one is harmless there.
+      ['with the generated resolver', (field) => field, 'Generated'],
+    ])('accepts an interface field copied from a bound type %s', async (label, copyField, suffix) => {
+      const prefix = `OwnedInterfaceCopy${suffix}`;
       const types = createLibraryTypes(prefix);
-      const first = createRuntime(createStoreAdapter());
+      const firstAdapter = createStoreAdapter();
+      const first = createRuntime(firstAdapter);
       registerLibrary(first, types);
       first.createSchema();
       const BookLike = new GraphQLInterfaceType({
@@ -1172,6 +1175,8 @@ describe('runtime type ownership', () => {
       const result = await graphql({ schema, source: '{ papers { title author { name } } }', contextValue: {} });
       expect(result.errors).toBeUndefined();
       expect(result.data.papers).toEqual([{ title: 'paper', author: { name: 'paper author' } }]);
+      expect(firstAdapter.getById).not.toHaveBeenCalled();
+      expect(firstAdapter.find).not.toHaveBeenCalled();
     });
 
     test('accepts a copy made before another runtime generated the resolvers', async () => {

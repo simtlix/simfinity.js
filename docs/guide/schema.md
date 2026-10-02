@@ -81,7 +81,7 @@ Copies are checked too. After a runtime generates a relation field's resolver, a
 - A copied field without a resolver is accepted, as in 3.5.2: the second runtime generates its own resolver for it.
 - A copied field whose resolver the first runtime generated is rejected, also after `createAuthPlugin` wrapped that resolver, because the auth plugin's wrapper keeps its owner.
 - On an object type, a copied field whose resolver Simfinity neither generated nor wrapped, such as your own resolver, is rejected when it keeps the copied `extensions` object. Simfinity cannot tell such a resolver apart from a generated resolver that other code wrapped in place. Give the field its own `extensions` object, or define the field for each runtime.
-- Interface fields are checked only by their resolver, because graphql-js never runs an interface field's resolver.
+- Interface fields are not checked, because graphql-js never runs an interface field's resolver; the object types that implement the interface, and the types its fields reference, are checked.
 
 The check has one known gap: a generated resolver that a third-party tool wrapped in place, such as Envelop or OpenTelemetry-style instrumentation, copied together with a rebuilt `extensions` object, is not detected, and the copy reads through the first runtime. Creating the type objects for each runtime avoids it.
 

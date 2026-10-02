@@ -71,7 +71,7 @@ const formatError = buildErrorFormatter((error) => {
 });
 ```
 
-The returned function takes the error your GraphQL server reports and classifies it. GraphQL servers report an error raised while resolving a field as a field error: the `GraphQLError` that graphql-js creates around the raised value, with the field `path` and the same message. For a field error, the formatter classifies the value that was raised, such as the one a resolver threw. Any other input, including a request error from a syntax, validation or variable problem, is classified as it is:
+The returned function takes the error your GraphQL server reports and classifies it. GraphQL servers report an error raised while resolving a field as a field error, a `GraphQLError` with the field `path`. Usually it is the `GraphQLError` that graphql-js creates around the raised value, with the same message, and the formatter then classifies the value that was raised, such as the one a resolver threw. A raised `GraphQLError` that already has a `path` is reported as it is and classified as a field error too, unless it repeats the message of its `originalError` and has no code of its own, in which case it is treated like the graphql-js wrapper. Request errors from a syntax, validation or variable problem have no `path`. A `GraphQLError` without a `path` that repeats the message of a plain `Error` it wraps and has no code of its own, such as the error a subscription's source stream raised under Yoga, wraps a value raised during execution, and that value is classified. Any other input is classified as it is:
 
 | Classified value | Result |
 | --- | --- |
@@ -164,6 +164,6 @@ The outcomes above describe the errors graphql-js produces. Some servers change 
 | `INVALID_MIDDLEWARE` | Status 500. `use()` received a value that is not a function. |
 | `UNREGISTERED_RELATION_TARGET` | Status 500. `createSchema()` found a list relation, embedded object or embedded list whose type was not registered with `connect()` or `addNoEndpointType()`. |
 | `NOT_VALID_ID` | A state action targets a record that does not exist. |
-| `BAD_REQUEST` | A state action is not allowed from the record's current state. `buildErrorFormatter` also uses `BAD_REQUEST` (400) for GraphQL syntax, validation and variable errors, including input rejected by a scalar, and for any `GraphQLError` without its own code. |
+| `BAD_REQUEST` | A state action is not allowed from the record's current state. `buildErrorFormatter` also uses `BAD_REQUEST` (400) for GraphQL syntax, validation and variable errors, including input rejected by a scalar, and for a request `GraphQLError` without its own code. A `GraphQLError` raised while resolving a field without its own code or a `SimfinityError` cause is `INTERNAL_SERVER_ERROR`. |
 
 This table covers intentional core errors; GraphQL coercion and backend drivers can also produce their own errors. PostgreSQL constraint errors are normalized without leaking SQL or constraint details. MCP returns execution failures as tool results and throws some setup/dispatch errors; see [MCP error handling](/reference/mcp#results-and-errors).

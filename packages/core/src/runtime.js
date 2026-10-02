@@ -158,7 +158,10 @@ const GraphQLJSON = new GraphQLScalarType({
 // path and repeats the thrown error's message. A thrown non-Error becomes a NonErrorThrown whose
 // message prints the value.
 const isFieldErrorWrapper = (error) => Array.isArray(error.path) && error.originalError != null
-  && error.message === error.originalError.message;
+  && error.message === error.originalError.message
+  // locatedError adds no code of its own, so a thrown GraphQLError with its own code is not a wrapper.
+  && (error.originalError instanceof SimfinityError || typeof error.extensions?.code !== 'string'
+    || error.extensions === error.originalError.extensions);
 const thrownValueOf = (error) => (error.name === 'NonErrorThrown' && Object.hasOwn(error, 'thrownValue')
   ? error.thrownValue : error);
 
@@ -193,15 +196,27 @@ const classifyValue = (value) => {
     : new InternalServerError('Unexpected error value');
 };
 
-// GraphQL servers pass the GraphQLError that graphql-js created around the value a resolver threw;
-// that value is classified, without unwrapping a GraphQLError the resolver threw any further.
+// A GraphQLError without a path that repeats the message of the non-GraphQL Error it wraps, and has
+// no code of its own, also wraps a value raised during execution, such as the error a subscription's
+// source stream raised under Yoga. Request errors have no originalError or prefix its message.
+const wrapsExecutionValue = (error) => error.originalError instanceof Error
+  && !(error.originalError instanceof GraphQLError) && !(error.originalError instanceof SimfinityError)
+  && error.message === error.originalError.message && typeof error.extensions?.code !== 'string';
+
+// Errors raised while executing a field have a path; request errors (syntax, validation, variable
+// coercion) never do. GraphQL servers pass the GraphQLError that graphql-js created around the value
+// a resolver threw, and that value is classified, without unwrapping a GraphQLError the resolver
+// threw any further. A thrown GraphQLError that already has a path is passed as is.
 // graphql-js raises its own code-less GraphQLErrors there too when it cannot complete a value (scalar
 // or enum serialization, isTypeOf, abstract type resolution, a non-iterable list), and some print the
 // value. So a GraphQLError raised there is an application error only with its own code or a
 // SimfinityError cause; any other is unexpected.
 const classifyError = (error) => {
-  if (!(error instanceof GraphQLError) || !isFieldErrorWrapper(error)) return classifyValue(error);
-  const thrown = thrownValueOf(error.originalError);
+  if (!(error instanceof GraphQLError)) return classifyValue(error);
+  if (!Array.isArray(error.path)) {
+    return wrapsExecutionValue(error) ? classifyValue(thrownValueOf(error.originalError)) : classifyValue(error);
+  }
+  const thrown = isFieldErrorWrapper(error) ? thrownValueOf(error.originalError) : error;
   if (thrown instanceof GraphQLError && typeof thrown.extensions?.code !== 'string' && !simfinityCauseOf(thrown)) {
     return new InternalServerError(thrown.message, thrown);
   }
@@ -295,15 +310,16 @@ export const createRuntime = (adapter) => {
   const isForeign = (owner) => owner !== undefined && owner !== runtimeIdentity;
   // A field copied, with toConfig() or a field spread, from a type after another runtime generated
   // its relation resolver keeps that resolver or its extensions object. The extensions object counts
-  // only for an object field whose resolver is untagged, such as one other code wrapped in place. A
-  // field without a resolver gets this runtime's own, and graphql-js never runs interface field resolvers.
+  // only for a field whose resolver is untagged, such as one other code wrapped in place. A field
+  // without a resolver gets this runtime's own. graphql-js never runs interface field resolvers, so
+  // interface fields are not checked; the types they reference are.
   const assertFieldsNotBoundElsewhere = (gqltype) => {
-    const checkExtensions = !(gqltype instanceof GraphQLInterfaceType);
+    if (gqltype instanceof GraphQLInterfaceType) return;
     for (const [fieldName, field] of Object.entries(gqltype.getFields())) {
       if (!field.resolve) continue;
       const resolverOwner = relationFieldOwners.get(field.resolve);
       if (isForeign(resolverOwner)
-        || (checkExtensions && resolverOwner === undefined && isForeign(relationFieldOwners.get(field.extensions)))) {
+        || (resolverOwner === undefined && isForeign(relationFieldOwners.get(field.extensions)))) {
         throw new SimfinityError(
           `Field ${gqltype.name}.${fieldName} was copied from a relation field that another Simfinity runtime generated, `
             + 'with its resolver or its extensions; define the field for each runtime instead of copying it from a type '
