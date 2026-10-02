@@ -34,7 +34,9 @@ The email scalar checks format; it does not verify a mailbox. The URL scalar doe
 | `createBoundedFloatScalar(name, min, max)` | GraphQL float with inclusive numeric bounds. |
 | `createPatternStringScalar(name, pattern, message)` | String matching a `RegExp` or regex string. |
 
-Pass `undefined` for a bound you do not need. Reuse a single scalar instance for each GraphQL name instead of creating different instances with the same name. For regex validators, prefer patterns without stateful `g` or `y` flags.
+Pass `undefined` for a bound you do not need. Reuse a single scalar instance for each GraphQL name instead of creating different instances with the same name.
+
+`createPatternStringScalar` copies the pattern when the scalar is created and tests every value from its first character. A `g` flag has no effect between values, a `y` flag anchors each match at the start of the value, and later changes to your `RegExp` object, including its `lastIndex`, do not affect the scalar. The pattern must be a `RegExp` or a string; any other value throws `TypeError` when the scalar is created.
 
 ```javascript
 import { GraphQLObjectType, GraphQLID } from 'graphql';
@@ -79,10 +81,14 @@ const HTTPSURLScalar = createValidatedScalar(
 
 The resulting GraphQL name is `HTTPSURL_String`. The supplied base must be a `GraphQLScalarType`. The synchronous validation callback should throw on invalid input; returning `false` does not reject a value.
 
-The scalar exposes `baseScalarType`, which lets Simfinity map it to an appropriate backend storage type. PostgreSQL accepts custom scalars only when this chain resolves to a recognized native scalar. Validation also runs during output serialization, so invalid stored values can produce GraphQL response errors.
+The callback receives the base scalar's internal value. The base parses variables and inline literals first, so a DateTime base passes the parsed `Date`, and an ID base passes a string even for an integer variable. Base coercion errors, such as a number sent to a String-based scalar, are reported before the callback runs. Input that the base rejects by returning `undefined` is reported by GraphQL without calling the callback. On output, the callback receives the resolver's value before the base serializes it. In a chain of validated scalars, input runs the innermost callback first and output runs the outermost first. Keep callbacks pure and cheap: GraphQL can parse an inline literal more than once per request.
+
+The scalar exposes `baseScalarType`, which lets Simfinity map it to an appropriate backend storage type. PostgreSQL accepts custom scalars only when this chain resolves to a recognized native scalar. You can also set `baseScalarType` on your own custom scalar as a storage hint; it affects only backend and MCP type mapping, never which literals the scalar accepts. Validation also runs during output serialization, so invalid stored values can produce GraphQL response errors.
 
 ### Literal behavior
 
-The factory checks inline AST kinds before delegating to the base scalar. Float-based validated scalars require a float literal such as `4.0`; an integer literal such as `4` is rejected by this check. ID-based validated scalars require string literals. JSON variables go through `parseValue` instead of this literal check.
+The factory checks inline AST kinds against the root of the chain before delegating to the base scalar. It follows only scalars created by `createValidatedScalar`, so a scalar built on `PositiveIntScalar` accepts `4` just like one built on `GraphQLInt`. String- and ID-rooted validated scalars require string literals, Int-rooted ones integer literals, and Boolean-rooted ones boolean literals. Float-rooted ones accept float and integer literals, such as `4.0` and `4`, as `GraphQLFloat` does; the callback receives the same number either way. This keeps an integral default such as `defaultValue: 5`, which GraphQL prints as `5`, valid in MCP tools and introspection.
 
-The built-in scalar failures are ordinary `Error` instances. Their presentation depends on your GraphQL server's error handling; they do not automatically carry the `VALIDATION_ERROR` code produced by declarative field validators.
+Any other scalar is the root, even if you set a `baseScalarType` storage hint on it. For a custom root such as `DateTime`, the factory does not check the kind, and the root's own `parseLiteral` decides which literals are valid. JSON variables skip this literal check: the base's `parseValue` parses them, then the callback validates them.
+
+The built-in scalar failures are ordinary `Error` instances. Their presentation depends on your GraphQL server's error handling; they do not automatically carry the `VALIDATION_ERROR` code produced by declarative field validators. [`buildErrorFormatter`](./errors#builderrorformatter) reports them as `BAD_REQUEST` (400) with GraphQL's message, such as `Variable "$input" got invalid value "nope" at "input.email"; Expected type "Email_String". Invalid email format`.

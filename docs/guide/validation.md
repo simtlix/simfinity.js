@@ -60,6 +60,8 @@ const SerieType = new GraphQLObjectType({
 
 `arrayLength()`'s optional `itemValidator` is an array of validator objects with a `validate()` method. For `dateFormat()`, `YYYY-MM-DD` is the explicitly supported format check; it is not a general date-format parser.
 
+`pattern()` copies the regular expression when the helper is created and tests each value from its first character, so `g` and `y` flags keep no state between values, and later changes to your `RegExp` do not affect it. The pattern must be a `RegExp` or a string; other values throw `TypeError` when the helper is created. `url()` rejects invalid values without logging them.
+
 ## Combine helpers
 
 Merge the arrays for each operation. Spreading two helper objects would overwrite the first helper's arrays:

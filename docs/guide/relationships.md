@@ -226,7 +226,7 @@ mutation EditSeasons($serieId: ID!, $seasonId: ID!, $removedId: ID!) {
 }
 ```
 
-`added` creates records, `updated` changes records by ID, and `deleted` deletes child records. These changes share the parent mutation's transaction. Each child runs global middleware for the target type with the same request context and root argument shape: `save` and `update` receive `{ input }`; `delete` receives `{ id }`.
+`added` creates records, `updated` changes records by ID, and `deleted` deletes child records. These changes share the parent mutation's transaction. To cap the number of entries one mutation may carry across all nesting levels, set `configureMutationLimits({ maxNestedOperations })`; see [limit nested collection operations](./mutations#limit-nested-collection-operations). Each child runs global middleware for the target type with the same request context and root argument shape: `save` and `update` receive `{ input }`; `delete` receives `{ id }`.
 
 After middleware, updated and deleted children are read in the transaction and must already belong to the current parent. A missing child raises `NOT_VALID_ID` (404); a child owned by another parent raises `FORBIDDEN` (403). Nested updates do not reparent foreign children. The required parent link is retained after child pre-write hooks, including ordinary field assignments and `$set`/`$unset` updates. A rejection aborts all changes in the parent mutation.
 

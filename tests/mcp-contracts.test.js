@@ -21,6 +21,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   generateMCPTools, createMCPServer, createHTTPMCPHandler,
 } from '../packages/mongodb/src/mcp.js';
+import { createValidatedScalar, scalars } from '../packages/mongodb/src/index.js';
 
 // Resolve the SDK's AJV version without adding a dependency or loading the
 // different AJV version used by ESLint. Unlike the SDK defaults, enable schema
@@ -213,6 +214,53 @@ describe('MCP GraphQL input contracts', () => {
     const { tools } = generateMCPTools(schema);
     expect(() => new Ajv2020({ strict: false }).compile(tools[0].inputSchema)).not.toThrow();
     expect(() => new Ajv2020({ strict: false }).compile(tools[0].outputSchema)).not.toThrow();
+  });
+
+  it('publishes the root JSON type and own description of chained validated scalars', async () => {
+    const Corporate = createValidatedScalar('McpContractCorporate', 'Corporate email address', scalars.EmailScalar, (value) => {
+      if (!value.endsWith('@example.com')) {
+        throw new Error('Not a corporate address');
+      }
+    });
+    const Even = createValidatedScalar('McpContractEven', 'An even positive integer', scalars.PositiveIntScalar, (value) => {
+      if (value % 2 !== 0) {
+        throw new Error('Not even');
+      }
+    });
+    const schema = makeSchema({
+      echo: {
+        type: Corporate,
+        args: {
+          email: { type: new GraphQLNonNull(Corporate) },
+          count: { type: Even },
+          work: { type: Corporate, description: 'Work address' },
+          label: { type: GraphQLString },
+        },
+        resolve: (parent, args) => args.email,
+      },
+    });
+    const { tools, callTool } = generateMCPTools(schema);
+    const { properties } = tools[0].inputSchema;
+    expect(properties.email).toEqual({ type: 'string', description: 'Corporate email address' });
+    expect(properties.count).toEqual({ type: ['integer', 'null'], description: 'An even positive integer' });
+    expect(properties.work).toEqual({ type: ['string', 'null'], description: 'Work address' });
+    expect(properties.label).toEqual({ type: ['string', 'null'] });
+    expect(tools[0].outputSchema.properties.echo).toEqual({ type: ['string', 'null'], description: 'Corporate email address' });
+
+    const validate = new AjvJsonSchemaValidator().getValidator(tools[0].inputSchema);
+    expect(validate({ email: 'a@example.com', count: 4 }).valid).toBe(true);
+    expect(validate({ email: 'a@example.com', count: '4' }).valid).toBe(false);
+    expect((await callTool('echo', { email: 'a@example.com' })).structuredContent).toEqual({ echo: 'a@example.com' });
+  });
+
+  it('stops at a cyclic baseScalarType chain', () => {
+    const first = new GraphQLScalarType({ name: 'McpContractCycleA', serialize: (value) => value });
+    const second = new GraphQLScalarType({ name: 'McpContractCycleB', serialize: (value) => value });
+    first.baseScalarType = second;
+    second.baseScalarType = first;
+    const schema = makeSchema({ echo: { type: GraphQLString, args: { value: { type: first } } } });
+    const { tools } = generateMCPTools(schema);
+    expect(tools[0].inputSchema.properties.value).toEqual({});
   });
 
   it('uses a valid selection fallback when an id field returns an object at depth zero', async () => {
@@ -414,5 +462,61 @@ describe('MCP stateless HTTP configuration', () => {
     const schema = makeSchema({ echo: { type: GraphQLString } });
     await expect(createHTTPMCPHandler(schema, { transportOptions: { [key]: () => 'session' } }))
       .rejects.toMatchObject({ extensions: { code: 'MCP_INVALID_TRANSPORT_OPTIONS' } });
+  });
+
+  it.each([
+    ['toolMiddleware', { toolMiddleware: [null] }, 'MCP_INVALID_MIDDLEWARE'],
+    ['sparse toolMiddleware', { toolMiddleware: new Array(1) }, 'MCP_INVALID_MIDDLEWARE'],
+    ['limits', { limits: { maxPageSize: 10, defaultPagination: { page: 1, size: 50 } } }, 'MCP_INVALID_LIMITS'],
+    ['schemaPlugins', { schemaPlugins: [{}] }, 'MCP_INVALID_SCHEMA_PLUGIN'],
+    ['misspelled schemaPlugins hook', { schemaPlugins: [{ onSchemaChanged() {} }] }, 'MCP_INVALID_SCHEMA_PLUGIN'],
+  ])('rejects invalid %s when creating the handler', async (label, options, code) => {
+    const schema = makeSchema({ echo: { type: GraphQLString } });
+    await expect(createHTTPMCPHandler(schema, options)).rejects.toMatchObject({ extensions: { code } });
+  });
+
+  it('awaits an asynchronous onSchemaChange and surfaces its failure at setup', async () => {
+    const schema = makeSchema({ echo: { type: GraphQLString } });
+    let installed = false;
+    await createHTTPMCPHandler(schema, {
+      schemaPlugins: [{
+        async onSchemaChange() {
+          await new Promise((resolve) => { setTimeout(resolve, 10); });
+          installed = true;
+        },
+      }],
+    });
+    expect(installed).toBe(true);
+
+    await expect(createHTTPMCPHandler(schema, {
+      schemaPlugins: [{
+        async onSchemaChange() {
+          throw new Error('install failed');
+        },
+      }],
+    })).rejects.toThrow('install failed');
+  });
+
+  it('resolves createMCPServer only after an asynchronous onSchemaChange finishes', async () => {
+    const schema = makeSchema({ echo: { type: GraphQLString } });
+    let installed = false;
+    const server = await createMCPServer(schema, {
+      schemaPlugins: [{
+        async onSchemaChange() {
+          await new Promise((resolve) => { setTimeout(resolve, 10); });
+          installed = true;
+        },
+      }],
+    });
+    resources.push(() => server.close());
+    expect(installed).toBe(true);
+
+    await expect(createMCPServer(schema, {
+      schemaPlugins: [{
+        async onSchemaChange() {
+          throw new Error('install failed');
+        },
+      }],
+    })).rejects.toThrow('install failed');
   });
 });

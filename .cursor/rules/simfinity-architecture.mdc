@@ -76,7 +76,9 @@ simfinity.createSchema()
 |------|---------------|
 | `packages/mongodb/src/index.js` | MongoDB facade and legacy helper exports |
 | `packages/core/src/runtime.js` | Shared registration, input/schema generation, lifecycle, middleware, scopes and resolvers |
+| `packages/core/src/relation-owners.js` | Internal `relationFieldOwners` `WeakMap` shared by `runtime.js` and the auth plugin; not exported |
 | `packages/core/src/query-plan.js` | Driver-free typed query paths and predicate/sort/aggregation plans |
+| `packages/core/src/query-limits.js`, `packages/core/src/mutation-limits.js` | Process-wide `configureQueryLimits` (page sizes) and `configureMutationLimits` (`maxNestedOperations`) settings |
 | `packages/mongodb/src/mongo/` | Mongoose models, pipelines, transactions and record adapter |
 | `packages/sql/src/` | Driver-free relational planner, record store, model/session orchestration and plugin contract |
 | `packages/postgres/src/` | PostgreSQL plugin/facade, codecs, record/query compiler and physical schema lifecycle |
@@ -84,8 +86,10 @@ simfinity.createSchema()
 | `packages/core/src/auth/rules.js` | Shared rule helpers: `requireAuth`, `requireRole`, `composeRules`, `isOwner`, `allow`, `deny` |
 | `packages/core/src/auth/expressions.js` | Shared policy expression DSL evaluator |
 | `packages/core/src/auth/errors.js` | `UnauthenticatedError`, `ForbiddenError` (extend the shared `SimfinityError`) |
+| `packages/core/src/auth/thenable.js` | Internal `isThenable`/`discardThenable`; not exported |
 | `packages/core/src/validators.js` | Shared declarative field validators: `stringLength`, `pattern`, `email`, `numberRange`, etc. |
 | `packages/core/src/scalars.js` | Shared pre-built scalars (`EmailScalar`, `URLScalar`) and scalar factories |
+| `packages/core/src/scalars/factory.js`, `packages/core/src/scalars/pattern.js` | `createValidatedScalar`; internal RegExp copy/reset helper shared by `validators.pattern` and `createPatternStringScalar` (not a published subpath) |
 | `packages/core/src/plugins.js` | Shared plugin exports: `createAuthPlugin`, `apolloCountPlugin`, `envelopCountPlugin` |
 | `packages/mcp/src/index.js` | Optional MCP generation and transports; `packages/mongodb/src/mcp.js` remains the Mongo facade shim. Uses optional `@modelcontextprotocol/sdk` |
 | `packages/core/src/const/` | Shared filter operators, values and sort input types; MongoDB retains compatibility shims |
@@ -100,6 +104,8 @@ simfinity.createSchema()
 - Check cancellation again after awaiting an in-process context factory, before calling GraphQL. Do not promise to undo database work already started.
 - Remote attempt timeouts include reading the body. Queries alone may retry transport failures; client cancellation rejects during fetch or body reading. Validate the remote GraphQL envelope before creating a tool result.
 - `createHTTPMCPHandler` always creates a fresh stateless server/transport per request. Reject session generators, session callbacks and event stores at setup; applications needing sessions manage a transport with `createMCPServer`.
+- `prepareMCPTools()` and `createHTTPMCPHandler` validate execution, `toolMiddleware` (`normalizeToolMiddleware`: a single function is a one-element stack, copied at setup; an index loop rejects non-functions and sparse-array holes with `MCP_INVALID_MIDDLEWARE`), `limits` (`validateLimits`, `MCP_INVALID_LIMITS`) and tool definitions before `applySchemaPlugins()`. That validates every entry (`normalizeSchemaPlugins`, `MCP_INVALID_SCHEMA_PLUGIN`) before any hook runs, inspecting own and inherited property descriptors (`pluginDescriptors`) so no getter other than `onSchemaChange` runs (`then` is checked through its descriptor; a `then` method or getter is rejected as a promise), rejects a misspelling of `onSchemaChange` only on entries without a function `onSchemaChange` (`isMisspelledSchemaHook`: a method or getter key that starts with `onschema` ignoring case or is within two optimal-string-alignment edits of `onschemachange`), warns once per plugin object about ignored hooks, rejects a different schema in `replaceSchema` (`MCP_UNSUPPORTED_SCHEMA_REPLACEMENT`) and returns a promise for asynchronous hooks: the server and HTTP factories await it, and `generateMCPTools` calls wait for it.
+- `scalarToJSONSchema` follows the whole `baseScalarType` chain (cycle-safe) for the JSON type and publishes a custom scalar's own description.
 
 ## Instance State (inside `createRuntime` in `packages/core/src/runtime.js`)
 
@@ -108,9 +114,18 @@ simfinity.createSchema()
 - `typesDictForUpdate` -- parallel registry with update-specific input types
 - `waitingInputType` -- deferred input types awaiting dependency resolution (circular refs)
 - `registeredMutations` -- custom mutations registered via `registerMutation()`
-- `middlewares` -- array of middleware functions registered on this runtime via `use()`
+- `middlewares` -- array of middleware functions registered on this runtime via `use()`; `use()` rejects non-functions with `INVALID_MIDDLEWARE`
+- `runtimeIdentity` -- private object identifying this runtime in `runtimeBoundTypes`
 
-These registries are per runtime. The introspection extension and `configureQueryLimits()` setting in `packages/core/src/query-limits.js` are shared at module scope; do not describe them as instance-isolated.
+These registries are per runtime. Module-scope state shared by every runtime:
+
+- the introspection extension;
+- `maxPageSize` in `packages/core/src/query-limits.js` (`configureQueryLimits()`);
+- `maxNestedOperations` in `packages/core/src/mutation-limits.js` (`configureMutationLimits()`), null (unlimited) by default;
+- `runtimeBoundTypes` in `runtime.js`, a `WeakMap` from each GraphQL object type to the identity of the runtime that generated its relation resolvers (bound) or whose schema reached it with an unresolved non-embedded relation field (reserved, such as an unregistered custom mutation result). `connect()`, `addNoEndpointType()` and `createSchema()` throw `TYPE_BOUND_TO_OTHER_RUNTIME` (409) for a type bound or reserved elsewhere;
+- `relationFieldOwners` in `packages/core/src/relation-owners.js` (internal, imported by `runtime.js` and `auth/index.js`), a `WeakMap` from each generated relation resolver, the fresh extensions object of its field, and the auth plugin's wrapper of such a resolver (which inherits the owner) to the runtime that generated it. `toConfig()` copies and field spreads keep the resolver and the extensions object, so `createSchema()` and `autoGenerateResolvers()` reject a copied field from another runtime (`assertFieldsNotBoundElsewhere`): fields without a resolver are skipped and get this runtime's own; a foreign resolver tag is rejected; the extensions tag counts only on fields whose resolver is untagged; interface fields are not checked, because graphql-js never runs their resolvers (the types they reference still are). A third-party in-place wrapper copied with a rebuilt extensions object is not detected. Type objects are not shared between runtimes that generate or reserve their relation resolvers; types without unresolved non-embedded relation fields may be, and a `toConfig()` copy made before the first schema may be used by another runtime.
+
+Do not describe module-scope state as instance-isolated.
 
 ## Introspection Extension (Critical)
 

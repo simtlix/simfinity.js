@@ -36,7 +36,7 @@ throw new SimfinityError('Resource not found', 'NOT_FOUND', 404);
 - Always use `extensions.relation` on fields referencing other `GraphQLObjectType`s. Omitting it causes warnings and broken input types.
 - Use `GraphQLNonNull` wrapper for required fields.
 - Use `extensions.readOnly` for computed/system fields that should not appear in input types.
-- Validated scalars: use `createValidatedScalar(name, description, baseScalarType, validate)` -- the resulting scalar name is `{name}_{baseScalarType.name}`.
+- Validated scalars: use `createValidatedScalar(name, description, baseScalarType, validate)` -- the resulting scalar name is `{name}_{baseScalarType.name}`. Variables and literals are parsed by the base before `validate` runs; inline literal kinds follow the root of the chain of factory-made scalars (a module `WeakMap` in `scalars/factory.js`, not the public `baseScalarType` property), Float roots accept INT and FLOAT literals, and any other root scalar, even one with a hand-set `baseScalarType` storage hint, decides its own literals. Pattern helpers copy their RegExp and reset `lastIndex` per value through the internal `packages/core/src/scalars/pattern.js`.
 
 ## Schema Transformations
 

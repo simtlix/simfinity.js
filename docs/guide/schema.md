@@ -64,8 +64,56 @@ const schema = simfinity.createSchema();
 Here `SeasonType` is another `GraphQLObjectType`, such as the one in the [relationships guide](./relationships). With the MongoDB facade, the first argument can be an existing Mongoose model or `null` to generate one. PostgreSQL registrations pass `null`. The optional arguments attach a controller, a model callback, and a state machine; see the [core API reference](../reference/api).
 
 ::: info Registration belongs to a runtime
-Type registrations and middleware belong to the selected runtime instance. The default MongoDB and PostgreSQL module facades each expose one instance; `createPostgres()` creates an isolated PostgreSQL runtime. Register the application's types during startup and reuse the built schema. Do not register types or create a new schema for each request.
+Type registrations and middleware belong to the selected runtime instance. The default MongoDB and PostgreSQL module facades each expose one instance; `createPostgres()` creates a separate PostgreSQL runtime with its own registrations. Register the application's types during startup and reuse the built schema. Do not register types or create a new schema for each request.
 :::
+
+### Types belong to one runtime
+
+`createSchema()` adds generated resolvers and filter arguments to the relation fields of your type objects. Those resolvers read through the runtime that created them: its adapter, registrations, middleware and scopes. When a runtime first creates a schema, it therefore claims two kinds of object types:
+
+- **Bound types**: each type whose non-embedded relation fields receive this runtime's generated resolvers. These are usually the registered types that have relations.
+- **Reserved types**: each object type the schema reaches that still has a non-embedded relation field without a resolver, such as an unregistered custom mutation result with a relation field. Reserving it stops another runtime from later generating resolvers that this schema would execute.
+
+A schema reaches a type through registered types, fields, interfaces, union members and custom mutation results, as GraphQL itself does. Another runtime cannot use a claimed type: registering it with `connect()` or `addNoEndpointType()`, or building a schema that reaches it, throws `TYPE_BOUND_TO_OTHER_RUNTIME` (409).
+
+Copies are checked too. After a runtime generates a relation field's resolver, a copy of that field keeps the generated resolver, or the field's `extensions` object, or both. `createSchema()` rejects a reachable type with such a copy, with the message `Field Type.field was copied from a relation field that another Simfinity runtime generated, with its resolver or its extensions; …`. This covers `new GraphQLObjectType(BookType.toConfig())` and `fields: () => ({ ...BookType.toConfig().fields })`, including a `fields` thunk that is defined at startup but runs only when the second runtime builds its schema. `connect()` accepts such a copy; `createSchema()` rejects it before building anything. In detail:
+
+- A copied field without a resolver is accepted, as in 3.5.2: the second runtime generates its own resolver for it.
+- A copied field whose resolver the first runtime generated is rejected, also after `createAuthPlugin` wrapped that resolver, because the auth plugin's wrapper keeps its owner.
+- On an object type, a copied field whose resolver Simfinity neither generated nor wrapped, such as your own resolver, is rejected when it keeps the copied `extensions` object. Simfinity cannot tell such a resolver apart from a generated resolver that other code wrapped in place. Give the field its own `extensions` object, or define the field for each runtime.
+- Interface fields are not checked, because graphql-js never runs an interface field's resolver; the object types that implement the interface, and the types its fields reference, are checked.
+
+The check has one known gap: a generated resolver that a third-party tool wrapped in place, such as Envelop or OpenTelemetry-style instrumentation, copied together with a rebuilt `extensions` object, is not detected, and the copy reads through the first runtime. Creating the type objects for each runtime avoids it.
+
+To serve the same model from two runtimes, create the type objects once per runtime, for example with a factory function:
+
+```javascript
+const createTypes = () => {
+  const SeasonType = new GraphQLObjectType({ name: 'Season', fields: () => ({ /* ... */ }) });
+  const SerieType = new GraphQLObjectType({ name: 'Serie', fields: () => ({ /* ... */ }) });
+  return { SerieType, SeasonType };
+};
+
+// first and second are two runtimes, such as two createPostgres() instances.
+const catalog = createTypes();
+first.connect(null, catalog.SerieType, 'serie', 'series');
+first.connect(null, catalog.SeasonType, 'season', 'seasons');
+
+const archive = createTypes();
+second.connect(null, archive.SerieType, 'serie', 'series');
+second.connect(null, archive.SeasonType, 'season', 'seasons');
+```
+
+These object types can be shared between runtimes:
+
+- types without non-embedded relation fields, such as scalar-only types and types whose relation fields are all embedded;
+- types whose non-embedded relation fields all have your own resolvers.
+
+Another runtime can also use a copy made with `toConfig()` before the first runtime built its schema, because the copy's fields do not yet hold generated resolvers. The copy then belongs to that other runtime. A factory function is safer: a copy made too late fails at startup.
+
+A custom mutation result type that is not registered and has a non-embedded relation field without a resolver cannot be shared. If two runtimes pass the same `CheckoutResult` type object, with an `order` relation, to `registerMutation()`, the first schema reserves it and the second runtime's `createSchema()` throws `TYPE_BOUND_TO_OTHER_RUNTIME`. That error message mentions generated relation resolvers even though none were generated. Create the result type for each runtime, or give its relation field your own resolver.
+
+A runtime can rebuild its own schema from the types it claimed.
 
 ## What gets generated
 

@@ -56,15 +56,29 @@ Check that:
 
 See [relationships](../guide/relationships) for embedded, reference, and collection examples.
 
+## Startup fails with a configuration error
+
+These errors are thrown while you register types or build the schema:
+
+- `TYPE_BOUND_TO_OTHER_RUNTIME`: another runtime already claimed the type object, because it generated the type's relation resolvers or its schema reached the type with a relation field that has no resolver, such as a shared custom mutation result. A message starting `Field Type.field was copied from a relation field` means the field was copied with `toConfig()`, or spread from `Type.toConfig().fields`, after the other runtime generated its resolver, and the copy kept that resolver or the field's `extensions` object. Create the type objects once per runtime, for example with a factory function. See [types belong to one runtime](../guide/schema#types-belong-to-one-runtime).
+- `INVALID_SCOPE`: `extensions.scope` must be a plain object whose keys are `find`, `get_by_id` or `aggregate` functions. Check for misspelled keys such as `getById`, and omit a key, or the whole property, instead of setting it to `undefined`. See the [scope contract](../guide/query-scope#callback-contract).
+- `INVALID_MIDDLEWARE`: `use()` received a value that is not a function, often `null` from `enabled && middleware`. Register the middleware conditionally instead.
+- `UNREGISTERED_RELATION_TARGET`: the field named in the message, as `Type.field`, is a list relation or embedded field whose type was never registered. Register that type with `connect()` or `addNoEndpointType()` before `createSchema()`.
+- `INVALID_MUTATION_LIMITS`: `configureMutationLimits()` needs a plain object whose only option is `maxNestedOperations`, set to `null` or a non-negative safe integer. Check for misspellings such as `maxNestedOperation`.
+
 ## Authorization or scope is not applied
 
 Creating permission metadata alone does not install an authorization plugin. Add `auth.createAuthPlugin()` to your Yoga/Envelop configuration and supply the request's authenticated user in the GraphQL context.
 
 Generated query permissions target `RootQueryType`, not `Query`. Query scopes apply to generated root reads; they do not automatically protect every nested relationship or write. See [authorization](../guide/authorization) and [query scope](../guide/query-scope) for their separate responsibilities.
 
+`Cannot authorize type X: it was created by a different copy of the graphql module` means the schema mixes types from two graphql installations, or from its ESM and CommonJS builds. Run `npm ls graphql`, deduplicate it with your package manager's overrides or resolutions, and make your bundler resolve one entry point.
+
+`Authorization paths must return values synchronously` means a rule helper read a promise, for example an un-awaited `ctx.user`. Await the user and claims in your context factory, or write an async rule. See [rule helpers](../guide/authorization#rule-helpers).
+
 ## A hook or middleware does not behave as expected
 
-Global middleware runs before the operation. Throw to reject an operation; omitting `next()` only stops the middleware chain. Code after `await next()` still runs before the resolver. See [middleware](../guide/middleware).
+Global middleware runs before the operation. Throw to reject an operation; omitting `next()` only stops the middleware chain. Code after `await next()` still runs before the resolver. An error from a later middleware cancels the operation even if you catch it around `next()`. If later middleware never runs, check that `next()` is called before the middleware returns: a `next()` called from `setTimeout` or another callback after the middleware finished does nothing. See [middleware](../guide/middleware#execution-order).
 
 Lifecycle hooks run inside the generated operation's transaction flow, before commit. Retried transactions can repeat hook execution. See [controllers and hooks](../guide/controllers) before performing external side effects there.
 

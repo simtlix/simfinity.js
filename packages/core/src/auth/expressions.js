@@ -5,6 +5,7 @@
  */
 
 import { normalizeObjectId } from './object-id.js';
+import { isThenable, discardThenable } from './thenable.js';
 
 const invalidResult = Symbol('invalid policy result');
 
@@ -21,7 +22,8 @@ const isValidValue = (value) => {
   if (isReference(value)) {
     return Object.keys(value).length === 1 && Object.hasOwn(value, 'ref') && isValidRef(value.ref);
   }
-  return value !== undefined && typeof value !== 'function' && typeof value !== 'symbol';
+  // NaN equals nothing, so a literal NaN is rejected, as in literal `in` lists.
+  return value !== undefined && typeof value !== 'function' && typeof value !== 'symbol' && !Number.isNaN(value);
 };
 
 const isDenseArray = value => Array.isArray(value)
@@ -105,38 +107,93 @@ const resolveValue = (value, context) => {
   return isReference(value) ? resolveRef(value.ref, context) : value;
 };
 
-// Registered ObjectIds compare by hexadecimal value; every other value compares strictly.
+/**
+ * The time value of a genuine Date from any realm (NaN when invalid), or undefined for other values.
+ * The tag skips other objects cheaply; getTime then rejects objects that only spoof the tag.
+ */
+const dateTime = (value) => {
+  if (value === null || typeof value !== 'object') return undefined;
+  try {
+    return Object.prototype.toString.call(value) === '[object Date]' ? Date.prototype.getTime.call(value) : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+// Registered ObjectIds compare by hexadecimal value; other values except Dates compare strictly.
 const comparable = value => normalizeObjectId(value) ?? value;
 
-// Strict equality never matches values of different types, such as a string and a number or a
-// primitive and a list. Such a comparison is invalid, so `not` cannot turn it into a grant.
-// null stays comparable with anything, as an explicit check for a missing value.
-const isMismatch = (left, right) => left !== null && right !== null && typeof left !== typeof right;
+/**
+ * Classify the left value of a comparison once: a promise, null, NaN, a Date by its time, or another
+ * value in its comparable form. A membership list then repeats only the checks on its items.
+ */
+const classifyOperand = (value) => {
+  if (isThenable(value)) return { kind: 'promise', value: undefined };
+  if (value === null) return { kind: 'null', value };
+  if (Number.isNaN(value)) return { kind: 'nan', value };
+  const time = dateTime(value);
+  if (time !== undefined) return { kind: 'date', value: time };
+  return { kind: 'value', value: comparable(value) };
+};
+
+/**
+ * Compare a classified value with a resolved value: true, false, or invalidResult when they cannot
+ * be compared reliably. A promise is not its eventual value, so it is never compared; a rejected
+ * native one is handled, so it cannot crash the process. null stays comparable with anything else,
+ * as an explicit check for a missing value. NaN equals nothing, and Dates compare by time, only with
+ * valid Dates. Otherwise strict equality never matches values of different types, such as a string
+ * and a number. Such comparisons are invalid, so `not` cannot turn them into a grant.
+ */
+const compareOperand = (left, right) => {
+  if (isThenable(right)) {
+    discardThenable(right);
+    return invalidResult;
+  }
+  if (left.kind === 'promise') return invalidResult;
+  if (left.kind === 'null' || right === null) return left.kind === 'null' && right === null;
+  if (left.kind === 'nan' || Number.isNaN(right)) return invalidResult;
+  const rightTime = dateTime(right);
+  if (left.kind === 'date' || rightTime !== undefined) {
+    if (left.kind !== 'date' || rightTime === undefined || Number.isNaN(left.value) || Number.isNaN(rightTime)) {
+      return invalidResult;
+    }
+    return left.value === rightTime;
+  }
+  const other = comparable(right);
+  return typeof left.value !== typeof other ? invalidResult : left.value === other;
+};
 
 const evaluateMembership = (target, list) => {
   // A list or plain object is not a member value.
   if (!Array.isArray(list) || isPlainValue(target)) return invalidResult;
+  const operand = classifyOperand(target);
   // Never call the list's own includes: Mongoose arrays cast and compare loosely.
   let mismatched = false;
   for (let index = 0; index < list.length; index++) {
-    const item = comparable(list[index]);
-    if (item === target) return true;
-    if (isMismatch(target, item)) mismatched = true;
+    const result = compareOperand(operand, list[index]);
+    if (result === true) return true;
+    if (result === invalidResult) mismatched = true;
   }
-  // Without a match, an item of another type means the list could not be checked reliably.
+  // Without a match, an item that could not be compared means the list was not checked reliably.
   return mismatched ? invalidResult : false;
 };
 
 const evaluateComparison = (operator, operands, context) => {
   const left = resolveValue(operands[0], context);
   const right = resolveValue(operands[1], context);
-  if (left === undefined || right === undefined || typeof left === 'function' || typeof right === 'function') {
+  // A promise is not its eventual value, so it cannot be compared, even with an empty list. A rejected
+  // native promise a ref yields, such as a lazy relation that failed to load, is handled so it cannot
+  // crash the process.
+  const leftThenable = isThenable(left);
+  const rightThenable = isThenable(right);
+  if (leftThenable) discardThenable(left);
+  if (rightThenable) discardThenable(right);
+  if (left === undefined || right === undefined || typeof left === 'function' || typeof right === 'function'
+    || leftThenable || rightThenable) {
     return invalidResult;
   }
-  const target = comparable(left);
-  if (operator === 'in') return evaluateMembership(target, right);
-  const other = comparable(right);
-  return isMismatch(target, other) ? invalidResult : target === other;
+  if (operator === 'in') return evaluateMembership(left, right);
+  return compareOperand(classifyOperand(left), right);
 };
 
 const evaluateAllOf = (expressions, context) => {
@@ -209,6 +266,9 @@ const compileOperand = (operator, value, index) => {
   if (isReference(value)) return new CompiledOperand(true, value.ref);
   // A literal membership list is copied, so only its validated items are compared.
   if (operator === 'in' && index === 1) return new CompiledOperand(false, Object.freeze(copyArray(value)));
+  // A literal Date compares by time, so a private copy keeps setTime on the configured one out.
+  const time = dateTime(value);
+  if (time !== undefined) return new CompiledOperand(false, new Date(time));
   // Other literals keep their identity, which equality compares.
   return new CompiledOperand(false, value);
 };
@@ -219,7 +279,8 @@ const snapshotOperands = (operator, operand) => Object.freeze(
 
 /**
  * Copy the validated structure, so evaluation needs no revalidation and later changes to the
- * configured object cannot make it malformed. Other literal operands keep their identity.
+ * configured object cannot make it malformed. Date literals are copied; other literal operands keep
+ * their identity.
  */
 const snapshotExpression = (expression) => {
   if (typeof expression === 'boolean') return expression;

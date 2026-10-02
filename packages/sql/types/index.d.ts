@@ -21,10 +21,15 @@ export type {
   FieldValidations,
   FieldValidator,
   MiddlewareContext,
+  MutationLimitsOptions,
   PermissionSchema,
   PolicyExpression,
+  ScopeFunction,
+  ScopeOperation,
+  ScopeParams,
   StateMachine,
   TypePermissions,
+  TypeScopes,
 } from '@simtlix/simfinity-core';
 
 export type SQLCapability = 'transactions' | 'foreignKeys' | 'deferredForeignKeys' | 'embeddedValues' | 'ownedRecords' | 'scalarLists' | 'uniqueValues' | 'nullableUnique';

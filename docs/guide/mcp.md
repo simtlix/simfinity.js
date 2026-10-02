@@ -16,7 +16,7 @@ The MongoDB facade retains MCP compatibility exports. For either database, the d
 The following examples import `@simtlix/simfinity-mcp`, which works with either adapter. In either application, install it from npm:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.2
+npm install @simtlix/simfinity-mcp@3.5.3
 ```
 
 Keep it at the same version as your other Simfinity packages. The archived MongoDB starter already includes its matching version for compatibility. The published MongoDB 3.0.1 release instead exports these functions from `@simtlix/simfinity-js`.
@@ -134,7 +134,7 @@ The context reaches generated resolvers and [root query scopes](/guide/query-sco
 
 For standalone in-process MCP, pass the plugin through `schemaPlugins`, as shown above. Creating a plugin object alone does not install it. If Yoga has already applied the same plugin to the same schema object, MCP executes those wrapped resolvers as well.
 
-`schemaPlugins` invokes schema hooks only. It does not run every Envelop request hook. In remote mode, the remote GraphQL server enforces authorization using the credentials supplied in `execution.headers`.
+`schemaPlugins` invokes schema hooks only. It does not run every Envelop request hook; a plugin with request hooks gets a one-time console warning naming them. Each entry must be a plugin object, so pass `createAuthPlugin(permissions)`, not the factory; invalid entries, including a misspelled hook such as `onSchemaChanged` on a plugin without `onSchemaChange`, throw `MCP_INVALID_SCHEMA_PLUGIN` before any hook runs, and `false`, `null` and `undefined` entries are skipped. An asynchronous `onSchemaChange` is awaited before the server or HTTP handler is ready, and `generateMCPTools` calls wait for it. A schema containing types from another copy of the graphql module makes the auth plugin throw `TypeError` at this point. In remote mode, the remote GraphQL server enforces authorization using the credentials supplied in `execution.headers`.
 
 If a call is cancelled while its context factory is pending, GraphQL execution does not start. Cancellation cannot undo database work already started. Remote timeouts cover both the request and response-body reading; only queries may retry, and client cancellation rejects without retrying.
 

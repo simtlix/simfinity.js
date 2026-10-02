@@ -1,8 +1,10 @@
 import { UnauthenticatedError, ForbiddenError } from './errors.js';
 import { normalizeObjectId } from './object-id.js';
+import { isThenable, discardThenable } from './thenable.js';
 
 /**
  * Resolves a value from an object using a dotted path string or function.
+ * A function's result is returned as is, including a promise; the built-in rules deny such results.
  * @param {Object} obj - The object to resolve from
  * @param {string|Function} pathOrFn - Dotted path (e.g., 'user.profile.id') or function to extract value
  * @returns {*} The resolved value or undefined if not found
@@ -44,6 +46,30 @@ const ruleFromCheck = (check) => {
 
 const unauthenticated = () => new UnauthenticatedError('You must be logged in to access this resource');
 
+// Built-in checks are synchronous, so they cannot wait for a path that yields a promise or another
+// thenable. Such a value is never truthy evidence of a user or claim: it denies with this error.
+const pendingValue = () => new TypeError(
+  'Authorization paths must return values synchronously; resolve asynchronous data in the GraphQL context or use an async rule',
+);
+const pending = Symbol('pending authorization value');
+
+const isAsyncFunction = value => ['[object AsyncFunction]', '[object AsyncGeneratorFunction]']
+  .includes(Object.prototype.toString.call(value));
+
+const validatePath = (name, pathOrFn) => {
+  if (isAsyncFunction(pathOrFn)) {
+    throw new TypeError(`${name} must be a dotted path or a synchronous extractor function`);
+  }
+};
+
+/** Resolve a path for a built-in check; a thenable result is discarded and reported as pending. */
+const readPath = (obj, pathOrFn) => {
+  const value = resolvePath(obj, pathOrFn);
+  if (!isThenable(value)) return value;
+  discardThenable(value);
+  return pending;
+};
+
 /**
  * Rule that requires the user to be authenticated
  * Checks for user existence at the specified path in context
@@ -55,9 +81,12 @@ const unauthenticated = () => new UnauthenticatedError('You must be logged in to
  * requireAuth('session.currentUser') // checks ctx.session.currentUser
  */
 export const requireAuth = (userPath = 'user') => {
+  validatePath('userPath', userPath);
   return ruleFromCheck((_parent, _args, ctx) => {
-    if (!ctx || !resolvePath(ctx, userPath)) return unauthenticated;
-    return true;
+    if (!ctx) return unauthenticated;
+    const user = readPath(ctx, userPath);
+    if (user === pending) return pendingValue;
+    return user ? true : unauthenticated;
   });
 };
 
@@ -80,14 +109,18 @@ export const requireRole = (role, options = {}) => {
     throw new TypeError('Required roles must be a nonempty string or array of nonempty strings');
   }
   const { userPath = 'user', rolePath = 'role' } = options;
+  validatePath('userPath', userPath);
+  validatePath('rolePath', rolePath);
   const forbidden = () => new ForbiddenError(`Requires role: ${roles.join(' or ')}`);
 
   return ruleFromCheck((_parent, _args, ctx) => {
     if (!ctx) return unauthenticated;
-    const user = resolvePath(ctx, userPath);
+    const user = readPath(ctx, userPath);
+    if (user === pending) return pendingValue;
     if (!user) return unauthenticated;
 
-    const userRole = resolvePath(user, rolePath);
+    const userRole = readPath(user, rolePath);
+    if (userRole === pending) return pendingValue;
     return roles.includes(userRole) ? true : forbidden;
   });
 };
@@ -130,13 +163,18 @@ export const requirePermission = (permission, options = {}) => {
     throw new TypeError('Required permissions must be a nonempty string or array of nonempty strings');
   }
   const { userPath = 'user', permissionsPath = 'permissions' } = options;
+  validatePath('userPath', userPath);
+  validatePath('permissionsPath', permissionsPath);
 
   return ruleFromCheck((_parent, _args, ctx) => {
     if (!ctx) return unauthenticated;
-    const user = resolvePath(ctx, userPath);
+    const user = readPath(ctx, userPath);
+    if (user === pending) return pendingValue;
     if (!user) return unauthenticated;
 
-    const held = findHeldPermissions(resolvePath(user, permissionsPath), requiredPermissions);
+    const claims = readPath(user, permissionsPath);
+    if (claims === pending) return pendingValue;
+    const held = findHeldPermissions(claims, requiredPermissions);
     if (held === null) {
       return () => new ForbiddenError('User permissions must be an array of nonempty strings');
     }
@@ -244,17 +282,23 @@ const normalizeOwnerId = (value) => {
  */
 export const isOwner = (ownerField = 'userId', userIdField = 'id', options = {}) => {
   const { userPath = 'user' } = options;
+  validatePath('ownerField', ownerField);
+  validatePath('userIdField', userIdField);
+  validatePath('userPath', userPath);
 
   return ruleFromCheck((parent, _args, ctx) => {
     if (!ctx) return unauthenticated;
-    const user = resolvePath(ctx, userPath);
+    const user = readPath(ctx, userPath);
+    if (user === pending) return pendingValue;
     if (!user) return unauthenticated;
 
     // Get ownerId from parent (using path or function)
-    const ownerId = normalizeOwnerId(resolvePath(parent, ownerField));
-
+    const owner = readPath(parent, ownerField);
     // Get userId from user object (using path or function)
-    const userId = normalizeOwnerId(resolvePath(user, userIdField));
+    const id = readPath(user, userIdField);
+    if (owner === pending || id === pending) return pendingValue;
+    const ownerId = normalizeOwnerId(owner);
+    const userId = normalizeOwnerId(id);
 
     if (ownerId === undefined || userId === undefined) {
       return false;

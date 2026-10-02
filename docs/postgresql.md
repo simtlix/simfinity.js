@@ -1,11 +1,11 @@
 ---
 title: PostgreSQL storage reference
-description: PostgreSQL types, generated foreign keys, embedded storage, schema validation, native APIs, and compatibility boundaries in Simfinity 3.5.2.
+description: PostgreSQL types, generated foreign keys, embedded storage, schema validation, native APIs, and compatibility boundaries in Simfinity 3.5.3.
 ---
 
 # PostgreSQL support
 
-Simfinity 3.5.2 provides PostgreSQL schema generation and GraphQL execution through the shared core and SQL runtime. PostgreSQL is the first [SQL plugin](guide/sql-plugins.md); its existing facade and generated 3.2.0 physical schema remain compatible. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.5.2 is available from npm; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
+Simfinity 3.5.3 provides PostgreSQL schema generation and GraphQL execution through the shared core and SQL runtime. PostgreSQL is the first [SQL plugin](guide/sql-plugins.md); its existing facade and generated 3.2.0 physical schema remain compatible. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.5.3 is available from npm; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
 
 Start with the canonical [PostgreSQL quick start](guide/postgresql.md) for a complete Yoga server, initialization choice, controller/session example, and pool shutdown. This page is the detailed storage and compatibility reference.
 
@@ -13,7 +13,7 @@ The intended backend choice is permanent application configuration. There is no 
 
 ## Packages and local setup
 
-Use the [v3.5.2 starters](guide/databases.md#download-the-starters) and run `npm install` in the `postgres` folder. For library development, `npm ci` at the repository root installs the workspaces. Packages are distributed together:
+Use the [v3.5.3 starters](guide/databases.md#download-the-starters) and run `npm install` in the `postgres` folder. For library development, `npm ci` at the repository root installs the workspaces. Packages are distributed together:
 
 | Package | Current exports and dependencies |
 | --- | --- |
@@ -23,7 +23,7 @@ Use the [v3.5.2 starters](guide/databases.md#download-the-starters) and run `npm
 | `@simtlix/simfinity-postgres` | `postgresPlugin`, `createPostgres`, default-module runtime facade, schema description/DDL/initialization, shared scalar factory and errors. Depends on SQL, core and `pg`; GraphQL peer. No MongoDB, Mongoose or MCP dependency. |
 | `@simtlix/simfinity-mcp` | Optional database-independent tool generation and transports. Depends on core; the MCP SDK is an optional peer. |
 
-All five packages are versioned together at version `3.5.2` with exact internal dependencies. The verified package set includes standalone consumer checks for SQL as well as both facades, covering MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; the starter requires Node.js 22+. PostgreSQL 15, 16, and 18 are covered by the release verification.
+All five packages are versioned together at version `3.5.3` with exact internal dependencies. The verified package set includes standalone consumer checks for SQL as well as both facades, covering MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; the starter requires Node.js 22+. PostgreSQL 15, 16, and 18 are covered by the release verification.
 
 ## Executable example
 
@@ -81,7 +81,7 @@ try {
 
 The generated `Book.author_id` is a `uuid NOT NULL` column with exactly one FK to `Author.id` and a referencing index. The inverse `Author.books` does not add a column. Both tables receive UUID primary keys with `gen_random_uuid()` defaults.
 
-For the module facade, use `import * as simfinity from '@simtlix/simfinity-postgres'` followed by `simfinity.configure({ pool, schema: 'library' })` once. Registration and GraphQL APIs have the same signatures. The factory is useful for independent instances: use fresh `GraphQLObjectType` objects for each instance because resolver generation mutates those objects in place. Register types before `createSchema()`; PostgreSQL rejects later registrations. Configuration takes a snapshot of the pool/schema binding and rejects reconfiguration. The caller owns the pool and closes it at application shutdown.
+For the module facade, use `import * as simfinity from '@simtlix/simfinity-postgres'` followed by `simfinity.configure({ pool, schema: 'library' })` once. Registration and GraphQL APIs have the same signatures. The factory is useful for independent instances: use fresh `GraphQLObjectType` objects for each instance because resolver generation mutates those objects in place; reusing types whose relations another instance resolves, `toConfig()` copies of them made after that instance built its schema, or a shared custom mutation result type with an unresolved relation field throws `TYPE_BOUND_TO_OTHER_RUNTIME`. Register types before `createSchema()`; PostgreSQL rejects later registrations. Configuration takes a snapshot of the pool/schema binding and rejects reconfiguration. The caller owns the pool and closes it at application shutdown.
 
 The server must await `initializeDatabase()` before accepting operations. A missing or failed initialization produces `DATABASE_NOT_INITIALIZED`. To disable schema creation, call `preventCreatingCollection(true)` before `createSchema()`; default initialization then validates only, and an explicit `mode: 'create'` is rejected. `mode: 'validate'` can also be selected directly.
 
@@ -91,7 +91,7 @@ Generated operation names, arguments, introspection extensions and nested `added
 
 Filters support EQ, NE, LT, LTE, GT, GTE, BTW, IN, NIN and literal case-sensitive LIKE, with nested AND/OR, typed scalar and relationship paths, pagination, sort, and `context.count`. Queries preserve repeated roots from matching inverse children and their contribution to counts and aggregates. Matching predicates on the same referenced child share a join. Embedded scalar predicates retain Mongo's array membership behavior, without expanding root rows. Comparisons use bound values and metadata-validated paths; malformed paths or values produce domain errors. Text ordering uses binary `C` collation rather than the database's language locale.
 
-`configureQueryLimits({ maxPageSize: 500 })` configures the shared process-wide list maximum (default 1000). Calling it without options restores the default. Unpaged lists return at most `Math.min(100, maxPageSize)` rows. Explicit page/size and calculated skip must be safe integers, with page >= 1 and size between 1 and the maximum; invalid input raises `INVALID_PAGINATION`. Unpaged aggregates stay unbounded. Sort/filter paths must end at a declared scalar or enum. Filter lists cannot contain null elements, and EQ/NE take scalar values rather than whole arrays.
+`configureQueryLimits({ maxPageSize: 500 })` configures the shared process-wide list maximum (default 1000). Calling it without options restores the default. Unpaged lists return at most `Math.min(100, maxPageSize)` rows. Explicit page/size and calculated skip must be safe integers, with page >= 1 and size between 1 and the maximum; invalid input raises `INVALID_PAGINATION`. Unpaged aggregates stay unbounded. Sort/filter paths must end at a declared scalar or enum. Filter lists cannot contain null elements, and EQ/NE take scalar values rather than whole arrays. The process-wide `configureMutationLimits({ maxNestedOperations })` caps nested `added`/`updated`/`deleted` entries per generated mutation before its transaction starts; it is unlimited by default.
 
 Nested collection mutations run child middleware (`{ input }` for save/update, `{ id }` for delete). Child update/delete IDs are checked for existing parent ownership after middleware, inside the transaction. Missing children raise `NOT_VALID_ID`; foreign-parent children raise `FORBIDDEN`. Pre-write hooks cannot change the required parent connection. These checks do not replace application write permissions or turn query scopes into write authorization.
 

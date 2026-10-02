@@ -1,5 +1,5 @@
 import {
-  describe, test, expect, beforeAll,
+  describe, test, expect, beforeAll, afterEach, vi,
 } from 'vitest';
 import {
   GraphQLObjectType, GraphQLString, GraphQLID,
@@ -126,6 +126,69 @@ describe('Declarative Validation Helpers', () => {
           }
         }
       }
+    });
+  });
+
+  describe('pattern validator', () => {
+    const accepts = (validation, value) => validation.CREATE[0].validate('Serie', 'slug', value, null).then(() => true, () => false);
+
+    test('a global regex accepts every valid value in sequence', async () => {
+      const validation = validators.pattern('Slug', /^[a-z]+$/g);
+      const results = [];
+      for (const value of ['alpha', 'beta', 'gamma', 'delta']) results.push(await accepts(validation, value));
+      expect(results).toEqual([true, true, true, true]);
+    });
+
+    test('a global unanchored regex is not affected by the previous match position', async () => {
+      const validation = validators.pattern('Code', /[0-9]{3}/g);
+      expect(await accepts(validation, 'x123')).toBe(true);
+      expect(await accepts(validation, '123')).toBe(true);
+    });
+
+    test('a sticky regex always matches from the start of each value', async () => {
+      const validation = validators.pattern('Code', /[0-9]{3}/y);
+      expect(await accepts(validation, '123')).toBe(true);
+      expect(await accepts(validation, 'abc123')).toBe(false);
+      expect(await accepts(validation, 'abc123')).toBe(false);
+    });
+
+    test('the caller regex is neither read nor mutated', async () => {
+      const regex = /[0-9]{3}/y;
+      const validation = validators.pattern('Code', regex);
+      regex.lastIndex = 3;
+      expect(await accepts(validation, 'abc123')).toBe(false);
+      expect(await accepts(validation, '123')).toBe(true);
+      expect(regex.lastIndex).toBe(3);
+    });
+
+    test('string patterns are compiled', async () => {
+      const validation = validators.pattern('Code', '^[0-9]+$');
+      expect(await accepts(validation, '12')).toBe(true);
+      await expect(validation.UPDATE[0].validate('Serie', 'code', 'x', null))
+        .rejects.toMatchObject({ message: 'Code format is invalid', extensions: { code: 'VALIDATION_ERROR', status: 400 } });
+    });
+
+    test.each([[{ test: () => true }], [123], [null]])('rejects the unsupported pattern %j at creation', (unsupported) => {
+      expect(() => validators.pattern('Code', unsupported)).toThrow(TypeError);
+    });
+  });
+
+  describe('url validator', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    test('accepts an absolute URL', async () => {
+      await expect(validators.url().CREATE[0].validate('User', 'website', 'https://example.com', null))
+        .resolves.not.toThrow();
+    });
+
+    test('rejects invalid input without writing it to the console', async () => {
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const validation = validators.url();
+      await expect(validation.CREATE[0].validate('User', 'website', 'not a url token=secret', null))
+        .rejects.toMatchObject({ message: 'Invalid URL format', extensions: { code: 'VALIDATION_ERROR', status: 400 } });
+      expect(log).not.toHaveBeenCalled();
     });
   });
 

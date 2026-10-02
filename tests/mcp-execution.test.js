@@ -624,6 +624,57 @@ describe('MCP callTool in-process execution', () => {
         extensions: { code: 'MCP_MIDDLEWARE_ERROR' },
       });
     });
+
+    const DENY = { content: [{ type: 'text', text: 'denied' }], isError: true };
+
+    it.each([
+      ['zero-parameter', () => DENY],
+      ['rest-parameter', (...args) => (args.length ? DENY : DENY)],
+      ['default-parameter', (call = {}) => (call ? DENY : DENY)],
+      ['two-parameter', (call, next) => (next ? DENY : DENY)],
+    ])('runs a single %s function as a one-element stack', async (label, guard) => {
+      const { callTool } = simfinity.generateMCPTools(stubSchema, { toolMiddleware: guard });
+      const callsBefore = itemCalls;
+
+      expect(await callTool('item', { id: '1' })).toBe(DENY);
+      expect(itemCalls).toBe(callsBefore);
+    });
+
+    it.each([
+      ['a null entry', [(call, next) => next(), null], /toolMiddleware\[1\] must be a function/],
+      ['an undefined entry', [undefined], /toolMiddleware\[0\] must be a function/],
+      ['an object entry', [{}], /toolMiddleware\[0\] must be a function/],
+      // A stray double comma leaves a hole that forEach would skip.
+      // eslint-disable-next-line no-sparse-arrays
+      ['a sparse array literal', [(call, next) => next(), , (call, next) => next()], /toolMiddleware\[1\] must be a function, got an empty array slot/],
+      ['a preallocated array', new Array(2), /toolMiddleware\[0\] must be a function, got an empty array slot/],
+      ['an array with a deleted entry', (() => {
+        const stack = [(call, next) => next(), (call, next) => next()];
+        delete stack[1];
+        return stack;
+      })(), /toolMiddleware\[1\] must be a function, got an empty array slot/],
+      ['a string', 'logger', /toolMiddleware must be a function or an array/],
+      ['an object', {}, /toolMiddleware must be a function or an array/],
+    ])('rejects %s at setup with MCP_INVALID_MIDDLEWARE', (label, toolMiddleware, message) => {
+      let error;
+      try {
+        simfinity.generateMCPTools(stubSchema, { toolMiddleware });
+      } catch (err) {
+        error = err;
+      }
+      expect(error).toMatchObject({ extensions: { code: 'MCP_INVALID_MIDDLEWARE' } });
+      expect(error.message).toMatch(message);
+    });
+
+    it('copies the stack at setup, ignoring later changes to the array', async () => {
+      const stack = [];
+      const { callTool } = simfinity.generateMCPTools(stubSchema, { toolMiddleware: stack });
+      stack.push(() => DENY);
+      const callsBefore = itemCalls;
+
+      expect((await callTool('item', { id: '1' })).isError).toBe(false);
+      expect(itemCalls).toBe(callsBefore + 1);
+    });
   });
 
   describe('schemaPlugins', () => {
@@ -656,6 +707,339 @@ describe('MCP callTool in-process execution', () => {
       const response = await callTool('secret', {});
       expect(response.isError).toBe(true);
       expect(response.content[0].text).toContain('denied by auth plugin');
+    });
+
+    // Fresh schema per test: plugins wrap its resolvers in place.
+    const guardedSchema = (name) => {
+      const calls = { count: 0 };
+      const schema = new GraphQLSchema({
+        query: new GraphQLObjectType({
+          name: `McpExecGuard${name}`,
+          fields: {
+            secret: {
+              type: GraphQLString,
+              resolve: () => {
+                calls.count += 1;
+                return 'open';
+              },
+            },
+          },
+        }),
+      });
+      return { schema, calls };
+    };
+    const denyPlugin = () => ({
+      onSchemaChange({ schema }) {
+        Object.values(schema.getQueryType().getFields()).forEach((field) => {
+          field.resolve = () => {
+            throw new Error('denied by auth plugin');
+          };
+        });
+      },
+    });
+    const setupError = (fn) => {
+      try {
+        fn();
+      } catch (err) {
+        return err;
+      }
+      return undefined;
+    };
+
+    it.each([
+      ['a plugin factory', () => [denyPlugin]],
+      ['a nested array', () => [[denyPlugin()]]],
+      ['a promise', () => [Promise.resolve(denyPlugin())]],
+      ['an object without hooks', () => [{}]],
+      ['a non-function onSchemaChange', () => [{ onSchemaChange: true }]],
+      ['a non-array plugin object', () => denyPlugin()],
+      ['a string', () => 'auth'],
+    ])('rejects %s with MCP_INVALID_SCHEMA_PLUGIN before invoking any hook', (label, build) => {
+      const { schema, calls } = guardedSchema(`Invalid${label.replace(/\W/g, '')}`);
+      const first = { onSchemaChange: vi.fn() };
+      const schemaPlugins = build();
+      const error = setupError(() => simfinity.generateMCPTools(schema, {
+        schemaPlugins: Array.isArray(schemaPlugins) ? [first, ...schemaPlugins] : schemaPlugins,
+      }));
+
+      expect(error).toMatchObject({ extensions: { code: 'MCP_INVALID_SCHEMA_PLUGIN' } });
+      expect(first.onSchemaChange).not.toHaveBeenCalled();
+      expect(calls.count).toBe(0);
+    });
+
+    it.each([
+      ['an own onSchemaChanged', 'onSchemaChanged', () => ({ onSchemaChanged: denyPlugin().onSchemaChange })],
+      ['an own onSchemaChage', 'onSchemaChage', () => ({ onSchemaChage: denyPlugin().onSchemaChange })],
+      ['an own onschemaChange', 'onschemaChange', () => ({ onschemaChange: denyPlugin().onSchemaChange })],
+      ['an own onSchemChange', 'onSchemChange', () => ({ onSchemChange: denyPlugin().onSchemaChange })],
+      ['an own onShemaChange', 'onShemaChange', () => ({ onShemaChange: denyPlugin().onSchemaChange })],
+      ['an own onSchmeaChange', 'onSchmeaChange', () => ({ onSchmeaChange: denyPlugin().onSchemaChange })],
+      ['an own onScemaChange (next to onExecute)', 'onScemaChange', () => ({ onScemaChange: denyPlugin().onSchemaChange, onExecute() {} })],
+      ['a getter onSchemeChange', 'onSchemeChange', () => Object.defineProperty({}, 'onSchemeChange', {
+        get: () => { throw new Error('getter invoked'); },
+        enumerable: true,
+      })],
+      ['an inherited onSchemaChanged', 'onSchemaChanged', () => new (class {
+        onSchemaChanged(payload) { denyPlugin().onSchemaChange(payload); }
+      })()],
+    ])('rejects %s hook with a did-you-mean hint instead of warning', (label, key, build) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { schema, calls } = guardedSchema(`Misspelled${label.replace(/\W/g, '')}`);
+        const first = { onSchemaChange: vi.fn() };
+        const error = setupError(() => simfinity.generateMCPTools(schema, { schemaPlugins: [first, build()] }));
+
+        expect(error).toMatchObject({ extensions: { code: 'MCP_INVALID_SCHEMA_PLUGIN' } });
+        expect(error.message).toContain(`schemaPlugins[1] declares ${key}`);
+        expect(error.message).toContain('did you mean onSchemaChange?');
+        expect(first.onSchemaChange).not.toHaveBeenCalled();
+        expect(calls.count).toBe(0);
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it.each([
+      ['a class plugin with an onSchemaReady helper', () => new (class {
+        onSchemaChange(payload) {
+          denyPlugin().onSchemaChange(payload);
+          this.onSchemaReady();
+        }
+
+        onSchemaReady() {
+          this.ready = true;
+        }
+      })()],
+      ['a class plugin delegating to onSchemaChangeImpl', () => new (class {
+        constructor() {
+          this.onSchemaChangeCount = 0;
+        }
+
+        onSchemaChange(payload) {
+          this.onSchemaChangeCount += 1;
+          return this.onSchemaChangeImpl(payload);
+        }
+
+        onSchemaChangeImpl(payload) {
+          denyPlugin().onSchemaChange(payload);
+        }
+      })()],
+      ['onSchemaChanged next to onSchemaChange', () => ({ ...denyPlugin(), onSchemaChanged() {} })],
+    ])('accepts %s and installs its onSchemaChange', async (label, build) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { schema, calls } = guardedSchema(`Helper${label.replace(/\W/g, '')}`);
+        const { callTool } = simfinity.generateMCPTools(schema, { schemaPlugins: [build()] });
+
+        const response = await callTool('secret', {});
+        expect(response.isError).toBe(true);
+        expect(response.content[0].text).toContain('denied by auth plugin');
+        expect(calls.count).toBe(0);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('rejects an entry with a then accessor as a promise without invoking it', () => {
+      const then = vi.fn(() => {
+        throw new Error('then getter invoked');
+      });
+      const { schema, calls } = guardedSchema('ThenGetter');
+      const thenable = Object.defineProperty(denyPlugin(), 'then', { get: then });
+      const error = setupError(() => simfinity.generateMCPTools(schema, { schemaPlugins: [thenable] }));
+
+      expect(error).toMatchObject({ extensions: { code: 'MCP_INVALID_SCHEMA_PLUGIN' } });
+      expect(error.message).toContain('schemaPlugins[0] must be a plugin object, got a promise');
+      expect(then).not.toHaveBeenCalled();
+      expect(calls.count).toBe(0);
+    });
+
+    it('reads no plugin property other than onSchemaChange during setup', () => {
+      const reads = new Set();
+      const plugin = new Proxy(denyPlugin(), {
+        get(target, key, receiver) {
+          reads.add(key);
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      simfinity.generateMCPTools(guardedSchema('ProxyReads').schema, { schemaPlugins: [plugin] });
+
+      expect([...reads]).toEqual(['onSchemaChange']);
+    });
+
+    it('validates a plugin without invoking its getters', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        class AuditPlugin {
+          #schema;
+
+          get schema() {
+            if (!this.#schema) {
+              throw new Error('AuditPlugin not initialized');
+            }
+            return this.#schema;
+          }
+
+          onSchemaChange(payload) {
+            this.#schema = payload.schema;
+            denyPlugin().onSchemaChange(payload);
+          }
+        }
+        const { schema, calls } = guardedSchema('Getter');
+        const { callTool } = simfinity.generateMCPTools(schema, { schemaPlugins: [new AuditPlugin()] });
+
+        expect((await callTool('secret', {})).isError).toBe(true);
+        expect(calls.count).toBe(0);
+
+        // A hook defined by a getter counts as declared without being called.
+        const onExecute = vi.fn(() => {
+          throw new Error('getter invoked');
+        });
+        const shared = Object.defineProperty({}, 'onExecute', { get: onExecute, enumerable: true });
+        simfinity.generateMCPTools(guardedSchema('GetterHook').schema, { schemaPlugins: [shared] });
+
+        expect(onExecute).not.toHaveBeenCalled();
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toMatch(/ignores onExecute/);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('skips null, undefined and false entries like Envelop', async () => {
+      const { schema } = guardedSchema('Falsy');
+      const { callTool } = simfinity.generateMCPTools(schema, {
+        schemaPlugins: [null, undefined, false, denyPlugin()],
+      });
+
+      const response = await callTool('secret', {});
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('denied by auth plugin');
+    });
+
+    describe('ignored plugin hooks', () => {
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      it('warns once per plugin object, naming the hooks MCP does not run', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const { schema } = guardedSchema('Hooks');
+        const shared = { onExecute() {}, onPluginInit() {} };
+
+        simfinity.generateMCPTools(schema, { schemaPlugins: [shared] });
+        simfinity.generateMCPTools(schema, { schemaPlugins: [shared] });
+
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toMatch(/onExecute/);
+        expect(warn.mock.calls[0][0]).toMatch(/onPluginInit/);
+      });
+
+      it('still installs onSchemaChange of a plugin that also has request hooks', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const { schema, calls } = guardedSchema('Mixed');
+        const { callTool } = simfinity.generateMCPTools(schema, {
+          schemaPlugins: [{ ...denyPlugin(), onExecute() {} }],
+        });
+
+        expect((await callTool('secret', {})).isError).toBe(true);
+        expect(calls.count).toBe(0);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toMatch(/onExecute/);
+      });
+    });
+
+    it('accepts replaceSchema with the same schema and rejects a replacement with MCP_UNSUPPORTED_SCHEMA_REPLACEMENT', () => {
+      const { schema } = guardedSchema('Replace');
+      const { schema: other } = guardedSchema('ReplaceOther');
+
+      expect(() => simfinity.generateMCPTools(schema, {
+        schemaPlugins: [{ onSchemaChange({ schema: current, replaceSchema }) { replaceSchema(current); } }],
+      })).not.toThrow();
+      expect(setupError(() => simfinity.generateMCPTools(schema, {
+        schemaPlugins: [{ onSchemaChange({ replaceSchema }) { replaceSchema(other); } }],
+      }))).toMatchObject({ extensions: { code: 'MCP_UNSUPPORTED_SCHEMA_REPLACEMENT' } });
+    });
+
+    it('makes calls wait for an asynchronous onSchemaChange', async () => {
+      const { schema, calls } = guardedSchema('Async');
+      const { callTool } = simfinity.generateMCPTools(schema, {
+        schemaPlugins: [{
+          async onSchemaChange(payload) {
+            await new Promise((resolve) => { setTimeout(resolve, 10); });
+            denyPlugin().onSchemaChange(payload);
+          },
+        }],
+      });
+
+      const response = await callTool('secret', {});
+      expect(response.content[0].text).toContain('denied by auth plugin');
+      expect(calls.count).toBe(0);
+    });
+
+    it('rejects every call when an asynchronous onSchemaChange fails, without an unhandled rejection', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const unhandled = vi.fn();
+      process.on('unhandledRejection', unhandled);
+      try {
+        const { schema, calls } = guardedSchema('AsyncFail');
+        const { callTool } = simfinity.generateMCPTools(schema, {
+          schemaPlugins: [{
+            async onSchemaChange() {
+              throw new Error('install failed');
+            },
+          }],
+        });
+        await new Promise((resolve) => { setTimeout(resolve, 10); });
+
+        expect(unhandled).not.toHaveBeenCalled();
+        expect(warn.mock.calls[0][0]).toMatch(/schemaPlugins installer failed/);
+        await expect(callTool('secret', {})).rejects.toThrow('install failed');
+        await expect(callTool('secret', {})).rejects.toThrow('install failed');
+        expect(calls.count).toBe(0);
+      } finally {
+        process.off('unhandledRejection', unhandled);
+        warn.mockRestore();
+      }
+    });
+
+    it('throws a synchronous onSchemaChange failure at setup without leaving earlier asynchronous hooks unhandled', async () => {
+      const unhandled = vi.fn();
+      process.on('unhandledRejection', unhandled);
+      try {
+        const { schema } = guardedSchema('MixedFail');
+        expect(() => simfinity.generateMCPTools(schema, {
+          schemaPlugins: [
+            {
+              async onSchemaChange() {
+                throw new Error('async install failed');
+              },
+            },
+            {
+              onSchemaChange() {
+                throw new Error('sync install failed');
+              },
+            },
+          ],
+        })).toThrow('sync install failed');
+        await new Promise((resolve) => { setTimeout(resolve, 10); });
+
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.off('unhandledRejection', unhandled);
+      }
+    });
+
+    it('neither validates nor applies schemaPlugins in remote mode', () => {
+      const { schema } = guardedSchema('Remote');
+      const plugin = { onSchemaChange: vi.fn() };
+
+      expect(() => simfinity.generateMCPTools(schema, {
+        schemaPlugins: [{}, plugin],
+        execution: { mode: 'remote', endpoint: 'http://graphql.test/graphql' },
+      })).not.toThrow();
+      expect(plugin.onSchemaChange).not.toHaveBeenCalled();
     });
   });
 

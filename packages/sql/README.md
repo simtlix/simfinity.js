@@ -5,7 +5,7 @@ Driver-free relational planning, record reconstruction, and transaction orchestr
 PostgreSQL 15 or later is the first and only supported SQL plugin. Install the SQL runtime and PostgreSQL plugin at matching versions:
 
 ```sh
-npm install @simtlix/simfinity-sql@3.5.2 @simtlix/simfinity-postgres@3.5.2 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-sql@3.5.3 @simtlix/simfinity-postgres@3.5.3 graphql@^16.11.0 pg@^8.16.3
 ```
 
 ## Runtime
@@ -27,7 +27,7 @@ await simfinity.initializeDatabase({ mode: 'create' });
 
 `createPostgres({ pool, schema })` remains a convenience factory for this same implementation. Both entry points preserve PostgreSQL descriptions, generated SQL, GraphQL operations, scopes, hooks, state machines, model handles, and session behavior. The [PostgreSQL package guide](https://github.com/simtlix/simfinity.js/tree/master/packages/postgres) describes the supported storage and query shapes.
 
-A runtime permanently binds one plugin and configuration. Its methods and capabilities are captured at creation; connection objects remain caller-owned. To configure later, use `createSQL({ plugin: postgresPlugin() })`, then call `configure({ pool, schema })` once before `createSchema()`. Register all types before creating the schema and await successful initialization before serving operations.
+A runtime permanently binds one plugin and configuration. Its methods and capabilities are captured at creation; connection objects remain caller-owned. To configure later, use `createSQL({ plugin: postgresPlugin() })`, then call `configure({ pool, schema })` once before `createSchema()`. Register all types before creating the schema and await successful initialization before serving operations. Give each runtime its own GraphQL type objects: a type whose relation resolvers one runtime generated, a `toConfig()` copy of it made afterwards, or a shared custom mutation result type with an unresolved relation field throws `TYPE_BOUND_TO_OTHER_RUNTIME` in another.
 
 `initializeDatabase({ mode: 'create' })` creates missing compatible storage; `mode: 'validate'` validates existing storage. Incompatible definitions are rejected. `preventCreatingCollection(true)` forces validation. PostgreSQL initialization performs no destructive migration or schema synchronization.
 

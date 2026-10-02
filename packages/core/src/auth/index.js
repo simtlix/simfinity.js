@@ -31,11 +31,23 @@
  * const yoga = createYoga({ schema, plugins: [authPlugin] });
  */
 
-import { GraphQLError, GraphQLObjectType, defaultFieldResolver, __Field } from 'graphql';
+import {
+  GraphQLError,
+  GraphQLEnumType,
+  GraphQLInputObjectType,
+  GraphQLInterfaceType,
+  GraphQLObjectType,
+  GraphQLScalarType,
+  GraphQLUnionType,
+  defaultFieldResolver,
+  __Field,
+} from 'graphql';
 import SimfinityError from '../errors/simfinity.error.js';
 import { UnauthenticatedError, ForbiddenError, createAuthError } from './errors.js';
 import { isPolicyExpression, createRuleFromExpression, evaluateExpression } from './expressions.js';
 import { collectQueryPaths, walkQueryPath } from '../query-plan.js';
+import { relationFieldOwners } from '../relation-owners.js';
+import { isThenable } from './thenable.js';
 import {
   resolvePath,
   requireAuth,
@@ -145,8 +157,20 @@ const isExemptMetadataType = (permissions, type) => isSimfinityMetadataType(type
 // these schemas; in a schema no instance processed, every wrapper keeps enforcing its rules.
 const authorizedSchemas = new WeakSet();
 
-const isThenable = value => value !== null && (typeof value === 'object' || typeof value === 'function')
-  && typeof value.then === 'function';
+const namedTypeClasses = [
+  GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType,
+  GraphQLScalarType, GraphQLEnumType, GraphQLInputObjectType,
+];
+
+/**
+ * A type created by another copy of graphql (a second installed version, or its ESM and CommonJS
+ * builds loaded together) fails `instanceof`, so it cannot be classified and its fields could not be
+ * protected. graphql's own isObjectType only reports such copies outside production.
+ */
+const assertSameGraphQLModule = (typeName, type) => {
+  if (namedTypeClasses.some(NamedType => type instanceof NamedType)) return;
+  throw new TypeError(`Cannot authorize type ${typeName}: it was created by a different copy of the graphql module than the auth plugin uses. Install a single graphql version and load it through one entry point.`);
+};
 
 const validateConfiguration = (permissions, defaultPolicy) => {
   if (defaultPolicy !== 'ALLOW' && defaultPolicy !== 'DENY') {
@@ -348,6 +372,9 @@ export const createFieldMiddleware = (permissions, options = {}) => createAuthMi
  * and rebuilds the schema), this plugin mutates resolvers directly on the existing schema,
  * avoiding schema reconstruction and the duplicate-type errors it can cause.
  *
+ * `onSchemaChange` throws `TypeError` before wrapping any field when a schema type was created by
+ * another copy of the graphql module, instead of leaving that type's fields unprotected.
+ *
  * @param {PermissionSchema} permissions - The permission schema object
  * @param {AuthMiddlewareOptions} [options={}] - Plugin options
  * @returns {Object} An Envelop plugin with an `onSchemaChange` hook
@@ -441,7 +468,7 @@ export const createAuthPlugin = (permissions, options = {}) => {
       return denied();
     };
 
-    return (parent, args, ctx, info) => {
+    const resolver = (parent, args, ctx, info) => {
       // In a schema that only other auth plugin instances processed, their rules apply, not these.
       if (info?.schema && authorizedSchemas.has(info.schema) && !processedSchemas.has(info.schema)) {
         return originalResolve(parent, args, ctx, info);
@@ -454,6 +481,11 @@ export const createAuthPlugin = (permissions, options = {}) => {
       }
       return runRules(0, parent, args, ctx, info);
     };
+    // The wrapper still reads through the runtime that generated a relation resolver, so a field
+    // copied with it stays bound to that runtime.
+    const owner = relationFieldOwners.get(originalResolve);
+    if (owner !== undefined) relationFieldOwners.set(resolver, owner);
+    return resolver;
   };
 
   const wrapSchemaResolvers = (schema) => {
@@ -461,11 +493,15 @@ export const createAuthPlugin = (permissions, options = {}) => {
     validateConfiguration(permissions, defaultPolicy);
     warnAboutQueryRoot(schema);
 
-    const typeMap = schema.getTypeMap();
+    // Check every type before wrapping any field, so an unsupported schema is left unchanged.
+    const objectTypes = [];
+    for (const [typeName, type] of Object.entries(schema.getTypeMap())) {
+      if (typeName.startsWith('__')) continue;
+      assertSameGraphQLModule(typeName, type);
+      if (type instanceof GraphQLObjectType && !isExemptMetadataType(permissions, type)) objectTypes.push([typeName, type]);
+    }
 
-    for (const [typeName, type] of Object.entries(typeMap)) {
-      if (!(type instanceof GraphQLObjectType) || typeName.startsWith('__') || isExemptMetadataType(permissions, type)) continue;
-
+    for (const [typeName, type] of objectTypes) {
       const fields = type.getFields();
 
       for (const [fieldName, field] of Object.entries(fields)) {

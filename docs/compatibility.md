@@ -1,13 +1,13 @@
 ---
 title: Database compatibility contract
-description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.5.2.
+description: Shared API semantics and explicit storage differences between the MongoDB and PostgreSQL adapters in Simfinity 3.5.3.
 ---
 
 # Database compatibility contract
 
-This ledger records the v3.5.2 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
+This ledger records the v3.5.3 behavior shared by the MongoDB and PostgreSQL implementations and the remaining differences. The MongoDB contract is in `tests/integration/mongodb.test.js`, PostgreSQL execution in the runtime/lifecycle/options suites, and direct result/schema comparison in the query-parity suites, using the graph in `tests/contracts/model-fixtures.js`.
 
-The test paths below are available in the [v3.5.2 source](https://github.com/simtlix/simfinity.js/tree/v3.5.2). To try the API, use the [released starters](guide/databases.md#download-the-starters).
+The test paths below are available in the [v3.5.3 source](https://github.com/simtlix/simfinity.js/tree/v3.5.3). To try the API, use the [released starters](guide/databases.md#download-the-starters).
 
 When running the source tests, set `SIMFINITY_MONGODB_URI` and `SIMFINITY_POSTGRES_URI` to disposable databases for the cross-backend suites. Set `SIMFINITY_TEST_MONGODB_URI` to a separate disposable MongoDB database for upstream opt-in regressions. Mongo setup drops its configured databases, so these URIs must never identify application data. When a variable is absent, its integration suites are reported as skipped.
 
@@ -73,7 +73,7 @@ Runtime verification (2026-09-11):
 
 Nested child saves/updates/deletes run target middleware with root argument shapes. Update/delete ownership is checked from persisted records after middleware selects the effective ID. Missing records raise `NOT_VALID_ID`; foreign-parent records raise `FORBIDDEN`. Hooks cannot clear or replace the required parent connection. Query scopes authorize reads only; custom resolvers and native database access retain application-defined checks.
 
-`configureQueryLimits({ maxPageSize })` is available on MongoDB and PostgreSQL facades and runtime instances. Its shared process-wide default is 1000; unpaged lists use the smaller of 100 and the configured maximum. Explicit page/size and calculated skip must be positive/safe integers within the maximum; unpaged aggregates remain unbounded. Invalid sort/filter paths and malformed filter values fail with domain errors. v3.1.0 rejects whole-array EQ values and null elements in filter lists; these older permissive parity cases now assert rejection on both backends.
+`configureQueryLimits({ maxPageSize })` is available on MongoDB and PostgreSQL facades and runtime instances. Its shared process-wide default is 1000; unpaged lists use the smaller of 100 and the configured maximum. Explicit page/size and calculated skip must be positive/safe integers within the maximum; unpaged aggregates remain unbounded. Invalid sort/filter paths and malformed filter values fail with domain errors. v3.1.0 rejects whole-array EQ values and null elements in filter lists; these older permissive parity cases now assert rejection on both backends. The later process-wide `configureMutationLimits({ maxNestedOperations })` setting, also on both facades and runtime instances, caps nested collection operations per generated mutation and is unlimited by default.
 
 MongoDB transactions use the registered model connection, retry transient bodies and uncertain commits separately, and await owned cleanup. Borrowed active sessions remain caller-owned in default Mongo mode. With opt-in transactional reference integrity, violations and guarded-write errors abort supplied sessions; those sessions require snapshot reads and majority commits. See [MongoDB reference integrity](guide/mongodb-integrity.md). PostgreSQL validates instance-owned active handles, retains repeatable-read atomicity, and retries confirmed serialization/deadlock aborts only.
 

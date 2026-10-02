@@ -4,20 +4,23 @@ import {
   GraphQLInt,
   GraphQLInputObjectType,
   GraphQLEnumType,
+  GraphQLInterfaceType,
   GraphQLList,
   GraphQLNonNull,
   GraphQLObjectType,
   GraphQLScalarType,
   GraphQLString,
+  GraphQLUnionType,
   graphql,
   printSchema,
 } from 'graphql';
 import mongoose from 'mongoose';
 
-import { createRuntime } from '../packages/core/src/index.js';
+import { auth, createRuntime } from '../packages/core/src/index.js';
 import { createMongoAdapter } from '../packages/mongodb/src/mongo/adapter.js';
 import { createMongoModel } from '../packages/mongodb/src/mongo/models.js';
 import { createMongoQueries } from '../packages/mongodb/src/mongo/queries.js';
+import { createPostgres } from '../packages/postgres/src/index.js';
 
 const createType = (name) => new GraphQLObjectType({
   name,
@@ -822,5 +825,496 @@ describe('createRuntime', () => {
     expect(published.data.publish_runtimeOverlappingStateItem.state).toBe('PUBLISHED');
     expect(finished.errors).toBeUndefined();
     expect(finished.data.finish_runtimeOverlappingStateItem.state).toBe('FINAL');
+  });
+});
+
+const BOUND_TO_OTHER_RUNTIME = expect.objectContaining({
+  extensions: expect.objectContaining({ code: 'TYPE_BOUND_TO_OTHER_RUNTIME', status: 409 }),
+});
+
+const createLibraryTypes = (prefix, { listRelation = false } = {}) => {
+  const Author = new GraphQLObjectType({
+    name: `${prefix}Author`,
+    fields: () => ({
+      id: { type: GraphQLID },
+      name: { type: GraphQLString },
+      ...(listRelation ? {
+        books: {
+          type: new GraphQLList(Book),
+          extensions: { relation: { embedded: false, connectionField: 'author' } },
+        },
+      } : {}),
+    }),
+  });
+  const Book = new GraphQLObjectType({
+    name: `${prefix}Book`,
+    fields: () => ({
+      id: { type: GraphQLID },
+      title: { type: GraphQLString },
+      author: { type: Author, extensions: { relation: { embedded: false, connectionField: 'authorId' } } },
+    }),
+  });
+  return { Author, Book };
+};
+
+const createStoreAdapter = (records = {}) => ({
+  prepare: vi.fn(),
+  validateRegistration: vi.fn(),
+  createModel: vi.fn((gqltype) => ({ name: gqltype.name })),
+  castId: (value) => String(value),
+  withTransaction: async (session, body) => body(session || {}),
+  getById: vi.fn(async (Model, id) => (records[Model.name] ?? []).find((record) => record._id === String(id)) ?? null),
+  find: vi.fn(async (Model) => records[Model.name] ?? []),
+  count: async () => 0,
+  aggregate: async () => [],
+  findChildren: vi.fn(async () => []),
+});
+
+const tenantRecords = (tenant, prefix) => ({
+  [`${prefix}Author`]: [{ _id: '1', name: `${tenant} author` }],
+  [`${prefix}Book`]: [{ _id: '10', title: `${tenant} book`, authorId: '1' }],
+});
+
+const registerLibrary = (runtime, { Author, Book }) => {
+  runtime.connect(null, Author, 'author', 'authors');
+  runtime.connect(null, Book, 'book', 'books');
+};
+
+describe('runtime type ownership', () => {
+  test('rejects a schema whose relation resolvers another runtime generated', async () => {
+    const types = createLibraryTypes('OwnedSingle');
+    const firstAdapter = createStoreAdapter(tenantRecords('first', 'OwnedSingle'));
+    const secondAdapter = createStoreAdapter(tenantRecords('second', 'OwnedSingle'));
+    const first = createRuntime(firstAdapter);
+    const second = createRuntime(secondAdapter);
+    registerLibrary(first, types);
+    registerLibrary(second, types);
+
+    const schema = first.createSchema();
+
+    expect(() => second.createSchema()).toThrow(BOUND_TO_OTHER_RUNTIME);
+    expect(secondAdapter.prepare).not.toHaveBeenCalled();
+    expect(secondAdapter.createModel).not.toHaveBeenCalled();
+    const result = await graphql({ schema, source: '{ books { title author { name } } }', contextValue: {} });
+    expect(result.errors).toBeUndefined();
+    expect(result.data.books).toEqual([{ title: 'first book', author: { name: 'first author' } }]);
+    expect(secondAdapter.getById).not.toHaveBeenCalled();
+  });
+
+  test('reports a shared list relation as a bound type instead of duplicate filter types', () => {
+    const types = createLibraryTypes('OwnedList', { listRelation: true });
+    const first = createRuntime(createStoreAdapter());
+    const second = createRuntime(createStoreAdapter());
+    registerLibrary(first, types);
+    registerLibrary(second, types);
+    first.createSchema();
+
+    expect(() => second.createSchema()).toThrow(BOUND_TO_OTHER_RUNTIME);
+    expect(() => second.createSchema()).toThrow('OwnedListAuthor');
+  });
+
+  test('binds types to the runtime that creates a schema first', async () => {
+    const types = createLibraryTypes('OwnedOrder');
+    const first = createRuntime(createStoreAdapter(tenantRecords('first', 'OwnedOrder')));
+    const second = createRuntime(createStoreAdapter(tenantRecords('second', 'OwnedOrder')));
+    registerLibrary(first, types);
+    registerLibrary(second, types);
+
+    const schema = second.createSchema();
+
+    expect(() => first.createSchema()).toThrow(BOUND_TO_OTHER_RUNTIME);
+    const result = await graphql({ schema, source: '{ books { author { name } } }', contextValue: {} });
+    expect(result.data.books).toEqual([{ author: { name: 'second author' } }]);
+  });
+
+  test('rejects registering a bound type in another runtime without recording it', () => {
+    const types = createLibraryTypes('OwnedRegistration');
+    const first = createRuntime(createStoreAdapter());
+    registerLibrary(first, types);
+    first.createSchema();
+    const secondAdapter = createStoreAdapter();
+    const second = createRuntime(secondAdapter);
+
+    second.connect(null, types.Author, 'author', 'authors');
+
+    expect(() => second.connect(null, types.Book, 'book', 'books')).toThrow(BOUND_TO_OTHER_RUNTIME);
+    expect(() => second.addNoEndpointType(types.Book)).toThrow(BOUND_TO_OTHER_RUNTIME);
+    expect(second.getRegistrations().map(({ gqltype }) => gqltype)).toEqual([types.Author]);
+    expect(secondAdapter.validateRegistration).toHaveBeenCalledTimes(1);
+  });
+
+  test('rejects bound types reached through relations or custom mutation results', () => {
+    const types = createLibraryTypes('OwnedReach');
+    const first = createRuntime(createStoreAdapter());
+    registerLibrary(first, types);
+    first.createSchema();
+
+    const viaMutation = createRuntime(createStoreAdapter());
+    viaMutation.connect(null, new GraphQLObjectType({
+      name: 'OwnedReachOther',
+      fields: { id: { type: GraphQLID }, label: { type: GraphQLString } },
+    }), 'other', 'others');
+    viaMutation.registerMutation('pickBook', 'Returns a book', new GraphQLInputObjectType({
+      name: 'OwnedReachPick',
+      fields: { id: { type: GraphQLID } },
+    }), types.Book, async () => null);
+    expect(() => viaMutation.createSchema()).toThrow(BOUND_TO_OTHER_RUNTIME);
+
+    const viaRelation = createRuntime(createStoreAdapter());
+    viaRelation.connect(null, new GraphQLObjectType({
+      name: 'OwnedReachReview',
+      fields: {
+        id: { type: GraphQLID },
+        book: { type: types.Book, extensions: { relation: { embedded: false, connectionField: 'bookId' } } },
+      },
+    }), 'review', 'reviews');
+    expect(() => viaRelation.createSchema()).toThrow(BOUND_TO_OTHER_RUNTIME);
+  });
+
+  test('rejects bound types reached through the interfaces of a custom mutation result', () => {
+    const types = createLibraryTypes('OwnedInterface');
+    const first = createRuntime(createStoreAdapter());
+    registerLibrary(first, types);
+    first.createSchema();
+    const Other = new GraphQLObjectType({ name: 'OwnedInterfaceOther', fields: { label: { type: GraphQLString } } });
+    const Pick = new GraphQLUnionType({ name: 'OwnedInterfacePick', types: [Other, types.Book] });
+    const HasPick = new GraphQLInterfaceType({ name: 'OwnedInterfaceHasPick', fields: { pick: { type: Pick } } });
+    const Wrapper = new GraphQLObjectType({
+      name: 'OwnedInterfaceWrapper',
+      interfaces: [HasPick],
+      fields: { pick: { type: Other } },
+    });
+    const secondAdapter = createStoreAdapter();
+    const second = createRuntime(secondAdapter);
+    second.connect(null, createType('OwnedInterfaceThing'), 'thing', 'things');
+    second.registerMutation('wrap', 'Wraps a pick', new GraphQLInputObjectType({
+      name: 'OwnedInterfaceInput',
+      fields: { id: { type: GraphQLID } },
+    }), Wrapper, async () => null);
+
+    expect(() => second.createSchema()).toThrow(BOUND_TO_OTHER_RUNTIME);
+    expect(() => second.createSchema()).toThrow('OwnedInterfaceBook');
+    expect(secondAdapter.prepare).not.toHaveBeenCalled();
+  });
+
+  describe('copied relation fields', () => {
+    const spreadFields = (Book) => new GraphQLObjectType({
+      name: `${Book.name}Admin`,
+      fields: () => ({ ...Book.toConfig().fields, notes: { type: GraphQLString } }),
+    });
+    const copyType = (Book) => new GraphQLObjectType(Book.toConfig());
+    const wrapWithAuth = (schema) => auth.createAuthPlugin({}, { defaultPolicy: 'DENY' }).onSchemaChange({ schema });
+    const withoutResolver = (field) => {
+      const copy = { ...field };
+      delete copy.resolve;
+      return copy;
+    };
+
+    test.each([
+      ['a type that spreads the fields in a thunk defined at module load', 'OwnedSpread', spreadFields, true],
+      ['a toConfig() copy', 'OwnedClone', copyType, false],
+    ])('rejects %s once another runtime generated the resolvers', (label, prefix, copy, defineEarly) => {
+      const types = createLibraryTypes(prefix);
+      const early = defineEarly ? copy(types.Book) : null;
+      const firstAdapter = createStoreAdapter(tenantRecords('first', prefix));
+      const first = createRuntime(firstAdapter);
+      registerLibrary(first, types);
+      first.createSchema();
+      const Copy = early ?? copy(types.Book);
+      const secondAdapter = createStoreAdapter(tenantRecords('second', prefix));
+      const second = createRuntime(secondAdapter);
+      second.connect(null, types.Author, 'author', 'authors');
+      second.connect(null, Copy, 'book', 'books');
+
+      expect(() => second.createSchema()).toThrow(BOUND_TO_OTHER_RUNTIME);
+      expect(() => second.createSchema()).toThrow(`Field ${Copy.name}.author`);
+      expect(secondAdapter.prepare).not.toHaveBeenCalled();
+      expect(secondAdapter.createModel).not.toHaveBeenCalled();
+      expect(firstAdapter.getById).not.toHaveBeenCalled();
+    });
+
+    test('rejects copies of single and list relations after an auth plugin wrapped their resolvers', () => {
+      const types = createLibraryTypes('OwnedWrapped');
+      const Item = createType('OwnedWrappedItem');
+      const Shelf = new GraphQLObjectType({
+        name: 'OwnedWrappedShelf',
+        fields: () => ({
+          id: { type: GraphQLID },
+          items: { type: new GraphQLList(Item), extensions: { relation: { embedded: false, connectionField: 'shelf' } } },
+        }),
+      });
+      const first = createRuntime(createStoreAdapter());
+      registerLibrary(first, types);
+      first.connect(null, Item, 'item', 'items');
+      first.connect(null, Shelf, 'shelf', 'shelves');
+      const schema = first.createSchema();
+      const generatedAuthor = types.Book.getFields().author.resolve;
+      const generatedItems = Shelf.getFields().items.resolve;
+      wrapWithAuth(schema);
+
+      const BookCopy = copyType(types.Book);
+      const ShelfCopy = copyType(Shelf);
+      expect(BookCopy.getFields().author.resolve).not.toBe(generatedAuthor);
+      expect(ShelfCopy.getFields().items.resolve).not.toBe(generatedItems);
+      const books = createRuntime(createStoreAdapter());
+      books.connect(null, types.Author, 'author', 'authors');
+      books.connect(null, BookCopy, 'book', 'books');
+      const shelves = createRuntime(createStoreAdapter());
+      shelves.connect(null, Item, 'item', 'items');
+      shelves.connect(null, ShelfCopy, 'shelf', 'shelves');
+
+      expect(() => books.createSchema()).toThrow(BOUND_TO_OTHER_RUNTIME);
+      expect(() => books.createSchema()).toThrow('Field OwnedWrappedBook.author');
+      expect(() => shelves.createSchema()).toThrow(BOUND_TO_OTHER_RUNTIME);
+      expect(() => shelves.createSchema()).toThrow('Field OwnedWrappedShelf.items');
+    });
+
+    test('rejects copies that rebuild relation extensions after an auth plugin wrapped the resolvers', () => {
+      const types = createLibraryTypes('OwnedRebuilt');
+      const Item = createType('OwnedRebuiltItem');
+      const Shelf = new GraphQLObjectType({
+        name: 'OwnedRebuiltShelf',
+        fields: () => ({
+          id: { type: GraphQLID },
+          items: { type: new GraphQLList(Item), extensions: { relation: { embedded: false, connectionField: 'shelf' } } },
+        }),
+      });
+      const firstAdapter = createStoreAdapter(tenantRecords('first', 'OwnedRebuilt'));
+      const first = createRuntime(firstAdapter);
+      registerLibrary(first, types);
+      first.connect(null, Item, 'item', 'items');
+      first.connect(null, Shelf, 'shelf', 'shelves');
+      wrapWithAuth(first.createSchema());
+      const rebuild = (type, fieldName) => new GraphQLObjectType({
+        name: `${type.name}Admin`,
+        fields: () => {
+          const fields = type.toConfig().fields;
+          const field = fields[fieldName];
+          return { ...fields, [fieldName]: { ...field, extensions: { ...field.extensions, readOnly: true } } };
+        },
+      });
+      const BookAdmin = rebuild(types.Book, 'author');
+      const ShelfAdmin = rebuild(Shelf, 'items');
+      const secondAdapter = createStoreAdapter();
+      const books = createRuntime(secondAdapter);
+      books.connect(null, types.Author, 'author', 'authors');
+      books.connect(null, BookAdmin, 'bookAdmin', 'bookAdmins');
+      const shelves = createRuntime(createStoreAdapter());
+      shelves.connect(null, Item, 'item', 'items');
+      shelves.connect(null, ShelfAdmin, 'shelfAdmin', 'shelfAdmins');
+
+      expect(BookAdmin.getFields().author.extensions).not.toBe(types.Book.getFields().author.extensions);
+      expect(() => books.createSchema()).toThrow(BOUND_TO_OTHER_RUNTIME);
+      expect(() => books.createSchema()).toThrow('Field OwnedRebuiltBookAdmin.author');
+      expect(() => shelves.createSchema()).toThrow(BOUND_TO_OTHER_RUNTIME);
+      expect(() => shelves.createSchema()).toThrow('Field OwnedRebuiltShelfAdmin.items');
+      expect(secondAdapter.prepare).not.toHaveBeenCalled();
+      expect(firstAdapter.getById).not.toHaveBeenCalled();
+    });
+
+    test('accepts a copy without resolvers and generates its own', async () => {
+      const types = createLibraryTypes('OwnedStripped');
+      const firstAdapter = createStoreAdapter(tenantRecords('first', 'OwnedStripped'));
+      const first = createRuntime(firstAdapter);
+      registerLibrary(first, types);
+      first.createSchema();
+      const BookCopy = new GraphQLObjectType({
+        name: 'OwnedStrippedBookCopy',
+        fields: () => Object.fromEntries(Object.entries(types.Book.toConfig().fields)
+          .map(([name, field]) => [name, withoutResolver(field)])),
+      });
+      const second = createRuntime(createStoreAdapter({
+        OwnedStrippedAuthor: [{ _id: '1', name: 'second author' }],
+        OwnedStrippedBookCopy: [{ _id: '10', title: 'second book', authorId: '1' }],
+      }));
+      second.connect(null, types.Author, 'author', 'authors');
+      second.connect(null, BookCopy, 'bookCopy', 'bookCopies');
+
+      expect(BookCopy.getFields().author.extensions).toBe(types.Book.getFields().author.extensions);
+      const schema = second.createSchema();
+
+      const result = await graphql({ schema, source: '{ bookCopies { title author { name } } }', contextValue: {} });
+      expect(result.errors).toBeUndefined();
+      expect(result.data.bookCopies).toEqual([{ title: 'second book', author: { name: 'second author' } }]);
+      expect(firstAdapter.getById).not.toHaveBeenCalled();
+      expect(() => second.createSchema()).not.toThrow();
+    });
+
+    test.each([
+      ['without a resolver', withoutResolver, 'Bare'],
+      ['with an application resolver', (field) => ({ ...field, resolve: () => null }), 'App'],
+      // graphql-js never runs an interface field's resolver, so the generated one is harmless there.
+      ['with the generated resolver', (field) => field, 'Generated'],
+    ])('accepts an interface field copied from a bound type %s', async (label, copyField, suffix) => {
+      const prefix = `OwnedInterfaceCopy${suffix}`;
+      const types = createLibraryTypes(prefix);
+      const firstAdapter = createStoreAdapter();
+      const first = createRuntime(firstAdapter);
+      registerLibrary(first, types);
+      first.createSchema();
+      const BookLike = new GraphQLInterfaceType({
+        name: `${prefix}BookLike`,
+        fields: () => ({ author: copyField(types.Book.toConfig().fields.author) }),
+      });
+      const Paper = new GraphQLObjectType({
+        name: `${prefix}Paper`,
+        interfaces: [BookLike],
+        fields: () => ({
+          id: { type: GraphQLID },
+          title: { type: GraphQLString },
+          author: { type: types.Author, resolve: () => ({ name: 'paper author' }) },
+        }),
+      });
+      const second = createRuntime(createStoreAdapter({ [`${prefix}Paper`]: [{ _id: '1', title: 'paper' }] }));
+      second.connect(null, types.Author, 'author', 'authors');
+      second.connect(null, Paper, 'paper', 'papers');
+
+      expect(BookLike.getFields().author.extensions).toBe(types.Book.getFields().author.extensions);
+      const schema = second.createSchema();
+
+      const result = await graphql({ schema, source: '{ papers { title author { name } } }', contextValue: {} });
+      expect(result.errors).toBeUndefined();
+      expect(result.data.papers).toEqual([{ title: 'paper', author: { name: 'paper author' } }]);
+      expect(firstAdapter.getById).not.toHaveBeenCalled();
+      expect(firstAdapter.find).not.toHaveBeenCalled();
+    });
+
+    test('accepts a copy made before another runtime generated the resolvers', async () => {
+      const types = createLibraryTypes('OwnedEarlyCopy');
+      const Copy = copyType(types.Book);
+      const firstAdapter = createStoreAdapter(tenantRecords('first', 'OwnedEarlyCopy'));
+      const first = createRuntime(firstAdapter);
+      registerLibrary(first, types);
+      first.createSchema();
+      const second = createRuntime(createStoreAdapter(tenantRecords('second', 'OwnedEarlyCopy')));
+      second.connect(null, types.Author, 'author', 'authors');
+      second.connect(null, Copy, 'book', 'books');
+
+      const schema = second.createSchema();
+
+      const result = await graphql({ schema, source: '{ books { title author { name } } }', contextValue: {} });
+      expect(result.errors).toBeUndefined();
+      expect(result.data.books).toEqual([{ title: 'second book', author: { name: 'second author' } }]);
+      expect(firstAdapter.getById).not.toHaveBeenCalled();
+      expect(() => second.createSchema()).not.toThrow();
+    });
+  });
+
+  test('reserves unregistered relation types that an earlier schema reaches', async () => {
+    const types = createLibraryTypes('OwnedReserved');
+    const first = createRuntime(createStoreAdapter(tenantRecords('first', 'OwnedReserved')));
+    first.connect(null, new GraphQLObjectType({
+      name: 'OwnedReservedOther',
+      fields: { id: { type: GraphQLID }, label: { type: GraphQLString } },
+    }), 'other', 'others');
+    first.registerMutation('pickBook', 'Returns a book', new GraphQLInputObjectType({
+      name: 'OwnedReservedPick',
+      fields: { id: { type: GraphQLID } },
+    }), types.Book, async () => ({ _id: '10', title: 'first book', authorId: '1' }));
+    const schema = first.createSchema();
+    const secondAdapter = createStoreAdapter(tenantRecords('second', 'OwnedReserved'));
+    const second = createRuntime(secondAdapter);
+    second.connect(null, types.Author, 'author', 'authors');
+
+    expect(() => second.connect(null, types.Book, 'book', 'books')).toThrow(BOUND_TO_OTHER_RUNTIME);
+    expect(() => second.addNoEndpointType(types.Book)).toThrow(BOUND_TO_OTHER_RUNTIME);
+    const source = 'mutation { pickBook(input: { id: "10" }) { title author { name } } }';
+    const result = await graphql({ schema, source, contextValue: {} });
+    expect(result.data.pickBook).toEqual({ title: 'first book', author: null });
+    expect(secondAdapter.getById).not.toHaveBeenCalled();
+    expect(types.Book.getFields().author.resolve).toBeUndefined();
+  });
+
+  test('lets the reserving runtime register the type and rebuild its schema', async () => {
+    const types = createLibraryTypes('OwnedReclaimed');
+    const runtime = createRuntime(createStoreAdapter(tenantRecords('first', 'OwnedReclaimed')));
+    runtime.connect(null, types.Author, 'author', 'authors');
+    runtime.registerMutation('pickBook', 'Returns a book', new GraphQLInputObjectType({
+      name: 'OwnedReclaimedPick',
+      fields: { id: { type: GraphQLID } },
+    }), types.Book, async () => ({ _id: '10', title: 'first book', authorId: '1' }));
+    runtime.createSchema();
+    runtime.connect(null, types.Book, 'book', 'books');
+
+    const schema = runtime.createSchema();
+
+    const result = await graphql({ schema, source: '{ books { title author { name } } }', contextValue: {} });
+    expect(result.errors).toBeUndefined();
+    expect(result.data.books).toEqual([{ title: 'first book', author: { name: 'first author' } }]);
+  });
+
+  test('keeps the binding after an auth plugin wraps generated resolvers', () => {
+    const types = createLibraryTypes('OwnedAuth');
+    const first = createRuntime(createStoreAdapter());
+    registerLibrary(first, types);
+    const schema = first.createSchema();
+    const generated = types.Book.getFields().author.resolve;
+
+    auth.createAuthPlugin({}, { defaultPolicy: 'DENY' }).onSchemaChange({ schema });
+
+    expect(types.Book.getFields().author.resolve).not.toBe(generated);
+    const second = createRuntime(createStoreAdapter());
+    expect(() => second.connect(null, types.Book, 'book', 'books')).toThrow(BOUND_TO_OTHER_RUNTIME);
+  });
+
+  test('shares types without generated relation resolvers', async () => {
+    const Item = new GraphQLObjectType({
+      name: 'OwnedSharedItem',
+      fields: { id: { type: GraphQLID }, name: { type: GraphQLString } },
+    });
+    const Tag = new GraphQLObjectType({ name: 'OwnedSharedTag', fields: { label: { type: GraphQLString } } });
+    const Note = new GraphQLObjectType({
+      name: 'OwnedSharedNote',
+      fields: {
+        id: { type: GraphQLID },
+        tags: { type: new GraphQLList(Tag), extensions: { relation: { embedded: true } } },
+        item: {
+          type: Item,
+          extensions: { relation: { embedded: false, connectionField: 'itemId' } },
+          resolve: () => null,
+        },
+      },
+    });
+    const schemas = ['first', 'second'].map((tenant) => {
+      const runtime = createRuntime(createStoreAdapter({ OwnedSharedItem: [{ _id: '1', name: tenant }] }));
+      runtime.connect(null, Item, 'item', 'items');
+      runtime.addNoEndpointType(Tag);
+      runtime.connect(null, Note, 'note', 'notes');
+      return runtime.createSchema();
+    });
+
+    const results = await Promise.all(schemas.map((schema) => graphql({
+      schema, source: '{ items { name } }', contextValue: {},
+    })));
+
+    expect(results.map(({ data }) => data.items)).toEqual([[{ name: 'first' }], [{ name: 'second' }]]);
+  });
+
+  test('rebuilds schemas of the runtime that bound the types', () => {
+    const types = createLibraryTypes('OwnedRepeat', { listRelation: true });
+    const runtime = createRuntime(createStoreAdapter());
+    registerLibrary(runtime, types);
+
+    const first = runtime.createSchema();
+    const second = runtime.createSchema();
+
+    expect(printSchema(second)).toBe(printSchema(first));
+  });
+
+  test('rejects types the MongoDB runtime bound in a PostgreSQL runtime', () => {
+    const types = createLibraryTypes('OwnedMixed');
+    const mongo = createRuntime(createMongoAdapter());
+    mongo.preventCreatingCollection(true);
+    try {
+      registerLibrary(mongo, types);
+      mongo.createSchema();
+      const postgres = createPostgres({ pool: { connect: vi.fn(), query: vi.fn() }, schema: 'owned_mixed' });
+
+      expect(() => postgres.connect(null, types.Book, 'book', 'books')).toThrow(BOUND_TO_OTHER_RUNTIME);
+    } finally {
+      for (const { name } of Object.values(types)) {
+        if (mongoose.models[name]) mongoose.deleteModel(name);
+      }
+    }
   });
 });

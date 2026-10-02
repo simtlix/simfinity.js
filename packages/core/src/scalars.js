@@ -3,6 +3,7 @@ import {
 } from 'graphql';
 import { createValidatedScalar } from './scalars/factory.js';
 import { isEmailFormat } from './scalars/email.js';
+import { compilePattern, matchesPattern } from './scalars/pattern.js';
 
 /**
  * Email scalar - validates email format
@@ -152,7 +153,7 @@ export const createBoundedFloatScalar = (name, min, max) => {
  * @returns {GraphQLScalarType} A scalar type with pattern validation
  */
 export const createPatternStringScalar = (name, pattern, message) => {
-  const regex = typeof pattern === 'string' ? new RegExp(pattern) : pattern;
+  const regex = compilePattern(pattern);
   const errorMessage = message || 'Value does not match required pattern';
 
   return createValidatedScalar(
@@ -163,7 +164,7 @@ export const createPatternStringScalar = (name, pattern, message) => {
       if (typeof value !== 'string') {
         throw new Error('Value must be a string');
       }
-      if (!regex.test(value)) {
+      if (!matchesPattern(regex, value)) {
         throw new Error(errorMessage);
       }
     },

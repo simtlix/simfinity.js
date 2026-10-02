@@ -140,7 +140,8 @@ export interface CallToolResult {
 /**
  * Koa-style middleware run around every tool execution. May mutate
  * `call.args`, short-circuit by returning a result without calling `next()`,
- * or throw. Calling `next()` twice rejects with MCP_MIDDLEWARE_ERROR.
+ * or throw. Calling `next()` twice rejects with MCP_MIDDLEWARE_ERROR. Every
+ * function runs regardless of its declared parameter count.
  */
 export type MCPToolMiddleware = (
   call: MCPToolMiddlewareCall,
@@ -153,14 +154,37 @@ export type MCPContextFactory = (extra?: MCPCallExtra) => unknown;
 /** GraphQL context factory for the HTTP handler (invoked per request with the Express request). */
 export type MCPHTTPContextFactory = (req: any, extra?: MCPCallExtra) => unknown;
 
-/** Envelop-style plugin; only the `onSchemaChange` hook is invoked (in-process mode, once before serving). */
+/**
+ * Envelop-style plugin; only the `onSchemaChange` hook is invoked (in-process
+ * mode, once before serving). Other recognized hooks (`on*`, `instrumentation`,
+ * `requestDidStart`, `serverWillStart`) are ignored with a one-time warning;
+ * without `onSchemaChange`, a misspelling of it is rejected with
+ * MCP_INVALID_SCHEMA_PLUGIN.
+ */
 export interface EnvelopSchemaPlugin {
+  /**
+   * Wrap resolvers in place. A returned promise is awaited before tools run
+   * (Envelop and Yoga do not await it, so shared plugins should install
+   * synchronously).
+   */
   onSchemaChange?: (payload: {
     schema: GraphQLSchema;
+    /** No-op for the same schema; any other schema throws MCP_UNSUPPORTED_SCHEMA_REPLACEMENT. */
     replaceSchema: (schema: GraphQLSchema) => void;
-  }) => void;
+  }) => void | Promise<void>;
   [key: string]: unknown;
 }
+
+/**
+ * Any other plugin object accepted by `schemaPlugins`, such as an Envelop or
+ * Yoga `Plugin` or a class instance (interfaces and classes have no index
+ * signature, so they do not match {@link EnvelopSchemaPlugin}), including
+ * ones with `call` or `apply` members. Entries are validated at runtime.
+ * Functions (pass the plugin factory's result, not the factory) and promises
+ * are excluded through members that plugin objects do not have:
+ * `Symbol.hasInstance` (from the ES2015 `lib`) and `then`.
+ */
+export type SchemaPluginObject = object & { [Symbol.hasInstance]?: never; then?: never };
 
 /** Options for {@link generateMCPTools}. All optional; defaults preserve previous behavior. */
 export interface GenerateMCPToolsOptions {
@@ -188,12 +212,30 @@ export interface GenerateMCPToolsOptions {
   toolNamePrefix?: string;
   /** Per-tool overrides keyed by published tool name or unprefixed field name. */
   toolOverrides?: Record<string, MCPToolOverride>;
-  /** Koa-style middleware run around every tool execution. */
-  toolMiddleware?: MCPToolMiddleware[];
+  /**
+   * Koa-style middleware run around every tool execution. A single function is
+   * a one-element stack. Validated at setup (MCP_INVALID_MIDDLEWARE for a
+   * non-array, a non-function entry or an empty slot in a sparse array) and
+   * copied: later changes to the array have no effect.
+   */
+  toolMiddleware?: MCPToolMiddleware | MCPToolMiddleware[];
   /** Pagination / result-size guardrails. */
   limits?: MCPLimits;
-  /** Envelop-style plugins whose `onSchemaChange` hook is applied before serving (in-process mode only). */
-  schemaPlugins?: EnvelopSchemaPlugin[];
+  /**
+   * Envelop-style plugins whose `onSchemaChange` hook is applied before serving
+   * (in-process mode only; remote mode neither validates nor applies them).
+   * Every entry is validated before any hook runs: falsy entries are skipped;
+   * a non-array, a function (pass the factory's result), an array, a promise,
+   * a non-function `onSchemaChange`, an object with no plugin hooks, or one
+   * without `onSchemaChange` that declares a misspelling of it (a method or
+   * getter whose name starts with `onSchema`, or is at most two edits away
+   * from `onSchemaChange`, ignoring case, such as `onSchemaChanged` or
+   * `onSchemChange`) throws MCP_INVALID_SCHEMA_PLUGIN. Validation does not
+   * invoke getters other than `onSchemaChange`. Asynchronous hooks are
+   * awaited by the server and HTTP factories; `generateMCPTools` calls wait
+   * for them and reject if one fails.
+   */
+  schemaPlugins?: Array<EnvelopSchemaPlugin | SchemaPluginObject | false | null | undefined>;
 }
 
 /** Options for the MCP server / transport factories. */
@@ -225,6 +267,8 @@ export interface GeneratedMCPTools {
    * (GraphQL errors become `isError` results). Throws SimfinityError
    * MCP_TOOL_NOT_FOUND for unknown names and MCP_CALL_CANCELLED when
    * `extra.signal` is aborted before execution, including while awaiting context.
+   * Waits for asynchronous `schemaPlugins` hooks and rejects with their error if
+   * one failed.
    */
   callTool: (
     name: string,
@@ -260,6 +304,7 @@ export function graphqlArgsToJSONSchema(field: GraphQLField<any, any>): JSONSche
  * Create a transport-agnostic MCP Server exposing every GraphQL operation as a
  * tool. Requires the optional `@modelcontextprotocol/sdk` dependency (throws
  * SimfinityError MCP_SDK_NOT_INSTALLED / MCP_SDK_INCOMPATIBLE / MCP_SDK_LOAD_FAILED).
+ * Resolves after asynchronous `schemaPlugins` hooks finish, and rejects if one fails.
  */
 export function createMCPServer(
   schema: GraphQLSchema,
@@ -276,7 +321,8 @@ export function startStdioMCPServer(
  * Create an Express-style request handler serving the MCP over Streamable
  * HTTP. Tool definitions are built once; a fresh server + transport pair is
  * created per request, and a function `context` is invoked `(req, extra)` per
- * request.
+ * request. `toolMiddleware`, `limits` and `schemaPlugins` are validated, and
+ * asynchronous `schemaPlugins` hooks awaited, before the handler is returned.
  */
 export function createHTTPMCPHandler(
   schema: GraphQLSchema,
