@@ -277,6 +277,45 @@ describe('buildErrorFormatter', () => {
       return error instanceof InternalServerError ? new InternalServerError('Unexpected error') : undefined;
     });
 
+    test.each([true, false])('keeps scalar literal validation errors public (nodes: %s)', async (includeNodes) => {
+      const Input = new GraphQLScalarType({
+        name: 'FormatterWrappedInput',
+        serialize: (value) => value,
+        parseValue: (value) => value,
+        parseLiteral: (node) => {
+          const cause = new Error('Invalid string format');
+          throw new GraphQLError(cause.message, {
+            originalError: cause,
+            ...(includeNodes ? { nodes: node } : {}),
+          });
+        },
+      });
+      let resolved = false;
+      const inputSchema = new GraphQLSchema({
+        query: new GraphQLObjectType({
+          name: 'FormatterInputQuery',
+          fields: {
+            value: {
+              type: GraphQLString,
+              args: { input: { type: Input } },
+              resolve: () => { resolved = true; return 'ok'; },
+            },
+          },
+        }),
+      });
+      const result = await graphql({ schema: inputSchema, source: '{ value(input: "invalid") }' });
+
+      const formatted = masking()(result.errors[0]);
+
+      expect(resolved).toBe(false);
+      expect(serialize(formatted)).toMatchObject({
+        message: 'Invalid string format',
+        extensions: { code: 'BAD_REQUEST', status: 400 },
+      });
+      expect(formatted.path).toBeUndefined();
+      expect(formatted.locations).toEqual(includeNodes ? [{ line: 1, column: 16 }] : undefined);
+    });
+
     test.each([
       ['a String field that resolves to an object', '{ driftedString }', ['driftedString']],
       ['an isTypeOf mismatch', '{ driftedAccount { id } }', ['driftedAccount']],
@@ -321,12 +360,15 @@ describe('buildErrorFormatter', () => {
       expect(JSON.stringify(formatted)).not.toContain('token=private');
     });
 
-    test('masks an execution error that a server reports without a path', () => {
-      // How Yoga's executor reports an error a subscription's source stream raised.
+    test.each([false, true])('masks an explicitly internal source error without a path (nested: %s)', (nested) => {
+      // Mark the error at the source: an unmarked wrapper is indistinguishable from an input error.
       const sourceError = new Error('connect ECONNREFUSED 10.0.0.5:6379 password=redis-secret');
+      const internal = new InternalServerError('Subscription failed', sourceError);
       const callback = vi.fn();
+      const wrapped = new GraphQLError(internal.message, { originalError: internal });
+      const error = nested ? new GraphQLError(wrapped.message, { originalError: wrapped }) : wrapped;
 
-      const formatted = masking(callback)(new GraphQLError(sourceError.message, { originalError: sourceError }));
+      const formatted = masking(callback)(error);
 
       expect(callback.mock.calls[0][0]).toBeInstanceOf(InternalServerError);
       expect(callback.mock.calls[0][0].getCause()).toBe(sourceError);

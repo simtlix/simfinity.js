@@ -77,10 +77,11 @@ export class InternalServerError extends SimfinityError {
  * Creates an error formatter for a GraphQL server's error hook. A field error is a `GraphQLError`
  * with a `path`: for the one graphql-js creates around a value raised while resolving a field, such
  * as one a resolver threw, it classifies that value, and a raised `GraphQLError` that already had a
- * path is classified as a field error itself. A path-less `GraphQLError` that repeats the message of
- * a plain `Error` it wraps and has no code, such as a subscription source error under Yoga, has that
- * value classified. Any other input, such as a syntax, validation or variable error, which has no
- * path, is classified as is:
+ * path is classified as a field error itself. A path-less `GraphQLError` is a request error, even
+ * when it wraps a plain Error with the same message. An explicit `InternalServerError` cause,
+ * followed through GraphQLErrors only, is kept for masking; mark unexpected subscription source
+ * failures with it because a path-less wrapper cannot distinguish them from scalar input errors.
+ * Any other input, such as a syntax, validation or variable error, is classified as is:
  * - a `SimfinityError` is kept;
  * - a request `GraphQLError`, or one raised while resolving a field that has its own string
  *   `extensions.code` or a `SimfinityError` cause, becomes a `SimfinityError` with its own message

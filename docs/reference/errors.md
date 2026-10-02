@@ -71,7 +71,7 @@ const formatError = buildErrorFormatter((error) => {
 });
 ```
 
-The returned function takes the error your GraphQL server reports and classifies it. GraphQL servers report an error raised while resolving a field as a field error, a `GraphQLError` with the field `path`. Usually it is the `GraphQLError` that graphql-js creates around the raised value, with the same message, and the formatter then classifies the value that was raised, such as the one a resolver threw. A raised `GraphQLError` that already has a `path` is reported as it is and classified as a field error too, unless it repeats the message of its `originalError` and has no code of its own, in which case it is treated like the graphql-js wrapper. Request errors from a syntax, validation or variable problem have no `path`. A `GraphQLError` without a `path` that repeats the message of a plain `Error` it wraps and has no code of its own, such as the error a subscription's source stream raised under Yoga, wraps a value raised during execution, and that value is classified. Any other input is classified as it is:
+The returned function takes the error your GraphQL server reports and classifies it. GraphQL servers report an error raised while resolving a field as a field error, a `GraphQLError` with the field `path`. Usually it is the `GraphQLError` that graphql-js creates around the raised value, with the same message, and the formatter then classifies the value that was raised, such as the one a resolver threw. A raised `GraphQLError` that already has a `path` is reported as it is and classified as a field error too, unless it repeats the message of its `originalError` and has no code of its own, in which case it is treated like the graphql-js wrapper. Request errors from a syntax, validation or variable problem have no `path`. A `GraphQLError` without a `path` is classified as a request error, even when it wraps an `Error` with the same message: a scalar's `parseLiteral()` can report validation failures in that form. If its cause, followed through `GraphQLError`s only, is explicitly an `InternalServerError`, that internal error is kept so the callback can mask it. Any other input is classified as it is:
 
 | Classified value | Result |
 | --- | --- |
@@ -138,7 +138,24 @@ The outcomes above describe the errors graphql-js produces. Some servers change 
 
 - **Request error codes.** A code the server already set is the error's own `extensions.code`, so it is kept instead of `BAD_REQUEST`. Yoga sets `GRAPHQL_PARSE_FAILED` on syntax errors, and Apollo Server sets codes such as `GRAPHQL_VALIDATION_FAILED` and `BAD_USER_INPUT`.
 - **Yoga validation errors.** Yoga does not pass validation errors, including an invalid inline literal for a scalar, to `maskError`. They keep Yoga's own response, with the `GRAPHQL_VALIDATION_FAILED` code. Variable errors do reach the formatter and become `BAD_REQUEST`, with HTTP 400.
+- **Subscription source failures without a path.** Some servers, including Yoga, wrap a source-stream failure in a `GraphQLError` without `path`. Its shape can be identical to a scalar validation error, even when `nodes` or `locations` are present. The formatter cannot infer the execution phase from that error alone. Mark unexpected stream failures with `InternalServerError` at the source, as below, or mask them in a server hook that knows they came from execution. An unmarked `GraphQLError` without a path is treated as a request error and keeps its message.
 - **Non-`Error` values.** Yoga's executor turns a value that is not an `Error`, thrown by a resolver, into an `Error` before graphql-js wraps it: a string becomes the message, and an object with a `message` property keeps that message. The formatter then returns an `InternalServerError` with that text instead of `Unexpected error value`. Mask `InternalServerError` in the callback, as above, so that text is not sent to clients.
+
+When using the custom formatter with subscriptions, catch failures where the application reads its event source:
+
+```javascript
+async function* subscriptionEvents() {
+  try {
+    for await (const event of readApplicationEvents()) {
+      yield event;
+    }
+  } catch (cause) {
+    throw new InternalServerError('Subscription failed', cause);
+  }
+}
+```
+
+Here `readApplicationEvents()` is your application's event source. When the server reports a GraphQL error without a path, the formatter preserves the explicit internal cause through nested GraphQL wrappers, so the masking callback hides the error and can still log its original cause. Keep the server's default masking if you cannot identify unexpected source failures at that boundary.
 
 ## Core error codes
 

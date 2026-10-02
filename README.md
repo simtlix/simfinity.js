@@ -108,7 +108,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.2
+npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.3
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies. Keep them within the ranges above so your application and Simfinity share a single Mongoose and GraphQL instance; npm reports an out-of-range version as a peer conflict. The MCP transports need the optional peer `@modelcontextprotocol/sdk@^1.13.0`, which is not installed automatically, and `graphql-middleware` is not a Simfinity dependency.
@@ -152,7 +152,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.2 @modelcontextprotocol/sdk@^1.13.0
+npm install @simtlix/simfinity-mcp@3.5.3 @modelcontextprotocol/sdk@^1.13.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
@@ -1410,6 +1410,8 @@ To normalize errors in your GraphQL server, pass `simfinity.buildErrorFormatter(
 - A request `GraphQLError`, such as a syntax, validation or variable error, keeps its message and extensions, including the `http` status Yoga adds. So does a `GraphQLError` raised while resolving a field, but only when it has its own string `extensions.code` or a `SimfinityError` cause. Its code is its own `extensions.code`, or `BAD_REQUEST`, and its status is its `extensions.status`, or 500 for `INTERNAL_SERVER_ERROR` and 400 otherwise; a `SimfinityError` cause, such as one thrown by a custom scalar, supplies them instead. Input rejected by Simfinity's validated scalars, such as an invalid `EmailScalar` value, is therefore `BAD_REQUEST` (400), and the hidden `originalError` of an application `GraphQLError` is never exposed. A code the server already set is kept, such as Yoga's `GRAPHQL_PARSE_FAILED` or Apollo Server's `BAD_USER_INPUT`.
 - Any other `GraphQLError` raised while resolving a field, such as one a resolver threw without a code or one graphql-js raised because it could not serialize or type-check the resolved value, becomes an `InternalServerError` that keeps the message and the error as its cause. Some graphql-js messages print the resolved value.
 - Any other `Error` becomes an `InternalServerError` that keeps the message and the error as its cause; a non-Error value becomes `Unexpected error value` with no cause. Under Yoga, whose executor turns a thrown non-Error value into an `Error` with the value's text, that text becomes the `InternalServerError` message instead.
+
+A GraphQL error without `path` is treated as a request error, including a scalar literal validation error that wraps another error with the same message. For subscriptions, mark unexpected source-stream failures with `InternalServerError` before the server wraps them: those wrappers can be indistinguishable from request errors. For a GraphQL error without a path, the formatter keeps an explicit internal cause for masking.
 
 The callback receives the classified error and can return a replacement. To hide unexpected messages, branch on `error instanceof simfinity.InternalServerError`. The formatter returns a `GraphQLError` whose `originalError` is the classified error. See [buildErrorFormatter](docs/reference/errors.md#builderrorformatter), [server integration](docs/reference/errors.md#connect-it-to-your-server) and [server differences](docs/reference/errors.md#server-differences).
 

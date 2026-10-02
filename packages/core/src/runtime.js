@@ -196,13 +196,6 @@ const classifyValue = (value) => {
     : new InternalServerError('Unexpected error value');
 };
 
-// A GraphQLError without a path that repeats the message of the non-GraphQL Error it wraps, and has
-// no code of its own, also wraps a value raised during execution, such as the error a subscription's
-// source stream raised under Yoga. Request errors have no originalError or prefix its message.
-const wrapsExecutionValue = (error) => error.originalError instanceof Error
-  && !(error.originalError instanceof GraphQLError) && !(error.originalError instanceof SimfinityError)
-  && error.message === error.originalError.message && typeof error.extensions?.code !== 'string';
-
 // Errors raised while executing a field have a path; request errors (syntax, validation, variable
 // coercion) never do. GraphQL servers pass the GraphQLError that graphql-js created around the value
 // a resolver threw, and that value is classified, without unwrapping a GraphQLError the resolver
@@ -214,7 +207,11 @@ const wrapsExecutionValue = (error) => error.originalError instanceof Error
 const classifyError = (error) => {
   if (!(error instanceof GraphQLError)) return classifyValue(error);
   if (!Array.isArray(error.path)) {
-    return wrapsExecutionValue(error) ? classifyValue(thrownValueOf(error.originalError)) : classifyValue(error);
+    // Scalar validation errors can wrap a plain Error unchanged, with or without nodes. A server
+    // may report a source-stream failure in the same shape, so only an explicit internal cause
+    // identifies it as unexpected; applications must mark those failures at their source.
+    const cause = simfinityCauseOf(error);
+    return cause instanceof InternalServerError ? cause : classifyValue(error);
   }
   const thrown = isFieldErrorWrapper(error) ? thrownValueOf(error.originalError) : error;
   if (thrown instanceof GraphQLError && typeof thrown.extensions?.code !== 'string' && !simfinityCauseOf(thrown)) {
