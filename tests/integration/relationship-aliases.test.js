@@ -70,11 +70,57 @@ const createFixture = () => {
       label: { type: new GraphQLNonNull(GraphQLString) },
     }),
   });
+  // Two chained collections reuse one private connectionField that neither child declares.
+  const ChainAliasLeaf = new GraphQLObjectType({
+    name: 'ChainAliasLeaf',
+    fields: () => ({
+      id: { type: GraphQLID },
+      label: { type: new GraphQLNonNull(GraphQLString) },
+    }),
+  });
+  const ChainAliasMid = new GraphQLObjectType({
+    name: 'ChainAliasMid',
+    fields: () => ({
+      id: { type: GraphQLID },
+      label: { type: new GraphQLNonNull(GraphQLString) },
+      leaves: {
+        type: new GraphQLList(ChainAliasLeaf),
+        extensions: { relation: { connectionField: 'owner_private_id' } },
+      },
+    }),
+  });
+  const ChainAliasRoot = new GraphQLObjectType({
+    name: 'ChainAliasRoot',
+    fields: () => ({
+      id: { type: GraphQLID },
+      label: { type: new GraphQLNonNull(GraphQLString) },
+      mids: {
+        type: new GraphQLList(ChainAliasMid),
+        extensions: { relation: { connectionField: 'owner_private_id' } },
+      },
+    }),
+  });
+  // A self-referencing collection stores its private link on its own type.
+  const TreeAliasNode = new GraphQLObjectType({
+    name: 'TreeAliasNode',
+    fields: () => ({
+      id: { type: GraphQLID },
+      label: { type: new GraphQLNonNull(GraphQLString) },
+      children: {
+        type: new GraphQLList(TreeAliasNode),
+        extensions: { relation: { connectionField: 'parent_node_id' } },
+      },
+    }),
+  });
   return {
     AliasParent,
     StorageAliasChild,
     NamedAliasChild,
     PrivateAliasChild,
+    ChainAliasLeaf,
+    ChainAliasMid,
+    ChainAliasRoot,
+    TreeAliasNode,
   };
 };
 
@@ -83,6 +129,10 @@ const registerFixture = (api, fixture) => {
   api.connect(null, fixture.StorageAliasChild, 'storageAliasChild', 'storageAliasChildren');
   api.connect(null, fixture.NamedAliasChild, 'namedAliasChild', 'namedAliasChildren');
   api.connect(null, fixture.PrivateAliasChild, 'privateAliasChild', 'privateAliasChildren');
+  api.connect(null, fixture.ChainAliasLeaf, 'chainAliasLeaf', 'chainAliasLeaves');
+  api.connect(null, fixture.ChainAliasMid, 'chainAliasMid', 'chainAliasMids');
+  api.connect(null, fixture.ChainAliasRoot, 'chainAliasRoot', 'chainAliasRoots');
+  api.connect(null, fixture.TreeAliasNode, 'treeAliasNode', 'treeAliasNodes');
 };
 
 const execute = (backend, source, variableValues) => graphql({
@@ -92,6 +142,8 @@ const execute = (backend, source, variableValues) => graphql({
 });
 
 const describeWithDatabases = mongoUri && postgresUri ? describe : describe.skip;
+
+const sameId = (stored) => (stored == null ? stored : String(stored));
 
 describeWithDatabases('relationship connection field aliases', () => {
   const namespace = `aliases_${randomUUID().replaceAll('-', '')}`;
@@ -256,6 +308,99 @@ describeWithDatabases('relationship connection field aliases', () => {
         groupId: `${backend.name}-parent`,
         facts: { namedCount: 1 },
       }]);
+    }
+  });
+
+  it('reuses one private connectionField across chained collections', async () => {
+    for (const backend of backends) {
+      const added = await execute(
+        backend,
+        `mutation AddChainRoot($input: ChainAliasRootInput!) {
+          addchainAliasRoot(input: $input) { id label mids { id label leaves { id label } } }
+        }`,
+        {
+          input: {
+            label: `${backend.name}-root`,
+            mids: { added: [{ label: 'mid', leaves: { added: [{ label: 'leaf' }] } }] },
+          },
+        },
+      );
+
+      expect(added.errors).toBeUndefined();
+      const root = added.data.addchainAliasRoot;
+      expect(root.mids).toEqual([{ id: expect.any(String), label: 'mid', leaves: [{ id: expect.any(String), label: 'leaf' }] }]);
+      const [mid] = root.mids;
+
+      const read = await execute(
+        backend,
+        `query ReadChainRoot($id: ID) {
+          chainAliasRoot(id: $id) { mids { id label leaves { id label } } }
+        }`,
+        { id: root.id },
+      );
+      expect(read.errors).toBeUndefined();
+      expect(read.data.chainAliasRoot.mids).toEqual(root.mids);
+
+      if (backend.name === 'mongo') {
+        const db = mongoose.connection.db;
+        expect(sameId((await db.collection('ChainAliasMid').findOne({ label: 'mid' })).owner_private_id)).toBe(root.id);
+        expect(sameId((await db.collection('ChainAliasLeaf').findOne({ label: 'leaf' })).owner_private_id)).toBe(mid.id);
+      } else {
+        const rowOf = async (table, id) => (await pool.query(
+          `SELECT owner_private_id FROM "${namespace}"."${table}" WHERE id = $1`, [id],
+        )).rows[0];
+        expect(sameId((await rowOf('ChainAliasMid', mid.id)).owner_private_id)).toBe(root.id);
+        expect(sameId((await rowOf('ChainAliasLeaf', mid.leaves[0].id)).owner_private_id)).toBe(mid.id);
+      }
+    }
+  });
+
+  it('stores the private link of a self-referencing collection', async () => {
+    for (const backend of backends) {
+      const added = await execute(
+        backend,
+        `mutation AddTreeNode($input: TreeAliasNodeInput!) {
+          addtreeAliasNode(input: $input) { id label children { id label } }
+        }`,
+        { input: { label: `${backend.name}-tree`, children: { added: [{ label: 'kid' }] } } },
+      );
+      expect(added.errors).toBeUndefined();
+      const tree = added.data.addtreeAliasNode;
+      expect(tree.children).toEqual([{ id: expect.any(String), label: 'kid' }]);
+      const [kid] = tree.children;
+
+      const grown = await execute(
+        backend,
+        `mutation GrowTreeNode($input: TreeAliasNodeInputForUpdate!) {
+          updatetreeAliasNode(input: $input) { id children { id label } }
+        }`,
+        { input: { id: kid.id, children: { added: [{ label: 'grandkid' }] } } },
+      );
+      expect(grown.errors).toBeUndefined();
+      expect(grown.data.updatetreeAliasNode.children).toEqual([{ id: expect.any(String), label: 'grandkid' }]);
+      kid.children = grown.data.updatetreeAliasNode.children;
+
+      const read = await execute(
+        backend,
+        `query ReadTreeNode($id: ID) {
+          treeAliasNode(id: $id) { children { id label children { id label } } }
+        }`,
+        { id: tree.id },
+      );
+      expect(read.errors).toBeUndefined();
+      expect(read.data.treeAliasNode.children).toEqual(tree.children);
+
+      if (backend.name === 'mongo') {
+        const nodes = mongoose.connection.db.collection('TreeAliasNode');
+        expect(sameId((await nodes.findOne({ label: 'kid' })).parent_node_id)).toBe(tree.id);
+        expect(sameId((await nodes.findOne({ label: 'grandkid' })).parent_node_id)).toBe(kid.id);
+      } else {
+        const parentOf = async (id) => (await pool.query(
+          `SELECT parent_node_id FROM "${namespace}"."TreeAliasNode" WHERE id = $1`, [id],
+        )).rows[0].parent_node_id;
+        expect(sameId(await parentOf(kid.id))).toBe(tree.id);
+        expect(sameId(await parentOf(kid.children[0].id))).toBe(kid.id);
+      }
     }
   });
 });

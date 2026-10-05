@@ -61,6 +61,52 @@ const createBlogFixture = (runtime) => {
   runtime.connect(null, Post, 'qpvpost', 'qpvposts');
 };
 
+/**
+ * Secrets are scoped by a field named `aggregation`, which list queries filter like any other
+ * field. Boxes hold secrets as a collection, and holders reference one secret each.
+ */
+const createAggregationScopeFixture = (runtime) => {
+  const tenantOf = (context) => context?.user?.tenant ?? '__none__';
+  const findScope = async ({ args, context }) => {
+    if (context?.user?.role === 'ADMIN') return;
+    args.aggregation = { operator: 'EQ', value: tenantOf(context) };
+  };
+  // On the aggregate endpoint `args.aggregation` is the expression, so the scope adds a group.
+  const aggregateScope = async ({ args, context }) => {
+    if (context?.user?.role === 'ADMIN') return;
+    args.AND = [...(args.AND || []), { conditions: [{ field: 'aggregation', operator: 'EQ', value: tenantOf(context) }] }];
+  };
+  const Secret = new GraphQLObjectType({
+    name: 'QpgSecret',
+    extensions: { scope: { find: findScope, get_by_id: findScope, aggregate: aggregateScope } },
+    fields: () => ({
+      id: { type: GraphQLID },
+      key: { type: GraphQLString },
+      aggregation: { type: GraphQLString },
+      box: { type: Box, extensions: { relation: { connectionField: 'box' } } },
+    }),
+  });
+  const Box = new GraphQLObjectType({
+    name: 'QpgBox',
+    fields: () => ({
+      id: { type: GraphQLID },
+      name: { type: GraphQLString },
+      secrets: { type: new GraphQLList(Secret), extensions: { relation: { connectionField: 'box' } } },
+    }),
+  });
+  const Holder = new GraphQLObjectType({
+    name: 'QpgHolder',
+    fields: () => ({
+      id: { type: GraphQLID },
+      name: { type: GraphQLString },
+      secret: { type: Secret, extensions: { relation: { connectionField: 'secret' } } },
+    }),
+  });
+  runtime.connect(null, Box, 'qpgbox', 'qpgboxes');
+  runtime.connect(null, Secret, 'qpgsecret', 'qpgsecrets');
+  runtime.connect(null, Holder, 'qpgholder', 'qpgholders');
+};
+
 const backends = [
   {
     name: 'MongoDB',
@@ -73,6 +119,7 @@ const backends = [
       createMembershipScopeFixture(api, 'Qpi');
       createEmbeddedRoleScopeFixture(api, 'Qpi');
       createBlogFixture(api);
+      createAggregationScopeFixture(api);
       const schema = api.createSchema();
       for (const { model } of api.getRegistrations()) await model.createCollection();
       return { fixture, schema };
@@ -94,6 +141,7 @@ const backends = [
       createMembershipScopeFixture(api, 'Qpi');
       createEmbeddedRoleScopeFixture(api, 'Qpi');
       createBlogFixture(api);
+      createAggregationScopeFixture(api);
       const schema = api.createSchema();
       await api.initializeDatabase();
       return { fixture, schema };
@@ -132,6 +180,9 @@ const permissions = {
   QpvUser: { '*': auth.allow() },
   QpvBlog: { '*': auth.allow() },
   QpvPost: { '*': auth.allow() },
+  QpgBox: { '*': auth.allow() },
+  QpgSecret: { '*': auth.allow() },
+  QpgHolder: { '*': auth.allow() },
 };
 const countBy = (groupId) => `aggregation: {groupId: "${groupId}", facts: [{operation: COUNT, factName: "n", path: "id"}]}`;
 
@@ -139,6 +190,8 @@ for (const backend of backends) {
   describe.skipIf(!backend.enabled)(`${backend.name} client query path authorization`, () => {
     let schema;
     const teams = {};
+    const secrets = {};
+    let box;
     const roleViewer = { user: { role: 'viewer', orgs: [] } };
     const leadViewer = { user: { role: 'viewer', form: 'level' } };
     const run = async (source, context = viewer) => {
@@ -213,6 +266,11 @@ for (const backend of backends) {
         for (const name of ['ann', 'bob']) {
           await mutate('Post', { title: `${name} ${index}`, blog: { id: blog }, author: { id: blogAuthors[name] } }, 'Qpv');
         }
+      }
+      box = await mutate('Box', { name: 'box' }, 'Qpg');
+      for (const tenant of ['A', 'B']) {
+        secrets[tenant] = await mutate('Secret', { key: `s${tenant}`, aggregation: tenant, box: { id: box } }, 'Qpg');
+        await mutate('Holder', { name: `h${tenant}`, secret: { id: secrets[tenant] } }, 'Qpg');
       }
     }, 30000);
     afterAll(() => backend.destroy());
@@ -388,6 +446,46 @@ for (const backend of backends) {
         .toEqual(['ada@a.test', 'amy@a.test', 'ann@a.test', 'bob@b.test']);
       const members = await ok(`{qpiteam(id: "${teams.Beta}") {members(email: {operator: LIKE, value: "bob"}) {name}}}`, admin);
       expect(members.data.qpiteam.members).toEqual([{ name: 'bob' }]);
+    });
+
+    it('applies find, get_by_id, collection and joined scopes on a field named aggregation', async () => {
+      const byKey = 'sort: {terms: [{field: "key", order: ASC}]}';
+      const keys = async (source, field, context) => (
+        await ok(source, context)
+      ).data[field].map((row) => row.key);
+      expect(await keys(`{qpgsecrets(${byKey}) {key}}`, 'qpgsecrets')).toEqual(['sA']);
+      expect(await keys(`{qpgsecrets(${byKey}) {key}}`, 'qpgsecrets', admin)).toEqual(['sA', 'sB']);
+      const counted = await ok('{qpgsecrets(key: {operator: LIKE, value: "s"}, pagination: {page: 1, size: 10, count: true}) {key}}');
+      expect(counted.data.qpgsecrets).toEqual([{ key: 'sA' }]);
+      expect(counted.count).toBe(1);
+      // The scope's value replaces a client filter on the same field, so it cannot reach B.
+      expect((await ok('{qpgsecrets(aggregation: {value: "B"}) {key}}')).data.qpgsecrets).toEqual([{ key: 'sA' }]);
+      expect((await ok('{qpgsecrets(aggregation: {value: "B"}) {key}}', admin)).data.qpgsecrets).toEqual([{ key: 'sB' }]);
+
+      expect((await ok(`{qpgsecret(id: "${secrets.B}") {key}}`)).data.qpgsecret).toBeNull();
+      expect((await ok(`{qpgsecret(id: "${secrets.A}") {key}}`)).data.qpgsecret).toEqual({ key: 'sA' });
+      expect((await ok(`{qpgsecret(id: "${secrets.B}") {key}}`, admin)).data.qpgsecret).toEqual({ key: 'sB' });
+
+      const boxSecrets = `{qpgbox(id: "${box}") {secrets(${byKey}) {key}}}`;
+      expect((await ok(boxSecrets)).data.qpgbox.secrets).toEqual([{ key: 'sA' }]);
+      expect((await ok(boxSecrets, admin)).data.qpgbox.secrets).toEqual([{ key: 'sA' }, { key: 'sB' }]);
+
+      const byName = 'sort: {terms: [{field: "name", order: ASC}]}';
+      const holders = async (args, context) => (
+        await ok(`{qpgholders(${args}, ${byName}) {name}}`, context)
+      ).data.qpgholders.map((holder) => holder.name);
+      const anySecret = 'secret: {terms: [{path: "key", operator: LIKE, value: "s"}]}';
+      expect(await holders(anySecret)).toEqual(['hA']);
+      expect(await holders(anySecret, admin)).toEqual(['hA', 'hB']);
+      expect(await holders('OR: [{conditions: [{field: "secret.key", value: "sB"}]}, {conditions: [{field: "name", value: "hA"}]}]'))
+        .toEqual(['hA']);
+      expect((await ok(`{qpgholders(${byName}) {name secret {key}}}`)).data.qpgholders).toEqual([
+        { name: 'hA', secret: { key: 'sA' } },
+        { name: 'hB', secret: null },
+      ]);
+
+      const counts = await ok('{qpgsecrets_aggregate(aggregation: {groupId: "aggregation", facts: [{operation: COUNT, factName: "n", path: "id"}]}) {groupId facts}}');
+      expect(counts.data.qpgsecrets_aggregate).toEqual([{ groupId: 'A', facts: { n: 1 } }]);
     });
   });
 }

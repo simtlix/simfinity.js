@@ -3,6 +3,23 @@ import { SimfinityError } from '@simtlix/simfinity-core';
 
 const MAX_TRANSIENT_RETRIES = 5;
 const MAX_COMMIT_RETRIES = 5;
+// Full-jitter exponential backoff before each complete-transaction retry: a uniform wait below
+// 10, 20, 40, 80 and 160 ms, so conflicting transactions do not retry in lock-step.
+const RETRY_BASE_DELAY_MS = 10;
+const WRITE_CONFLICT = 112;
+
+const retryDelay = (attempt) => Math.random() * RETRY_BASE_DELAY_MS * 2 ** attempt;
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+const isWriteConflict = (error) => error?.code === WRITE_CONFLICT || error?.codeName === 'WriteConflict';
+
+// Same code and status as PostgreSQL's exhausted serialization and deadlock retries. The driver
+// error stays available to logging, as on InternalServerError.
+const retryExceeded = (error) => {
+  const exceeded = new SimfinityError('Concurrent write could not be completed', 'TRANSACTION_RETRY_EXCEEDED', 409);
+  exceeded.cause = error;
+  exceeded.getCause = () => exceeded.cause;
+  return exceeded;
+};
 
 const commitWithRetry = async (session) => {
   for (let attempt = 0; ; attempt++) {
@@ -45,7 +62,7 @@ export const withMongoTransaction = async (session, body, model, transactionOpti
     ? await mongoose.startSession() : await connection.startSession();
   let failed = false;
   try {
-    for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
+    for (let attempt = 0; ; attempt++) {
       if (transactionOptions) await mySession.startTransaction(transactionOptions);
       else await mySession.startTransaction();
       try {
@@ -65,14 +82,16 @@ export const withMongoTransaction = async (session, body, model, transactionOpti
             throw error;
           }
         }
-        const isTransient = error?.errorLabels?.includes('TransientTransactionError');
-        if (isTransient && attempt < MAX_TRANSIENT_RETRIES) {
+        if (!error?.errorLabels?.includes('TransientTransactionError')) throw error;
+        if (attempt < MAX_TRANSIENT_RETRIES) {
+          // Wait only once the failed attempt is aborted, so its locks are not held meanwhile.
+          await sleep(retryDelay(attempt));
           continue;
         }
-        throw error;
+        // Other exhausted transient failures (network, NoSuchTransaction) are not concurrency.
+        throw isWriteConflict(error) ? retryExceeded(error) : error;
       }
     }
-    throw new SimfinityError('Transaction exceeded retry limit', 'TRANSACTION_RETRY_EXCEEDED', 500);
   } catch (error) {
     failed = true;
     throw error;

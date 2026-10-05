@@ -53,6 +53,14 @@ export interface MongoAdapterOptions {
 }
 export interface MongoAdapter extends DatabaseAdapter {
   readonly referentialIntegrity: 'off' | 'transactional';
+  /**
+   * Accepts only an ObjectId or a 24-character hexadecimal string, normalized to lowercase, and
+   * throws `NOT_VALID_ID` (400) for anything else, including undefined, null and numbers. It never
+   * creates an identifier; use `new mongoose.Types.ObjectId()` for that.
+   */
+  castId(value: any): any;
+  /** Returns null for a hydrated nested path whose stored value is an explicit null; otherwise the value. */
+  readEmbeddedValue(value: any): any;
   /** After connecting MongoDB and createSchema(), await the transaction capability and existing-reference audit. */
   initialize(): Promise<void>;
 }
@@ -107,7 +115,10 @@ export function addNoEndpointType(gqltype: GraphQLObjectType): void;
  * holding a field copied with toConfig() after another runtime generated its
  * relation resolver, keeping the generated resolver or its extensions, are rejected (TYPE_BOUND_TO_OTHER_RUNTIME), before models
  * are created; a list or embedded relation to an unregistered type throws
- * UNREGISTERED_RELATION_TARGET.
+ * UNREGISTERED_RELATION_TARGET. A writable non-embedded list relation without a child
+ * connectionField, whose resolver Simfinity would generate, throws INVALID_MODEL (400). In default
+ * mode, one with its own resolver or readOnly only logs a warning and rejects nested writes
+ * (INVALID_MODEL, 500); referentialIntegrity 'transactional' rejects every such collection.
  */
 export function createSchema(
   includedQueryTypes?: GraphQLObjectType[] | null,
@@ -186,7 +197,10 @@ export function getInputType(type: GraphQLObjectType | { name: string }): GraphQ
  * The caller then owns retries, commit, abort, and cleanup; inactive sessions are rejected.
  * Exception: transactional reference integrity aborts on a violation, guarded-write error or ambiguous update result.
  * That mode requires snapshot read concern and majority write concern on supplied transactions.
- * Owned transactions retry transient failures and uncertain commits separately, up to five times each.
+ * Owned transactions retry transient failures after a short randomized backoff, and uncertain commits
+ * immediately, up to five times each. An exhausted write conflict throws TRANSACTION_RETRY_EXCEEDED
+ * (409) with the driver error as `cause`; a supplied session receives the raw driver error.
+ * Relation inputs need `{ id }`; a missing or malformed ID throws NOT_VALID_ID (400).
  */
 
 export function saveObject(
@@ -221,7 +235,12 @@ export interface FilterGroupInput {
   [key: string]: any;
 }
 
-/** Translate list-query arguments (filters, AND/OR, sort, pagination) into a MongoDB aggregation pipeline. */
+/**
+ * Translate list-query arguments (filters, AND/OR, sort, pagination) into a MongoDB aggregation
+ * pipeline. `input.aggregation` filters a field named `aggregation`; the aggregate stage is never
+ * built here. An embedded `.id` path uses the declared `id` member, except for entity types embedded
+ * as lists and supplied subdocument schemas without an `id` path, which use the subdocument `_id`.
+ */
 export function buildQuery(
   input: Record<string, any>,
   gqltype: GraphQLObjectType,

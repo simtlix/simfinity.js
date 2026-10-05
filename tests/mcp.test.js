@@ -8,9 +8,11 @@ import {
   GraphQLString,
   GraphQLFloat,
   GraphQLInt,
+  GraphQLList,
   GraphQLNonNull,
 } from 'graphql';
 import * as simfinity from '../packages/mongodb/src/index.js';
+import { createRuntime } from '../packages/core/src/index.js';
 
 describe('MCP generation', () => {
   let schema;
@@ -408,5 +410,91 @@ describe('MCP callTool execution', () => {
   it('throws for an unknown tool', async () => {
     const { callTool } = simfinity.generateMCPTools(stubSchema);
     await expect(callTool('doesNotExist', {})).rejects.toThrow();
+  });
+});
+
+describe('MCP classification of entities with a field named aggregation', () => {
+  const rows = [{ _id: 'r1', key: 'a', aggregation: 1 }, { _id: 'r2', key: 'b', aggregation: 10 }];
+  const calls = [];
+  const runtime = createRuntime({
+    bind() {},
+    prepare() {},
+    createModel: (gqltype) => ({ name: gqltype.name }),
+    castId: String,
+    withTransaction: async (session, body) => body(session || {}),
+    async getById(Model, id) { return rows.find((row) => row._id === id) || null; },
+    async find(Model, gqltype, args) {
+      calls.push({ method: 'find', args });
+      return rows;
+    },
+    async count(Model, gqltype, args) {
+      calls.push({ method: 'count', args });
+      return rows.length;
+    },
+    async aggregate(Model, gqltype, args) {
+      calls.push({ method: 'aggregate', args });
+      return [{ groupId: 'a', facts: { total: 1 } }];
+    },
+    async findChildren() { return []; },
+  });
+  const MetricType = new GraphQLObjectType({
+    name: 'McpMetric',
+    fields: () => ({
+      id: { type: GraphQLString },
+      key: { type: GraphQLString },
+      aggregation: { type: GraphQLInt },
+    }),
+  });
+  runtime.connect(null, MetricType, 'mcpmetric', 'mcpmetrics');
+  const schema = runtime.createSchema();
+
+  it('lists the generated list query and returns _meta.count', async () => {
+    const { tools, callTool } = simfinity.generateMCPTools(schema, { context: {} });
+    const list = tools.find((tool) => tool.name === 'mcpmetrics');
+    expect(list.title).toBe('List McpMetric');
+    expect(list.description).toContain('List and search McpMetric');
+    expect(list.inputSchema.required ?? []).not.toContain('aggregation');
+
+    calls.length = 0;
+    const response = await callTool('mcpmetrics', {
+      aggregation: { operator: 'GT', value: 5 },
+      pagination: { page: 1, size: 10, count: true },
+    });
+    expect(response.isError).toBe(false);
+    expect(response._meta).toEqual({ count: 2 });
+    expect(calls.map((call) => call.method).sort()).toEqual(['count', 'find']);
+    for (const call of calls) expect(call.args.aggregation).toEqual({ operator: 'GT', value: 5 });
+  });
+
+  it('keeps the generated _aggregate query an aggregate tool', async () => {
+    const { tools, callTool } = simfinity.generateMCPTools(schema, { context: {} });
+    const aggregate = tools.find((tool) => tool.name === 'mcpmetrics_aggregate');
+    expect(aggregate.title).toBe('Aggregate McpMetric');
+    expect(aggregate.inputSchema.required).toContain('aggregation');
+
+    const response = await callTool('mcpmetrics_aggregate', {
+      aggregation: { groupId: 'key', facts: [{ operation: 'SUM', factName: 'total', path: 'aggregation' }] },
+      pagination: { page: 1, size: 10, count: true },
+    });
+    expect(response.isError).toBe(false);
+    expect(response._meta).toBeUndefined();
+  });
+
+  it('classifies custom queries with an aggregation argument as aggregates, whatever its type', () => {
+    // Custom fields carry no generated-operation marker, so the argument-name heuristic applies.
+    const customSchema = new GraphQLSchema({
+      query: new GraphQLObjectType({
+        name: 'Query',
+        fields: {
+          metricsByFilter: {
+            type: new GraphQLList(MetricType),
+            args: { aggregation: { type: schema.getType('QLFilter') } },
+            resolve: () => [],
+          },
+        },
+      }),
+    });
+    const { tools } = simfinity.generateMCPTools(customSchema);
+    expect(tools.find((tool) => tool.name === 'metricsByFilter').title).toBe('Aggregate McpMetric');
   });
 });

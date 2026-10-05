@@ -11,6 +11,7 @@ import {
   GraphQLString,
 } from 'graphql';
 import mongoose from 'mongoose';
+import { getFieldStorageName } from '@simtlix/simfinity-core/internal/relation-storage';
 
 const isNonNullOfType = (fieldEntryType, graphQLType) => (
   fieldEntryType instanceof GraphQLNonNull && fieldEntryType.ofType instanceof graphQLType
@@ -90,8 +91,7 @@ const generateSchemaDefinition = (gqlType, nested = false) => {
     } else if (type instanceof GraphQLObjectType || isNonNullOfType(type, GraphQLObjectType)) {
       if (fieldEntry.extensions && fieldEntry.extensions.relation) {
         if (!fieldEntry.extensions.relation.embedded) {
-          const key = fieldEntry.extensions.relation.connectionField || fieldEntry.name;
-          schemaArg[key] = mongoose.Schema.Types.ObjectId;
+          schemaArg[getFieldStorageName(fieldEntryName, fieldEntry)] = mongoose.Schema.Types.ObjectId;
         } else {
           const entryType = unwrapNonNull(type);
           if (entryType === gqlType) {

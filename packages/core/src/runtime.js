@@ -1,4 +1,4 @@
-import { configureQueryLimits, getQueryMaxPageSize } from './query-limits.js';
+import { configureQueryLimits, getQueryMaxPageSize, paginationStages } from './query-limits.js';
 import { configureMutationLimits, getMaxNestedOperations } from './mutation-limits.js';
 import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
@@ -14,6 +14,9 @@ import QLValue from './const/QLValue.js';
 import QLSort from './const/QLSort.js';
 import { collectQueryPathEntries, collectQueryPaths, walkQueryPath } from './query-plan.js';
 import { relationFieldOwners } from './relation-owners.js';
+import {
+  getFieldStorageName, getListShape, markStoredIdentity, normalizeConnectionField,
+} from './relation-storage.js';
 import './introspection.js';
 
 // Resolvers Simfinity generates. Any other resolver on a registered type when its schema is first
@@ -78,7 +81,26 @@ const requireRegisteredType = (dict, type, fieldName, ownerName) => {
   }
   return registration;
 };
-const SCOPE_IGNORED_ARGS = new Set(['sort', 'pagination', 'aggregation']);
+// A joined scope is a find scope, so `aggregation` is a field filter there, as on list queries.
+const SCOPE_IGNORED_ARGS = new Set(['sort', 'pagination']);
+
+// A joined scope cannot sort or paginate the records it restricts. Its sort and pagination values are
+// checked for shape only (INVALID_SORT: non-empty terms with a field and an ASC or DESC order;
+// INVALID_PAGINATION: as on direct queries), then ignored; sort field names are not resolved.
+const assertScopeControlArg = (name, value) => {
+  if (name === 'pagination') {
+    paginationStages(value, false);
+    return;
+  }
+  if (!Array.isArray(value.terms) || !value.terms.length) {
+    throw new SimfinityError('Sort requires non-empty terms', 'INVALID_SORT', 400);
+  }
+  for (const term of value.terms) {
+    if (typeof term?.field !== 'string' || !['ASC', 'DESC'].includes(term.order)) {
+      throw new SimfinityError('Sort terms require a field and an ASC or DESC order', 'INVALID_SORT', 400);
+    }
+  }
+};
 
 // Moves a joined type's scope group below the relation path that entered it.
 const prefixScopeGroup = (group, prefix) => {
@@ -102,7 +124,11 @@ const prefixScopeArgs = (scopeArgs, prefix, typeName) => {
   const conditions = [];
   const groups = [];
   for (const [name, value] of Object.entries(scopeArgs)) {
-    if (value == null || SCOPE_IGNORED_ARGS.has(name)) continue;
+    if (value == null) continue;
+    if (SCOPE_IGNORED_ARGS.has(name)) {
+      assertScopeControlArg(name, value);
+      continue;
+    }
     if (name === 'AND') groups.push(...[].concat(value).map((group) => prefixScopeGroup(group, prefix)));
     else if (name === 'OR') {
       const branches = [].concat(value);
@@ -475,46 +501,6 @@ const unwrapListAndNonNull = (type) => {
   return unwrapped;
 };
 
-const getListShape = (type) => {
-  const outerNonNull = type instanceof GraphQLNonNull;
-  const listType = unwrapNonNull(type);
-  if (!(listType instanceof GraphQLList)) return null;
-  const itemNonNull = listType.ofType instanceof GraphQLNonNull;
-  return {
-    outerNonNull,
-    itemNonNull,
-    itemType: unwrapNonNull(listType.ofType),
-  };
-};
-
-const getFieldStorageName = (fieldName, field) => {
-  const relation = field.extensions?.relation;
-  return relation && !relation.embedded && !getListShape(field.type)
-    ? relation.connectionField || fieldName
-    : fieldName;
-};
-
-const normalizeConnectionField = (childType, declaredFieldName) => {
-  if (!declaredFieldName) {
-    return { declaredFieldName, graphqlFieldName: null, storageFieldName: null };
-  }
-  const childFields = childType.getFields();
-  let graphqlFieldName = childFields[declaredFieldName] ? declaredFieldName : null;
-  if (!graphqlFieldName) {
-    const aliasedField = Object.entries(childFields).find(([fieldName, field]) => (
-      getFieldStorageName(fieldName, field) === declaredFieldName
-    ));
-    graphqlFieldName = aliasedField?.[0] || null;
-  }
-  return {
-    declaredFieldName,
-    graphqlFieldName,
-    storageFieldName: graphqlFieldName
-      ? getFieldStorageName(graphqlFieldName, childFields[graphqlFieldName])
-      : declaredFieldName,
-  };
-};
-
 const wrapListInputType = (itemType, listShape, preserveOuterNonNull) => {
   const wrappedItem = listShape.itemNonNull ? new GraphQLNonNull(itemType) : itemType;
   const listType = new GraphQLList(wrappedItem);
@@ -821,8 +807,7 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
         || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
         if (fieldEntry.extensions && fieldEntry.extensions.relation) {
           if (!fieldEntry.extensions.relation.embedded) {
-            const connectionField = fieldEntry.extensions.relation.connectionField || fieldEntryName;
-            modelArgs[connectionField] = adapter.castId(args[fieldEntryName].id);
+            modelArgs[getFieldStorageName(fieldEntryName, fieldEntry)] = adapter.castId(args[fieldEntryName].id);
           } else {
             const fieldType = fieldEntry.type instanceof GraphQLNonNull
               ? fieldEntry.type.ofType : fieldEntry.type;
@@ -959,6 +944,25 @@ const completeEmbeddedValue = (fieldName, fieldEntry, value, patch = null) => {
   }
 };
 
+// An explicit null for a nullable member of a singular embedded patch clears that member, as a
+// top-level null clears a field. Lists become empty lists; other members, including nested embedded
+// objects and references (under their storage name), are stored as null rather than removed, since
+// a removed nested object is materialized again from its list defaults. A null for a non-null member
+// keeps the stored value, also as at the top level. Nested objects in the patch replace the stored
+// ones wholesale.
+const clearNullEmbeddedMembers = (merged, fieldEntry, patch) => {
+  if (!patch || typeof patch !== 'object') return;
+  const members = unwrapNonNull(fieldEntry.type).getFields();
+  for (const [memberName, value] of Object.entries(patch)) {
+    const member = members[memberName];
+    if (value !== null || !member || member.type instanceof GraphQLNonNull) continue;
+    const relation = member.extensions?.relation;
+    const listShape = getListShape(member.type);
+    if (relation && !relation.embedded && listShape) continue;
+    merged[getFieldStorageName(memberName, member)] = listShape ? [] : null;
+  }
+};
+
 const onUpdateSubject = async (Model, gqltype, controller, args, session, linkToParent, context) => {
   const materializedModel = await materializeModel(args, gqltype, linkToParent, 'UPDATE', session);
   const objectId = args.id;
@@ -982,6 +986,8 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
             completeEmbeddedValue(fieldEntryName, argTypes[fieldEntryName], newObjectData);
           } else {
             materializedModel.modelArgs[fieldEntryName] = { ...oldObjectData, ...newObjectData };
+            clearNullEmbeddedMembers(materializedModel.modelArgs[fieldEntryName],
+              argTypes[fieldEntryName], args[fieldEntryName]);
             completeEmbeddedValue(fieldEntryName, argTypes[fieldEntryName],
               materializedModel.modelArgs[fieldEntryName], newObjectData);
           }
@@ -992,13 +998,9 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
 
   for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
     if (args[fieldEntryName] === null && !(fieldEntry.type instanceof GraphQLNonNull)) {
-      const relation = fieldEntry.extensions?.relation;
-      const storageFieldName = relation && !relation.embedded && !(unwrapNonNull(fieldEntry.type) instanceof GraphQLList)
-        ? relation.connectionField || fieldEntryName
-        : fieldEntryName;
       materializedModel.modelArgs.$unset = {
         ...materializedModel.modelArgs.$unset,
-        [storageFieldName]: '',
+        [getFieldStorageName(fieldEntryName, fieldEntry)]: '',
       };
     }
   }
@@ -1079,6 +1081,7 @@ const onSaveObject = async (Model, gqltype, controller, args, session, linkToPar
 
 const saveObject = async (typeName, args, session, context) => {
   const type = typesDict.types[typeName];
+  assertCollectionWrites(type.gqltype, args);
   const snapshot = cloneInput(args, type.inputType);
   return adapter.withTransaction(session, (transaction) => onSaveObject(
     type.model, type.gqltype, type.controller, cloneInput(snapshot, type.inputType), transaction, null, context,
@@ -1109,10 +1112,50 @@ const assertNestedOperations = (gqltype, input, limit, state = { count: 0 }) => 
   }
 };
 
+// A referenced collection links each child to its parent through the child's connectionField.
+const hasConnectionField = (relation) => typeof relation.connectionField === 'string'
+  && relation.connectionField !== '';
+const isUnlinkedCollection = (field) => {
+  const relation = field.extensions?.relation;
+  const listShape = getListShape(field.type);
+  return !!relation && !relation.embedded && !!listShape
+    && listShape.itemType instanceof GraphQLObjectType && !hasConnectionField(relation);
+};
+// Null entries are skipped by every nested operation, so a list of only nulls writes nothing.
+const hasNestedItems = (items) => !Array.isArray(items) || items.some((item) => item !== null);
+const unlinkedCollectionError = (gqltype, fieldName) => new SimfinityError(
+  `${gqltype.name}.${fieldName} cannot store nested items because it has no connectionField`,
+  'INVALID_MODEL',
+  500,
+);
+
+// Rejects nested items for a collection without a connectionField, at every nesting level that
+// iterateOnCollectionFields executes, before anything is written or any controller hook runs. Such a
+// collection only exists with its own resolver or as readOnly; createSchema rejects the others.
+const assertCollectionWrites = (gqltype, input) => {
+  if (!input || typeof input !== 'object') return;
+  for (const [fieldName, field] of Object.entries(gqltype.getFields())) {
+    const value = input[fieldName];
+    const relation = field.extensions?.relation;
+    const listShape = getListShape(field.type);
+    if (value == null || !relation || relation.embedded || !listShape
+      || !(listShape.itemType instanceof GraphQLObjectType)) continue;
+    for (const key of ['added', 'updated', 'deleted']) {
+      const items = value[key];
+      if (!items) continue;
+      if (!hasConnectionField(relation) && hasNestedItems(items)) throw unlinkedCollectionError(gqltype, fieldName);
+      if (key !== 'deleted' && Array.isArray(items)) {
+        for (const item of items) assertCollectionWrites(listShape.itemType, item);
+      }
+    }
+  }
+};
+
 const executeOperation = (Model, gqltype, controller, args, operation, actionField,
   session, context, inputType) => {
   const limit = getMaxNestedOperations();
   if (limit !== null && operation !== operations.DELETE) assertNestedOperations(gqltype, args, limit);
+  if (operation !== operations.DELETE) assertCollectionWrites(gqltype, args);
   const inputSnapshot = operation === operations.DELETE ? args : cloneInput(args, inputType);
   return adapter.withTransaction(
     session,
@@ -1142,10 +1185,12 @@ const executeItemFunction = async (gqltype, collectionField, objectId, session,
   collectionFieldsList, operationType, context) => {
   const argTypes = gqltype.getFields();
   const collectionGQLType = unwrapListAndNonNull(argTypes[collectionField].type);
-  const connection = normalizeConnectionField(
-    collectionGQLType,
-    argTypes[collectionField].extensions.relation.connectionField,
-  );
+  const { relation } = argTypes[collectionField].extensions;
+  // Checked before the operation too; this also covers items that nested middleware added.
+  if (!hasConnectionField(relation) && hasNestedItems(collectionFieldsList)) {
+    throw unlinkedCollectionError(gqltype, collectionField);
+  }
+  const connection = normalizeConnectionField(collectionGQLType, relation.connectionField);
 
   const type = operationType === operations.UPDATE
     ? typesDictForUpdate.types[collectionGQLType.name] : typesDict.types[collectionGQLType.name];
@@ -1568,10 +1613,6 @@ const buildRootQuery = (name, includedTypes) => {
     if (!shouldNotBeIncludedInSchema(includedTypes, type.gqltype)) {
       const wasAddedAsNoEnpointType = !type.simpleEntityEndpointName;
       if (!wasAddedAsNoEnpointType) {
-        if (type.gqltype.getFields().id && !type.gqltype.getFields().id.resolve) {
-          type.gqltype.getFields().id.resolve = markGenerated((parent) => parent._id);
-        }
-
         rootQueryArgs.fields[type.simpleEntityEndpointName] = {
           type: type.gqltype,
           args: { id: { type: GraphQLID } },
@@ -1580,9 +1621,7 @@ const buildRootQuery = (name, includedTypes) => {
           },
         };
 
-        const argTypes = type.gqltype.getFields();
-
-        const argsObject = createArgsForQuery(argTypes);
+        const argsObject = createArgsForQuery(type.gqltype);
 
         rootQueryArgs.fields[type.listEntitiesEndpointName] = {
           type: new GraphQLList(type.gqltype),
@@ -1616,6 +1655,11 @@ const buildRootQuery = (name, includedTypes) => {
         };
 
         const aggregateArgsObject = { ...argsObject };
+        if (Object.hasOwn(type.gqltype.getFields(), 'aggregation')) {
+          warnOnce(type.gqltype, 'aggregation', `Configuration issue: ${type.gqltype.name}.aggregation has the name `
+            + `of the aggregation argument of ${type.listEntitiesEndpointName}_aggregate, so that endpoint cannot `
+            + 'filter it with a top-level argument; filter it in AND/OR group conditions or rename the field.');
+        }
         aggregateArgsObject.aggregation = {
           type: new GraphQLNonNull(QLTypeAggregationExpression),
         };
@@ -1645,7 +1689,9 @@ const buildRootQuery = (name, includedTypes) => {
   return new GraphQLObjectType(rootQueryArgs);
 };
 
+// Returns the registrations that a non-embedded relation of a registered type targets.
 const markReferencedTypesForModelGeneration = () => {
+  const referenced = new Set();
   Object.values(typesDict.types).forEach((typeInfo) => {
     Object.values(typeInfo.gqltype.getFields()).forEach((fieldEntry) => {
       const relation = fieldEntry.extensions?.relation;
@@ -1653,11 +1699,70 @@ const markReferencedTypesForModelGeneration = () => {
 
       const relatedType = unwrapListAndNonNull(fieldEntry.type);
       const relatedTypeInfo = typesDict.types[relatedType.name];
+      if (relatedTypeInfo) referenced.add(relatedTypeInfo);
       if (relatedTypeInfo && !relatedTypeInfo.endpoint) {
         relatedTypeInfo.needsModel = true;
       }
     });
   });
+  return referenced;
+};
+
+// Entity records keep their identity in `_id`; MongoDB records have no `id` value, while the SQL
+// store and other adapters may set both. Embedded-only types keep the default resolver, which
+// returns their declared `id` member.
+const installIdResolver = (gqltype) => {
+  const idField = gqltype.getFields().id;
+  if (idField && !idField.resolve) idField.resolve = markGenerated((parent) => parent._id ?? parent.id);
+};
+
+// An adapter that hydrates stored records may render an explicitly null singular embedded object as
+// an object (MongoDB nested paths do); readEmbeddedValue returns null for it. Nullable singular
+// embedded fields of registered types, and of the embedded types they reach, read through it. The
+// hook depends only on the value and reads no data, so these resolvers do not bind their types to
+// this runtime: another runtime that reaches a shared type reads the same value through it.
+const installEmbeddedValueResolvers = (gqltype, visited) => {
+  if (!(gqltype instanceof GraphQLObjectType) || visited.has(gqltype)) return;
+  visited.add(gqltype);
+  for (const [fieldName, fieldEntry] of Object.entries(gqltype.getFields())) {
+    if (fieldEntry.extensions?.relation?.embedded !== true) continue;
+    const listShape = getListShape(fieldEntry.type);
+    if (!listShape && !(fieldEntry.type instanceof GraphQLNonNull) && !fieldEntry.resolve) {
+      fieldEntry.resolve = markGenerated((parent) => adapter.readEmbeddedValue(parent?.[fieldName]));
+    }
+    installEmbeddedValueResolvers(listShape ? listShape.itemType : unwrapNonNull(fieldEntry.type), visited);
+  }
+};
+
+// Configuration issues this runtime already reported, per type, so a repeated createSchema call or a
+// type reached from several places logs each one once.
+const reportedIssues = new WeakMap();
+const warnOnce = (gqltype, key, message) => {
+  if (!reportedIssues.has(gqltype)) reportedIssues.set(gqltype, new Set());
+  const reported = reportedIssues.get(gqltype);
+  if (reported.has(key)) return;
+  reported.add(key);
+  console.warn(message);
+};
+
+// A writable referenced collection without a child connectionField would store unlinked children
+// through generated nested writes and read none back, so it is rejected before anything is built.
+// One with its own resolver only warns, and its nested writes are rejected per request; a readOnly
+// one warns unless it has its own resolver.
+const assertCollectionConnections = () => {
+  for (const { gqltype } of Object.values(typesDict.types)) {
+    for (const [fieldName, field] of Object.entries(gqltype.getFields())) {
+      if (!isUnlinkedCollection(field)) continue;
+      const problem = `${gqltype.name}.${fieldName} requires a child connectionField`;
+      const readOnly = !!field.extensions.readOnly;
+      const ownResolver = hasApplicationResolver(gqltype, fieldName);
+      if (!readOnly && !ownResolver) throw new SimfinityError(problem, 'INVALID_MODEL', 400);
+      if (!readOnly || !ownResolver) {
+        warnOnce(gqltype, `connectionField:${fieldName}`,
+          `Configuration issue: ${problem}; nested writes through it are rejected`);
+      }
+    }
+  }
 };
 
 const getRegistrations = () => Object.values(typesDict.types);
@@ -1668,7 +1773,12 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
   const schemaTypes = collectSchemaOutputTypes();
   schemaTypes.forEach(assertNotBoundElsewhere);
   schemaTypes.forEach(assertFieldsNotBoundElsewhere);
-  markReferencedTypesForModelGeneration();
+  assertCollectionConnections();
+  const referencedTypes = markReferencedTypesForModelGeneration();
+  // Entities, which keep their own stored identity: connect() types and relation targets.
+  Object.values(typesDict.types).forEach((typeInfo) => {
+    typeInfo.storedIdentity = typeInfo.endpoint === true || referencedTypes.has(typeInfo);
+  });
   if (adapter.prepare) {
     adapter.prepare(getRegistrations(), { createCollection: !preventCollectionCreation });
   }
@@ -1688,12 +1798,23 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
   Object.keys(typesDict.types).forEach((typeName) => {
     if (typesDictForUpdate.types[typeName]) {
       typesDictForUpdate.types[typeName].model = typesDict.types[typeName].model;
+      typesDictForUpdate.types[typeName].storedIdentity = typesDict.types[typeName].storedIdentity;
     }
   });
 
+  // Every entity resolves `id`, whatever the query and mutation allowlists include. The type object
+  // is marked too, so query paths of any runtime that shares it follow the same identity.
+  const embeddedValueTypes = new Set();
   Object.values(typesDict.types).forEach((typeInfo) => {
     if (typeInfo.gqltype) {
+      if (typeInfo.storedIdentity) {
+        markStoredIdentity(typeInfo.gqltype);
+        installIdResolver(typeInfo.gqltype);
+      }
       autoGenerateResolvers(typeInfo.gqltype);
+      if (typeof adapter.readEmbeddedValue === 'function') {
+        installEmbeddedValueResolvers(typeInfo.gqltype, embeddedValueTypes);
+      }
     }
   });
 
@@ -1766,8 +1887,7 @@ const autoGenerateResolvers = (gqltype) => {
         relation.connectionField || fieldName,
       );
       const relatedTypeInfo = requireRegisteredType(typesDict, relatedType, fieldName, gqltype.name);
-      const argsObject = createArgsForQuery(relatedTypeInfo.gqltype.getFields());
-      if (connection.graphqlFieldName) delete argsObject[connection.graphqlFieldName];
+      const argsObject = createArgsForQuery(relatedTypeInfo.gqltype, connection.graphqlFieldName);
 
       fieldEntry.args = formatArgs(Object.entries(argsObject));
       claimRelationField(fieldEntry, async (parent, args, context) => {
@@ -1783,7 +1903,7 @@ const autoGenerateResolvers = (gqltype) => {
           relatedTypeInfo.model,
           relatedTypeInfo.gqltype,
           connection.storageFieldName,
-          parent.id || parent._id,
+          parent._id ?? parent.id,
           params.args,
           null,
         );
@@ -1792,16 +1912,17 @@ const autoGenerateResolvers = (gqltype) => {
     } else if (fieldEntry.type instanceof GraphQLObjectType
       || (fieldEntry.type instanceof GraphQLNonNull && fieldEntry.type.ofType instanceof GraphQLObjectType)) {
       const relatedType = unwrapNonNull(fieldEntry.type);
-      const connectionField = relation.connectionField || fieldName;
+      const connectionField = getFieldStorageName(fieldName, fieldEntry);
 
       claimRelationField(fieldEntry, async (parent, args, context) => {
         const relatedTypeInfo = typesDict.types[relatedType.name];
         if (!relatedTypeInfo || !relatedTypeInfo.model) {
           throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
         }
-        const relatedId = parent[connectionField] || parent[fieldName];
-        const id = relatedId?._id || relatedId;
-        return id ? resolveById(relatedTypeInfo, { id: String(id) }, context, id) : null;
+        // Any stored identifier except null or an empty string, so numeric IDs such as 0 resolve.
+        const relatedId = parent[connectionField] ?? parent[fieldName];
+        const id = relatedId?._id ?? relatedId;
+        return id != null && id !== '' ? resolveById(relatedTypeInfo, { id: String(id) }, context, id) : null;
       });
       runtimeBoundTypes.set(gqltype, runtimeIdentity);
     }
@@ -1858,10 +1979,24 @@ const addNoEndpointType = (gqltype) => {
   typesDictForUpdate.types[gqltype.name] = { ...typesDict.types[gqltype.name] };
 };
 
-const createArgsForQuery = (argTypes) => {
+// Arguments that every list query and collection field generates, after the field filters.
+const LIST_QUERY_ARGS = ['pagination', 'sort', 'AND', 'OR'];
+
+// `omit` is a collection's back-reference field, which its parent supplies, so it gets no filter.
+// A field named like a generated argument gets no top-level filter either; it is reported once.
+const createArgsForQuery = (gqltype, omit = null) => {
     const argsObject = {};
+    const argTypes = gqltype.getFields();
+    for (const name of LIST_QUERY_ARGS) {
+      if (name !== omit && Object.hasOwn(argTypes, name)) {
+        warnOnce(gqltype, name, `Configuration issue: ${gqltype.name}.${name} has the name of a generated list `
+          + 'query argument, so list queries and collection fields cannot filter it with a top-level argument; '
+          + 'filter it in AND/OR group conditions or rename the field.');
+      }
+    }
 
     for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
+      if (fieldEntryName === omit) continue;
       argsObject[fieldEntryName] = {};
 
       if (fieldEntry.type instanceof GraphQLScalarType

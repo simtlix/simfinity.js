@@ -139,7 +139,7 @@ The `fields: () => ({ ... })` functions defer access to the types, allowing both
 `connectionField` has two related roles: on `Season.serie`, it is the ObjectId or UUID storage field in a season; on `Serie.seasons`, it identifies the child's back-reference. Use the matching field name on both sides, as in this example, so nested creation and collection queries share the same link.
 
 ::: tip Configure the stored link
-For a single-object reference, omitting `connectionField` uses the GraphQL field name consistently for model generation, creation, updates, clearing, and resolution. Set it when storage uses a different field name. For referenced collections, specify the child's back-reference explicitly. `displayField` is a descriptive UI hint, not a uniqueness rule or a persistence field.
+For a single-object reference, omitting `connectionField` uses the GraphQL field name consistently for model generation, creation, updates, clearing, and resolution. Set it when storage uses a different field name. For referenced collections, `connectionField` is required: `createSchema()` rejects a collection without it with `INVALID_MODEL` (400), except, in default MongoDB mode and with custom adapters, one with its own resolver or marked `readOnly`; see [relation](../reference/extensions#relation). When the child type declares no field for the back-reference, the link is stored privately, in an ObjectId field of the generated MongoDB model or a foreign-key column on PostgreSQL. This includes self-referencing collections, such as `Category.children`, and chained collections that reuse one name. `displayField` is a descriptive UI hint, not a uniqueness rule or a persistence field.
 :::
 
 ## Create children with their parent
@@ -180,7 +180,7 @@ mutation AddSeason($serieId: String!) {
 }
 ```
 
-The generated reference wrapper is `IdInputType`, whose `id` field is `String!`. Root entity IDs and update IDs use the GraphQL `ID` scalar; use the variable type required by the position you are filling.
+The generated reference wrapper is `IdInputType`, whose `id` field is `String!`. Root entity IDs and update IDs use the GraphQL `ID` scalar; use the variable type required by the position you are filling. A malformed `id`, such as one that is not an ObjectId on MongoDB, fails with `NOT_VALID_ID` (400) and nothing is stored.
 
 ## Query related records
 
@@ -204,7 +204,7 @@ query {
 
 Referenced collections receive scalar filters, relationship filters, logical groups, sorting, and pagination. Filtering inside `seasons(...)` changes the returned children; it does not exclude the parent serie. To filter the parent by its children, put a relationship filter on the root `series` query, as shown in [queries](./queries#filter-through-a-relationship).
 
-Generated referenced-object resolvers run the target type's `get_by_id` middleware and [query scope](./query-scope); generated collection resolvers run its `find` middleware and scope. They await callbacks and pass the request context. The original referenced ID or parent connection remains required even when middleware or scope changes filters. Scoped-out single records return `null`, and scoped-out children are omitted before pagination.
+Generated referenced-object resolvers run the target type's `get_by_id` middleware and [query scope](./query-scope); generated collection resolvers run its `find` middleware and scope. They await callbacks and pass the request context. The original referenced ID or parent connection remains required even when middleware or scope changes filters. Scoped-out single records return `null`, and scoped-out children are omitted before pagination. A generated single reference reads the related record whenever the stored value is not `null`, missing or an empty string, so numeric identifiers such as `0` from a custom SQL plugin or adapter resolve like any other ID.
 
 Within a request, generated single-reference fields are batched: `get_by_id` middleware still runs once per field, the bundled MongoDB and PostgreSQL adapters read the referenced records of one type and nesting level in one batched read (split at `maxPageSize`), and fields that reference the same ID share the returned record. References to a type with a `get_by_id` scope, IDs that middleware changes or the adapter cannot cast (such as non-ObjectId MongoDB `_id` values), executions without a context object, and Mongoose models with any `find` or `findOne` pre/post query hook are read one ID at a time. Even a hook function shared by both operations may branch on `this.op` or the filter shape, so those models retain the original `findOne` behavior. Collection fields keep one read per parent, because each parent's filters and pagination apply separately.
 
@@ -228,7 +228,7 @@ mutation EditSeasons($serieId: ID!, $seasonId: ID!, $removedId: ID!) {
 
 `added` creates records, `updated` changes records by ID, and `deleted` deletes child records. These changes share the parent mutation's transaction. To cap the number of entries one mutation may carry across all nesting levels, set `configureMutationLimits({ maxNestedOperations })`; see [limit nested collection operations](./mutations#limit-nested-collection-operations). Each child runs global middleware for the target type with the same request context and root argument shape: `save` and `update` receive `{ input }`; `delete` receives `{ id }`.
 
-After middleware, updated and deleted children are read in the transaction and must already belong to the current parent. A missing child raises `NOT_VALID_ID` (404); a child owned by another parent raises `FORBIDDEN` (403). Nested updates do not reparent foreign children. The required parent link is retained after child pre-write hooks, including ordinary field assignments and `$set`/`$unset` updates. A rejection aborts all changes in the parent mutation.
+After middleware, updated and deleted children are read in the transaction and must already belong to the current parent. A malformed child ID raises `NOT_VALID_ID` (400), a missing child raises `NOT_VALID_ID` (404), and a child owned by another parent raises `FORBIDDEN` (403). Nested updates do not reparent foreign children. The required parent link is retained after child pre-write hooks, including ordinary field assignments and `$set`/`$unset` updates. A rejection aborts all changes in the parent mutation.
 
 Parent ownership does not replace application permissions. Use child operation middleware or [controller checks](./controllers) to authorize writes; query scope is a read restriction. Root mutation permissions in the [authorization plugin](./authorization) do not automatically authorize nested child mutation inputs.
 

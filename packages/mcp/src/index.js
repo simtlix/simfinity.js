@@ -564,7 +564,10 @@ const hasArg = (field, name) => (field.args || []).some((arg) => arg.name === na
 
 /**
  * Classify a root field into a logical operation kind so descriptions, titles
- * and annotations can be tailored. Queries are classified structurally.
+ * and annotations can be tailored. Generated list and aggregate queries carry
+ * their operation in `extensions.simfinityQuery`, so a list query whose type
+ * declares a field named `aggregation` (and therefore has an `aggregation`
+ * filter argument) stays a list; other queries are classified structurally.
  * Generated CRUD mutations are recognized by the placeholder descriptions
  * Simfinity stamps on them ('add'/'update'/'delete' — see buildMutation in
  * src/index.js); name prefixes are only a fallback for description-less fields,
@@ -577,6 +580,14 @@ const hasArg = (field, name) => (field.args || []).some((arg) => arg.name === na
  */
 const classifyOperation = (kind, fieldName, field) => {
   if (kind === 'query') {
+    const query = field.extensions && field.extensions.simfinityQuery;
+    const generated = query ? query.operation : undefined;
+    if (generated === 'aggregate') {
+      return 'aggregate';
+    }
+    if (generated === 'find') {
+      return 'list';
+    }
     if (hasArg(field, 'aggregation')) {
       return 'aggregate';
     }

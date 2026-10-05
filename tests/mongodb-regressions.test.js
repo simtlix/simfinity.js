@@ -7,6 +7,56 @@ import {
 } from 'graphql';
 import * as simfinity from '../packages/mongodb/src/index.js';
 
+const adapterModes = [
+  ['default', () => simfinity.createMongoAdapter()],
+  ['transactional', () => simfinity.createMongoAdapter({ referentialIntegrity: 'transactional' })],
+];
+
+const createIsolatedRuntime = (createAdapter) => {
+  const runtime = simfinity.createRuntime(createAdapter());
+  runtime.preventCreatingCollection(true);
+  return runtime;
+};
+
+// Root.mids and Mid.leaves reuse one private connectionField that neither child declares.
+const createChainTypes = (prefix) => {
+  const types = {};
+  types.Leaf = new GraphQLObjectType({
+    name: `${prefix}Leaf`,
+    fields: () => ({ id: { type: GraphQLID }, label: { type: GraphQLString } }),
+  });
+  types.Mid = new GraphQLObjectType({
+    name: `${prefix}Mid`,
+    fields: () => ({
+      id: { type: GraphQLID },
+      label: { type: GraphQLString },
+      leaves: { type: new GraphQLList(types.Leaf), extensions: { relation: { connectionField: 'owner' } } },
+    }),
+  });
+  types.Root = new GraphQLObjectType({
+    name: `${prefix}Root`,
+    fields: () => ({
+      id: { type: GraphQLID },
+      label: { type: GraphQLString },
+      mids: { type: new GraphQLList(types.Mid), extensions: { relation: { connectionField: 'owner' } } },
+    }),
+  });
+  return types;
+};
+
+// A tree whose children collection stores its private link on the same type.
+const createTreeType = (prefix) => {
+  const Node = new GraphQLObjectType({
+    name: `${prefix}Node`,
+    fields: () => ({
+      id: { type: GraphQLID },
+      label: { type: GraphQLString },
+      children: { type: new GraphQLList(Node), extensions: { relation: { connectionField: 'parentNode' } } },
+    }),
+  });
+  return Node;
+};
+
 const createSession = () => ({
   startTransaction: vi.fn(),
   commitTransaction: vi.fn(),
@@ -212,6 +262,59 @@ describe('MongoDB compatibility regressions', () => {
 
     expect(result.errors).toBeUndefined();
     expect(controller.onUpdated).toHaveBeenCalledWith(updatedRecord, session, undefined);
+  });
+
+  test.each(adapterModes)('adds a private connection field to each level of chained collections that reuse one name (%s)', (mode, createAdapter) => {
+    const runtime = createIsolatedRuntime(createAdapter);
+    const types = createChainTypes(`MongoChain${mode}`);
+    runtime.connect(null, types.Leaf, `mongochain${mode}leaf`, `mongochain${mode}leaves`);
+    runtime.connect(null, types.Mid, `mongochain${mode}mid`, `mongochain${mode}mids`);
+    runtime.connect(null, types.Root, `mongochain${mode}root`, `mongochain${mode}roots`);
+    runtime.createSchema();
+
+    for (const type of [types.Mid, types.Leaf]) {
+      const model = runtime.getModel(type);
+      expect(model.schema.path('owner')?.instance).toBe('ObjectId');
+      expect(model.schema.indexes()).toContainEqual([{ owner: 1 }, expect.any(Object)]);
+    }
+    expect(runtime.getModel(types.Root).schema.path('owner')).toBeUndefined();
+  });
+
+  test.each(adapterModes)('adds a private connection field to a self-referencing collection (%s)', (mode, createAdapter) => {
+    const runtime = createIsolatedRuntime(createAdapter);
+    const Node = createTreeType(`MongoTree${mode}`);
+    runtime.connect(null, Node, `mongotree${mode}node`, `mongotree${mode}nodes`);
+    runtime.createSchema();
+
+    expect(runtime.getModel(Node).schema.path('parentNode')?.instance).toBe('ObjectId');
+  });
+
+  test.each(adapterModes)('the %s adapter rejects a collection without connectionField at startup', (mode, createAdapter) => {
+    const runtime = createIsolatedRuntime(createAdapter);
+    const Thing = new GraphQLObjectType({
+      name: `MongoMissingConnection${mode}Thing`,
+      fields: () => ({ id: { type: GraphQLID }, label: { type: GraphQLString } }),
+    });
+    const Owner = new GraphQLObjectType({
+      name: `MongoMissingConnection${mode}Owner`,
+      fields: () => ({
+        id: { type: GraphQLID },
+        things: { type: new GraphQLList(Thing), extensions: { relation: { embedded: false } } },
+      }),
+    });
+    runtime.connect(null, Thing, `mongomissing${mode}thing`, `mongomissing${mode}things`);
+    runtime.connect(null, Owner, `mongomissing${mode}owner`, `mongomissing${mode}owners`);
+
+    let error;
+    try {
+      runtime.createSchema();
+    } catch (failure) {
+      error = failure;
+    }
+    expect(error).toMatchObject({
+      message: `${Owner.name}.things requires a child connectionField`,
+      extensions: { code: 'INVALID_MODEL', status: 400 },
+    });
   });
 
   test('preserves multiple flat terms on the same relation', async () => {

@@ -23,7 +23,12 @@ const typedFixture = () => {
     detail: { type: Detail, extensions: { relation: { embedded: true } } },
     entries: { type: new GraphQLList(Detail), extensions: { relation: { embedded: true } } },
   } });
-  return { Item, Detail };
+  // Fields named like generated query arguments: only `sort` is shadowed on list queries.
+  const NameCollision = new GraphQLObjectType({ name: 'ParityNameCollision', fields: {
+    id: { type: GraphQLID }, key: { type: new GraphQLNonNull(GraphQLString) },
+    conditions: { type: GraphQLString }, aggregation: { type: GraphQLInt }, sort: { type: GraphQLString },
+  } });
+  return { Item, Detail, NameCollision };
 };
 
 describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL GraphQL parity', () => {
@@ -47,6 +52,7 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL GraphQL parity', 
       if (!backend.api.initializeDatabase) backend.api.preventCreatingCollection(true);
       backend.api.addNoEndpointType(backend.fixture.Detail);
       backend.api.connect(null, backend.fixture.Item, 'parityItem', 'parityItems');
+      backend.api.connect(null, backend.fixture.NameCollision, 'parityNameCollision', 'parityNameCollisions');
       for (const registration of backend.relations.registrations) {
         if (registration.endpoint) backend.api.connect(null, registration.gqltype, registration.simpleEntityEndpointName, registration.listEntitiesEndpointName, registration.controller);
         else backend.api.addNoEndpointType(registration.gqltype);
@@ -63,6 +69,10 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL GraphQL parity', 
       ];
       for (const input of inputs) {
         const result = await execute(backend, 'mutation($input:ParityItemInput!){addparityItem(input:$input){key}}', { input });
+        expect(result.errors).toBeUndefined();
+      }
+      for (const input of [{ key: 'a', conditions: 'c1', aggregation: 1, sort: 's1' }, { key: 'b', conditions: 'c2', aggregation: 10, sort: 's2' }]) {
+        const result = await execute(backend, 'mutation($input:ParityNameCollisionInput!){addparityNameCollision(input:$input){key}}', { input });
         expect(result.errors).toBeUndefined();
       }
       const star = await backend.api.getModel(backend.relations.types.ContractStar).create({ name: 'Lead' });
@@ -155,5 +165,42 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL GraphQL parity', 
     await assertParity('{parityItems_aggregate(aggregation:{groupId:"kind",facts:[{operation:COUNT,factName:"count",path:"id"},{operation:SUM,factName:"sum",path:"score"},{operation:AVG,factName:"avg",path:"score"},{operation:MIN,factName:"min",path:"score"},{operation:MAX,factName:"max",path:"score"}]}){groupId facts}}');
     await assertParity('{contractseries_aggregate(aggregation:{groupId:"tenant",facts:[{operation:COUNT,factName:"count",path:"seasons.id"},{operation:SUM,factName:"sum",path:"seasons.number"}]}){groupId facts}}');
     await assertParity('{parityItems_aggregate(aggregation:{groupId:"kind",facts:[{operation:MIN,factName:"min",path:"enabled"},{operation:MAX,factName:"max",path:"enabled"}]}){groupId facts}}');
+  });
+
+  describe('fields named like query arguments', () => {
+    const keys = async (args, expected) => {
+      const data = await assertParity(`{parityNameCollisions(${args}){key}}`);
+      expect(data.parityNameCollisions.map((row) => row.key)).toEqual(expected);
+    };
+
+    it('filters a top-level field named conditions', async () => {
+      await keys('conditions:{value:"c1"}', ['a']);
+      await keys('conditions:{operator:IN,value:["c1","c2"]},sort:{terms:[{field:"key",order:ASC}]}', ['a', 'b']);
+    });
+
+    it('filters a top-level field named aggregation on list and count queries', async () => {
+      await keys('aggregation:{operator:GT,value:5}', ['b']);
+      const counts = [];
+      const results = [];
+      for (const backend of backends) {
+        const context = {};
+        const result = await execute(backend, '{parityNameCollisions(aggregation:{operator:LT,value:5},pagination:{page:1,size:10,count:true}){key}}', undefined, context);
+        expect(result.errors).toBeUndefined();
+        results.push(result.data.parityNameCollisions); counts.push(context.count);
+      }
+      expect(results).toEqual([[{ key: 'a' }], [{ key: 'a' }]]);
+      expect(counts).toEqual([1, 1]);
+    });
+
+    it('filters and sorts a field named sort through groups and sort terms', async () => {
+      await keys('AND:[{conditions:[{field:"sort",value:"s2"}]}]', ['b']);
+      await keys('sort:{terms:[{field:"sort",order:DESC}]}', ['b', 'a']);
+      await keys('OR:[{conditions:[{field:"conditions",value:"c1"}]},{conditions:[{field:"aggregation",operator:GTE,value:10}]}],sort:{terms:[{field:"sort",order:ASC}]}', ['a', 'b']);
+    });
+
+    it('keeps the aggregation expression on the aggregate endpoint and filters the field in groups', async () => {
+      const data = await assertParity('{parityNameCollisions_aggregate(aggregation:{groupId:"conditions",facts:[{operation:SUM,factName:"total",path:"aggregation"}]},AND:[{conditions:[{field:"aggregation",operator:GT,value:5}]}]){groupId facts}}');
+      expect(data.parityNameCollisions_aggregate).toEqual([{ groupId: 'c2', facts: { total: 10 } }]);
+    });
   });
 });

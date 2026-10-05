@@ -1,5 +1,5 @@
 import {
-  afterAll, beforeAll, beforeEach, describe, expect, test,
+  afterAll, beforeAll, beforeEach, describe, expect, test, vi,
 } from 'vitest';
 import mongoose from 'mongoose';
 import {
@@ -8,6 +8,7 @@ import {
 import {
   auth, createMongoAdapter, createRuntime, createValidatedScalar, SimfinityError,
 } from '../packages/mongodb/src/index.js';
+import { markStoredIdentity } from '@simtlix/simfinity-core/internal/relation-storage';
 import { createMongoQueries } from '../packages/mongodb/src/mongo/queries.js';
 
 const idField = { type: GraphQLID };
@@ -277,6 +278,182 @@ describe('MongoDB filters on chained validated scalars', () => {
   });
 });
 
+describe('MongoDB embedded id paths', () => {
+  const hex = '0123456789abcdef01234567';
+  const otherHex = '76543210fedcba9876543210';
+  const objectId = (value) => new mongoose.Types.ObjectId(value);
+  // Embedded-only: reads return the declared `id` member.
+  const LineType = new GraphQLObjectType({
+    name: 'QueryPathLine',
+    fields: { id: idField, sku: { type: GraphQLString } },
+  });
+  // An entity type (a runtime marked it with stored identity): reads return the stored `_id` when there is one.
+  const PartType = new GraphQLObjectType({
+    name: 'QueryPathPart',
+    fields: { id: idField, sku: { type: GraphQLString } },
+  });
+  markStoredIdentity(PartType);
+  const OrderType = new GraphQLObjectType({
+    name: 'QueryPathOrder',
+    fields: {
+      id: idField,
+      line: { type: LineType, extensions: { relation: { embedded: true } } },
+      lines: { type: new GraphQLList(LineType), extensions: { relation: { embedded: true } } },
+      part: { type: PartType, extensions: { relation: { embedded: true } } },
+      parts: { type: new GraphQLList(PartType), extensions: { relation: { embedded: true } } },
+      meta: { type: MetaType, extensions: { relation: { embedded: true } } },
+    },
+  });
+  const { ObjectId } = mongoose.Schema.Types;
+  // Same shape as a generated model: singular embedded objects are nested paths without `_id`, and
+  // embedded list items are subdocuments with Mongoose's automatic `_id` beside the declared `id`.
+  const generatedSchema = new mongoose.Schema({
+    line: { id: ObjectId, sku: String },
+    lines: [{ id: ObjectId, sku: String }],
+    part: { id: ObjectId, sku: String },
+    parts: [{ id: ObjectId, sku: String }],
+    meta: { label: String, ref: ObjectId },
+  });
+  // A supplied model whose subdocument schemas store only `_id`, read through Mongoose's `id` virtual.
+  const suppliedSchema = new mongoose.Schema({
+    line: new mongoose.Schema({ sku: String }),
+    lines: [new mongoose.Schema({ sku: String })],
+    part: new mongoose.Schema({ sku: String }),
+    parts: [new mongoose.Schema({ sku: String })],
+  });
+  markStoredIdentity(OrderType);
+  const registrations = [
+    { gqltype: OrderType, endpoint: true },
+    { gqltype: PartType, endpoint: true },
+    { gqltype: LineType, endpoint: false },
+  ];
+  const queriesFor = (schema) => {
+    const orderModel = { collection: { collectionName: 'orders' }, schema };
+    const byType = new Map([[OrderType, orderModel], [UserType, modelFor('users')]]);
+    return createMongoQueries({ getModel: (type) => byType.get(type) ?? null, getRegistrations: () => registrations });
+  };
+  const generated = queriesFor(generatedSchema);
+  const supplied = queriesFor(suppliedSchema);
+  const schemaLess = queriesFor(undefined);
+  const term = (path, operator, value) => ({ terms: [{ path, operator, value }] });
+
+  test('filters embedded-only objects by their declared id on a generated model', async () => {
+    expect(matchOf(await generated.buildQuery({ line: term('id', 'EQ', hex) }, OrderType)))
+      .toEqual({ 'line.id': objectId(hex) });
+    expect(matchOf(await generated.buildQuery({ lines: term('id', 'IN', [hex, otherHex]) }, OrderType)))
+      .toEqual({ 'lines.id': { $in: [objectId(hex), objectId(otherHex)] } });
+    // NE used to compare the absent `line._id`, so it matched every record.
+    expect(matchOf(await generated.buildQuery({ line: term('id', 'NE', hex) }, OrderType)))
+      .toEqual({ 'line.id': { $ne: objectId(hex) } });
+    expect(matchOf(await generated.buildQuery({ OR: [
+      { conditions: [{ field: 'line', path: 'id', value: hex }] },
+      { conditions: [{ field: 'lines.id', operator: 'NIN', value: [otherHex] }] },
+    ] }, OrderType))).toEqual({ $or: [{ 'line.id': objectId(hex) }, { 'lines.id': { $nin: [objectId(otherHex)] } }] });
+  });
+
+  test('sorts and groups by declared embedded ids while root and joined ids stay _id', async () => {
+    const sorted = await generated.buildQuery({ sort: { terms: [
+      { field: 'line.id', order: 'ASC' }, { field: 'lines.id', order: 'DESC' },
+      { field: 'id', order: 'ASC' }, { field: 'meta.ref.id', order: 'ASC' },
+    ] } }, OrderType);
+    expect(sorted.find((stage) => stage.$sort)).toEqual({ $sort: {
+      'line.id': 1, 'lines.id': -1, _id: 1, '__sf_l0._id': 1,
+    } });
+
+    const grouped = await generated.buildAggregationQuery({}, OrderType, {
+      groupId: 'lines.id',
+      facts: [{ operation: 'MIN', factName: 'first', path: 'line.id' }, { operation: 'COUNT', factName: 'n', path: 'id' }],
+    });
+    expect(groupOf(grouped)).toEqual({ _id: '$lines.id', fact_0: { $min: '$line.id' }, fact_1: { $sum: 1 } });
+  });
+
+  test('keeps the stored subdocument _id for entity types embedded as lists', async () => {
+    // The entity id resolver returns `parent._id ?? parent.id`: list items have `_id`, nested objects do not.
+    expect(matchOf(await generated.buildQuery({ parts: term('id', 'EQ', hex) }, OrderType)))
+      .toEqual({ 'parts._id': objectId(hex) });
+    expect(matchOf(await generated.buildQuery({ part: term('id', 'NE', hex) }, OrderType)))
+      .toEqual({ 'part.id': { $ne: objectId(hex) } });
+    const grouped = await generated.buildAggregationQuery({}, OrderType, {
+      groupId: 'parts.id', facts: [{ operation: 'MAX', factName: 'last', path: 'part.id' }],
+    });
+    expect(groupOf(grouped)).toEqual({ _id: '$parts._id', fact_0: { $max: '$part.id' } });
+  });
+
+  test('keeps _id for supplied subdocument schemas that declare no id path', async () => {
+    expect(matchOf(await supplied.buildQuery({
+      line: term('id', 'EQ', hex), lines: term('id', 'IN', [hex]), part: term('id', 'EQ', hex), parts: term('id', 'NE', hex),
+    }, OrderType))).toEqual({
+      'line._id': objectId(hex),
+      'lines._id': { $in: [objectId(hex)] },
+      'part._id': objectId(hex),
+      'parts._id': { $ne: objectId(hex) },
+    });
+  });
+
+  test('uses the declared id and casts ObjectId values when the model has no schema', async () => {
+    const pipeline = await schemaLess.buildQuery({
+      line: term('id', 'EQ', hex), parts: term('id', 'IN', [hex]), sort: { terms: [{ field: 'lines.id', order: 'ASC' }] },
+    }, OrderType);
+    expect(matchOf(pipeline)).toEqual({ 'line.id': objectId(hex), 'parts.id': { $in: [objectId(hex)] } });
+    expect(pipeline.find((stage) => stage.$sort)).toEqual({ $sort: { 'lines.id': 1 } });
+  });
+
+  test.each([
+    ['generated', 'bad'],
+    ['generated', 12],
+    ['schema-less', 12],
+    ['schema-less', 'aaaaaaaaaaaa'],
+  ])('rejects a malformed embedded id on a %s model: %j', async (name, value) => {
+    const built = name === 'generated' ? generated : schemaLess;
+    await expectRejection(built.buildQuery({ line: term('id', 'EQ', value) }, OrderType), 'INVALID_FILTER_VALUE');
+  });
+});
+
+describe('MongoDB fields named like query controls', () => {
+  const CollisionType = new GraphQLObjectType({
+    name: 'QueryPathCollision',
+    fields: {
+      id: idField,
+      key: { type: GraphQLString },
+      conditions: { type: GraphQLString },
+      aggregation: { type: GraphQLInt },
+    },
+  });
+  const collisionQueries = createMongoQueries({
+    getModel: (type) => (type === CollisionType ? modelFor('collisions') : null), getRegistrations: () => [],
+  });
+
+  test('filters a field named aggregation on find and count, and keeps the expression on aggregate', async () => {
+    const filter = { aggregation: { operator: 'GT', value: 5 } };
+    expect(matchOf(await collisionQueries.buildQuery(filter, CollisionType))).toEqual({ aggregation: { $gt: 5 } });
+    expect(await collisionQueries.buildQuery(filter, CollisionType, true))
+      .toEqual([{ $match: { aggregation: { $gt: 5 } } }, { $count: 'size' }]);
+
+    const expression = { groupId: 'key', facts: [{ operation: 'SUM', factName: 'total', path: 'aggregation' }] };
+    const grouped = await collisionQueries.buildAggregationQuery({
+      aggregation: expression,
+      AND: [{ conditions: [{ field: 'aggregation', operator: 'LT', value: 9 }] }],
+    }, CollisionType, expression);
+    expect(matchOf(grouped)).toEqual({ aggregation: { $lt: 9 } });
+    expect(groupOf(grouped)).toEqual({ _id: '$key', fact_0: { $sum: '$aggregation' } });
+  });
+
+  test('filters a top-level field named conditions and keeps conditions a group list inside groups', async () => {
+    expect(matchOf(await collisionQueries.buildQuery({ conditions: { value: 'c1' } }, CollisionType)))
+      .toEqual({ conditions: 'c1' });
+    await expectRejection(collisionQueries.buildQuery({ AND: [{ conditions: {} }] }, CollisionType), 'INVALID_FILTER_VALUE');
+    await expectRejection(collisionQueries.buildQuery({ AND: {} }, CollisionType), 'INVALID_FILTER_VALUE');
+  });
+
+  test('rejects aggregation and conditions on find for types without those fields', async () => {
+    await expectRejection(queries.buildQuery({ aggregation: { groupId: 'title', facts: [count] } }, NoteType), 'INVALID_FILTER_FIELD');
+    await expectRejection(queries.buildQuery({ conditions: 'x' }, NoteType), 'INVALID_FILTER_FIELD');
+    // Aggregate queries still read `aggregation` as the expression.
+    expect(groupOf(await aggregate({ groupId: 'title', facts: [count] }, { aggregation: { groupId: 'title', facts: [count] } })))
+      .toEqual({ _id: '$title', fact_0: { $sum: 1 } });
+  });
+});
+
 const mongoUri = process.env.SIMFINITY_TEST_MONGODB_URI;
 
 describe.skipIf(!mongoUri)('MongoDB relation queries against a database', () => {
@@ -414,5 +591,131 @@ describe.skipIf(!mongoUri)('MongoDB relation queries against a database', () => 
       expect(leaked.errors?.[0]?.extensions).toMatchObject({ status: 400 });
       expect(JSON.stringify(leaked)).not.toContain('hash');
     }
+  });
+
+  describe('a relation-free type that another runtime connects', () => {
+    let Holders;
+    let sharedSchema;
+
+    beforeAll(async () => {
+      const SharedTag = new GraphQLObjectType({
+        name: 'QueryPathSharedTag',
+        fields: { id: idField, name: { type: GraphQLString } },
+      });
+      const SharedHolder = new GraphQLObjectType({
+        name: 'QueryPathSharedHolder',
+        fields: {
+          id: idField,
+          name: { type: GraphQLString },
+          tags: { type: new GraphQLList(SharedTag), extensions: { relation: { embedded: true } } },
+        },
+      });
+      // Same shape as a generated model: list items are subdocuments with an automatic `_id` beside `id`.
+      Holders = connection.model(`query_path_shared_holders_${suffix}`, new mongoose.Schema({
+        name: String, tags: [{ id: mongoose.Schema.Types.ObjectId, name: String }],
+      }));
+      const Tags = connection.model(`query_path_shared_tags_${suffix}`, new mongoose.Schema({ name: String }));
+      await Holders.createCollection();
+
+      // Runtime A embeds the type as a list. Runtime B connects the same type object, so the entity id
+      // resolver it installs, which reads the subdocument `_id`, also serves runtime A's reads.
+      const runtimeA = createRuntime(createMongoAdapter());
+      runtimeA.preventCreatingCollection(true);
+      runtimeA.addNoEndpointType(SharedTag);
+      runtimeA.connect(Holders, SharedHolder, 'queryPathSharedHolder', 'queryPathSharedHolders');
+      sharedSchema = runtimeA.createSchema();
+      const runtimeB = createRuntime(createMongoAdapter());
+      runtimeB.preventCreatingCollection(true);
+      runtimeB.connect(Tags, SharedTag, 'queryPathSharedTag', 'queryPathSharedTags');
+      runtimeB.createSchema();
+    });
+
+    afterAll(async () => {
+      await Holders?.collection.drop().catch(() => {});
+    });
+
+    test('filters embedded list items by the id that reads show', async () => {
+      const declaredId = new mongoose.Types.ObjectId().toString();
+      await Holders.create([
+        { name: 'h', tags: [{ id: declaredId, name: 't' }] },
+        { name: 'other', tags: [{ id: new mongoose.Types.ObjectId(), name: 'u' }] },
+      ]);
+      const run = (source) => graphql({ schema: sharedSchema, source, contextValue: {} });
+
+      const listed = await run('{ queryPathSharedHolders(name: {value: "h"}) { tags { id } } }');
+      expect(listed.errors).toBeUndefined();
+      const shown = listed.data.queryPathSharedHolders[0].tags[0].id;
+      expect(shown).not.toBe(declaredId);
+
+      for (const value of [shown, declaredId]) {
+        const filtered = await run(`{
+          queryPathSharedHolders(tags: {terms: [{path: "id", operator: EQ, value: "${value}"}]}) { name tags { id } }
+        }`);
+        expect(filtered.errors).toBeUndefined();
+        expect(filtered.data.queryPathSharedHolders).toEqual(value === shown ? [{ name: 'h', tags: [{ id: shown }] }] : []);
+      }
+    });
+  });
+
+  describe('a read-only collection without a connectionField', () => {
+    let Owners;
+    let Things;
+    let fallbackSchema;
+
+    beforeAll(async () => {
+      const Thing = new GraphQLObjectType({
+        name: 'QueryPathFallbackThing',
+        fields: { id: idField, label: { type: GraphQLString } },
+      });
+      const Owner = new GraphQLObjectType({
+        name: 'QueryPathFallbackOwner',
+        fields: {
+          id: idField,
+          label: { type: GraphQLString },
+          things: { type: new GraphQLList(Thing), extensions: { readOnly: true, relation: { embedded: false } } },
+        },
+      });
+      // Children store their owner under the collection's field name.
+      Things = connection.model(`query_path_fallback_things_${suffix}`, new mongoose.Schema({
+        label: String, things: mongoose.Schema.Types.ObjectId,
+      }));
+      Owners = connection.model(`query_path_fallback_owners_${suffix}`, new mongoose.Schema({ label: String }));
+      await Promise.all([Things.createCollection(), Owners.createCollection()]);
+
+      const runtime = createRuntime(createMongoAdapter());
+      runtime.preventCreatingCollection(true);
+      runtime.connect(Things, Thing, 'queryPathFallbackThing', 'queryPathFallbackThings');
+      runtime.connect(Owners, Owner, 'queryPathFallbackOwner', 'queryPathFallbackOwners');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fallbackSchema = runtime.createSchema();
+        expect(warn).toHaveBeenCalledWith(expect.stringMatching(
+          /^Configuration issue: QueryPathFallbackOwner\.things requires a child connectionField/,
+        ));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    afterAll(async () => {
+      await Promise.all([Things, Owners].filter(Boolean).map((model) => model.collection.drop().catch(() => {})));
+    });
+
+    test('reads and filters children stored under the field name', async () => {
+      const [first, second] = await Owners.create([{ label: 'a' }, { label: 'b' }]);
+      await Things.create([{ label: 'x', things: first._id }, { label: 'y', things: second._id }]);
+      const run = (source) => graphql({ schema: fallbackSchema, source, contextValue: {} });
+
+      const read = await run('{ queryPathFallbackOwners(sort: {terms: [{field: "label", order: ASC}]}) { label things { label } } }');
+      expect(read.errors).toBeUndefined();
+      expect(read.data.queryPathFallbackOwners).toEqual([
+        { label: 'a', things: [{ label: 'x' }] },
+        { label: 'b', things: [{ label: 'y' }] },
+      ]);
+
+      const filtered = await run('{ queryPathFallbackOwners(things: {terms: [{path: "label", value: "x"}]}) { label } }');
+      expect(filtered.errors).toBeUndefined();
+      expect(filtered.data.queryPathFallbackOwners).toEqual([{ label: 'a' }]);
+    });
   });
 });

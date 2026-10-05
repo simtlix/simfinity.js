@@ -171,6 +171,7 @@ The lookup above uses the MongoDB Model API. With PostgreSQL, use `await simfini
 
 | Condition | Result |
 | --- | --- |
+| ID is malformed for the backend | `SimfinityError` with code `NOT_VALID_ID` and status `400` |
 | ID does not identify a record | `SimfinityError` with code `NOT_VALID_ID` and status `404` |
 | Current state does not match the action's `from` | `SimfinityError` with code `BAD_REQUEST` and status `400` |
 | Action callback or update validation throws | The mutation transaction is aborted |

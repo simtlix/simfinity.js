@@ -111,7 +111,7 @@ export const simfinity = createPostgres({ pool, schema: 'series_api' });
 
 :::
 
-After all registrations, call `simfinity.createSchema()` once. **PostgreSQL then requires `await simfinity.initializeDatabase({ mode: 'create' })` before serving operations**; use `mode: 'validate'` to check already provisioned storage without DDL. Close the PostgreSQL pool or disconnect Mongoose during shutdown.
+The MongoDB facade registers its models on your application's default Mongoose instance and does not change global Mongoose options such as `strictQuery`. After all registrations, call `simfinity.createSchema()` once. **PostgreSQL then requires `await simfinity.initializeDatabase({ mode: 'create' })` before serving operations**; use `mode: 'validate'` to check already provisioned storage without DDL. Close the PostgreSQL pool or disconnect Mongoose during shutdown.
 
 The quick starts include their connection and runtime setup inline. When splitting them into modules, move that setup into `runtime.js`, keep schema registration in `schema.js`, and export `schema` only after initialization. Helper-only imports such as validators, scalars, errors, and auth come directly from `@simtlix/simfinity-core`; MCP functions come from `@simtlix/simfinity-mcp`.
 

@@ -2,7 +2,7 @@ import {
   describe, expect, test, vi,
 } from 'vitest';
 import {
-  GraphQLError, GraphQLID, GraphQLList, GraphQLObjectType, GraphQLString, graphql,
+  GraphQLError, GraphQLID, GraphQLInt, GraphQLList, GraphQLObjectType, GraphQLString, graphql,
 } from 'graphql';
 
 import {
@@ -835,5 +835,147 @@ describe('auth plugin query path rules', () => {
     expect(resolve).not.toHaveBeenCalled();
     await middleware(resolve, undefined, { title: { value: 'x' } }, { user: { role: 'viewer' } }, info);
     expect(resolve).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('client query paths: fields named aggregation', () => {
+  const buildAggregationFields = (permissions) => {
+    const calls = [];
+    const runtime = createRuntime(createAdapter(calls));
+    const secretScope = async ({ args, context }) => {
+      if (context.user?.role !== 'ADMIN') args.tenant = { operator: 'EQ', value: context.user?.tenant ?? '__none__' };
+    };
+    const Metric = new GraphQLObjectType({
+      name: 'AgMetric',
+      fields: () => ({
+        id: { type: GraphQLID },
+        key: { type: GraphQLString },
+        aggregation: { type: GraphQLInt, extensions: { queryable: false } },
+      }),
+    });
+    const Gauge = new GraphQLObjectType({
+      name: 'AgGauge',
+      fields: () => ({ id: { type: GraphQLID }, key: { type: GraphQLString }, aggregation: { type: GraphQLInt } }),
+    });
+    const Computed = new GraphQLObjectType({
+      name: 'AgComputed',
+      fields: () => ({ id: { type: GraphQLID }, aggregation: { type: GraphQLString, resolve: () => 'x' } }),
+    });
+    const OptIn = new GraphQLObjectType({
+      name: 'AgOptIn',
+      fields: () => ({
+        id: { type: GraphQLID },
+        aggregation: { type: GraphQLString, extensions: { queryable: true }, resolve: (row) => row.aggregation },
+      }),
+    });
+    const Secret = new GraphQLObjectType({
+      name: 'AgSecret',
+      extensions: { scope: { find: secretScope, get_by_id: secretScope, aggregate: secretScope } },
+      fields: () => ({
+        id: { type: GraphQLID },
+        key: { type: GraphQLString },
+        tenant: { type: GraphQLString, extensions: { queryable: false } },
+        vault: { type: Vault, extensions: { relation: { connectionField: 'vault' } } },
+      }),
+    });
+    const Holder = new GraphQLObjectType({
+      name: 'AgHolder',
+      fields: () => ({
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        aggregation: { type: Secret, extensions: { relation: { connectionField: 'aggregation' } } },
+      }),
+    });
+    const Vault = new GraphQLObjectType({
+      name: 'AgVault',
+      fields: () => ({
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        aggregation: { type: new GraphQLList(Secret), extensions: { relation: { connectionField: 'vault' } } },
+      }),
+    });
+    runtime.connect(null, Metric, 'agmetric', 'agmetrics');
+    runtime.connect(null, Gauge, 'aggauge', 'aggauges');
+    runtime.connect(null, Computed, 'agcomputed', 'agcomputeds');
+    runtime.connect(null, OptIn, 'agoptin', 'agoptins');
+    runtime.connect(null, Secret, 'agsecret', 'agsecrets');
+    runtime.connect(null, Holder, 'agholder', 'agholders');
+    runtime.connect(null, Vault, 'agvault', 'agvaults');
+    const schema = runtime.createSchema();
+    if (permissions) auth.createAuthPlugin(permissions, { defaultPolicy: 'DENY' }).onSchemaChange({ schema });
+    return {
+      calls,
+      run: (source, user = { role: 'viewer', tenant: 'A' }) => graphql({ schema, source, contextValue: { user } }),
+    };
+  };
+  const countByKey = 'aggregation: {groupId: "key", facts: [{operation: COUNT, factName: "n", path: "id"}]}';
+
+  test('rejects a find filter on a non-queryable aggregation field and keeps the aggregate expression', async () => {
+    const { run, calls } = buildAggregationFields();
+    for (const source of [
+      '{agmetrics(aggregation: {operator: GT, value: 5}) {id}}',
+      '{agmetrics(aggregation: {value: 1}, pagination: {page: 1, size: 5, count: true}) {id}}',
+    ]) {
+      const result = await run(source);
+      expectForbiddenPath(result);
+      expect(result.errors[0].message).toBe('Query path aggregation uses the non-queryable field AgMetric.aggregation');
+    }
+    expect(calls).toEqual([]);
+    const aggregate = await run(`{agmetrics_aggregate(${countByKey}) {groupId facts}}`);
+    expect(aggregate.errors).toBeUndefined();
+    expect(calls.map((call) => call.method)).toEqual(['aggregate']);
+  });
+
+  test('applies field rules to a find filter on an aggregation field', async () => {
+    const { run, calls } = buildAggregationFields({
+      RootQueryType: { '*': auth.allow() },
+      QLTypeAggregationResult: { '*': auth.allow() },
+      AgGauge: { '*': auth.allow(), aggregation: auth.deny() },
+    });
+    const result = await run('{aggauges(aggregation: {operator: GT, value: 5}) {id}}');
+    expect(result.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+    expect(calls).toEqual([]);
+    expect((await run('{aggauges(key: {value: "k"}) {id}}')).errors).toBeUndefined();
+    expect((await run(`{aggauges_aggregate(${countByKey}) {groupId}}`)).errors).toBeUndefined();
+    expect(calls.map((call) => call.method)).toEqual(['find', 'aggregate']);
+  });
+
+  test('rejects a filter on an aggregation field with its own resolver unless it opts in', async () => {
+    const { run, calls } = buildAggregationFields();
+    const computed = await run('{agcomputeds(aggregation: {value: "x"}) {id}}');
+    expectForbiddenPath(computed);
+    expect(computed.errors[0].message).toBe('Query path aggregation uses the non-queryable field AgComputed.aggregation');
+    expect(calls).toEqual([]);
+    const optIn = await run('{agoptins(aggregation: {value: "x"}) {id}}');
+    expect(optIn.errors).toBeUndefined();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args.aggregation).toEqual({ value: 'x' });
+  });
+
+  test('restricts a reference named aggregation with the target find scope', async () => {
+    const { run, calls } = buildAggregationFields();
+    const source = '{agholders(aggregation: {terms: [{path: "key", value: "k"}]}) {id}}';
+    expect((await run(source)).errors).toBeUndefined();
+    expect(calls[0].args.aggregation).toEqual({ terms: [{ path: 'key', value: 'k' }] });
+    expect(calls[0].args.AND).toEqual([
+      { conditions: [{ field: 'aggregation.tenant', operator: 'EQ', value: 'A' }] },
+    ]);
+    expect((await run(source, { role: 'ADMIN' })).errors).toBeUndefined();
+    expect(calls[1].args.AND).toBeUndefined();
+    // On the aggregate endpoint the argument is the expression, whose groupId enters the reference.
+    const grouped = await run(`{agholders_aggregate(aggregation: {groupId: "aggregation.key",
+      facts: [{operation: COUNT, factName: "n", path: "id"}]}) {groupId}}`);
+    expect(grouped.errors).toBeUndefined();
+    expect(calls[2].args.AND).toEqual([
+      { conditions: [{ field: 'aggregation.tenant', operator: 'EQ', value: 'A' }] },
+    ]);
+  });
+
+  test('rejects a filter on a scoped collection named aggregation', async () => {
+    const { run, calls } = buildAggregationFields();
+    const result = await run('{agvaults(aggregation: {terms: [{path: "key", value: "k"}]}) {id}}');
+    expectForbiddenPath(result);
+    expect(result.errors[0].message).toBe('Query path aggregation enters the scoped collection AgVault.aggregation');
+    expect(calls).toEqual([]);
   });
 });

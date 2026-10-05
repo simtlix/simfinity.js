@@ -4,12 +4,17 @@ import SimfinityError from './errors/simfinity.error.js';
 const fail = (message, code = 'INVALID_FILTER_VALUE') => { throw new SimfinityError(message, code, 400); };
 const operators = new Set(['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE']);
 const reserved = new Set(['AND', 'OR', 'sort', 'pagination', 'aggregation']);
+// `aggregation` is a generated argument only on aggregate endpoints; on find and count a field of
+// that name is filtered like any other.
+const listReserved = new Set(['AND', 'OR', 'sort', 'pagination']);
+const controlArgs = (operation) => (operation === 'aggregate' ? reserved : listReserved);
 const listOf = (value) => (Array.isArray(value) ? value : []);
 
 /**
  * Internal: the model paths named by generated query arguments, as `{ segments, group }` entries.
  * Covers filter keys and relation terms, AND/OR conditions, list sort terms, and aggregation
- * groupId and fact paths; aggregate sort terms name result keys. `group` is the AND/OR group
+ * groupId and fact paths; aggregate sort terms name result keys. Outside aggregate mode a key
+ * named `aggregation` is a field filter like any other. `group` is the AND/OR group
  * object whose `conditions` hold the path, or null for the other forms. Malformed entries are
  * left to the backends.
  */
@@ -27,8 +32,9 @@ export const collectQueryPathEntries = (args, operation = 'find') => {
     }
     for (const item of [...listOf(group.AND), ...listOf(group.OR)]) visit(item);
   };
+  const controls = controlArgs(operation);
   for (const [name, value] of Object.entries(args)) {
-    if (reserved.has(name) || value == null) continue;
+    if (controls.has(name) || value == null) continue;
     const terms = listOf(value.terms).filter((term) => typeof term?.path === 'string' && term.path);
     if (terms.length) for (const term of terms) add(`${name}.${term.path}`);
     else add(name);
@@ -100,9 +106,9 @@ export const createQueryPlan = (models, entityName, input = {}, { mode = 'find' 
     if (op === 'BTW' && value.length !== 2) fail('BTW requires two values');
     return { kind: 'predicate', path: Array.isArray(path) ? path : path.split('.'), operator: op, value: value === undefined ? null : value };
   };
-  const validateGroup = (value) => {
+  const validateGroup = (value, keys = ['conditions', 'AND', 'OR']) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) fail('Expected a filter group object');
-    for (const key of ['conditions', 'AND', 'OR']) if (value[key] != null && !Array.isArray(value[key])) fail(`${key} requires an array`);
+    for (const key of keys) if (value[key] != null && !Array.isArray(value[key])) fail(`${key} requires an array`);
   };
   const group = (value, depth = 0) => {
     validateGroup(value);
@@ -117,10 +123,12 @@ export const createQueryPlan = (models, entityName, input = {}, { mode = 'find' 
     terms.push(combine('or', (value.OR || []).map((item) => group(item, depth + 1))));
     return combine('and', terms);
   };
-  validateGroup(input);
+  // Top-level arguments are field filters plus AND/OR; `conditions` only lists conditions inside groups.
+  validateGroup(input, ['AND', 'OR']);
+  const controls = controlArgs(mode);
   const terms = [];
   for (const [name, value] of Object.entries(input)) {
-    if (reserved.has(name) || value == null) continue;
+    if (controls.has(name) || value == null) continue;
     const field = resolveModelPath(models, entityName, name).at(-1);
     if (typeof value !== 'object' || Array.isArray(value)) fail('Expected a filter object');
     if (field.kind !== 'scalar' && !field.inferred && (!Array.isArray(value.terms) || !value.terms.length)) fail('Object filters require non-empty terms', 'MISSING_FILTER_PATH');

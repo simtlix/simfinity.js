@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { describeModels, SimfinityError } from '@simtlix/simfinity-core';
 import { withMongoTransaction } from './transactions.js';
+import { castModelId, mapIdCastError } from './ids.js';
 
 const LOCK_FIELD = '_simfinityReferenceLock';
 // Startup audit bounds: distinct target ids checked per query and ids remembered per target.
@@ -108,7 +109,8 @@ export const createMongoIntegrity = (options = {}) => {
         // A caller must not catch that error and commit a borrowed transaction.
         try { await session.abortTransaction(); } catch { /* Preserve the write error and retry labels. */ }
       }
-      throw error;
+      // A malformed identifier is reported as NOT_VALID_ID; the transaction is still aborted.
+      throw mapIdCastError(error);
     }
   };
 
@@ -257,7 +259,7 @@ export const createMongoIntegrity = (options = {}) => {
     async updateRecord(Model, id, update, session) {
       assertWrite(Model, session);
       return abortOnWriteError(session, async () => {
-        const objectId = Model.schema.path('_id').cast(id);
+        const objectId = castModelId(Model, id);
         const updated = await Model.findByIdAndUpdate(objectId, update, { new: true }).session(session);
         if (!updated) {
           // A middleware can hide a completed write with a null result. Abort
@@ -272,7 +274,7 @@ export const createMongoIntegrity = (options = {}) => {
     },
     async deleteRecord(Model, id, session) {
       return abortOnWriteError(session, async () => {
-        const objectId = Model.schema.path('_id').cast(id);
+        const objectId = castModelId(Model, id);
         if (!await lock(Model, objectId, session)) return null;
         for (const reference of incoming.get(Model) || []) {
           const query = reference.Model === Model

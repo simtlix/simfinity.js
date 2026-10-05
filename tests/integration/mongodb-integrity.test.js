@@ -2,10 +2,13 @@ import {
   afterAll, beforeAll, beforeEach, describe, expect, test,
 } from 'vitest';
 import mongoose from 'mongoose';
-import { graphql } from 'graphql';
+import {
+  GraphQLID, GraphQLList, GraphQLObjectType, GraphQLString, graphql,
+} from 'graphql';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { integrityFixture } from '../fixtures/mongodb-integrity.js';
+import { createMongoAdapter, createRuntime } from '../../packages/mongodb/src/index.js';
 
 const uri = process.env.SIMFINITY_MONGODB_URI;
 const withMongo = uri ? describe : describe.skip;
@@ -24,6 +27,42 @@ const expectViolation = (result, operation) => {
   expect(result.errors).toHaveLength(1);
   expect(result.errors[0].path).toEqual([operation]);
   expect(result.errors[0].extensions).toMatchObject({ code: 'REFERENCE_CONSTRAINT_VIOLATION', status: 409 });
+};
+const expectInvalidId = (result, operation) => {
+  expect(result.errors).toHaveLength(1);
+  expect(result.errors[0].path).toEqual([operation]);
+  expect(result.errors[0].extensions).toMatchObject({ code: 'NOT_VALID_ID', status: 400 });
+};
+
+// Chained collections and a tree that reuse one private connectionField no child declares.
+const privateLinkFixture = (prefix) => {
+  const adapter = createMongoAdapter({ referentialIntegrity: 'transactional' });
+  const runtime = createRuntime(adapter);
+  runtime.preventCreatingCollection(true);
+  const types = {};
+  const owned = (type) => ({ type: new GraphQLList(type), extensions: { relation: { connectionField: 'owner' } } });
+  types.Leaf = new GraphQLObjectType({
+    name: `${prefix}Leaf`, fields: () => ({ id: { type: GraphQLID }, label: { type: GraphQLString } }),
+  });
+  types.Mid = new GraphQLObjectType({
+    name: `${prefix}Mid`,
+    fields: () => ({ id: { type: GraphQLID }, label: { type: GraphQLString }, leaves: owned(types.Leaf) }),
+  });
+  types.Root = new GraphQLObjectType({
+    name: `${prefix}Root`,
+    fields: () => ({ id: { type: GraphQLID }, label: { type: GraphQLString }, mids: owned(types.Mid) }),
+  });
+  types.Node = new GraphQLObjectType({
+    name: `${prefix}Node`,
+    fields: () => ({ id: { type: GraphQLID }, label: { type: GraphQLString }, children: owned(types.Node) }),
+  });
+  for (const [name, type] of Object.entries(types)) {
+    const endpoint = `${prefix}${name}`.toLowerCase();
+    runtime.connect(null, type, endpoint, `${endpoint}s`);
+  }
+  return {
+    adapter, schema: runtime.createSchema(), types, model: (name) => runtime.getModel(types[name]),
+  };
 };
 
 withMongo('MongoDB transactional reference integrity', () => {
@@ -307,6 +346,82 @@ withMongo('MongoDB transactional reference integrity', () => {
       await deleter?.endSession();
       await connection.close();
     }
+  });
+
+  test('initializes chained and self-referencing collections sharing a private connectionField and stores every link', async () => {
+    const { adapter, schema, types, model } = privateLinkFixture('PrivateLink');
+    for (const name of Object.keys(types)) await model(name).createCollection();
+    await adapter.initialize();
+    const run = (source, variableValues) => graphql({ schema, source, variableValues });
+
+    const chain = await run(`mutation($input: ${types.Root.name}Input!) {
+      addprivatelinkroot(input: $input) { id mids { id label leaves { id label } } }
+    }`, { input: { label: 'root', mids: { added: [{ label: 'mid', leaves: { added: [{ label: 'leaf' }] } }] } } });
+    expect(chain.errors).toBeUndefined();
+    const root = chain.data.addprivatelinkroot;
+    expect(root.mids).toEqual([{ id: expect.any(String), label: 'mid', leaves: [{ id: expect.any(String), label: 'leaf' }] }]);
+    expect(String((await model('Mid').findById(root.mids[0].id).lean()).owner)).toBe(root.id);
+    expect(String((await model('Leaf').findById(root.mids[0].leaves[0].id).lean()).owner)).toBe(root.mids[0].id);
+
+    const tree = await run(`mutation($input: ${types.Node.name}Input!) {
+      addprivatelinknode(input: $input) { id children { id label } }
+    }`, { input: { label: 'tree', children: { added: [{ label: 'kid' }] } } });
+    expect(tree.errors).toBeUndefined();
+    const [kid] = tree.data.addprivatelinknode.children;
+    expect(kid.label).toBe('kid');
+    expect(String((await model('Node').findById(kid.id).lean()).owner)).toBe(tree.data.addprivatelinknode.id);
+    // The private link is a protected reference: the parent cannot be removed while the child exists.
+    expectViolation(await run(`mutation { deleteprivatelinkroot(id: "${root.id}") { id } }`), 'deleteprivatelinkroot');
+  });
+
+  test.each([
+    ['update', ({ Shop }, session) => fixture.adapter.update(Shop, 'invalid', { name: 'changed' }, session)],
+    ['delete', ({ Shop }, session) => fixture.adapter.delete(Shop, 'invalid', session)],
+    ['update of a scalar ID', ({ Entry }, session, entry) => fixture.adapter.update(Entry, entry._id, { opaque: 'invalid' }, session)],
+  ])('a direct adapter %s with a malformed ID fails with NOT_VALID_ID and aborts the supplied transaction', async (_, write) => {
+    const entry = await fixture.models.Entry.create({ name: 'entry' });
+    const session = await mongoose.startSession();
+    try {
+      session.startTransaction(transactionOptions);
+      await fixture.runtime.saveObject(fixture.types.Service.name, { name: 'must roll back' }, session);
+      await expect(write(fixture.models, session, entry))
+        .rejects.toMatchObject({ message: 'Invalid identifier', extensions: { code: 'NOT_VALID_ID', status: 400 } });
+      expect(session.inTransaction()).toBe(false);
+      await expect(session.commitTransaction()).rejects.toThrow();
+      expect(await fixture.models.Service.countDocuments()).toBe(0);
+      expect((await fixture.models.Entry.findById(entry._id).lean()).opaque).toBeUndefined();
+    } finally { await session.endSession(); }
+  });
+
+  test('generated mutations reject malformed IDs with NOT_VALID_ID and write nothing', async () => {
+    const shop = await fixture.models.Shop.create({ name: 'original' });
+    expectInvalidId(await mutate(fixture, 'update', 'Shop', { id: 'invalid', name: 'changed' }), 'updateshop');
+    expectInvalidId(await remove(fixture, 'Shop', 'invalid'), 'deleteshop');
+    expectInvalidId(await mutate(fixture, 'add', 'Shop', { name: 'bad reference', service: { id: 'invalid' } }), 'addshop');
+    expectInvalidId(await mutate(fixture, 'add', 'Entry', { name: 'bad scalar', opaque: 'invalid' }), 'addentry');
+    expectInvalidId(await mutate(fixture, 'update', 'Shop', {
+      id: shop._id.toString(), name: 'changed', children: { deleted: ['invalid'] },
+    }), 'updateshop');
+    expect(await fixture.models.Shop.countDocuments()).toBe(1);
+    expect((await fixture.models.Shop.findById(shop._id).lean()).name).toBe('original');
+    expect(await fixture.models.Entry.countDocuments()).toBe(0);
+  });
+
+  test('an owned delete that keeps conflicting with a held reference lock fails with TRANSACTION_RETRY_EXCEEDED (409)', async () => {
+    const service = await fixture.models.Service.create({ name: 'held' });
+    const creator = await mongoose.startSession();
+    try {
+      creator.startTransaction(transactionOptions);
+      await fixture.runtime.saveObject(fixture.types.Shop.name, { service: { id: String(service._id) } }, creator);
+      const result = await remove(fixture, 'Service', service._id);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toBe('Concurrent write could not be completed');
+      expect(result.errors[0].extensions).toMatchObject({ code: 'TRANSACTION_RETRY_EXCEEDED', status: 409 });
+      expect(result.errors[0].originalError.cause).toMatchObject({ code: 112 });
+      await creator.commitTransaction();
+      expectViolation(await remove(fixture, 'Service', service._id), 'deleteservice');
+      expect(await fixture.models.Service.countDocuments()).toBe(1);
+    } finally { await creator.endSession(); }
   });
 
   test('owned mutations retry real write conflicts without duplicating records', async () => {

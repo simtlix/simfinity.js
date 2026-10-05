@@ -1318,3 +1318,817 @@ describe('runtime type ownership', () => {
     }
   });
 });
+
+const cloneRecord = (record) => (record == null ? null : JSON.parse(JSON.stringify(record)));
+
+// Records keep their identity in `_id`, as MongoDB documents do, unless `withId` also sets `id`.
+const createKeyedAdapter = ({
+  castId = String, firstId = 1, withId = false, getByIds = false,
+} = {}) => {
+  const records = new Map();
+  let nextId = firstId;
+  const key = (Model, id) => `${Model.name}:${castId(id)}`;
+  const ofModel = (Model) => [...records.entries()]
+    .filter(([entry]) => entry.startsWith(`${Model.name}:`)).map(([, record]) => cloneRecord(record));
+  const adapter = {
+    bind() {},
+    prepare: vi.fn(),
+    createModel: vi.fn((gqltype) => ({ name: gqltype.name })),
+    castId,
+    withTransaction: async (session, body) => body(session || {}),
+    newRecord(Model, data) {
+      const id = castId(nextId++);
+      return { ...cloneRecord(data), _id: id, ...(withId ? { id } : {}) };
+    },
+    saveRecord: vi.fn(async (Model, record) => {
+      records.set(key(Model, record._id), record);
+      return record;
+    }),
+    toObject: cloneRecord,
+    getById: vi.fn(async (Model, id) => cloneRecord(records.get(key(Model, id)))),
+    prepareUpdate: (set, unset) => ({ set, unset }),
+    update: vi.fn(async (Model, id, update) => {
+      const current = records.get(key(Model, id));
+      if (!current) return null;
+      for (const field of Object.keys(update.unset)) delete current[field];
+      Object.assign(current, cloneRecord(update.set));
+      return cloneRecord(current);
+    }),
+    delete: vi.fn(async () => null),
+    find: vi.fn(async (Model) => ofModel(Model)),
+    count: async () => 0,
+    aggregate: async () => [],
+    findChildren: vi.fn(async (Model, gqltype, field, parentId) => ofModel(Model)
+      .filter((record) => record[field] === parentId)),
+    seed: (typeName, record) => records.set(`${typeName}:${castId(record._id ?? record.id)}`, cloneRecord(record)),
+    getRecords: (typeName) => ofModel({ name: typeName }),
+  };
+  if (getByIds) {
+    adapter.getByIds = vi.fn(async (Model, ids) => ids.map((id) => records.get(key(Model, id)))
+      .filter(Boolean).map(cloneRecord));
+  }
+  return adapter;
+};
+
+const configurationIssues = (warn) => warn.mock.calls.map(([message]) => message)
+  .filter((message) => typeof message === 'string' && message.startsWith('Configuration issue:'));
+
+describe('entity id resolution', () => {
+  const createSerieTypes = (prefix, { appId } = {}) => {
+    const Person = createType(`${prefix}Person`);
+    const Label = createType(`${prefix}Label`);
+    // Embedded-only, but with a reference, so it still gets a model.
+    const Tag = new GraphQLObjectType({
+      name: `${prefix}Tag`,
+      fields: {
+        id: { type: GraphQLString },
+        label: { type: GraphQLString },
+        by: { type: Person, extensions: { relation: { embedded: false, connectionField: 'byId' } } },
+      },
+    });
+    const Serie = new GraphQLObjectType({
+      name: `${prefix}Serie`,
+      fields: () => ({
+        id: appId ? { type: GraphQLID, resolve: appId } : { type: GraphQLID },
+        title: { type: GraphQLString },
+        label: { type: Label, extensions: { relation: { embedded: false } } },
+        tags: { type: new GraphQLList(Tag), extensions: { relation: { embedded: true } } },
+        episodes: {
+          type: new GraphQLList(Episode),
+          extensions: { relation: { embedded: false, connectionField: 'serie' } },
+        },
+      }),
+    });
+    const Episode = new GraphQLObjectType({
+      name: `${prefix}Episode`,
+      fields: () => ({
+        id: { type: GraphQLID },
+        title: { type: GraphQLString },
+        serie: { type: Serie, extensions: { relation: { embedded: false, connectionField: 'serie' } } },
+      }),
+    });
+    return {
+      Person, Label, Tag, Serie, Episode,
+    };
+  };
+
+  const register = (runtime, types, prefix) => {
+    runtime.connect(null, types.Person, `${prefix}person`, `${prefix}persons`);
+    runtime.addNoEndpointType(types.Label);
+    runtime.addNoEndpointType(types.Tag);
+    runtime.connect(null, types.Serie, `${prefix}serie`, `${prefix}series`);
+    runtime.connect(null, types.Episode, `${prefix}episode`, `${prefix}episodes`);
+  };
+
+  test('resolves id for referenced no-endpoint types and types left out of the query allowlist', async () => {
+    const adapter = createKeyedAdapter();
+    const runtime = createRuntime(adapter);
+    const types = createSerieTypes('IdEntity');
+    register(runtime, types, 'idEntity');
+    const schema = runtime.createSchema([types.Serie]);
+    adapter.seed('IdEntityLabel', { _id: 'lab1', name: 'Label' });
+    const run = (source) => graphql({ schema, source });
+
+    const serie = await run('mutation { addidEntityserie(input: { title: "S", label: { id: "lab1" } }) { id label { id name } } }');
+    const serieId = serie.data.addidEntityserie.id;
+    const episode = await run(`mutation { addidEntityepisode(input: { title: "E", serie: { id: "${serieId}" } }) { id title } }`);
+    const read = await run(`{ idEntityserie(id: "${serieId}") { id label { id } episodes { id title } } }`);
+
+    expect(serie.errors).toBeUndefined();
+    expect(serie.data.addidEntityserie.label).toEqual({ id: 'lab1', name: 'Label' });
+    expect(episode.errors).toBeUndefined();
+    const episodeId = episode.data.addidEntityepisode.id;
+    expect(episodeId).toBe(adapter.getRecords('IdEntityEpisode')[0]._id);
+    expect(read.errors).toBeUndefined();
+    expect(read.data.idEntityserie).toEqual({
+      id: serieId, label: { id: 'lab1' }, episodes: [{ id: episodeId, title: 'E' }],
+    });
+    expect(Object.fromEntries(runtime.getRegistrations()
+      .map(({ gqltype, storedIdentity }) => [gqltype.name, storedIdentity]))).toEqual({
+      IdEntityPerson: true,
+      IdEntityLabel: true,
+      IdEntityTag: false,
+      IdEntitySerie: true,
+      IdEntityEpisode: true,
+    });
+  });
+
+  test('keeps the declared id of embedded-only types', async () => {
+    const adapter = createKeyedAdapter();
+    const runtime = createRuntime(adapter);
+    const types = createSerieTypes('IdEmbedded');
+    register(runtime, types, 'idEmbedded');
+    const schema = runtime.createSchema();
+    adapter.seed('IdEmbeddedSerie', { _id: 's1', title: 'S', tags: [{ _id: 'automatic', id: 'tag-1', label: 'T' }] });
+
+    const result = await graphql({ schema, source: '{ idEmbeddedseries { id tags { id label } } }' });
+
+    expect(result.errors).toBeUndefined();
+    expect(result.data.idEmbeddedseries).toEqual([{ id: 's1', tags: [{ id: 'tag-1', label: 'T' }] }]);
+    expect(types.Tag.getFields().id.resolve).toBeUndefined();
+  });
+
+  test('keeps an application id resolver, which still restricts id filters', async () => {
+    const adapter = createKeyedAdapter();
+    const runtime = createRuntime(adapter);
+    const appId = (parent) => `app-${parent._id}`;
+    const types = createSerieTypes('IdApplication', { appId });
+    register(runtime, types, 'idApplication');
+    const schema = runtime.createSchema();
+    adapter.seed('IdApplicationSerie', { _id: 's1', title: 'S' });
+
+    const read = await graphql({ schema, source: '{ idApplicationseries { id } }' });
+    const filtered = await graphql({ schema, source: '{ idApplicationseries(id: { operator: EQ, value: "s1" }) { id } }' });
+
+    expect(types.Serie.getFields().id.resolve).toBe(appId);
+    expect(read.data.idApplicationseries).toEqual([{ id: 'app-s1' }]);
+    expect(filtered.errors?.[0].extensions.code).toBe('FORBIDDEN_FILTER_PATH');
+  });
+});
+
+describe('references to zero identifiers', () => {
+  const createBookTypes = (prefix) => {
+    const Author = new GraphQLObjectType({
+      name: `${prefix}Author`,
+      fields: () => ({
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        books: {
+          type: new GraphQLList(Book),
+          extensions: { relation: { embedded: false, connectionField: 'author' } },
+        },
+      }),
+    });
+    const Book = new GraphQLObjectType({
+      name: `${prefix}Book`,
+      fields: () => ({
+        id: { type: GraphQLID },
+        title: { type: GraphQLString },
+        author: { type: Author, extensions: { relation: { embedded: false } } },
+        editor: { type: Author, extensions: { relation: { embedded: false, connectionField: 'editorId' } } },
+      }),
+    });
+    return { Author, Book };
+  };
+
+  const build = (prefix, options) => {
+    const adapter = createKeyedAdapter({
+      castId: Number, firstId: 0, withId: true, ...options,
+    });
+    const runtime = createRuntime(adapter);
+    const { Author, Book } = createBookTypes(prefix);
+    runtime.connect(null, Author, `${prefix}Author`, `${prefix}Authors`);
+    runtime.connect(null, Book, `${prefix}Book`, `${prefix}Books`);
+    const schema = runtime.createSchema();
+    return { adapter, run: (source) => graphql({ schema, source, contextValue: {} }) };
+  };
+
+  test.each([
+    ['read by id', 'ZeroDirect', false],
+    ['read in batches', 'ZeroBatched', true],
+  ])('resolves default and aliased single references to id 0: %s', async (label, prefix, getByIds) => {
+    const { adapter, run } = build(prefix, { getByIds });
+    const author = await run(`mutation { add${prefix}Author(input: { name: "Zero" }) { id } }`);
+    const book = await run(`mutation { add${prefix}Book(input: { title: "T", author: { id: "0" }, editor: { id: "0" } }) { id } }`);
+    adapter.getById.mockClear();
+
+    const read = await run(`{ ${prefix}Books { title author { id name } editor { id name } } }`);
+
+    expect(author.data[`add${prefix}Author`].id).toBe('0');
+    expect(book.errors).toBeUndefined();
+    expect(adapter.getRecords(`${prefix}Book`)[0]).toMatchObject({ author: 0, editorId: 0 });
+    expect(read.errors).toBeUndefined();
+    expect(read.data[`${prefix}Books`]).toEqual([
+      { title: 'T', author: { id: '0', name: 'Zero' }, editor: { id: '0', name: 'Zero' } },
+    ]);
+    if (getByIds) {
+      expect(adapter.getByIds).toHaveBeenCalledOnce();
+      expect(adapter.getById).not.toHaveBeenCalled();
+    } else {
+      expect(adapter.getById).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  test('keeps empty-string references null without reading them', async () => {
+    const { adapter, run } = build('ZeroBlank', { getByIds: true });
+    adapter.seed('ZeroBlankBook', { _id: 7, id: 7, title: 'Blank', author: '', editorId: '' });
+
+    const read = await run('{ ZeroBlankBooks { title author { id } editor { id } } }');
+
+    expect(read.errors).toBeUndefined();
+    expect(read.data.ZeroBlankBooks).toEqual([{ title: 'Blank', author: null, editor: null }]);
+    expect(adapter.getById).not.toHaveBeenCalled();
+    expect(adapter.getByIds).not.toHaveBeenCalled();
+  });
+
+  test('reads the collection of a parent whose only identity is id 0', async () => {
+    const { adapter, run } = build('ZeroParent');
+    adapter.seed('ZeroParentAuthor', { id: 0, name: 'Zero' });
+    adapter.seed('ZeroParentBook', { _id: 1, id: 1, title: 'T', author: 0 });
+
+    const read = await run('{ ZeroParentAuthors { id name books { id title } } }');
+
+    expect(read.errors).toBeUndefined();
+    expect(read.data.ZeroParentAuthors).toEqual([{ id: '0', name: 'Zero', books: [{ id: '1', title: 'T' }] }]);
+    expect(adapter.findChildren).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), 'author', 0, expect.anything(), null,
+    );
+  });
+});
+
+describe('referenced collection connectionField', () => {
+  const createOwnerTypes = (prefix, things = {}) => {
+    const Thing = new GraphQLObjectType({
+      name: `${prefix}Thing`,
+      fields: { id: { type: GraphQLID }, label: { type: GraphQLString } },
+    });
+    const Owner = new GraphQLObjectType({
+      name: `${prefix}Owner`,
+      fields: {
+        id: { type: GraphQLID },
+        label: { type: GraphQLString },
+        things: {
+          type: new GraphQLList(Thing),
+          ...things,
+          extensions: { ...things.extensions, relation: { embedded: false, ...things.relation } },
+        },
+      },
+    });
+    return { Thing, Owner };
+  };
+
+  const build = (prefix, things, controller) => {
+    const adapter = createKeyedAdapter();
+    const runtime = createRuntime(adapter);
+    const types = createOwnerTypes(prefix, things);
+    runtime.connect(null, types.Thing, `${prefix}thing`, `${prefix}things`);
+    runtime.connect(null, types.Owner, `${prefix}owner`, `${prefix}owners`, controller);
+    return { adapter, runtime, ...types };
+  };
+
+  test.each([
+    ['missing', 'MissingConnection', {}],
+    ['empty', 'EmptyConnection', { relation: { connectionField: '' } }],
+  ])('rejects a writable collection with a %s connectionField before preparing the adapter', (label, prefix, things) => {
+    const { adapter, runtime } = build(prefix, things);
+
+    expect(() => runtime.createSchema()).toThrow(expect.objectContaining({
+      message: `${prefix}Owner.things requires a child connectionField`,
+      extensions: expect.objectContaining({ code: 'INVALID_MODEL', status: 400 }),
+    }));
+    expect(adapter.prepare).not.toHaveBeenCalled();
+    expect(adapter.createModel).not.toHaveBeenCalled();
+  });
+
+  test('warns once for a read-only collection without its own resolver', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { runtime } = build('ReadOnlyGenerated', { extensions: { readOnly: true } });
+
+      runtime.createSchema();
+      runtime.createSchema();
+
+      expect(configurationIssues(warn)).toEqual([
+        'Configuration issue: ReadOnlyGeneratedOwner.things requires a child connectionField; nested writes through it are rejected',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('reads the children of a read-only collection without its own resolver through the field name', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { adapter, runtime, Thing } = build('ReadOnlyFallback', { extensions: { readOnly: true } });
+      const schema = runtime.createSchema();
+      adapter.seed('ReadOnlyFallbackOwner', { _id: 'o1', label: 'a' });
+      adapter.seed('ReadOnlyFallbackThing', { _id: 't1', label: 'x', things: 'o1' });
+      adapter.seed('ReadOnlyFallbackThing', { _id: 't2', label: 'y', things: 'o2' });
+
+      const result = await graphql({ schema, source: '{ ReadOnlyFallbackowners { label things { id label } } }' });
+
+      expect(result.errors).toBeUndefined();
+      expect(result.data.ReadOnlyFallbackowners).toEqual([{ label: 'a', things: [{ id: 't1', label: 'x' }] }]);
+      expect(adapter.findChildren).toHaveBeenCalledTimes(1);
+      expect(adapter.findChildren.mock.calls[0].slice(1, 4)).toEqual([Thing, 'things', 'o1']);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('builds a read-only collection with its own resolver without a warning', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { runtime } = build('ReadOnlyOwn', { extensions: { readOnly: true }, resolve: () => [] });
+
+      expect(() => runtime.createSchema()).not.toThrow();
+      expect(configurationIssues(warn)).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('warns for a writable collection with its own resolver and rejects nested items before writing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const controller = { onSaving: vi.fn(), onUpdating: vi.fn() };
+    try {
+      const { adapter, runtime } = build('WritableOwn', { resolve: () => [] }, controller);
+      const schema = runtime.createSchema();
+      const run = (source) => graphql({ schema, source });
+      const rejected = {
+        message: 'WritableOwnOwner.things cannot store nested items because it has no connectionField',
+        extensions: expect.objectContaining({ code: 'INVALID_MODEL', status: 500 }),
+      };
+
+      const added = await run('mutation { addWritableOwnowner(input: { label: "a", things: { added: [{ label: "x" }] } }) { id } }');
+      expect(added.errors).toEqual([expect.objectContaining(rejected)]);
+      expect(adapter.saveRecord).not.toHaveBeenCalled();
+      expect(controller.onSaving).not.toHaveBeenCalled();
+
+      const empty = await run(`mutation {
+        addWritableOwnowner(input: { label: "b", things: { added: [], updated: [], deleted: [] } }) { id }
+      }`);
+      const nulls = await run('mutation { addWritableOwnowner(input: { label: "c", things: { added: [null] } }) { id } }');
+      expect(empty.errors).toBeUndefined();
+      expect(nulls.errors).toBeUndefined();
+      const ownerId = empty.data.addWritableOwnowner.id;
+
+      for (const things of ['updated: [{ id: "1", label: "y" }]', 'deleted: ["1"]']) {
+        const updated = await run(`mutation { updateWritableOwnowner(input: { id: "${ownerId}", things: { ${things} } }) { id } }`);
+        expect(updated.errors).toEqual([expect.objectContaining(rejected)]);
+      }
+      expect(adapter.update).not.toHaveBeenCalled();
+      expect(controller.onUpdating).not.toHaveBeenCalled();
+      expect(adapter.getRecords('WritableOwnThing')).toEqual([]);
+      expect(adapter.getRecords('WritableOwnOwner').map(({ label }) => label)).toEqual(['b', 'c']);
+      expect(configurationIssues(warn)).toEqual([
+        'Configuration issue: WritableOwnOwner.things requires a child connectionField; nested writes through it are rejected',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('rejects nested items through a read-only collection in saveObject without writing', async () => {
+    const { adapter, runtime } = build('SavedReadOnly', { extensions: { readOnly: true }, resolve: () => [] });
+    runtime.createSchema();
+
+    await expect(runtime.saveObject('SavedReadOnlyOwner', {
+      label: 'a', things: { added: [{ label: 'x' }] },
+    })).rejects.toMatchObject({ extensions: { code: 'INVALID_MODEL', status: 500 } });
+    expect(adapter.saveRecord).not.toHaveBeenCalled();
+    await expect(runtime.saveObject('SavedReadOnlyOwner', { label: 'b', things: { added: [] } }))
+      .resolves.toMatchObject({ label: 'b' });
+  });
+
+  test('rejects unlinked items nested below a linked collection before writing the parent', async () => {
+    const adapter = createKeyedAdapter();
+    const runtime = createRuntime(adapter);
+    const { Thing, Owner } = createOwnerTypes('NestedUnlinked', { resolve: () => [] });
+    const Root = new GraphQLObjectType({
+      name: 'NestedUnlinkedRoot',
+      fields: {
+        id: { type: GraphQLID },
+        owners: { type: new GraphQLList(Owner), extensions: { relation: { embedded: false, connectionField: 'root' } } },
+      },
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      runtime.connect(null, Thing, 'nestedUnlinkedThing', 'nestedUnlinkedThings');
+      runtime.connect(null, Owner, 'nestedUnlinkedOwner', 'nestedUnlinkedOwners');
+      runtime.connect(null, Root, 'nestedUnlinkedRoot', 'nestedUnlinkedRoots');
+      const schema = runtime.createSchema();
+
+      const result = await graphql({
+        schema,
+        source: `mutation {
+          addnestedUnlinkedRoot(input: { owners: { added: [{ label: "o", things: { added: [{ label: "x" }] } }] } }) { id }
+        }`,
+      });
+
+      expect(result.errors?.[0].extensions).toMatchObject({ code: 'INVALID_MODEL', status: 500 });
+      expect(adapter.saveRecord).not.toHaveBeenCalled();
+
+      // Items that nested middleware adds after the pre-flight check are rejected before they are written.
+      runtime.use(async (params, next) => {
+        if (params.type?.gqltype === Owner && params.operation === 'save') {
+          params.args.input.things = { added: [{ label: 'late' }] };
+        }
+        await next();
+      });
+      const late = await graphql({
+        schema,
+        source: 'mutation { addnestedUnlinkedRoot(input: { owners: { added: [{ label: "o" }] } }) { id } }',
+      });
+      expect(late.errors?.[0].extensions).toMatchObject({ code: 'INVALID_MODEL', status: 500 });
+      expect(adapter.getRecords('NestedUnlinkedThing')).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('builds a one-sided many-to-many whose inverse is a read-only list with its own resolver', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const adapter = createKeyedAdapter();
+      const runtime = createRuntime(adapter);
+      const Course = new GraphQLObjectType({
+        name: 'OneSidedCourse',
+        fields: () => ({
+          id: { type: GraphQLID },
+          title: { type: GraphQLString },
+          students: { type: new GraphQLList(Student), extensions: { relation: { embedded: false, connectionField: 'courses' } } },
+        }),
+      });
+      const Student = new GraphQLObjectType({
+        name: 'OneSidedStudent',
+        fields: () => ({
+          id: { type: GraphQLID },
+          name: { type: GraphQLString },
+          courses: {
+            type: new GraphQLList(Course),
+            extensions: { relation: { embedded: false }, readOnly: true },
+            resolve: () => [],
+          },
+        }),
+      });
+      runtime.connect(null, Student, 'oneSidedStudent', 'oneSidedStudents');
+      runtime.connect(null, Course, 'oneSidedCourse', 'oneSidedCourses');
+      const schema = runtime.createSchema();
+
+      const result = await graphql({
+        schema,
+        source: 'mutation { addoneSidedCourse(input: { title: "math", students: { added: [{ name: "ana" }] } }) { id } }',
+      });
+
+      expect(result.errors).toBeUndefined();
+      const courseId = result.data.addoneSidedCourse.id;
+      expect(adapter.getRecords('OneSidedStudent')).toEqual([expect.objectContaining({ name: 'ana', courses: courseId })]);
+      expect(configurationIssues(warn)).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('fields named like generated query arguments', () => {
+  const queryArgs = (schema, fieldName) => Object.fromEntries(schema.getQueryType().getFields()[fieldName].args
+    .map((arg) => [arg.name, String(arg.type)]));
+
+  test('warns once per type and name and keeps aggregation a list filter', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const runtime = createRuntime(createMemoryAdapter());
+      const Item = new GraphQLObjectType({
+        name: 'ShadowedItem',
+        fields: {
+          id: { type: GraphQLID },
+          sort: { type: GraphQLString },
+          OR: { type: GraphQLString },
+          aggregation: { type: GraphQLInt },
+        },
+      });
+      runtime.connect(null, Item, 'shadowedItem', 'shadowedItems');
+
+      const schema = runtime.createSchema();
+      runtime.createSchema();
+
+      const issues = configurationIssues(warn);
+      expect(issues).toHaveLength(3);
+      expect(issues[0]).toMatch(/^Configuration issue: ShadowedItem\.sort has the name of a generated list query argument/);
+      expect(issues[1]).toMatch(/^Configuration issue: ShadowedItem\.OR /);
+      expect(issues[2]).toMatch(/^Configuration issue: ShadowedItem\.aggregation .*shadowedItems_aggregate/);
+      expect(queryArgs(schema, 'shadowedItems')).toMatchObject({
+        sort: 'QLSortExpression', OR: '[QLFilterGroup]', aggregation: 'QLFilter',
+      });
+      expect(queryArgs(schema, 'shadowedItems_aggregate')).toMatchObject({
+        aggregation: 'QLTypeAggregationExpression!',
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('does not warn for embedded-only types or twice for an endpoint that is also a collection target', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const runtime = createRuntime(createMemoryAdapter());
+      const Detail = new GraphQLObjectType({ name: 'ShadowedDetail', fields: { sort: { type: GraphQLString } } });
+      const Child = new GraphQLObjectType({
+        name: 'ShadowedChild',
+        fields: { id: { type: GraphQLID }, sort: { type: GraphQLString }, parentId: { type: GraphQLID } },
+      });
+      const Parent = new GraphQLObjectType({
+        name: 'ShadowedParent',
+        fields: {
+          id: { type: GraphQLID },
+          detail: { type: Detail, extensions: { relation: { embedded: true } } },
+          children: { type: new GraphQLList(Child), extensions: { relation: { embedded: false, connectionField: 'parentId' } } },
+        },
+      });
+      runtime.addNoEndpointType(Detail);
+      runtime.connect(null, Child, 'shadowedChild', 'shadowedChildren');
+      runtime.connect(null, Parent, 'shadowedParent', 'shadowedParents');
+
+      runtime.createSchema();
+
+      const issues = configurationIssues(warn);
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).toMatch(/^Configuration issue: ShadowedChild\.sort /);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test.each([
+    ['without a list endpoint', false, 0],
+    ['with a list endpoint', true, 1],
+  ])('keeps the sort argument of a collection whose connectionField is named sort, child %s', (label, endpoint, warnings) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const runtime = createRuntime(createMemoryAdapter());
+      const prefix = endpoint ? 'SortLinkedEndpoint' : 'SortLinkedNoEndpoint';
+      const Parent = new GraphQLObjectType({
+        name: `${prefix}Parent`,
+        fields: () => ({
+          id: { type: GraphQLID },
+          children: { type: new GraphQLList(Child), extensions: { relation: { embedded: false, connectionField: 'sort' } } },
+        }),
+      });
+      const Child = new GraphQLObjectType({
+        name: `${prefix}Child`,
+        fields: () => ({
+          id: { type: GraphQLID },
+          name: { type: GraphQLString },
+          sort: { type: Parent, extensions: { relation: { embedded: false, connectionField: 'sort' } } },
+        }),
+      });
+      if (endpoint) runtime.connect(null, Child, `${prefix}child`, `${prefix}children`);
+      else runtime.addNoEndpointType(Child);
+      runtime.connect(null, Parent, `${prefix}parent`, `${prefix}parents`);
+
+      runtime.createSchema();
+
+      const args = Object.fromEntries(Parent.getFields().children.args.map((arg) => [arg.name, String(arg.type)]));
+      expect(args).toEqual({
+        id: 'QLFilter',
+        name: 'QLFilter',
+        pagination: 'QLPagination',
+        sort: 'QLSortExpression',
+        AND: '[QLFilterGroup]',
+        OR: '[QLFilterGroup]',
+      });
+      const issues = configurationIssues(warn);
+      expect(issues).toHaveLength(warnings);
+      if (warnings) expect(issues[0]).toMatch(new RegExp(`^Configuration issue: ${prefix}Child\\.sort `));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('leaves out only the back-reference of each collection, direct or aliased', () => {
+    const runtime = createRuntime(createMemoryAdapter());
+    const Serie = new GraphQLObjectType({
+      name: 'BackReferenceSerie',
+      fields: () => ({
+        id: { type: GraphQLID },
+        seasons: { type: new GraphQLList(Season), extensions: { relation: { embedded: false, connectionField: 'serie' } } },
+        aliased: { type: new GraphQLList(Season), extensions: { relation: { embedded: false, connectionField: 'parent_id' } } },
+      }),
+    });
+    const Season = new GraphQLObjectType({
+      name: 'BackReferenceSeason',
+      fields: () => ({
+        id: { type: GraphQLID },
+        n: { type: GraphQLInt },
+        serie: { type: Serie, extensions: { relation: { embedded: false } } },
+        parent: { type: Serie, extensions: { relation: { embedded: false, connectionField: 'parent_id' } } },
+      }),
+    });
+    runtime.connect(null, Season, 'backReferenceSeason', 'backReferenceSeasons');
+    runtime.connect(null, Serie, 'backReferenceSerie', 'backReferenceSeries');
+
+    runtime.createSchema();
+
+    const argNames = (fieldName) => Serie.getFields()[fieldName].args.map((arg) => arg.name);
+    expect(argNames('seasons')).toEqual(['id', 'n', 'parent', 'pagination', 'sort', 'AND', 'OR']);
+    expect(argNames('aliased')).toEqual(['id', 'n', 'serie', 'pagination', 'sort', 'AND', 'OR']);
+  });
+});
+
+describe('joined scope control arguments', () => {
+  const build = (scopeArgs) => {
+    const adapter = createStoreAdapter({ JoinedControlHolder: [{ _id: '1', secretId: 's1' }] });
+    const runtime = createRuntime(adapter);
+    const Secret = new GraphQLObjectType({
+      name: 'JoinedControlSecret',
+      extensions: { scope: { find: ({ args }) => { Object.assign(args, scopeArgs); } } },
+      fields: {
+        id: { type: GraphQLID },
+        key: { type: GraphQLString },
+        sort: { type: GraphQLString },
+        aggregation: { type: GraphQLInt },
+      },
+    });
+    const Holder = new GraphQLObjectType({
+      name: 'JoinedControlHolder',
+      fields: {
+        id: { type: GraphQLID },
+        secret: { type: Secret, extensions: { relation: { embedded: false, connectionField: 'secretId' } } },
+      },
+    });
+    runtime.addNoEndpointType(Secret);
+    runtime.connect(null, Holder, 'joinedControlHolder', 'joinedControlHolders');
+    const schema = runtime.createSchema();
+    const run = () => graphql({
+      schema,
+      source: '{ joinedControlHolders(secret: { terms: [{ path: "key", operator: EQ, value: "k" }] }) { id } }',
+      contextValue: {},
+    });
+    return { adapter, run };
+  };
+
+  test.each([
+    ['sort without terms', { sort: { operator: 'EQ', value: 'A' } }, 'INVALID_SORT'],
+    ['a sort term without an order', { sort: { terms: [{ field: 'key' }] } }, 'INVALID_SORT'],
+    ['invalid pagination', { pagination: { page: 0, size: 1 } }, 'INVALID_PAGINATION'],
+  ])('rejects %s like a direct query', async (label, scopeArgs, code) => {
+    const { adapter, run } = build(scopeArgs);
+
+    const result = await run();
+
+    expect(result.errors?.[0].extensions).toMatchObject({ code, status: 400 });
+    expect(adapter.find).not.toHaveBeenCalled();
+  });
+
+  test('ignores valid sort and pagination and applies an aggregation field filter', async () => {
+    const { adapter, run } = build({
+      sort: { terms: [{ field: 'key', order: 'ASC' }] },
+      pagination: { page: 1, size: 1 },
+      aggregation: { operator: 'EQ', value: 1 },
+    });
+
+    const result = await run();
+
+    expect(result.errors).toBeUndefined();
+    expect(adapter.find.mock.calls[0][2].AND).toEqual([
+      { conditions: [{ field: 'secret.aggregation', operator: 'EQ', value: 1 }] },
+    ]);
+  });
+});
+
+describe('embedded value hook', () => {
+  const createShopTypes = (prefix) => {
+    const customResolve = (parent) => parent.main;
+    const Geo = new GraphQLObjectType({ name: `${prefix}Geo`, fields: { lat: { type: GraphQLInt } } });
+    const Snapshot = new GraphQLObjectType({
+      name: `${prefix}Snapshot`,
+      fields: { geo: { type: Geo, extensions: { relation: { embedded: true } } } },
+    });
+    const Address = new GraphQLObjectType({
+      name: `${prefix}Address`,
+      fields: {
+        street: { type: GraphQLString },
+        geo: { type: Geo, extensions: { relation: { embedded: true } } },
+        pin: { type: new GraphQLNonNull(Geo), extensions: { relation: { embedded: true } } },
+      },
+    });
+    const Shop = new GraphQLObjectType({
+      name: `${prefix}Shop`,
+      fields: {
+        id: { type: GraphQLID },
+        main: { type: Address, extensions: { relation: { embedded: true } } },
+        addresses: { type: new GraphQLList(Address), extensions: { relation: { embedded: true } } },
+        custom: { type: Address, extensions: { relation: { embedded: true } }, resolve: customResolve },
+        // Read-only and unregistered, so only reachable from Shop.
+        snapshot: { type: Snapshot, extensions: { relation: { embedded: true }, readOnly: true } },
+      },
+    });
+    return {
+      Geo, Snapshot, Address, Shop, customResolve,
+    };
+  };
+
+  const register = (runtime, types, endpoint) => {
+    runtime.addNoEndpointType(types.Geo);
+    runtime.addNoEndpointType(types.Address);
+    runtime.connect(null, types.Shop, endpoint, `${endpoint}s`);
+  };
+
+  const cleared = { cleared: true };
+  const createHookAdapter = () => Object.assign(createMemoryAdapter(), {
+    readEmbeddedValue: vi.fn((value) => (value?.cleared ? null : value)),
+  });
+
+  test('reads nullable singular embedded objects through the adapter', async () => {
+    const adapter = createHookAdapter();
+    const runtime = createRuntime(adapter);
+    const types = createShopTypes('HookRead');
+    register(runtime, types, 'hookReadShop');
+    const schema = runtime.createSchema();
+    await adapter.saveRecord({ name: 'HookReadShop' }, {
+      _id: '1',
+      main: { street: 'M', geo: cleared, pin: { lat: 1 } },
+      addresses: [{ street: 'A', geo: cleared, pin: { lat: 2 } }],
+      snapshot: { geo: cleared },
+    });
+
+    const result = await graphql({
+      schema,
+      source: `{ hookReadShops {
+        main { street geo { lat } pin { lat } } addresses { geo { lat } } custom { street } snapshot { geo { lat } }
+      } }`,
+    });
+
+    expect(result.errors).toBeUndefined();
+    expect(result.data.hookReadShops).toEqual([{
+      main: { street: 'M', geo: null, pin: { lat: 1 } },
+      addresses: [{ geo: null }],
+      custom: { street: 'M' },
+      snapshot: { geo: null },
+    }]);
+    const generated = (type, field) => typeof type.getFields()[field].resolve === 'function';
+    expect([
+      generated(types.Shop, 'main'), generated(types.Address, 'geo'), generated(types.Snapshot, 'geo'),
+      generated(types.Shop, 'addresses'), generated(types.Address, 'pin'),
+    ]).toEqual([true, true, true, false, false]);
+    expect(types.Shop.getFields().custom.resolve).toBe(types.customResolve);
+  });
+
+  test('keeps embedded filters queryable and leaves the types shareable', async () => {
+    const adapter = createHookAdapter();
+    const runtime = createRuntime(adapter);
+    const types = createShopTypes('HookShareable');
+    register(runtime, types, 'hookShareableShop');
+    const schema = runtime.createSchema();
+
+    const filtered = await graphql({
+      schema,
+      source: '{ hookShareableShops(main: { terms: [{ path: "geo.lat", operator: EQ, value: 1 }] }) { id } }',
+    });
+    expect(filtered.errors).toBeUndefined();
+
+    // The hook reads no data, so another runtime, with or without it, can reach the same types.
+    for (const otherAdapter of [createHookAdapter(), createMemoryAdapter()]) {
+      const other = createRuntime(otherAdapter);
+      register(other, types, 'hookShareableShop');
+      const otherSchema = other.createSchema();
+      await otherAdapter.saveRecord({ name: 'HookShareableShop' }, { _id: '1', main: { street: 'M', geo: cleared } });
+      const read = await graphql({ schema: otherSchema, source: '{ hookShareableShops { main { street geo { lat } } } }' });
+      expect(read.errors).toBeUndefined();
+      expect(read.data.hookShareableShops).toEqual([{ main: { street: 'M', geo: null } }]);
+    }
+  });
+
+  test('installs nothing for adapters without the hook, so the types stay shareable', async () => {
+    const types = createShopTypes('HookShared');
+    for (const adapter of [createMemoryAdapter(), createMemoryAdapter()]) {
+      const runtime = createRuntime(adapter);
+      register(runtime, types, 'hookSharedShop');
+      runtime.createSchema();
+    }
+
+    expect(types.Shop.getFields().main.resolve).toBeUndefined();
+    expect(types.Address.getFields().geo.resolve).toBeUndefined();
+  });
+});

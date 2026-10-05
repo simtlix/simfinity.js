@@ -9,14 +9,16 @@ import {
 import mongoose from 'mongoose';
 
 import { SimfinityError, QLOperator, paginationStages } from '@simtlix/simfinity-core';
+import {
+  getFieldStorageName, getListShape, hasStoredIdentity, normalizeConnectionField,
+} from '@simtlix/simfinity-core/internal/relation-storage';
 
+import { castObjectId } from './ids.js';
 import { resolveStorageScalar } from './models.js';
 
 const isNonNullOfType = (fieldEntryType, graphQLType) => (
   fieldEntryType instanceof GraphQLNonNull && fieldEntryType.ofType instanceof graphQLType
 );
-
-const unwrapNonNull = (type) => (type instanceof GraphQLNonNull ? type.ofType : type);
 
 const unwrapListAndNonNull = (type) => {
   let unwrapped = type;
@@ -24,28 +26,6 @@ const unwrapListAndNonNull = (type) => {
     unwrapped = unwrapped.ofType;
   }
   return unwrapped;
-};
-
-const isListType = (type) => unwrapNonNull(type) instanceof GraphQLList;
-
-const getFieldStorageName = (fieldName, field) => {
-  const relation = field.extensions?.relation;
-  return relation && !relation.embedded && !isListType(field.type)
-    ? relation.connectionField || fieldName
-    : fieldName;
-};
-
-const getConnectionStorageName = (childType, declaredFieldName) => {
-  const childFields = childType.getFields();
-  if (childFields[declaredFieldName]) {
-    return getFieldStorageName(declaredFieldName, childFields[declaredFieldName]);
-  }
-  const aliasedField = Object.entries(childFields).find(([fieldName, field]) => (
-    getFieldStorageName(fieldName, field) === declaredFieldName
-  ));
-  return aliasedField
-    ? getFieldStorageName(aliasedField[0], aliasedField[1])
-    : declaredFieldName;
 };
 
 const getEffectiveTypeName = (type) => (
@@ -153,6 +133,19 @@ const queryNamedType = (type) => {
   return result;
 };
 
+// `id` is the record key `_id` at an entity boundary: the root or a joined document. Inside an
+// embedded object it follows what reads return. Entity types read the stored subdocument `_id`
+// through the generated id resolver; that resolver lives on the type object, so any runtime that
+// marked the type an entity decides it, not only this one. Every other embedded object stores and
+// returns its declared `id` member. A supplied subdocument schema without an `id` path keeps `_id`,
+// which only hydrated reads expose, through Mongoose's `id` virtual; list reads return null for it.
+const identifierLeaf = (model, schemaPath, gqltype) => {
+  if (!schemaPath) return '_id';
+  const schema = model?.schema;
+  if (!schema?.path(`${schemaPath}._id`)) return 'id';
+  return hasStoredIdentity(gqltype) || !schema.path(`${schemaPath}.id`) ? '_id' : 'id';
+};
+
 // Resolve GraphQL paths and storage paths together; supplied models own ID casting.
 const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
   assertValidFilterPath(path);
@@ -176,9 +169,11 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
       } else {
         const relatedModel = getModel(fieldType);
         if (!relatedModel) throw filterError(`Related model is not available for ${path}`, 'INVALID_FILTER_PATH');
-        const isList = unwrapNonNull(field.type) instanceof GraphQLList;
-        const declaredField = relation.connectionField || part;
-        const connField = isList ? getConnectionStorageName(fieldType, declaredField) : declaredField;
+        const isList = !!getListShape(field.type);
+        // A collection without connectionField keeps reading through its field name, as before.
+        const connField = isList
+          ? normalizeConnectionField(fieldType, relation.connectionField || part).storageFieldName
+          : getFieldStorageName(part, field);
         const localLeaf = isList ? '_id' : connField;
         const alias = allocateLookupAlias(aggregationsIncluded, parts.slice(0, index + 1).join('.'));
         aggregateClauses[alias] = buildRelationLookup({
@@ -194,7 +189,7 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
       currentType = fieldType;
     } else {
       if (index !== parts.length - 1) throw filterError(`Cannot traverse scalar field in ${path}`, 'INVALID_FILTER_PATH');
-      const leaf = part === 'id' ? '_id' : part;
+      const leaf = part === 'id' ? identifierLeaf(currentModel, schemaPath, currentType) : part;
       const storagePath = schemaPath ? `${schemaPath}.${leaf}` : leaf;
       return {
         mongoPath: mongoPath ? `${mongoPath}.${leaf}` : leaf,
@@ -228,7 +223,7 @@ const castFilterValue = (value, resolved) => {
       if (Number.isNaN(date.getTime())) throw new Error('Invalid date');
       return date;
     }
-    if (scalar === GraphQLID && !schemaType) return new mongoose.Types.ObjectId(value);
+    if (scalar === GraphQLID && !schemaType) return castObjectId(value);
     if (scalar instanceof GraphQLEnumType) {
       const entry = scalar.getValues().find((item) => item.name === value)
         || scalar.getValues().find((item) => item.value === value);
@@ -289,9 +284,9 @@ const buildQueryTerms = async (filterField, qlField, fieldName, gqltype, aggrega
 
 const MAX_FILTER_GROUP_DEPTH = 5;
 
-const validateLogicalLists = (group) => {
+const validateLogicalLists = (group, keys = ['AND', 'OR', 'conditions']) => {
   if (!group || typeof group !== 'object' || Array.isArray(group)) throw filterError('Expected a filter group object');
-  for (const key of ['AND', 'OR', 'conditions']) {
+  for (const key of keys) {
     if (group[key] != null && !Array.isArray(group[key])) throw filterError(`${key} requires an array`);
   }
 };
@@ -367,17 +362,21 @@ const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, agg
   return { $and: parts };
 };
 
-const RESERVED_QUERY_KEYS = new Set(['pagination', 'sort', 'AND', 'OR', 'aggregation']);
+const FIND_CONTROL_KEYS = new Set(['pagination', 'sort', 'AND', 'OR']);
+// `aggregation` is the expression argument only on aggregate queries; elsewhere it names a field.
+const AGGREGATE_CONTROL_KEYS = new Set([...FIND_CONTROL_KEYS, 'aggregation']);
 
-const collectFiltersAndLookups = async (input, gqltype, aggregateClauses, aggregationsIncluded) => {
-  validateLogicalLists(input);
+const collectFiltersAndLookups = async (input, gqltype, aggregateClauses, aggregationsIncluded, operation = 'find') => {
+  // Top-level arguments are field filters plus AND/OR groups; `conditions` is a key only inside groups.
+  validateLogicalLists(input, ['AND', 'OR']);
+  const controlKeys = operation === 'aggregate' ? AGGREGATE_CONTROL_KEYS : FIND_CONTROL_KEYS;
   const flatMatchConditions = {};
   const repeatedConditions = [];
   let hasFlat = false;
   const fields = gqltype.getFields();
 
   for (const [key, filterField] of Object.entries(input)) {
-    if (RESERVED_QUERY_KEYS.has(key)) continue;
+    if (controlKeys.has(key)) continue;
     const qlField = fields[key];
     const result = await buildQueryTerms(filterField, qlField, key, gqltype, aggregationsIncluded);
     if (!result) continue;
@@ -448,7 +447,7 @@ const buildQuery = async (input, gqltype, isCount) => {
   const aggregationsIncluded = {};
   const paging = paginationStages(input.pagination, true);
 
-  const matchStage = await collectFiltersAndLookups(input, gqltype, aggregateClauses, aggregationsIncluded);
+  const matchStage = await collectFiltersAndLookups(input, gqltype, aggregateClauses, aggregationsIncluded, 'find');
   if (matchStage) aggregateClauses.push(matchStage);
 
   if (isCount) {
@@ -476,7 +475,7 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
   const aggregationsIncluded = {};
   const paging = paginationStages(input.pagination, false);
 
-  const matchStage = await collectFiltersAndLookups(input, gqltype, aggregateClauses, aggregationsIncluded);
+  const matchStage = await collectFiltersAndLookups(input, gqltype, aggregateClauses, aggregationsIncluded, 'aggregate');
   if (matchStage) aggregateClauses.push(matchStage);
 
   const { groupId, facts } = aggregationExpression ?? {};

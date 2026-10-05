@@ -18,8 +18,15 @@ const fixture = () => {
   const Scalar = new GraphQLObjectType({ name: 'EmbeddedScalar', fields: { n: { type: GraphQLInt } } });
   const types = [Target, TargetDetail, Scalar];
   const roots = [];
+  const idRoots = [];
   for (const owned of [false, true]) {
     const suffix = owned ? 'Owned' : 'JSON';
+    // An embedded-only type that declares `id`; the reference moves the Owned variant to owned PostgreSQL rows.
+    const tagFields = { id: { type: GraphQLID }, label: { type: GraphQLString } };
+    if (owned) tagFields.ref = { type: Target, extensions: { relation: { embedded: false } } };
+    const Tag = new GraphQLObjectType({ name: `EmbeddedTag${suffix}`, fields: tagFields });
+    types.push(Tag);
+    idRoots.push(new GraphQLObjectType({ name: `EmbeddedIdRoot${suffix}`, fields: { id: { type: GraphQLID }, key: { type: GraphQLString }, tag: { type: Tag, extensions: { relation: { embedded: true } } }, tags: { type: new GraphQLList(Tag), extensions: { relation: { embedded: true } } } } }));
     const fields = { n: { type: GraphQLInt }, x: { type: new GraphQLList(GraphQLInt) }, texts: { type: new GraphQLList(GraphQLString) }, dates: { type: new GraphQLList(DateTime) }, kinds: { type: new GraphQLList(Kind) }, p: { type: Scalar, extensions: { relation: { embedded: true } } } };
     if (owned) fields.ref = { type: Target, extensions: { relation: { embedded: false } } };
     const Leaf = new GraphQLObjectType({ name: `EmbeddedLeaf${suffix}`, fields });
@@ -36,7 +43,10 @@ const fixture = () => {
     types.push(Detail);
     return new GraphQLObjectType({ name: `EmbeddedUnique${array}`, fields: { id: { type: GraphQLID }, key: { type: GraphQLString }, w: { type: Detail, extensions: { relation: { embedded: true } } } } });
   });
-  return { types, roots, Stateful, uniqueTypes, Target };
+  // An entity type that is also embedded, singular and as a list (registered on MongoDB only).
+  const Part = new GraphQLObjectType({ name: 'EmbeddedPart', fields: { id: { type: GraphQLID }, sku: { type: GraphQLString } } });
+  const PartBox = new GraphQLObjectType({ name: 'EmbeddedPartBox', fields: { id: { type: GraphQLID }, key: { type: GraphQLString }, part: { type: Part, extensions: { relation: { embedded: true } } }, parts: { type: new GraphQLList(Part), extensions: { relation: { embedded: true } } } } });
+  return { types, roots, idRoots, Stateful, uniqueTypes, Target, Part, PartBox };
 };
 const inputs = [
   {}, { a: null }, { a: [] }, { a: [null] }, { a: [{}] }, { a: [{ x: null, n: null }] },
@@ -71,6 +81,8 @@ describe.skipIf(!mongoUri || !postgresUri)('embedded query differential parity',
       b.fixture.roots.forEach((t, i) => b.api.connect(null, t, `item${i}`, `items${i}`));
       b.api.connect(null, b.fixture.Stateful, 'stateful', 'statefuls', null, null, { initialState: { name: 'ALPHA', value: 'zzz' }, actions: { finish: { from: { name: 'ALPHA', value: 'zzz' }, to: { name: 'ZETA', value: 'aaa' } } } });
       b.fixture.uniqueTypes.forEach((t, i) => b.api.connect(null, t, `unique${i}`, `uniques${i}`));
+      b.fixture.idRoots.forEach((t, i) => b.api.connect(null, t, `idItem${i}`, `idItems${i}`));
+      if (!b.api.initializeDatabase) [b.fixture.Part, b.fixture.PartBox].forEach((t) => b.api.connect(null, t, t.name.toLowerCase(), `${t.name.toLowerCase()}s`));
       b.schema = b.api.createSchema();
       if (b.api.initializeDatabase) await b.api.initializeDatabase();
       else for (const { model } of b.api.getRegistrations()) if (model) await model.createCollection();
@@ -289,6 +301,70 @@ describe.skipIf(!mongoUri || !postgresUri)('embedded query differential parity',
     expect(nested).toHaveLength(7);
     expect(nested.map((row) => row.groupId)).toEqual(expect.arrayContaining([null, [], [null], [[]], [[null]], [[1, 2]], [[1], [2]]]));
     expect(nested.every((row) => row.facts.count === 1)).toBe(true);
+  });
+
+  // Embedded `id` members are ObjectIds on MongoDB and UUIDs on PostgreSQL, so each backend gets its own
+  // variables, and results are compared with the ids that backend's reads return.
+  const embeddedId = (b, n) => (b.api.initializeDatabase ? `00000000-0000-4000-8000-${n.toString(16).padStart(12, '0')}` : n.toString(16).padStart(24, '0'));
+  const tagRecords = [['k1', 3, [11, 12]], ['k2', 1, [12]], ['k3', 2, []], ['k4', null, [13]]];
+  const keysWith = (match) => tagRecords.filter(match).map(([key]) => key);
+  it.each([0, 1])('filters, sorts and groups embedded ids by the ids reads return (%s)', async (i) => {
+    for (const b of backends) {
+      for (const [key, tag, tags] of tagRecords) {
+        await b.api.getModel(b.fixture.idRoots[i]).create({ key, tag: tag === null ? null : { id: embeddedId(b, tag), label: `t${tag}` }, tags: tags.map((n) => ({ id: embeddedId(b, n), label: `t${n}` })) });
+      }
+    }
+    const list = `idItems${i}`;
+    const run = async (source, variablesFor = () => undefined) => {
+      const results = await Promise.all(backends.map((b) => execute(b, source, variablesFor(b))));
+      results.forEach((r) => expect(r.errors, source).toBeUndefined());
+      return results.map((r) => r.data);
+    };
+    const expectKeys = async (pending, expected, label) => (await pending).forEach((data) => expect(data[list].map((row) => row.key), label).toEqual(expected));
+    const filter = (field, operator, value) => run(
+      `query($v:QLValue){${list}(${field}:{terms:[{path:"id",operator:${operator},value:$v}]},sort:{terms:[{field:"key",order:ASC}]}){key}}`,
+      (b) => ({ v: Array.isArray(value) ? value.map((n) => embeddedId(b, n)) : embeddedId(b, value) }),
+    );
+
+    const reads = await run(`{${list}(sort:{terms:[{field:"key",order:ASC}]}){key tag{id} tags{id}}}`);
+    reads.forEach((data, index) => expect(data[list]).toEqual(tagRecords.map(([key, tag, tags]) => ({
+      key, tag: tag === null ? null : { id: embeddedId(backends[index], tag) }, tags: tags.map((n) => ({ id: embeddedId(backends[index], n) })),
+    }))));
+    // Every id the reads above return finds exactly the records that return it.
+    for (const n of [1, 2, 3]) await expectKeys(filter('tag', 'EQ', n), keysWith(([, tag]) => tag === n), `tag.id ${n}`);
+    for (const n of [11, 12, 13]) await expectKeys(filter('tags', 'EQ', n), keysWith(([, , tags]) => tags.includes(n)), `tags.id ${n}`);
+    await expectKeys(filter('tag', 'NE', 1), ['k1', 'k3', 'k4'], 'tag.id NE');
+    await expectKeys(filter('tags', 'IN', [12, 13]), ['k1', 'k2', 'k4'], 'tags.id IN');
+    await expectKeys(filter('tags', 'NIN', [12]), ['k3', 'k4'], 'tags.id NIN');
+    await expectKeys(run(`{${list}(sort:{terms:[{field:"tag.id",order:ASC}]}){key}}`), ['k4', 'k2', 'k3', 'k1'], 'tag.id ASC');
+    await expectKeys(run(`{${list}(sort:{terms:[{field:"tag.id",order:DESC}]}){key}}`), ['k1', 'k3', 'k2', 'k4'], 'tag.id DESC');
+    const groups = await run(`{${list}_aggregate(aggregation:{groupId:"tag.id",facts:[{operation:COUNT,factName:"count",path:"id"},{operation:MIN,factName:"first",path:"key"}]},sort:{terms:[{field:"groupId",order:ASC}]}){groupId facts}}`);
+    groups.forEach((data, index) => expect(JSON.parse(JSON.stringify(data[`${list}_aggregate`]))).toEqual([
+      { groupId: null, facts: { count: 1, first: 'k4' } },
+      ...[['k2', 1], ['k3', 2], ['k1', 3]].map(([first, n]) => ({ groupId: embeddedId(backends[index], n), facts: { count: 1, first } })),
+    ]));
+  });
+  it('filters and groups an entity type embedded in MongoDB documents by the ids reads return', async () => {
+    const [mongo] = backends;
+    const created = await execute(mongo, 'mutation{addembeddedpartbox(input:{key:"b1",part:{sku:"p"},parts:[{sku:"a"},{sku:"b"}]}){id}}');
+    expect(created.errors).toBeUndefined();
+    await mongo.api.getModel(mongo.fixture.PartBox).create({ key: 'b2', part: { id: embeddedId(mongo, 21), sku: 'q' }, parts: [{ id: embeddedId(mongo, 22), sku: 'c' }] });
+    const read = await execute(mongo, '{embeddedpartboxs(sort:{terms:[{field:"key",order:ASC}]}){key part{id} parts{id}}}');
+    expect(read.errors).toBeUndefined();
+    const rows = read.data.embeddedpartboxs;
+    // Singular copies have no subdocument `_id` and return the declared id; list items return their `_id`.
+    expect(rows.map((row) => row.part)).toEqual([{ id: null }, { id: embeddedId(mongo, 21) }]);
+    expect(rows.map((row) => row.parts.length)).toEqual([2, 1]);
+    const filterKeys = async (field, value) => {
+      const result = await execute(mongo, `query($v:QLValue){embeddedpartboxs(${field}:{terms:[{path:"id",value:$v}]}){key}}`, { v: value });
+      expect(result.errors).toBeUndefined();
+      return result.data.embeddedpartboxs.map((row) => row.key);
+    };
+    for (const row of rows) for (const { id } of row.parts) expect(await filterKeys('parts', id), `parts.id ${id}`).toEqual([row.key]);
+    expect(await filterKeys('part', embeddedId(mongo, 21))).toEqual(['b2']);
+    const grouped = await execute(mongo, '{embeddedpartboxs_aggregate(aggregation:{groupId:"parts.id",facts:[{operation:MIN,factName:"first",path:"key"}]},sort:{terms:[{field:"first",order:ASC}]}){groupId facts}}');
+    expect(grouped.errors).toBeUndefined();
+    expect(JSON.parse(JSON.stringify(grouped.data.embeddedpartboxs_aggregate))).toEqual(rows.map((row) => ({ groupId: row.parts.map(({ id }) => id), facts: { first: row.key } })));
   });
 
 });

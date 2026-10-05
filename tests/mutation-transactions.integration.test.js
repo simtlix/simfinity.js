@@ -266,6 +266,30 @@ describe.skipIf(!uri)('Mutation transactions against a MongoDB replica set', () 
     expect(await ChildModel.countDocuments({ parentId: result._id })).toBe(1);
   });
 
+  test('an owned update that keeps conflicting with an uncommitted write fails with 409 after six attempts', async () => {
+    const { parent } = await seedFamily();
+    const blocker = await mongoose.startSession();
+    let attempts = 0;
+    parentController.onUpdating = async () => { attempts++; };
+    try {
+      blocker.startTransaction();
+      await ParentModel.updateOne({ _id: parent._id }, { name: 'Blocked' }).session(blocker);
+      const result = await graphql({
+        schema,
+        source: `mutation { updatemongotransactionparent(input: { id: "${parent._id}", name: "Conflicting" }) { id } }`,
+      });
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toBe('Concurrent write could not be completed');
+      expect(result.errors[0].extensions).toMatchObject({ code: 'TRANSACTION_RETRY_EXCEEDED', status: 409 });
+      expect(result.errors[0].originalError.getCause()).toMatchObject({ code: 112 });
+      expect(attempts).toBe(6);
+    } finally {
+      if (blocker.inTransaction()) await blocker.abortTransaction();
+      await blocker.endSession();
+    }
+    expect((await ParentModel.findById(parent._id)).name).toBe('Before');
+  });
+
   test('an uncertain successful commit retries the real commit without repeating hooks or writes', async () => {
     let hooks = 0;
     let commits = 0;

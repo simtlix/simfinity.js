@@ -51,7 +51,7 @@ The protected graph comes from `extensions.relation`, using the same metadata de
 
 - Single references, including renamed and dotted Mongo storage keys.
 - References inside embedded objects and arbitrarily deep supported embedded lists, including nullable items.
-- One-to-many child keys, including inferred scalar `GraphQLID` fields and private connection fields.
+- One-to-many child keys, including inferred scalar `GraphQLID` fields and private connection fields. A private connection field is also generated when the child type has a collection with the same `connectionField`, as in chained or self-referencing collections.
 - Explicit many-to-many link entities and self-references.
 - Referenced supporting types registered without root endpoints.
 
@@ -69,7 +69,7 @@ If a creation commits first, deletion rejects its reference. If deletion commits
 
 The reserved field is not part of GraphQL or mutation inputs and uses `select: false` on Mongoose models. Native collection reads/aggregations and backups can see it. Lock writes bypass domain hooks, timestamps and version counters. Concurrent writes that reference a popular target contend on that document; this adds reads, writes and possible retries.
 
-Owned transactions use `readConcern: 'snapshot'` and `writeConcern: 'majority'`. Confirmed transient failures retry the complete mutation up to five times; uncertain commit results retry only commit. Controllers may therefore execute more than once. Keep external side effects in a transactional outbox; see [transaction boundaries](./mutations#transaction-boundaries).
+Owned transactions use `readConcern: 'snapshot'` and `writeConcern: 'majority'`. Confirmed transient failures retry the complete mutation up to five times, each retry after a random delay of less than 10, 20, 40, 80 and 160 ms that starts once the failed attempt is aborted; uncertain commit results retry only commit. Controllers may therefore execute more than once. A write conflict still present after the last retry, such as a delete that keeps conflicting with a concurrent reference lock, fails with `TRANSACTION_RETRY_EXCEEDED` (409), with the driver error as `error.cause`. Keep external side effects in a transactional outbox; see [transaction boundaries](./mutations#transaction-boundaries).
 
 ## Supplied sessions
 
@@ -92,7 +92,7 @@ try {
 }
 ```
 
-Healthy supplied sessions remain caller-owned: the adapter does not commit, end or retry them. **A reference violation or guarded-write error aborts even a supplied transaction**, so catching the error cannot commit an invalid preceding write. This includes normal Mongoose post-save/update hooks that throw after the database operation; the original error is preserved. An ambiguous/missing update result also aborts the supplied transaction; the generated update keeps its normal `NOT_VALID_ID` result for a nonexistent record. Callers own any retry using a fresh transaction.
+Healthy supplied sessions remain caller-owned: the adapter does not commit, end or retry them. **A reference violation or guarded-write error aborts even a supplied transaction**, so catching the error cannot commit an invalid preceding write. This includes normal Mongoose post-save/update hooks that throw after the database operation; the original error is preserved. An ambiguous/missing update result also aborts the supplied transaction; the generated update keeps its normal `NOT_VALID_ID` result for a nonexistent record. A malformed ID is rejected with `NOT_VALID_ID` (400): a direct `adapter.update()` or `adapter.delete()` call aborts the supplied transaction, while generated deletes, and updates of types with embedded fields, reject it during their initial read and leave the transaction active. Callers own any retry using a fresh transaction; a conflict in a supplied session is returned as the raw driver error with its `errorLabels`.
 
 ## Existing databases and native writes
 
@@ -114,5 +114,7 @@ Custom Mongoose middleware must preserve the transaction session and operation i
 | `MONGO_INTEGRITY_TRANSACTION_OPTIONS` | A supplied transaction lacks snapshot/majority options. |
 | `ACTIVE_TRANSACTION_REQUIRED` | A direct guarded write or supplied session has no active transaction. |
 | `REFERENCE_CONSTRAINT_VIOLATION` | Missing reference, restricted deletion or a write result whose guarded identity cannot be verified. |
+| `TRANSACTION_RETRY_EXCEEDED` | Status 409. An owned transaction still hit a write conflict, such as a concurrent reference lock, after its retries; retry the request. |
+| `NOT_VALID_ID` | Status 400 for a malformed ID; 404 when an update targets a missing record. |
 
 GraphQL may carry these errors in an HTTP 200 response; `extensions.status` is metadata, not a transport status override.

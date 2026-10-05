@@ -71,12 +71,60 @@ const createShopTypes = () => {
   return { Geo, Address, Shop };
 };
 
+// A nullable reference and a scalar list make PostgreSQL store the embedded tree in owned tables.
+const createClearTypes = (prefix) => {
+  const Geo = new GraphQLObjectType({
+    name: `${prefix}Geo`,
+    fields: {
+      lat: { type: new GraphQLNonNull(GraphQLFloat) },
+      lng: { type: new GraphQLNonNull(GraphQLFloat) },
+      aliases: { type: new GraphQLList(GraphQLString) },
+    },
+  });
+  const Person = new GraphQLObjectType({
+    name: `${prefix}Person`,
+    fields: { id: { type: GraphQLID }, name: { type: GraphQLString } },
+  });
+  const Address = new GraphQLObjectType({
+    name: `${prefix}Address`,
+    fields: {
+      street: { type: new GraphQLNonNull(GraphQLString) },
+      city: { type: GraphQLString },
+      phones: { type: new GraphQLList(GraphQLString) },
+      geo: { type: Geo, extensions: { relation: { embedded: true } } },
+      reviewer: { type: Person, extensions: { relation: { embedded: false, connectionField: 'reviewerId' } } },
+    },
+  });
+  const Shop = new GraphQLObjectType({
+    name: `${prefix}Shop`,
+    fields: {
+      id: { type: GraphQLID },
+      name: { type: GraphQLString },
+      main: { type: Address, extensions: { relation: { embedded: true } } },
+    },
+  });
+  return {
+    Geo, Person, Address, Shop,
+  };
+};
+
+const registerClearTypes = (api, prefix) => {
+  const types = createClearTypes(prefix);
+  const endpoint = `${prefix.charAt(0).toLowerCase()}${prefix.slice(1)}`;
+  api.addNoEndpointType(types.Geo);
+  api.addNoEndpointType(types.Address);
+  api.connect(null, types.Person, `${endpoint}Person`, `${endpoint}Persons`);
+  api.connect(null, types.Shop, `${endpoint}Shop`, `${endpoint}Shops`);
+  return { prefix, endpoint, types };
+};
+
 describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL required embedded update parity', () => {
   const namespace = `required_${randomUUID().replaceAll('-', '')}`;
   const fields = 'id director { name country } credits { role star { name } }';
   const listFields = 'id items { label tags } main { label tags } outer { note inner { label tags } }';
   let pool;
   let backends;
+  let clearBackends;
 
   const execute = (backend, source, variableValues) => graphql({ schema: backend.schema, source, variableValues });
   const update = (backend, input) => execute(
@@ -121,6 +169,7 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL required embedded
       backend.api.addNoEndpointType(backend.shopTypes.Geo);
       backend.api.addNoEndpointType(backend.shopTypes.Address);
       backend.api.connect(null, backend.shopTypes.Shop, 'requiredUpdateShop', 'requiredUpdateShops');
+      backend.clear = registerClearTypes(backend.api, backend.name === 'mongodb' ? 'ClearMongo' : 'ClearPostgres');
       for (const registration of backend.fixture.registrations) {
         if (registration.endpoint) {
           backend.api.connect(null, registration.gqltype, registration.simpleEntityEndpointName,
@@ -134,6 +183,20 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL required embedded
       else for (const { model } of backend.api.getRegistrations()) if (model) await model.createCollection();
       const star = await backend.api.getModel(backend.fixture.types.ContractStar).create({ name: 'Lead' });
       backend.starId = String(star._id);
+    }
+
+    // Transactional reference integrity validates and writes the same updates in a transaction.
+    const transactionalAdapter = createMongoAdapter({ referentialIntegrity: 'transactional' });
+    const transactional = { name: 'mongodb-transactional', api: createRuntime(transactionalAdapter) };
+    transactional.api.preventCreatingCollection(true);
+    transactional.clear = registerClearTypes(transactional.api, 'ClearMongoTx');
+    transactional.schema = transactional.api.createSchema();
+    for (const { model } of transactional.api.getRegistrations()) if (model) await model.createCollection();
+    await transactionalAdapter.initialize();
+    clearBackends = [backends[0], transactional, backends[1]];
+    for (const backend of clearBackends) {
+      const reviewer = await backend.api.getModel(backend.clear.types.Person).create({ name: 'R' });
+      backend.reviewerId = String(reviewer._id);
     }
   }, 30000);
 
@@ -248,5 +311,72 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL required embedded
       message: 'Required value lng is missing', extensions: { code: 'REQUIRED_VALUE', status: 400 },
     });
     expect((await raw()).main).toEqual({ street: 'M', city: 'Z', geo: { aliases: [] } });
+  });
+
+  test('every backend clears nullable members of a singular embedded patch on every read path', async () => {
+    const mainFields = 'main { street city phones geo { lat lng aliases } reviewer { name } }';
+    const patches = [{ city: null }, { phones: null }, { reviewer: null }, { geo: null }, { city: 'Y' }];
+    const results = [];
+    for (const backend of clearBackends) {
+      const { prefix, endpoint, types } = backend.clear;
+      const added = await execute(backend, `mutation($input: ${prefix}ShopInput!) { add${endpoint}Shop(input: $input) { id } }`, {
+        input: {
+          name: 'S',
+          main: {
+            street: 'M', city: 'C', phones: ['1'], geo: { lat: 1, lng: 2 }, reviewer: { id: backend.reviewerId },
+          },
+        },
+      });
+      expect(added.errors, backend.name).toBeUndefined();
+      const id = added.data[`add${endpoint}Shop`].id;
+      const steps = [];
+      for (const main of patches) {
+        const updated = await execute(backend, `mutation($input: ${prefix}ShopInputForUpdate!) {
+          update${endpoint}Shop(input: $input) { ${mainFields} }
+        }`, { input: { id, main } });
+        const byId = await execute(backend, `query($id: ID) { ${endpoint}Shop(id: $id) { ${mainFields} } }`, { id });
+        const list = await execute(backend, `{ ${endpoint}Shops(pagination: { page: 1, size: 50 }) { id ${mainFields} } }`);
+        const label = `${backend.name} ${JSON.stringify(main)}`;
+        for (const result of [updated, byId, list]) expect(result.errors, label).toBeUndefined();
+        const reads = [
+          updated.data[`update${endpoint}Shop`].main,
+          byId.data[`${endpoint}Shop`].main,
+          list.data[`${endpoint}Shops`].find((row) => row.id === id).main,
+        ];
+        expect(reads[1], label).toEqual(reads[0]);
+        expect(reads[2], label).toEqual(reads[0]);
+        steps.push(reads[0]);
+      }
+      if (backend.name.startsWith('mongodb')) {
+        const Shop = backend.api.getModel(types.Shop);
+        const raw = await Shop.collection.findOne({ _id: new mongoose.Types.ObjectId(id) });
+        expect(raw.main, backend.name).toEqual({
+          street: 'M', city: 'Y', phones: [], geo: null, reviewerId: null,
+        });
+      }
+      results.push(steps);
+    }
+
+    const geo = { lat: 1, lng: 2, aliases: [] };
+    const reviewer = { name: 'R' };
+    expect(results[0]).toEqual([
+      {
+        street: 'M', city: null, phones: ['1'], geo, reviewer,
+      },
+      {
+        street: 'M', city: null, phones: [], geo, reviewer,
+      },
+      {
+        street: 'M', city: null, phones: [], geo, reviewer: null,
+      },
+      {
+        street: 'M', city: null, phones: [], geo: null, reviewer: null,
+      },
+      {
+        street: 'M', city: 'Y', phones: [], geo: null, reviewer: null,
+      },
+    ]);
+    expect(results[1]).toEqual(results[0]);
+    expect(results[2]).toEqual(results[0]);
   });
 });

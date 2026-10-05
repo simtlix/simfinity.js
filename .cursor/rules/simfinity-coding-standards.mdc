@@ -28,7 +28,7 @@ throw new SimfinityError('Resource not found', 'NOT_FOUND', 404);
 
 - For auth errors, use `UnauthenticatedError` (401) or `ForbiddenError` (403) from `packages/core/src/auth/errors.js`; `packages/mongodb/src/auth/errors.js` is the compatibility shim.
 - Shared mutation logic uses `adapter.withTransaction`; do not import either database driver into core. Supplied sessions must already be active and remain caller-owned.
-- MongoDB owns Mongoose transaction handling: retry `TransientTransactionError` separately from commit-only `UnknownTransactionCommitResult` retries, with bounded attempts; preserve primary errors and await cleanup.
+- MongoDB owns Mongoose transaction handling: retry `TransientTransactionError` separately from commit-only `UnknownTransactionCommitResult` retries, with bounded attempts and a full-jitter backoff that starts after the abort; map an exhausted `WriteConflict` to `TRANSACTION_RETRY_EXCEEDED` (409) with the driver error as `cause`; preserve primary errors and await cleanup. Never mutate global Mongoose options (`mongoose.set`) from library code.
 - PostgreSQL owns `pg` clients and repeatable-read transactions; retry confirmed serialization/deadlock aborts with fresh input snapshots. Do not replay writes after uncertain commits or close an application-owned pool.
 
 ## GraphQL Type Definitions
