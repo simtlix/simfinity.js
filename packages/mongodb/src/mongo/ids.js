@@ -35,6 +35,12 @@ export const castPathValue = (schemaType, value) => {
 
 export const castModelId = (Model, value) => castPathValue(Model.schema.path('_id'), value);
 
+// A Mongoose query casts its filter, with the model's setters, when it runs, and keeps a failure as
+// its error flag. A failed cast of the record key there is a malformed identifier, whatever the key
+// type; a key cast failure in an update document, or an error that error middleware substitutes, is not.
+export const isQueryKeyCastFailure = (query, error) => error?.name === 'CastError' && error.path === '_id'
+  && typeof query?.error === 'function' && query.error() === error;
+
 // A write that fails only because ObjectId values do not cast: an ObjectId CastError, an embedded or
 // array cast wrapping one, or a ValidationError made only of such casts. Any other failure keeps its
 // own error.

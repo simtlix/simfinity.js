@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import {
+  afterEach, beforeEach, describe, expect, it, vi,
+} from 'vitest';
 import { GraphQLID, GraphQLObjectType, GraphQLString, graphql } from 'graphql';
 import { describeModels } from '@simtlix/simfinity-core';
 import { createRecordStore } from '../packages/sql/src/records.js';
@@ -15,6 +17,10 @@ const stubPlugin = () => ({
   values: { createId() {}, castId() {}, encodeScalar() {}, decodeScalar() {}, encodeEmbedded() {} },
   driver: { assertConfiguration() {}, query() {}, acquire() {}, begin() {}, commit() {}, rollback() {}, release() {}, isRetryable() {}, normalizeError() {} },
 });
+
+// Owned transactions wait Math.random() times the backoff before each retry; zero keeps retry tests immediate.
+beforeEach(() => { vi.spyOn(Math, 'random').mockReturnValue(0); });
+afterEach(() => { vi.restoreAllMocks(); });
 
 describe('SQL plugin binding', () => {
   it('rejects missing and malformed plugins eagerly', () => {

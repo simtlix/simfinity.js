@@ -246,7 +246,9 @@ export interface DatabaseAdapter<Model = any, Session = any> {
   /**
    * Casts a reference or batch key to the stored identifier type. Throw a `SimfinityError` with
    * code `NOT_VALID_ID` (400) for a malformed value; never create a new identifier. A batched
-   * reference read whose ID throws or is normalized reads that ID alone with `getById`.
+   * reference read whose ID throws or is normalized reads that ID alone with `getById`. When
+   * `getById` rejects a stored reference with that error, the generated reference field fails with
+   * an `InternalServerError` whose cause is that error, since the client did not send the value.
    */
   castId(value: any): any;
   stateValue?(state: { name: string; value: any }): any;
@@ -256,10 +258,12 @@ export interface DatabaseAdapter<Model = any, Session = any> {
   toObject(record: any): any;
   /**
    * Optional. When defined, every nullable, singular embedded object field without a resolver
-   * reads `readEmbeddedValue(parent[field])`. Return null for a value that a hydrated record renders
-   * as an object although the stored value is an explicit null; return any other value unchanged.
-   * It must depend only on the value: these resolvers read no data and do not bind their types, so a
-   * runtime that reaches a shared type may read through another runtime's hook.
+   * passes its value through `readEmbeddedValue(value)`. The field is read as graphql's default
+   * resolver reads it: a method on the parent is called with (args, context, info), and the hook
+   * receives its result once a returned promise settles. Return null for a value that a hydrated
+   * record renders as an object although the stored value is an explicit null; return any other
+   * value unchanged. It must depend only on the value: these resolvers read no data and do not bind
+   * their types, so a runtime that reaches a shared type may read through another runtime's hook.
    */
   readEmbeddedValue?(value: any): any;
   getById(model: Model, id: any, session?: Session | null, options?: { projection?: Record<string, number>; plain?: boolean; lock?: boolean; requiredId?: any; context?: any }): any;

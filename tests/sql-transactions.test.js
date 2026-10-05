@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTransactions } from '../packages/sql/src/transactions.js';
 import { bindPlugin } from '../packages/sql/src/plugin.js';
 import { postgresPlugin } from '../packages/postgres/src/index.js';
@@ -31,6 +31,11 @@ const fakePlugin = (overrides = {}) => {
   });
   return { client, log, driver, transactions: createTransactions(() => ({}), () => {}, plugin) };
 };
+
+// A zero jitter keeps retry tests immediate and deterministic.
+beforeEach(() => { vi.spyOn(Math, 'random').mockReturnValue(0); });
+// Restore spies before real timers, so a spy on a fake setTimeout is not left installed.
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe('SQL withTransaction rollback failures', () => {
   it.each([
@@ -66,6 +71,86 @@ describe('SQL withTransaction rollback failures', () => {
     });
     expect(result).toBe('second attempt');
     expect(driver.release.mock.calls.map(([, error]) => error)).toEqual([undefined, undefined]);
+  });
+});
+
+describe('SQL withTransaction retry backoff', () => {
+  // PostgreSQL's own classification and mapping, with no fake latency left in ROLLBACK or COMMIT,
+  // so every setTimeout call is a retry wait and the log shows when it happens.
+  const conflictPlugin = () => {
+    const { isRetryable, normalizeError } = postgresPlugin().driver;
+    const fake = fakePlugin({ isRetryable, normalizeError });
+    const { client, log, driver } = fake;
+    driver.acquire.mockImplementation(async () => { log.push('ACQUIRE'); return client; });
+    driver.commit.mockImplementation(async () => { log.push('COMMIT'); });
+    driver.rollback.mockImplementation(async () => { log.push('ROLLBACK'); });
+    // Logged only once the release settles, so a wait that does not await it shows up first.
+    driver.release.mockImplementation(async () => { await Promise.resolve(); log.push('RELEASE'); });
+    const setTimeout = globalThis.setTimeout;
+    const timer = vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, ms) => { log.push(`WAIT ${ms}`); return setTimeout(callback, ms); });
+    return { ...fake, timer };
+  };
+  const conflict = (code = '40001') => Object.assign(new Error('could not serialize access'), { code });
+
+  it.each(['40001', '40P01'])('waits a full-jitter exponential backoff after release and before each %s retry', async (code) => {
+    Math.random.mockReturnValue(0.5);
+    vi.useFakeTimers();
+    const { log, timer, transactions } = conflictPlugin();
+    const body = vi.fn(async () => { throw conflict(code); });
+    // Attach the expectation before running timers, so the rejection is never unhandled.
+    const outcome = expect(transactions.withTransaction(null, body)).rejects.toMatchObject({
+      message: 'Concurrent write could not be completed', extensions: { code: 'TRANSACTION_RETRY_EXCEEDED', status: 409 },
+    });
+    await vi.runAllTimersAsync();
+    await outcome;
+    expect(timer.mock.calls.map(([, ms]) => ms)).toEqual([5, 10, 20, 40, 80]);
+    expect(body).toHaveBeenCalledTimes(6);
+    const attempt = ['ACQUIRE', 'BEGIN', 'ROLLBACK', 'RELEASE'];
+    expect(log).toEqual([5, 10, 20, 40, 80].flatMap((ms) => [...attempt, `WAIT ${ms}`]).concat(attempt));
+  });
+
+  it('commits a retry that clears after one wait', async () => {
+    const { log, transactions } = conflictPlugin();
+    let attempts = 0;
+    const result = await transactions.withTransaction(null, async () => {
+      if (++attempts === 1) throw conflict('40P01');
+      return 'second attempt';
+    });
+    expect(result).toBe('second attempt');
+    expect(log).toEqual(['ACQUIRE', 'BEGIN', 'ROLLBACK', 'RELEASE', 'WAIT 0', 'ACQUIRE', 'BEGIN', 'COMMIT', 'RELEASE']);
+  });
+
+  it('does not wait before rethrowing an error that is not retryable', async () => {
+    const { log, timer, transactions } = conflictPlugin();
+    const body = vi.fn(async () => { throw Object.assign(new Error('duplicate key'), { code: '23505' }); });
+    await expect(transactions.withTransaction(null, body)).rejects.toMatchObject({ extensions: { code: 'DUPLICATE_KEY', status: 409 } });
+    expect(body).toHaveBeenCalledOnce();
+    expect(timer).not.toHaveBeenCalled();
+    expect(log).toEqual(['ACQUIRE', 'BEGIN', 'ROLLBACK', 'RELEASE']);
+  });
+
+  it('does not wait or retry when ROLLBACK fails', async () => {
+    const { client, driver, timer, transactions } = conflictPlugin();
+    const rollbackError = new Error('ROLLBACK timed out');
+    driver.rollback.mockRejectedValue(rollbackError);
+    const body = vi.fn(async () => { throw conflict(); });
+    await expect(transactions.withTransaction(null, body)).rejects.toMatchObject({ extensions: { code: 'TRANSACTION_RETRY_EXCEEDED' } });
+    expect(body).toHaveBeenCalledOnce();
+    expect(timer).not.toHaveBeenCalled();
+    expect(driver.release).toHaveBeenCalledWith(client, rollbackError);
+  });
+
+  it('returns a borrowed-session conflict unchanged without retry, wait or rollback', async () => {
+    const { log, timer, transactions } = conflictPlugin();
+    const failure = conflict();
+    const borrowed = vi.fn(async () => { throw failure; });
+    await transactions.withTransaction(null, async (session) => {
+      await expect(transactions.withTransaction(session, borrowed)).rejects.toBe(failure);
+      expect(session.inTransaction()).toBe(true);
+    });
+    expect(borrowed).toHaveBeenCalledOnce();
+    expect(timer).not.toHaveBeenCalled();
+    expect(log).toEqual(['ACQUIRE', 'BEGIN', 'COMMIT', 'RELEASE']);
   });
 });
 

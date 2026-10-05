@@ -92,7 +92,7 @@ await simfinity.withTransaction(null, async (session) => {
 });
 ```
 
-`withTransaction` uses repeatable-read isolation and retries confirmed serialization failures and deadlocks. The supplied session is active only inside its callback. A nested `withTransaction(session, callback)` or `saveObject(..., session, ...)` joins it without committing or releasing it. Arbitrary `pg.Client` objects and sessions from another runtime are rejected.
+`withTransaction` uses repeatable-read isolation and retries confirmed serialization failures and deadlocks up to five times, each after a short random delay. The supplied session is active only inside its callback. A nested `withTransaction(session, callback)` or `saveObject(..., session, ...)` joins it without committing or releasing it. Arbitrary `pg.Client` objects and sessions from another runtime are rejected.
 
 ## Relationship foreign keys
 

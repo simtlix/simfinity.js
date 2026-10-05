@@ -6,7 +6,7 @@ import { createMongoQueries } from './queries.js';
 import { withMongoTransaction } from './transactions.js';
 import { createMongoIntegrity } from './integrity.js';
 import {
-  castModelId, castObjectId, castPathValue, mapIdCastError,
+  castModelId, castObjectId, castPathValue, invalidId, isQueryKeyCastFailure, mapIdCastError,
 } from './ids.js';
 
 const withSession = (query, session) => (session ? query.session(session) : query);
@@ -20,12 +20,18 @@ const mapIdCastErrors = async (write) => {
   }
 };
 
-// Keep the chainable Query and map identifier cast failures only when it runs.
-const mapQueryIdCastErrors = (query) => {
+// By-ID queries take the raw ID, so the model's setters and key cast run once, in Mongoose's own
+// query lifecycle. Keep the chainable Query and map a failed key cast only when it runs; with
+// `mapError`, also map other failures, such as malformed ObjectId values in an update.
+const mapQueryIdCastErrors = (query, mapError = (error) => error) => {
   const { exec } = query;
   if (typeof exec !== 'function') return query;
-  query.exec = function execMappingIdCasts(...args) {
-    return mapIdCastErrors(() => exec.apply(this, args));
+  query.exec = async function execMappingIdCasts(...args) {
+    try {
+      return await exec.apply(this, args);
+    } catch (error) {
+      throw isQueryKeyCastFailure(this, error) ? invalidId() : mapError(error);
+    }
   };
   return query;
 };
@@ -114,12 +120,10 @@ export const createMongoAdapter = (options) => {
     },
     getById(Model, id, session, { projection, plain, requiredId } = {}) {
       integrity.assertReady();
-      // Cast with the model's own key type, so a malformed ID fails before any read.
-      const castedId = castModelId(Model, id);
-      let query = withSession(requiredId == null ? Model.findById(castedId, projection)
-        : Model.findOne({ $and: [{ _id: castModelId(Model, requiredId) }, { _id: castedId }] }, projection), session);
+      let query = withSession(requiredId == null ? Model.findById(id, projection)
+        : Model.findOne({ $and: [{ _id: requiredId }, { _id: id }] }, projection), session);
       if (plain) query = query.lean();
-      return query;
+      return mapQueryIdCastErrors(query);
     },
     getByIds(Model, ids) {
       integrity.assertReady();
@@ -135,19 +139,20 @@ export const createMongoAdapter = (options) => {
     update(Model, id, update, session) {
       if (integrity.enabled) return integrity.updateRecord(Model, id, update, session);
       return mapQueryIdCastErrors(withSession(
-        Model.findByIdAndUpdate(castModelId(Model, id), update, { new: true }), session,
-      ));
+        Model.findByIdAndUpdate(id, update, { new: true }), session,
+      ), mapIdCastError);
     },
     delete(Model, id, session) {
       if (integrity.enabled) {
         integrity.assertWrite(Model, session);
         return integrity.deleteRecord(Model, id, session);
       }
-      return withSession(Model.findByIdAndDelete(castModelId(Model, id)), session);
+      return mapQueryIdCastErrors(withSession(Model.findByIdAndDelete(id), session));
     },
     async find(Model, gqltype, args, session, { requiredId } = {}) {
       integrity.assertReady();
       const pipeline = await queries.buildQuery(args, gqltype);
+      // Mongoose does not cast aggregation stages, so cast the key type here, without setters.
       if (requiredId != null) pipeline.unshift({ $match: { _id: castModelId(Model, requiredId) } });
       if (pipeline.length === 0) return withSession(Model.find({}), session);
       return withSession(Model.aggregate(pipeline), session);

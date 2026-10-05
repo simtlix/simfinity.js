@@ -256,6 +256,8 @@ export const createMongoIntegrity = (options = {}) => {
         return saved;
       });
     },
+    // Protected writes cast the key before querying, without setters, as 3.5.3 did: the lock, the
+    // reference checks and the identity checks must all use the key requested before middleware runs.
     async updateRecord(Model, id, update, session) {
       assertWrite(Model, session);
       return abortOnWriteError(session, async () => {

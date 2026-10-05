@@ -16,7 +16,9 @@ import {
 } from 'graphql';
 import mongoose from 'mongoose';
 
-import { auth, createRuntime } from '../packages/core/src/index.js';
+import {
+  auth, buildErrorFormatter, createRuntime, InternalServerError, SimfinityError,
+} from '../packages/core/src/index.js';
 import { createMongoAdapter } from '../packages/mongodb/src/mongo/adapter.js';
 import { createMongoModel } from '../packages/mongodb/src/mongo/models.js';
 import { createMongoQueries } from '../packages/mongodb/src/mongo/queries.js';
@@ -1576,6 +1578,95 @@ describe('references to zero identifiers', () => {
   });
 });
 
+describe('stored references the adapter cannot read', () => {
+  // Numeric identifiers, as a SQL store keeps them; the adapter rejects any other value as malformed.
+  const castNumericId = (value) => {
+    if (!/^\d+$/.test(String(value))) throw new SimfinityError('Invalid identifier', 'NOT_VALID_ID', 400);
+    return Number(value);
+  };
+
+  // The second book stores an author identifier written outside Simfinity.
+  const build = (prefix, getByIds) => {
+    const adapter = createKeyedAdapter({ castId: castNumericId, withId: true, getByIds });
+    const runtime = createRuntime(adapter);
+    const Author = createType(`${prefix}Author`);
+    const Book = new GraphQLObjectType({
+      name: `${prefix}Book`,
+      fields: {
+        id: { type: GraphQLID },
+        title: { type: GraphQLString },
+        author: { type: Author, extensions: { relation: { embedded: false, connectionField: 'authorId' } } },
+      },
+    });
+    runtime.connect(null, Author, `${prefix}Author`, `${prefix}Authors`);
+    runtime.connect(null, Book, `${prefix}Book`, `${prefix}Books`);
+    const schema = runtime.createSchema();
+    adapter.seed(`${prefix}Author`, { _id: 1, id: 1, name: 'Ada' });
+    adapter.seed(`${prefix}Book`, { _id: 1, id: 1, title: 'Kept', authorId: 1 });
+    adapter.seed(`${prefix}Book`, { _id: 2, id: 2, title: 'Legacy', authorId: 'legacy-key' });
+    return { adapter, run: (source) => graphql({ schema, source, contextValue: {} }) };
+  };
+
+  const format = (result, callback) => result.errors.map(buildErrorFormatter(callback))
+    .map(({ path, extensions }) => ({ path, code: extensions.code, status: extensions.status }));
+
+  test.each([
+    ['read by id', 'StoredDirect', false],
+    ['read in batches', 'StoredBatched', true],
+  ])('reports a stored identifier the adapter rejects as an internal error at its field: %s', async (label, prefix, getByIds) => {
+    const { adapter, run } = build(prefix, getByIds);
+    const callback = vi.fn();
+
+    const read = await run(`{ ${prefix}Books { title author { name } } }`);
+
+    expect(read.data[`${prefix}Books`]).toEqual([
+      { title: 'Kept', author: { name: 'Ada' } },
+      { title: 'Legacy', author: null },
+    ]);
+    expect(format(read, callback)).toEqual([
+      { path: [`${prefix}Books`, 1, 'author'], code: 'INTERNAL_SERVER_ERROR', status: undefined },
+    ]);
+    const [[classified]] = callback.mock.calls;
+    expect(classified).toBeInstanceOf(InternalServerError);
+    expect(classified.getCause()).toBeInstanceOf(SimfinityError);
+    expect(classified.getCause().extensions).toMatchObject({ code: 'NOT_VALID_ID', status: 400 });
+    expect(adapter.getById).toHaveBeenCalledWith(
+      expect.anything(), 'legacy-key', null, expect.objectContaining({ requiredId: 'legacy-key' }),
+    );
+    if (getByIds) expect(adapter.getByIds).toHaveBeenCalledOnce();
+  });
+
+  test('keeps malformed identifiers a client sends bad requests', async () => {
+    const { adapter, run } = build('StoredClient', true);
+
+    const byId = await run('{ StoredClientBook(id: "legacy-key") { title } }');
+    const added = await run('mutation { addStoredClientBook(input: { title: "N", author: { id: "legacy-key" } }) { id } }');
+
+    expect(format(byId)).toEqual([{ path: ['StoredClientBook'], code: 'NOT_VALID_ID', status: 400 }]);
+    expect(format(added)).toEqual([{ path: ['addStoredClientBook'], code: 'NOT_VALID_ID', status: 400 }]);
+    expect(adapter.getRecords('StoredClientBook')).toHaveLength(2);
+  });
+
+  test.each([
+    ['a missing record', 'StoredMissing', new SimfinityError('Author is not valid', 'NOT_VALID_ID', 404)],
+    ['another bad request', 'StoredRejected', new SimfinityError('Rejected', 'BAD_REQUEST', 400)],
+  ])('passes %s through unchanged', async (label, prefix, failure) => {
+    const { adapter, run } = build(prefix, false);
+    adapter.getById.mockRejectedValue(failure);
+    const callback = vi.fn();
+
+    const read = await run(`{ ${prefix}Books { title author { name } } }`);
+
+    const { code, status } = failure.extensions;
+    expect(format(read, callback)).toEqual([
+      { path: [`${prefix}Books`, 0, 'author'], code, status },
+      { path: [`${prefix}Books`, 1, 'author'], code, status },
+    ]);
+    expect(callback.mock.calls.map(([error]) => error)).toEqual([failure, failure]);
+    expect(callback.mock.calls.every(([error]) => error === failure)).toBe(true);
+  });
+});
+
 describe('referenced collection connectionField', () => {
   const createOwnerTypes = (prefix, things = {}) => {
     const Thing = new GraphQLObjectType({
@@ -2118,6 +2209,67 @@ describe('embedded value hook', () => {
       expect(read.errors).toBeUndefined();
       expect(read.data.hookShareableShops).toEqual([{ main: { street: 'M', geo: null } }]);
     }
+  });
+
+  test('calls embedded methods of a custom mutation result before reading them through the adapter', async () => {
+    const adapter = createHookAdapter();
+    const runtime = createRuntime(adapter);
+    const types = createShopTypes('HookMethod');
+    register(runtime, types, 'hookMethodShop');
+    const received = [];
+    // Called with the parent as receiver and the resolver arguments, as graphql's default resolver does.
+    function main(args, context) {
+      received.push({ receiver: this.id, context: context.tenant });
+      return { street: `${this.id}-street`, geo: cleared };
+    }
+    const results = {
+      sync: { id: 'sync', main },
+      async: { id: 'async', async main() { return { street: `${this.id}-street` }; } },
+      asyncCleared: { id: 'asyncCleared', main: async () => cleared },
+    };
+    const ModeInput = new GraphQLInputObjectType({ name: 'HookMethodInput', fields: { mode: { type: GraphQLString } } });
+    runtime.registerMutation('hookMethodShop', 'Returns a shop with embedded methods', ModeInput, types.Shop,
+      async ({ mode }) => results[mode]);
+    const schema = runtime.createSchema();
+    const run = (mode) => graphql({
+      schema,
+      source: `mutation { hookMethodShop(input: { mode: "${mode}" }) { id main { street geo { lat } } } }`,
+      contextValue: { tenant: 't1' },
+    });
+
+    const [sync, asynchronous, asyncCleared] = await Promise.all(['sync', 'async', 'asyncCleared'].map(run));
+
+    expect(sync).toEqual({ data: { hookMethodShop: { id: 'sync', main: { street: 'sync-street', geo: null } } } });
+    expect(received).toEqual([{ receiver: 'sync', context: 't1' }]);
+    expect(asynchronous).toEqual({
+      data: { hookMethodShop: { id: 'async', main: { street: 'async-street', geo: null } } },
+    });
+    expect(asyncCleared).toEqual({ data: { hookMethodShop: { id: 'asyncCleared', main: null } } });
+    // The hook reads the value the method settles to, never the method or its promise.
+    for (const [value] of adapter.readEmbeddedValue.mock.calls) {
+      expect(typeof value === 'function' || value instanceof Promise).toBe(false);
+    }
+  });
+
+  test('calls the method behind a read-only embedded field of a stored record', async () => {
+    const adapter = createHookAdapter();
+    const runtime = createRuntime(adapter);
+    const types = createShopTypes('HookReadOnlyMethod');
+    register(runtime, types, 'hookReadOnlyMethodShop');
+    const schema = runtime.createSchema();
+    await adapter.saveRecord({ name: 'HookReadOnlyMethodShop' }, {
+      _id: '1',
+      snapshot() { return { geo: { lat: Number(this._id) } }; },
+    });
+    await adapter.saveRecord({ name: 'HookReadOnlyMethodShop' }, { _id: '2', snapshot: () => cleared });
+
+    const result = await graphql({ schema, source: '{ hookReadOnlyMethodShops { id snapshot { geo { lat } } } }' });
+
+    expect(result).toEqual({
+      data: {
+        hookReadOnlyMethodShops: [{ id: '1', snapshot: { geo: { lat: 1 } } }, { id: '2', snapshot: null }],
+      },
+    });
   });
 
   test('installs nothing for adapters without the hook, so the types stay shareable', async () => {

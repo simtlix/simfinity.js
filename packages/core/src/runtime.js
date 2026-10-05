@@ -4,7 +4,7 @@ import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
   GraphQLInt, GraphQLEnumType, GraphQLBoolean, GraphQLError, GraphQLInterfaceType, GraphQLUnionType,
-  Kind, getNamedType,
+  Kind, defaultFieldResolver, getNamedType,
 } from 'graphql';
 
 import SimfinityError from './errors/simfinity.error.js';
@@ -14,6 +14,7 @@ import QLValue from './const/QLValue.js';
 import QLSort from './const/QLSort.js';
 import { collectQueryPathEntries, collectQueryPaths, walkQueryPath } from './query-plan.js';
 import { relationFieldOwners } from './relation-owners.js';
+import { isThenable } from './auth/thenable.js';
 import {
   getFieldStorageName, getListShape, markStoredIdentity, normalizeConnectionField,
 } from './relation-storage.js';
@@ -1721,14 +1722,23 @@ const installIdResolver = (gqltype) => {
 // embedded fields of registered types, and of the embedded types they reach, read through it. The
 // hook depends only on the value and reads no data, so these resolvers do not bind their types to
 // this runtime: another runtime that reaches a shared type reads the same value through it.
+// The value is read as graphql's default resolver reads it, so a method on the parent, such as one a
+// custom mutation result supplies, is still called; a promise it returns is read once it settles.
+const readEmbeddedField = markGenerated((parent, args, context, info) => {
+  const value = defaultFieldResolver(parent, args, context, info);
+  return isThenable(value)
+    ? value.then((resolved) => adapter.readEmbeddedValue(resolved))
+    : adapter.readEmbeddedValue(value);
+});
+
 const installEmbeddedValueResolvers = (gqltype, visited) => {
   if (!(gqltype instanceof GraphQLObjectType) || visited.has(gqltype)) return;
   visited.add(gqltype);
-  for (const [fieldName, fieldEntry] of Object.entries(gqltype.getFields())) {
+  for (const fieldEntry of Object.values(gqltype.getFields())) {
     if (fieldEntry.extensions?.relation?.embedded !== true) continue;
     const listShape = getListShape(fieldEntry.type);
     if (!listShape && !(fieldEntry.type instanceof GraphQLNonNull) && !fieldEntry.resolve) {
-      fieldEntry.resolve = markGenerated((parent) => adapter.readEmbeddedValue(parent?.[fieldName]));
+      fieldEntry.resolve = readEmbeddedField;
     }
     installEmbeddedValueResolvers(listShape ? listShape.itemType : unwrapNonNull(fieldEntry.type), visited);
   }
@@ -1870,6 +1880,16 @@ const claimRelationField = (fieldEntry, resolve, extensions = {}) => {
   relationFieldOwners.set(fieldEntry.resolve, runtimeIdentity);
 };
 
+// The identifier a single reference reads is stored, not sent by the client, so one the adapter
+// rejects as malformed, such as a value written outside Simfinity, is a data error rather than a bad
+// request. Missing records and other errors keep their own classification.
+const storedReferenceError = (error, gqltype, fieldName) => {
+  if (!(error instanceof SimfinityError) || error.getCode() !== 'NOT_VALID_ID' || error.getStatus() !== 400) {
+    return error;
+  }
+  return new InternalServerError(`${gqltype.name}.${fieldName} stores an invalid identifier`, error);
+};
+
 const autoGenerateResolvers = (gqltype) => {
   assertFieldsNotBoundElsewhere(gqltype);
   const fields = gqltype.getFields();
@@ -1922,7 +1942,12 @@ const autoGenerateResolvers = (gqltype) => {
         // Any stored identifier except null or an empty string, so numeric IDs such as 0 resolve.
         const relatedId = parent[connectionField] ?? parent[fieldName];
         const id = relatedId?._id ?? relatedId;
-        return id != null && id !== '' ? resolveById(relatedTypeInfo, { id: String(id) }, context, id) : null;
+        if (id == null || id === '') return null;
+        try {
+          return await resolveById(relatedTypeInfo, { id: String(id) }, context, id);
+        } catch (error) {
+          throw storedReferenceError(error, gqltype, fieldName);
+        }
       });
       runtimeBoundTypes.set(gqltype, runtimeIdentity);
     }

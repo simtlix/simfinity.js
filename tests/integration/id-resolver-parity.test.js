@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
-  afterAll, beforeAll, describe, expect, test,
+  afterAll, beforeAll, describe, expect, test, vi,
 } from 'vitest';
 import {
   GraphQLID, GraphQLList, GraphQLObjectType, GraphQLString, graphql,
@@ -8,7 +8,7 @@ import {
 import mongoose from 'mongoose';
 import pg from 'pg';
 
-import { createRuntime } from '../../packages/core/src/index.js';
+import { buildErrorFormatter, createRuntime, InternalServerError } from '../../packages/core/src/index.js';
 import { createMongoAdapter } from '../../packages/mongodb/src/mongo/adapter.js';
 import { createPostgres } from '../../packages/postgres/src/index.js';
 import { createContractModelFixtures } from '../contracts/model-fixtures.js';
@@ -160,6 +160,41 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL entity id parity'
         // PostgreSQL stores embedded copies without an identity of their own.
         expect(copy).toEqual({ id: null, label: 'b1' });
       }
+    }
+  });
+
+  test('a stored MongoDB reference no ObjectId can hold fails its field as an internal error', async () => {
+    const backend = backends.find(({ name }) => name === 'mongodb');
+    const { Badge, Holder } = backend.badgeTypes;
+    const badge = await backend.api.getModel(Badge).create({ label: 'silver' });
+    const tag = `legacy-${randomUUID()}`;
+    // Written outside Simfinity: the reference is neither an ObjectId nor its hex form.
+    const { insertedId } = await backend.api.getModel(Holder).collection.insertOne({ name: tag, featuredId: 'legacy-key' });
+    await backend.api.getModel(Holder).collection.insertOne({ name: tag, featuredId: badge._id });
+
+    // With a context object references are read in batches; without one, each is read by ID.
+    for (const contextValue of [{}, undefined]) {
+      const callback = vi.fn();
+      const read = (source, variableValues) => graphql({
+        schema: backend.schema, source, variableValues, contextValue,
+      });
+
+      const list = await read(`query($tag: QLValue) {
+        idParityHolders(name: { operator: EQ, value: $tag }) { name featured { label } }
+      }`, { tag });
+      const byId = await read('query($id: ID) { idParityHolder(id: $id) { name featured { label } } }', { id: String(insertedId) });
+
+      const rows = list.data.idParityHolders;
+      const legacyRow = rows.findIndex((row) => row.featured === null);
+      expect(rows).toHaveLength(2);
+      expect(rows[1 - legacyRow]).toEqual({ name: tag, featured: { label: 'silver' } });
+      expect(list.errors.map(buildErrorFormatter(callback)).map(({ path, extensions }) => [path, extensions.code]))
+        .toEqual([[['idParityHolders', legacyRow, 'featured'], 'INTERNAL_SERVER_ERROR']]);
+      const [[classified]] = callback.mock.calls;
+      expect(classified).toBeInstanceOf(InternalServerError);
+      expect(classified.getCause().extensions).toMatchObject({ code: 'NOT_VALID_ID', status: 400 });
+      // A by-ID read hydrates the document, and Mongoose leaves a reference it cannot cast unset.
+      expect(byId).toEqual({ data: { idParityHolder: { name: tag, featured: null } } });
     }
   });
 });

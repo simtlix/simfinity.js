@@ -53,7 +53,7 @@ const schema = createSchema();
 await initializeDatabase({ mode: 'validate' });
 ```
 
-Transactions use one borrowed `pg` client and repeatable-read isolation. A supplied Simfinity PostgreSQL session joins the active transaction. Serialization failures and deadlocks are retried up to five times; mutation input is reset for each attempt. Unknown commit outcomes are not replayed. The caller owns the pool lifecycle.
+Transactions use one borrowed `pg` client and repeatable-read isolation. A supplied Simfinity PostgreSQL session joins the active transaction. Serialization failures and deadlocks are retried up to five times, each after a short random delay that starts once the client is released; mutation input is reset for each attempt. Unknown commit outcomes are not replayed. The caller owns the pool lifecycle.
 
 The module and every `createPostgres` instance expose the shared `auth`, `validators`, `scalars`, and `plugins` helpers. These are the same helper objects exported by the MongoDB package, so rules, scalar identities, and errors can be shared safely between backends.
 

@@ -1,5 +1,5 @@
 import {
-  afterAll, beforeAll, beforeEach, describe, expect, test,
+  afterAll, beforeAll, beforeEach, describe, expect, test, vi,
 } from 'vitest';
 import mongoose from 'mongoose';
 import {
@@ -598,6 +598,89 @@ describeWithMongoDB('MongoDB GraphQL compatibility contract', () => {
         contractvirtualsvisits: [{ shop: { main: cleared } }],
         contractvirtualsshops: [{ main: cleared }],
       });
+    });
+  });
+
+  describe('a supplied model whose key has a setter', () => {
+    // Maps the client's `item-12` to the stored Number key, as Mongoose applies it to queries.
+    const setKey = vi.fn((value) => (typeof value === 'string' ? value.replace(/^item-/, '') : value));
+    const appliedTo = () => setKey.mock.calls.map(([value]) => value);
+    let setterSchema;
+    let setterAdapter;
+    let ItemModel;
+
+    beforeAll(async () => {
+      setterAdapter = simfinity.createMongoAdapter();
+      const runtime = simfinity.createRuntime(setterAdapter);
+      runtime.preventCreatingCollection(true);
+      const Item = new GraphQLObjectType({
+        name: 'ContractSetterItem',
+        fields: { id: { type: GraphQLID }, title: { type: GraphQLString } },
+      });
+      ItemModel = mongoose.model('ContractSetterItem', new mongoose.Schema({
+        _id: { type: Number, set: setKey }, title: String,
+      }));
+      runtime.connect(ItemModel, Item, 'contractsetteritem', 'contractsetteritems');
+      setterSchema = runtime.createSchema();
+      await ItemModel.createCollection();
+    });
+
+    beforeEach(async () => {
+      await ItemModel.collection.deleteMany({});
+      await ItemModel.collection.insertOne({ _id: 12, title: 'original' });
+      setKey.mockClear();
+    });
+
+    const stored = () => ItemModel.collection.find({}).toArray();
+
+    test('by-ID reads, updates and deletes accept the ID its setter maps, applying it once per query', async () => {
+      const read = await execute(setterSchema, 'query { contractsetteritem(id: "item-12") { id title } }');
+      expect(read.errors).toBeUndefined();
+      expect(read.data.contractsetteritem).toEqual({ id: '12', title: 'original' });
+      expect(appliedTo()).toEqual(['item-12']);
+
+      setKey.mockClear();
+      const updated = await execute(setterSchema, `mutation {
+        updatecontractsetteritem(input: { id: "item-12", title: "changed" }) { id title }
+      }`);
+      expect(updated.errors).toBeUndefined();
+      expect(updated.data.updatecontractsetteritem).toEqual({ id: '12', title: 'changed' });
+      expect(appliedTo()).toEqual(['item-12']);
+      expect(await stored()).toEqual([{ _id: 12, title: 'changed' }]);
+
+      setKey.mockClear();
+      const deleted = await execute(setterSchema, 'mutation { deletecontractsetteritem(id: "item-12") { id title } }');
+      expect(deleted.errors).toBeUndefined();
+      expect(deleted.data.deletecontractsetteritem).toEqual({ id: '12', title: 'changed' });
+      // The delete reads the record for its hook first: two queries, each applying the setter once.
+      expect(appliedTo()).toEqual(['item-12', 'item-12']);
+      expect(await stored()).toEqual([]);
+    });
+
+    test('direct adapter reads and writes apply the setter once', async () => {
+      expect(await setterAdapter.getById(ItemModel, 'item-12', null, { plain: true }))
+        .toEqual({ _id: 12, title: 'original' });
+      expect(appliedTo()).toEqual(['item-12']);
+      setKey.mockClear();
+      expect((await setterAdapter.update(ItemModel, 'item-12', { title: 'changed' })).title).toBe('changed');
+      expect(appliedTo()).toEqual(['item-12']);
+      setKey.mockClear();
+      expect((await setterAdapter.delete(ItemModel, 'item-12'))._id).toBe(12);
+      expect(appliedTo()).toEqual(['item-12']);
+      expect(await stored()).toEqual([]);
+    });
+
+    test('an ID its setter maps to a value the key cannot hold fails with NOT_VALID_ID (400) and writes nothing', async () => {
+      expectInvalidId(await execute(setterSchema, 'query { contractsetteritem(id: "item-abc") { id } }'),
+        'contractsetteritem');
+      expectInvalidId(await execute(setterSchema, `mutation {
+        updatecontractsetteritem(input: { id: "item-abc", title: "changed" }) { id }
+      }`), 'updatecontractsetteritem');
+      expectInvalidId(await execute(setterSchema, 'mutation { deletecontractsetteritem(id: "item-abc") { id } }'),
+        'deletecontractsetteritem');
+      // One query each: the delete stops at the read for its hook.
+      expect(appliedTo()).toEqual(['item-abc', 'item-abc', 'item-abc']);
+      expect(await stored()).toEqual([{ _id: 12, title: 'original' }]);
     });
   });
 });

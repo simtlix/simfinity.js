@@ -102,7 +102,7 @@ All instances and writing scripts must use the same complete relationship graph 
 
 Protection covers generated GraphQL mutations, the same operations exposed through MCP, `saveObject()` and guarded adapter writes. Direct `getModel()` writes, raw driver/collection calls, external clients and native writes inside controllers/custom mutations bypass these checks. Those writers must implement the same protocol or use the protected runtime. Putting a native write in a transaction alone is insufficient.
 
-Custom Mongoose middleware must preserve the transaction session and operation identity. The adapter rejects redirected deletion identities and unreadable/hidden write results, but arbitrary hooks that perform separate writes or escape the transaction are outside the guarantee. Integrity checks use native storage, not query scopes; scopes continue to control which related records a caller can read.
+Custom Mongoose middleware must preserve the transaction session and operation identity. Protected updates and deletes cast the requested ID to the ObjectId key before querying, without `_id` setters, as in 3.5.3, so the lock, the reference checks and the identity checks all use the requested record; by-ID reads leave the setters and the cast to Mongoose, as in the default mode. The adapter rejects redirected deletion identities and unreadable/hidden write results, but arbitrary hooks that perform separate writes or escape the transaction are outside the guarantee. Integrity checks use native storage, not query scopes; scopes continue to control which related records a caller can read.
 
 ## Errors
 

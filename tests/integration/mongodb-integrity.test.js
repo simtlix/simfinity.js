@@ -1,5 +1,5 @@
 import {
-  afterAll, beforeAll, beforeEach, describe, expect, test,
+  afterAll, beforeAll, beforeEach, describe, expect, test, vi,
 } from 'vitest';
 import mongoose from 'mongoose';
 import {
@@ -405,6 +405,36 @@ withMongo('MongoDB transactional reference integrity', () => {
     expect(await fixture.models.Shop.countDocuments()).toBe(1);
     expect((await fixture.models.Shop.findById(shop._id).lean()).name).toBe('original');
     expect(await fixture.models.Entry.countDocuments()).toBe(0);
+  });
+
+  test('a protected by-ID read leaves a supplied key setter to the query and rejects a malformed ID', async () => {
+    // Maps the client's `item-<hex>` to the stored ObjectId key, as Mongoose applies it to queries.
+    const setKey = vi.fn((value) => (typeof value === 'string' ? value.replace(/^item-/, '') : value));
+    const adapter = createMongoAdapter({ referentialIntegrity: 'transactional' });
+    const runtime = createRuntime(adapter);
+    runtime.preventCreatingCollection(true);
+    const Item = new GraphQLObjectType({
+      name: 'IntegritySetterItem', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } },
+    });
+    const ItemModel = mongoose.model('IntegritySetterItem', new mongoose.Schema({
+      _id: { type: mongoose.Schema.Types.ObjectId, set: setKey }, title: String,
+    }));
+    runtime.connect(ItemModel, Item, 'integritysetteritem', 'integritysetteritems');
+    const schema = runtime.createSchema();
+    await ItemModel.createCollection();
+    await adapter.initialize();
+    const id = new mongoose.Types.ObjectId();
+    await ItemModel.collection.insertOne({ _id: id, title: 'original' });
+    setKey.mockClear();
+    const read = (value) => graphql({
+      schema, source: 'query($id: ID) { integritysetteritem(id: $id) { id title } }', variableValues: { id: value },
+    });
+
+    const found = await read(`item-${id}`);
+    expect(found.errors).toBeUndefined();
+    expect(found.data.integritysetteritem).toEqual({ id: String(id), title: 'original' });
+    expect(setKey.mock.calls.map(([value]) => value)).toEqual([`item-${id}`]);
+    expectInvalidId(await read('item-invalid'), 'integritysetteritem');
   });
 
   test('an owned delete that keeps conflicting with a held reference lock fails with TRANSACTION_RETRY_EXCEEDED (409)', async () => {
