@@ -13,10 +13,10 @@ Version 3.3.0 also exposes a [driver-free SQL core and PostgreSQL plugin](./sql-
 
 ## Download and install
 
-[Download the v3.5.3 starters](/releases/simfinity-3.5.3-starters.zip), extract them, and install the PostgreSQL application from npm:
+[Download the v3.5.4 starters](/releases/simfinity-3.5.4-starters.zip), extract them, and install the PostgreSQL application from npm:
 
 ```sh
-cd simfinity-3.5.3-starters/postgres
+cd simfinity-3.5.4-starters/postgres
 npm install
 ```
 
@@ -92,7 +92,7 @@ await simfinity.withTransaction(null, async (session) => {
 });
 ```
 
-`withTransaction` uses repeatable-read isolation and retries confirmed serialization failures and deadlocks. The supplied session is active only inside its callback. A nested `withTransaction(session, callback)` or `saveObject(..., session, ...)` joins it without committing or releasing it. Arbitrary `pg.Client` objects and sessions from another runtime are rejected.
+`withTransaction` uses repeatable-read isolation and retries confirmed serialization failures and deadlocks up to five times, each after a short random delay. The supplied session is active only inside its callback. A nested `withTransaction(session, callback)` or `saveObject(..., session, ...)` joins it without committing or releasing it. Arbitrary `pg.Client` objects and sessions from another runtime are rejected.
 
 ## Relationship foreign keys
 
@@ -128,7 +128,7 @@ Read the [detailed PostgreSQL storage and compatibility reference](../postgresql
 MCP is a separate package so PostgreSQL and core do not install its SDK chain. Install both the MCP package and SDK only when the application exposes tools:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.3 \
+npm install @simtlix/simfinity-mcp@3.5.4 \
   @modelcontextprotocol/sdk@^1.13.0
 ```
 

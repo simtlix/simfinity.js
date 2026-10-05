@@ -34,6 +34,10 @@ const labeledError = (...labels) => {
   return error;
 };
 
+const writeConflict = () => Object.assign(labeledError('TransientTransactionError'), {
+  code: 112, codeName: 'WriteConflict',
+});
+
 // Session state follows the driver's Core API: a commit attempt ends the active
 // transaction locally even when its result is unknown and commit must be retried.
 const createSession = () => {
@@ -72,12 +76,18 @@ describe('Mutation transactions', () => {
     session = createSession();
     vi.spyOn(mongoose, 'startSession').mockResolvedValue(session);
     vi.spyOn(mongoose.connection, 'startSession').mockResolvedValue(session);
+    // A zero jitter keeps retry tests immediate and deterministic.
+    vi.spyOn(Math, 'random').mockReturnValue(0);
     customCallback = vi.fn(async () => 'done');
     for (const key of Object.keys(parentController)) delete parentController[key];
     for (const key of Object.keys(childController)) delete childController[key];
   });
 
-  afterEach(() => vi.restoreAllMocks());
+  // Restore spies before real timers, so a spy on a fake setTimeout is not left installed.
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
 
   const mutate = (name, input) => schema.getMutationType().getFields()[name]
     .resolve(null, { input }, context);
@@ -196,13 +206,70 @@ describe('Mutation transactions', () => {
     expect(session.endSession).toHaveBeenCalledOnce();
   });
 
+  test('waits a full-jitter exponential backoff after abort and before each transient retry', async () => {
+    Math.random.mockReturnValue(0.5);
+    vi.useFakeTimers();
+    const timer = vi.spyOn(globalThis, 'setTimeout');
+    const failure = labeledError('TransientTransactionError');
+    customCallback.mockRejectedValue(failure);
+    // Attach the expectation before running timers, so the rejection is never unhandled.
+    const outcome = expect(mutate('transactionCustom')).rejects.toBe(failure);
+    await vi.runAllTimersAsync();
+    await outcome;
+    expect(timer.mock.calls.map(([, delay]) => delay)).toEqual([5, 10, 20, 40, 80]);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      expect(session.abortTransaction.mock.invocationCallOrder[attempt])
+        .toBeLessThan(timer.mock.invocationCallOrder[attempt]);
+      expect(timer.mock.invocationCallOrder[attempt])
+        .toBeLessThan(session.startTransaction.mock.invocationCallOrder[attempt + 1]);
+    }
+    expect(customCallback).toHaveBeenCalledTimes(6);
+  });
+
+  test('maps an exhausted WriteConflict to TRANSACTION_RETRY_EXCEEDED (409) with the driver error as cause', async () => {
+    const failure = writeConflict();
+    customCallback.mockRejectedValue(failure);
+    const error = await mutate('transactionCustom').catch((rejection) => rejection);
+    expect(error).toBeInstanceOf(simfinity.SimfinityError);
+    expect(error).toMatchObject({
+      message: 'Concurrent write could not be completed',
+      extensions: { code: 'TRANSACTION_RETRY_EXCEEDED', status: 409 },
+    });
+    expect(error.cause).toBe(failure);
+    expect(error.getCause()).toBe(failure);
+    expect(customCallback).toHaveBeenCalledTimes(6);
+    expect(session.abortTransaction).toHaveBeenCalledTimes(6);
+    expect(session.endSession).toHaveBeenCalledOnce();
+  });
+
+  test('a WriteConflict that clears before the last retry commits normally', async () => {
+    customCallback.mockRejectedValueOnce(writeConflict()).mockRejectedValueOnce(writeConflict());
+    await expect(mutate('transactionCustom')).resolves.toBe('done');
+    expect(customCallback).toHaveBeenCalledTimes(3);
+    expect(session.commitTransaction).toHaveBeenCalledOnce();
+  });
+
+  test('a borrowed-session WriteConflict is returned unchanged without retry, wait or abort', async () => {
+    session.startTransaction();
+    const timer = vi.spyOn(globalThis, 'setTimeout');
+    const failure = writeConflict();
+    const save = vi.spyOn(ParentModel.prototype, 'save').mockRejectedValue(failure);
+    await expect(simfinity.saveObject(Parent.name, { name: 'Borrowed' }, session)).rejects.toBe(failure);
+    expect(save).toHaveBeenCalledOnce();
+    expect(timer).not.toHaveBeenCalled();
+    expect(session.abortTransaction).not.toHaveBeenCalled();
+    expect(session.inTransaction()).toBe(true);
+  });
+
   test('does not retry a transient failure when abort itself fails', async () => {
+    const timer = vi.spyOn(globalThis, 'setTimeout');
     const failure = labeledError('TransientTransactionError');
     customCallback.mockRejectedValue(failure);
     session.abortTransaction.mockRejectedValue(new Error('Abort failed'));
     await expect(mutate('transactionCustom')).rejects.toBe(failure);
     expect(customCallback).toHaveBeenCalledOnce();
     expect(session.endSession).toHaveBeenCalledOnce();
+    expect(timer).not.toHaveBeenCalled();
   });
 
   test('surfaces an awaited cleanup error after a successful commit', async () => {
@@ -234,6 +301,7 @@ describe('Mutation transactions', () => {
   });
 
   test('bounds uncertain commit retries without replaying the transaction', async () => {
+    const timer = vi.spyOn(globalThis, 'setTimeout');
     const failure = labeledError('UnknownTransactionCommitResult');
     session.commitTransaction.mockRejectedValue(failure);
     await expect(mutate('transactionCustom')).rejects.toBe(failure);
@@ -241,6 +309,7 @@ describe('Mutation transactions', () => {
     expect(session.commitTransaction).toHaveBeenCalledTimes(6);
     expect(session.abortTransaction).not.toHaveBeenCalled();
     expect(session.endSession).toHaveBeenCalledOnce();
+    expect(timer).not.toHaveBeenCalled();
   });
 
   test.each([{ code: 50 }, { writeConcernError: { code: 50 } }])('does not retry an expired commit (%j)', async (details) => {

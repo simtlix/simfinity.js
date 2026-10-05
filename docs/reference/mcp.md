@@ -61,6 +61,8 @@ Tool names must contain only letters, digits, underscores, and hyphens, with a m
 
 An `includeTypes` allowlist also excludes tools without an object entity type. Excluding an entity type hides its recognized aggregate tool as well.
 
+Simfinity's generated list and aggregate queries carry their operation in `extensions.simfinityQuery`, which decides whether a query is published as a list or an aggregate tool. A list query stays a list tool, with `_meta.count`, even when its type declares a field named `aggregation` and so has an `aggregation` filter argument. Other query fields, including those of a schema rebuilt from SDL, are published as aggregate tools when they have an `aggregation` argument.
+
 ## Tool overrides
 
 ```javascript

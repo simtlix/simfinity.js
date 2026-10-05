@@ -71,7 +71,7 @@ Type registrations and middleware belong to the selected runtime instance. The d
 
 `createSchema()` adds generated resolvers and filter arguments to the relation fields of your type objects. Those resolvers read through the runtime that created them: its adapter, registrations, middleware and scopes. When a runtime first creates a schema, it therefore claims two kinds of object types:
 
-- **Bound types**: each type whose non-embedded relation fields receive this runtime's generated resolvers. These are usually the registered types that have relations.
+- **Bound types**: each type whose non-embedded relation fields receive this runtime's generated resolvers. These are usually the registered types that have relations. The resolvers that an adapter's `readEmbeddedValue` hook adds to nullable, singular embedded object fields (MongoDB's adapter defines it) read no data, so they do not bind their types.
 - **Reserved types**: each object type the schema reaches that still has a non-embedded relation field without a resolver, such as an unregistered custom mutation result with a relation field. Reserving it stops another runtime from later generating resolvers that this schema would execute.
 
 A schema reaches a type through registered types, fields, interfaces, union members and custom mutation results, as GraphQL itself does. Another runtime cannot use a claimed type: registering it with `connect()` or `addNoEndpointType()`, or building a schema that reaches it, throws `TYPE_BOUND_TO_OTHER_RUNTIME` (409).
@@ -108,6 +108,8 @@ These object types can be shared between runtimes:
 
 - types without non-embedded relation fields, such as scalar-only types and types whose relation fields are all embedded;
 - types whose non-embedded relation fields all have your own resolvers.
+
+Resolvers that an adapter's `readEmbeddedValue` hook adds to nullable, singular embedded object fields do not prevent sharing: every runtime that shares the type reads those fields through the hook of the first runtime that added them. A shared type also has a single `id` rule. Once a runtime that registers the type as an entity builds its schema, every runtime that shares the type reads and filters its `id` as an entity's, including runtimes that only embed it; see [supporting types without endpoints](#supporting-types-without-endpoints).
 
 Another runtime can also use a copy made with `toConfig()` before the first runtime built its schema, because the copy's fields do not yet hold generated resolvers. The copy then belongs to that other runtime. A factory function is safer: a copy made too late fails at startup.
 
@@ -181,7 +183,9 @@ simfinity.addNoEndpointType(DirectorType);
 
 Then reference it from `SerieType` with `extensions.relation.embedded: true`. See the [embedded object example](./relationships#embedded-objects) for the complete definition.
 
-Use `connect()` when a type needs its own root CRUD operations. A supporting type receives persistent storage when another registered type references it; a value-only embedded type stays inside its owner.
+Use `connect()` when a type needs its own root CRUD operations. A supporting type receives persistent storage when another registered type references it; a value-only embedded type stays inside its owner. A referenced supporting type is an entity, so its `id` resolves to its stored identity (`_id` on MongoDB), whatever the `createSchema()` allowlists include; a value-only embedded type returns its declared `id` member.
+
+Avoid using one type both as an entity and as an embedded value. Its embedded copies return the declared `id` they store: `null` for copies created through add inputs, which have no `id`, and the supplied value for copies written through update inputs (which require an `id`), `saveObject()` or native writes. On MongoDB, copies in an embedded list are the exception: they return the automatic `_id` that Mongoose adds to each list item, and `<list>.id` filters match that value. Their declared `id` is still stored but is neither returned nor matched, and the automatic `_id` changes whenever the list is rewritten. This rule follows the type object, so a type that any runtime registers as an entity behaves this way in every runtime that shares it. When clients need a stable embedded `id`, embed a separate embedded-only type instead.
 
 ## Use an existing Mongoose model
 

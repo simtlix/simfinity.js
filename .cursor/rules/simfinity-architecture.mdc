@@ -39,7 +39,7 @@ All five package versions, exact internal dependencies and the private root vers
 - Initialization borrows one pool client, owns its transaction, awaits DDL/catalog validation and never destructively synchronizes existing storage. `validate` mode is read-only. PostgreSQL >=15 is required.
 - Await initialization before serving; failure marks the instance unavailable. `preventCreatingCollection(true)` before createSchema forces validation only. Text columns and typed query expressions use binary C collation.
 - Enum query filters resolve names before strict internal values, then encode the selected value for storage; query normalization must never be applied to writes or state guards. LIKE is string-only.
-- PostgreSQL writes use repeatable-read transactions; supplied sessions are joined, owned sessions retry confirmed serialization/deadlock aborts. Shared typed input snapshots isolate attempts. Adapter stateValue supplies the canonical persisted representation for state writes/guards (names on Mongo, enum internal values on PostgreSQL).
+- PostgreSQL writes use repeatable-read transactions; supplied sessions are joined, owned sessions retry confirmed serialization/deadlock aborts after a full-jitter backoff that starts once the client is released. Shared typed input snapshots isolate attempts. Adapter stateValue supplies the canonical persisted representation for state writes/guards (names on Mongo, enum internal values on PostgreSQL).
 - Standalone saveObject owns a full workflow transaction including hooks and independent nested entities; active supplied sessions remain caller-owned. Owner+embedded reads use one snapshot. Only ownership FKs cascade.
 
 ## Core Flow
@@ -55,9 +55,13 @@ simfinity.addNoEndpointType(Type)   // supporting types without endpoints
        v
 simfinity.createSchema()
        |
+       +-- assertCollectionConnections() // INVALID_MODEL for collections without connectionField
+       +-- storedIdentity flags       // entities: connect() types and relation targets
        +-- adapter.prepare()          // prepare storage metadata
        +-- adapter.createModel()      // Mongoose models or PostgreSQL handles
+       +-- installIdResolver()        // entity `id` -> `_id ?? id`
        +-- autoGenerateResolvers()    // wire relationship resolvers
+       +-- installEmbeddedValueResolvers() // only when adapter.readEmbeddedValue exists
        +-- buildRootQuery()           // list, single-entity, aggregate queries
        +-- buildMutation()            // resolve pending inputs and build mutations
        |
@@ -77,9 +81,11 @@ simfinity.createSchema()
 | `packages/mongodb/src/index.js` | MongoDB facade and legacy helper exports |
 | `packages/core/src/runtime.js` | Shared registration, input/schema generation, lifecycle, middleware, scopes and resolvers |
 | `packages/core/src/relation-owners.js` | Internal `relationFieldOwners` `WeakMap` shared by `runtime.js` and the auth plugin; not exported |
+| `packages/core/src/relation-storage.js` | Internal connection-storage helpers (`getListShape`, `getFieldStorageName`, `normalizeConnectionField`) shared by `runtime.js` and the MongoDB adapter, models and query builder. Exported only as the `@simtlix/simfinity-core/internal/relation-storage` subpath, which is not public API; Mongo code imports it by package name, never by a relative path |
 | `packages/core/src/query-plan.js` | Driver-free typed query paths and predicate/sort/aggregation plans |
 | `packages/core/src/query-limits.js`, `packages/core/src/mutation-limits.js` | Process-wide `configureQueryLimits` (page sizes) and `configureMutationLimits` (`maxNestedOperations`) settings |
 | `packages/mongodb/src/mongo/` | Mongoose models, pipelines, transactions and record adapter |
+| `packages/mongodb/src/mongo/ids.js` | Identifier casts shared by the Mongo adapter, query builder and integrity layer: `invalidId()` (`NOT_VALID_ID`, 400, `Invalid identifier`), `castObjectId` (ObjectId or 24-hex string only, never mints; the adapter's `castId`), `castPathValue`/`castModelId` (the model's own schema type without setters, so String/Number `_id` keys work; used where Mongoose does not cast, such as `find`'s `requiredId` `$match`, and by protected integrity writes), `isQueryKeyCastFailure` (default-mode `getById`, `update` and `delete` pass the raw ID so Mongoose applies `_id` setters and casts once; a `CastError` on `_id` that is the query's own error flag becomes `NOT_VALID_ID` when the query runs, while the Query stays chainable) and `mapIdCastError` (ObjectId cast failures from writes become `NOT_VALID_ID`) |
 | `packages/sql/src/` | Driver-free relational planner, record store, model/session orchestration and plugin contract |
 | `packages/postgres/src/` | PostgreSQL plugin/facade, codecs, record/query compiler and physical schema lifecycle |
 | `packages/core/src/auth/index.js` | Shared auth plugin (`createAuthPlugin`), permission resolution, deprecated middleware; `packages/mongodb/src/auth/` remains a compatibility facade |
@@ -110,12 +116,13 @@ simfinity.createSchema()
 ## Instance State (inside `createRuntime` in `packages/core/src/runtime.js`)
 
 
-- `typesDict` -- primary registry: `{ types: { [typeName]: { model, gqltype, simpleEntityEndpointName, listEntitiesEndpointName, endpoint, controller, stateMachine, inputType } } }`
+- `typesDict` -- primary registry: `{ types: { [typeName]: { model, gqltype, simpleEntityEndpointName, listEntitiesEndpointName, endpoint, controller, stateMachine, inputType, storedIdentity } } }`. `storedIdentity` is set on every `createSchema()` before `adapter.prepare()`: true for `connect()` types and targets of non-embedded relations (entities), false for embedded-only types; it is mirrored on `typesDictForUpdate`, and entity type objects are also marked with `markStoredIdentity()`, which the Mongo query builder reads (`hasStoredIdentity()`) to map embedded `.id` paths, so the rule follows the shared type object
 - `typesDictForUpdate` -- parallel registry with update-specific input types
 - `waitingInputType` -- deferred input types awaiting dependency resolution (circular refs)
 - `registeredMutations` -- custom mutations registered via `registerMutation()`
 - `middlewares` -- array of middleware functions registered on this runtime via `use()`; `use()` rejects non-functions with `INVALID_MIDDLEWARE`
 - `runtimeIdentity` -- private object identifying this runtime in `runtimeBoundTypes`
+- `reportedIssues` -- `WeakMap` from type to the `Configuration issue` warning keys already logged (`warnOnce`), so each warning is logged once per runtime
 
 These registries are per runtime. Module-scope state shared by every runtime:
 

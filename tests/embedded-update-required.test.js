@@ -83,6 +83,10 @@ const buildShopSchema = () => {
         type: new GraphQLNonNull(PersonType),
         extensions: { relation: { embedded: false, connectionField: 'ownerId' } },
       },
+      reviewer: {
+        type: PersonType,
+        extensions: { relation: { embedded: false, connectionField: 'reviewerId' } },
+      },
     },
   });
   const TagType = new GraphQLObjectType({
@@ -258,5 +262,72 @@ describe('update validation of required embedded members', () => {
     const result = await shop.execute(updateShop, { input: { id: '404', main: { city: 'Z' } } });
 
     expect(result.errors[0].extensions.code).toBe('NOT_VALID_ID');
+  });
+});
+
+describe('explicit nulls inside embedded update patches', () => {
+  const mainFields = 'main { street city phones geo { lat lng aliases } owner { id } reviewer { id } }';
+  const updateMain = (shop, main) => shop.execute(
+    `mutation($input: RequiredUpdateShopInputForUpdate!) { updaterequiredUpdateShop(input: $input) { ${mainFields} } }`,
+    { input: { id: shop.id, main } },
+  );
+  const setupMain = () => setup((ownerId) => ({
+    main: {
+      street: 'M', city: 'C', phones: ['1'], geo: { lat: 1, lng: 2 }, owner: { id: ownerId }, reviewer: { id: ownerId },
+    },
+  }));
+
+  test('clears a nullable scalar member and keeps the other members', async () => {
+    const shop = await setupMain();
+
+    const result = await updateMain(shop, { city: null });
+
+    expect(result.errors).toBeUndefined();
+    expect(result.data.updaterequiredUpdateShop.main).toMatchObject({ street: 'M', city: null, phones: ['1'] });
+    expect(shop.stored().main).toEqual({
+      street: 'M', city: null, phones: ['1'], geo: { lat: 1, lng: 2 }, ownerId: shop.ownerId, reviewerId: shop.ownerId,
+    });
+  });
+
+  test.each([
+    ['a nested embedded object', { geo: null }, { geo: null }],
+    ['a scalar list', { phones: null }, { phones: [] }],
+    ['a reference, under its connectionField', { reviewer: null }, { reviewerId: null }],
+  ])('clears %s', async (label, patch, stored) => {
+    const shop = await setupMain();
+
+    const result = await updateMain(shop, patch);
+
+    expect(result.errors).toBeUndefined();
+    expect(shop.stored().main).toMatchObject({ street: 'M', city: 'C', ownerId: shop.ownerId, ...stored });
+    const main = result.data.updaterequiredUpdateShop.main;
+    expect(main[Object.keys(patch)[0]]).toEqual(Object.values(stored)[0]);
+  });
+
+  test('keeps the stored value of a non-null member', async () => {
+    const shop = await setupMain();
+
+    const result = await updateMain(shop, { street: null, city: 'Z' });
+
+    expect(result.errors).toBeUndefined();
+    expect(shop.stored().main).toMatchObject({ street: 'M', city: 'Z' });
+  });
+
+  test('replaces a supplied nested object wholesale', async () => {
+    const shop = await setupMain();
+
+    const result = await updateMain(shop, { geo: { lat: 5, lng: 6, aliases: null } });
+
+    expect(result.errors).toBeUndefined();
+    expect(shop.stored().main.geo).toEqual({ lat: 5, lng: 6, aliases: [] });
+  });
+
+  test('still requires the members of a value the patch creates', async () => {
+    const shop = await setup(() => ({}));
+
+    const result = await updateMain(shop, { city: null });
+
+    expectRequiredValue(result, 'street');
+    expect(shop.stored().main).toBeUndefined();
   });
 });

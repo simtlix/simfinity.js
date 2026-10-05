@@ -52,6 +52,7 @@ Check that:
 - The field declares `extensions.relation`.
 - `embedded` matches how you intend to store the value.
 - `connectionField` matches the stored link. Single-object references default to the GraphQL field name; referenced collections require the child back-reference explicitly.
+- On MongoDB, children added through a chained or self-referencing collection whose back-reference is not a field of the child were stored without the link by 3.5.3 and earlier. Current versions store it, but do not repair those records.
 - An existing custom resolver returns the expected value. Simfinity preserves custom resolvers.
 
 See [relationships](../guide/relationships) for embedded, reference, and collection examples.
@@ -65,6 +66,13 @@ These errors are thrown while you register types or build the schema:
 - `INVALID_MIDDLEWARE`: `use()` received a value that is not a function, often `null` from `enabled && middleware`. Register the middleware conditionally instead.
 - `UNREGISTERED_RELATION_TARGET`: the field named in the message, as `Type.field`, is a list relation or embedded field whose type was never registered. Register that type with `connect()` or `addNoEndpointType()` before `createSchema()`.
 - `INVALID_MUTATION_LIMITS`: `configureMutationLimits()` needs a plain object whose only option is `maxNestedOperations`, set to `null` or a non-negative safe integer. Check for misspellings such as `maxNestedOperation`.
+- `INVALID_MODEL` with `Type.field requires a child connectionField`: the referenced collection named in the message has no `connectionField`. Set it to the child's back-reference. In default MongoDB mode and with custom adapters, a collection with your own resolver, or marked `readOnly`, is accepted with a warning instead; PostgreSQL and `referentialIntegrity: 'transactional'` always require it. Other `INVALID_MODEL` messages from PostgreSQL or transactional MongoDB name metadata that their storage cannot represent. See [relation](../reference/extensions#relation).
+
+A console warning that starts with `Configuration issue:` does not stop startup. It names the field to fix, for example:
+
+- a field that a generated query argument hides, such as a field named `sort` or `aggregation`; see [fields named like query arguments](../guide/queries#fields-named-like-query-arguments);
+- a collection without `connectionField` whose nested writes are rejected with `INVALID_MODEL` (500);
+- `Field name does not define extensions.relation`: an object field without relation metadata, which generated create and update inputs leave out. Declare it as embedded or as a reference, as described in [relationships](../guide/relationships#choose-a-storage-model).
 
 ## Authorization or scope is not applied
 

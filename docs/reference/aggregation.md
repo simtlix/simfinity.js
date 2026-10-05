@@ -96,7 +96,7 @@ PostgreSQL preserves nested scalar-list arrays in group keys, including ragged l
 
 ## Filtering, sorting, and pagination
 
-Flat field filters and [logical AND/OR filters](/guide/queries) apply before grouping. A configured `scope.aggregate` restriction is applied as well; see [query scope](/guide/query-scope).
+Flat field filters and [logical AND/OR filters](/guide/queries) apply before grouping. A configured `scope.aggregate` restriction is applied as well; see [query scope](/guide/query-scope). On the aggregate endpoint `aggregation` is the expression argument, so a field named `aggregation` is filtered only through `AND`/`OR` group conditions; list queries filter it like any other field. See [fields named like query arguments](/guide/queries#fields-named-like-query-arguments).
 
 Sort terms can use `groupId` or a declared `factName`. Multiple terms are applied in order. An unrecognized sort field falls back to `groupId`. Without a sort argument, groups are sorted by `groupId` ascending.
 

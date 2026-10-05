@@ -1,14 +1,40 @@
 import mongoose from 'mongoose';
-import { getNamedType, isListType, isNonNullType } from 'graphql';
+import { getListShape, normalizeConnectionField } from '@simtlix/simfinity-core/internal/relation-storage';
 
 import { createMongoModel } from './models.js';
 import { createMongoQueries } from './queries.js';
 import { withMongoTransaction } from './transactions.js';
 import { createMongoIntegrity } from './integrity.js';
-
-mongoose.set('strictQuery', false);
+import {
+  castModelId, castObjectId, castPathValue, invalidId, isQueryKeyCastFailure, mapIdCastError,
+} from './ids.js';
 
 const withSession = (query, session) => (session ? query.session(session) : query);
+
+// A write that fails only on malformed ObjectId values reports NOT_VALID_ID, not a driver error.
+const mapIdCastErrors = async (write) => {
+  try {
+    return await write();
+  } catch (error) {
+    throw mapIdCastError(error);
+  }
+};
+
+// By-ID queries take the raw ID, so the model's setters and key cast run once, in Mongoose's own
+// query lifecycle. Keep the chainable Query and map a failed key cast only when it runs; with
+// `mapError`, also map other failures, such as malformed ObjectId values in an update.
+const mapQueryIdCastErrors = (query, mapError = (error) => error) => {
+  const { exec } = query;
+  if (typeof exec !== 'function') return query;
+  query.exec = async function execMappingIdCasts(...args) {
+    try {
+      return await exec.apply(this, args);
+    } catch (error) {
+      throw isQueryKeyCastFailure(this, error) ? invalidId() : mapError(error);
+    }
+  };
+  return query;
+};
 
 // Even a shared hook can branch on `this.op` or the filter shape. Preserve findOne semantics
 // whenever either query operation has hooks instead of inferring equivalence from function identity.
@@ -45,20 +71,15 @@ export const createMongoAdapter = (options) => {
       for (const registration of registrations) {
         for (const field of Object.values(registration.gqltype.getFields())) {
           const relation = field.extensions?.relation;
-          const listType = isNonNullType(field.type) ? field.type.ofType : field.type;
-          if (!relation?.connectionField || relation.embedded || !isListType(listType)) continue;
-          const childType = getNamedType(field.type);
-          const childFields = childType.getFields();
-          const connectionExists = childFields[relation.connectionField]
-            || Object.entries(childFields).some(([fieldName, childField]) => {
-              const childRelation = childField.extensions?.relation;
-              return childRelation && !childRelation.embedded
-                && (childRelation.connectionField || fieldName) === relation.connectionField;
-            });
-          if (!connectionExists) addPrivateConnectionField(
-            childType.name,
-            relation.connectionField,
-          );
+          const listShape = getListShape(field.type);
+          if (!relation?.connectionField || relation.embedded || !listShape) continue;
+          // Same rule as core: only a direct or aliased singular reference on the child stores the
+          // link. Otherwise, including a child collection that reuses the name (chained or
+          // self-referencing collections), the child gets a private ObjectId field.
+          const connection = normalizeConnectionField(listShape.itemType, relation.connectionField);
+          if (!connection.graphqlFieldName) {
+            addPrivateConnectionField(listShape.itemType.name, connection.storageFieldName);
+          }
         }
       }
     },
@@ -71,9 +92,8 @@ export const createMongoAdapter = (options) => {
         if (onModelCreated) onModelCreated(model);
       }, integrity.enabled ? { ...modelOptions, createCollection: false } : modelOptions);
     },
-    castId(value) {
-      return new mongoose.Types.ObjectId(value);
-    },
+    // Relation inputs and batch keys: only an ObjectId or its hex form, never a newly minted one.
+    castId: castObjectId,
     initialize: integrity.initialize,
     withTransaction: integrity.enabled ? integrity.withTransaction : withMongoTransaction,
     newRecord(Model, data, session) {
@@ -83,17 +103,27 @@ export const createMongoAdapter = (options) => {
     },
     saveRecord(Model, record, session) {
       if (integrity.enabled) return integrity.saveRecord(Model, record, session === undefined ? record.$session() : session);
-      return record.save();
+      return mapIdCastErrors(() => record.save());
     },
     toObject(record) {
       return typeof record?.toObject === 'function' ? record.toObject() : record;
+    },
+    // A hydrated document renders a singular embedded path as an object even when the stored value
+    // is an explicit null. Only that stored null reads as null; an absent value keeps Mongoose's
+    // materialized object, as legacy documents rely on.
+    readEmbeddedValue(value) {
+      // The nested accessor's toJSON is called without a receiver on purpose. It reads the schema's
+      // toJSON virtuals option from `this` (guarded by `this &&`), and with that option set a stored
+      // null renders as `{}`. Without a receiver it reads the raw path value of its own document.
+      return value?.$__isNested === true && typeof value.toJSON === 'function' && value.toJSON.call(null) === null
+        ? null : value;
     },
     getById(Model, id, session, { projection, plain, requiredId } = {}) {
       integrity.assertReady();
       let query = withSession(requiredId == null ? Model.findById(id, projection)
         : Model.findOne({ $and: [{ _id: requiredId }, { _id: id }] }, projection), session);
       if (plain) query = query.lean();
-      return query;
+      return mapQueryIdCastErrors(query);
     },
     getByIds(Model, ids) {
       integrity.assertReady();
@@ -108,19 +138,22 @@ export const createMongoAdapter = (options) => {
     },
     update(Model, id, update, session) {
       if (integrity.enabled) return integrity.updateRecord(Model, id, update, session);
-      return withSession(Model.findByIdAndUpdate(id, update, { new: true }), session);
+      return mapQueryIdCastErrors(withSession(
+        Model.findByIdAndUpdate(id, update, { new: true }), session,
+      ), mapIdCastError);
     },
     delete(Model, id, session) {
       if (integrity.enabled) {
         integrity.assertWrite(Model, session);
         return integrity.deleteRecord(Model, id, session);
       }
-      return withSession(Model.findByIdAndDelete(id), session);
+      return mapQueryIdCastErrors(withSession(Model.findByIdAndDelete(id), session));
     },
     async find(Model, gqltype, args, session, { requiredId } = {}) {
       integrity.assertReady();
       const pipeline = await queries.buildQuery(args, gqltype);
-      if (requiredId != null) pipeline.unshift({ $match: { _id: Model.schema.path('_id').cast(requiredId) } });
+      // Mongoose does not cast aggregation stages, so cast the key type here, without setters.
+      if (requiredId != null) pipeline.unshift({ $match: { _id: castModelId(Model, requiredId) } });
       if (pipeline.length === 0) return withSession(Model.find({}), session);
       return withSession(Model.aggregate(pipeline), session);
     },
@@ -138,8 +171,15 @@ export const createMongoAdapter = (options) => {
     async findChildren(Model, gqltype, connectionField, parentId, args, session) {
       integrity.assertReady();
       const pipeline = await queries.buildQuery(args, gqltype);
-      const path = Model.schema.path(connectionField);
-      pipeline.unshift({ $match: { [connectionField]: path ? path.cast(parentId) : parentId } });
+      let parentKey;
+      try {
+        parentKey = castPathValue(Model.schema.path(connectionField), parentId);
+      } catch (error) {
+        // A stored parent key that the connection path cannot cast has no children.
+        if (error?.extensions?.code === 'NOT_VALID_ID') return [];
+        throw error;
+      }
+      pipeline.unshift({ $match: { [connectionField]: parentKey } });
       return withSession(Model.aggregate(pipeline), session);
     },
   };

@@ -36,10 +36,12 @@ const field = {
 | Property | Description |
 | --- | --- |
 | `embedded` | `true` gives the value parent-owned storage: inline on MongoDB, JSONB or owned tables on PostgreSQL; `false` uses referenced records. |
-| `connectionField` | For a reference, the stored ObjectId/UUID field; for a reverse collection, the child field linking back to the parent. |
+| `connectionField` | For a reference, the stored ObjectId/UUID field; for a reverse collection, the required child field linking back to the parent. |
 | `displayField` | Descriptive field name exposed through introspection for client tooling. |
 
-For a single-object reference, `connectionField` defaults to the GraphQL field name for model generation, reads, writes, and explicit-null clears. Set it to use a different stored reference field. For referenced collections, specify the child's back-reference explicitly. PostgreSQL uses the metadata to create real FKs for single, inverse, explicit-link, and embedded references.
+For a single-object reference, `connectionField` defaults to the GraphQL field name for model generation, reads, writes, and explicit-null clears. Set it to use a different stored reference field.
+
+For referenced collections, `connectionField` is required: name the child's back-reference, either the child's single reference field or its stored field name. When it is missing or an empty string, `createSchema()` throws `INVALID_MODEL` (400, `Type.field requires a child connectionField`) on every adapter. In default MongoDB mode and with custom adapters only, a collection with its own resolver, or marked `readOnly`, is exempt: it builds with a `Configuration issue` warning, or silently when it is `readOnly` and has its own resolver, and nested writes through it fail with `INVALID_MODEL` (500). PostgreSQL and `referentialIntegrity: 'transactional'` always require it. When the child declares no field for the back-reference, MongoDB stores the link in a private ObjectId field of the generated child model, also when the child has a collection with the same `connectionField`, as in chained or self-referencing collections. PostgreSQL uses the metadata to create real FKs for single, inverse, explicit-link, and embedded references.
 
 Scalar lists do not need relationship metadata. Object fields and object lists do. Embedded self-references are rejected by model generation. See [relationships](/guide/relationships) for complete forward and reverse examples.
 

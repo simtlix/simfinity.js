@@ -44,9 +44,9 @@ The controller is the fifth `connect()` argument. Register it before building th
 | `onUpdated(document, session, context)` | After awaiting the parent update and processing collection inputs | Updated backend record |
 | `onDelete(document, session, context)` | Before deleting the record | Existing plain object, or `null` |
 
-For create hooks, `args` is the inner mutation input. For update hooks, `changes` contains the materialized values, may contain `$unset`, and may include merged embedded data. It is not a complete copy of the stored document.
+For create hooks, `args` is the inner mutation input. For update hooks, `changes` contains the materialized values, may contain `$unset`, and may include merged embedded data, where members the update clears are `null`, or `[]` for lists. It is not a complete copy of the stored document.
 
-The parent update completes before collection writes. If no parent matches, the mutation throws `NOT_VALID_ID` (404) before processing children or calling `onUpdated`. The hook receives the updated record, so it can read its fields or perform additional session-bound database work without executing the update query again. MongoDB supplies a Mongoose document; PostgreSQL supplies a plain record.
+The parent update completes before collection writes. A malformed ID fails with `NOT_VALID_ID` (400) before anything is written. In an update of a type without embedded fields, `onUpdating` runs before that check and receives the raw ID; the error then rolls back the hook's session writes. If no parent matches, the mutation throws `NOT_VALID_ID` (404) before processing children or calling `onUpdated`. The hook receives the updated record, so it can read its fields or perform additional session-bound database work without executing the update query again. MongoDB supplies a Mongoose document; PostgreSQL supplies a plain record.
 
 ## Check request context
 
@@ -83,6 +83,8 @@ const serieController = {
   },
 };
 ```
+
+Because `onUpdating` can receive a malformed ID, a hook that looks the record up must handle one. On MongoDB, `findById()` throws a Mongoose `CastError` for it, and the mutation fails with that error instead of `NOT_VALID_ID`; check the value first, for example with `mongoose.isObjectIdOrHexString(id)` for a generated model, and throw `NOT_VALID_ID` (400) yourself. On PostgreSQL, `findById()` already fails with `NOT_VALID_ID` (400).
 
 Define `ownerId` as a server-managed field and set it from trusted context during creation. Add equivalent checks for other write paths, including deletion and custom mutations, according to your policy. [Query scope](./query-scope) governs read filtering; it does not automatically authorize writes.
 
@@ -127,7 +129,7 @@ await AuditModel.create(
 
 `AuditModel` is an application-defined Mongoose model. This write can participate in the same MongoDB transaction as the entity change. PostgreSQL controllers use `session.query(sql, values)` or a PostgreSQL Model method with `{ session }` instead.
 
-Transaction retries can execute hooks more than once, up to five retries after the initial attempt. On MongoDB, an uncertain commit result retries only the commit without repeating hooks; PostgreSQL retries confirmed serialization/deadlock aborts as complete attempts. If an outcome remains uncertain, reconcile it before repeating the mutation. For email, webhooks, or other irreversible external actions, store an outbox event within the transaction and process it after commit. Calling an external service inside a hook does not make that call transactional.
+Transaction retries can execute hooks more than once, up to five retries after the initial attempt. Each complete retry first waits a short random delay. On MongoDB, an uncertain commit result retries only the commit without repeating hooks; PostgreSQL retries confirmed serialization/deadlock aborts as complete attempts. When a concurrent write still conflicts after the retries, the mutation fails with `TRANSACTION_RETRY_EXCEEDED` (409) and its hooks' database work is rolled back; see [transaction boundaries](./mutations#transaction-boundaries). If an outcome remains uncertain, reconcile it before repeating the mutation. For email, webhooks, or other irreversible external actions, store an outbox event within the transaction and process it after commit. Calling an external service inside a hook does not make that call transactional.
 
 ## Nested writes and direct model access
 

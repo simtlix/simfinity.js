@@ -24,6 +24,8 @@ Generated single-reference reads can be batched within a request. Models with an
 
 Generated models store enum internal values with their own type (numbers, booleans or strings; other combinations as given) and support embedded fields named `type`. Range filters, sorts and aggregates on numeric and boolean enums follow that type; PostgreSQL uses their text form. Earlier versions stored numeric and boolean enum values as strings; convert existing documents once as described in the [schema guide](https://simtlix.github.io/simfinity.js/guide/schema.html#what-gets-generated).
 
+The facade registers generated models on your application's default Mongoose instance and does not change global Mongoose options such as `strictQuery`. `createMongoAdapter().castId` accepts only an ObjectId or its 24-character hexadecimal string and throws `NOT_VALID_ID` (400) otherwise; create new identifiers with `new mongoose.Types.ObjectId()`. Owned transactions retry transient failures after a short random delay, and a write conflict that outlasts the retries fails with `TRANSACTION_RETRY_EXCEEDED` (409).
+
 Mongoose 8.24.2 or later within version 8 is required to exclude the update-casting prototype-pollution vulnerability. Existing applications should update Mongoose and their dependency lockfile, then run `npm audit`; upgrading Simfinity does not refresh every transitive dependency already locked by the application.
 
 ## Optional transactional reference integrity

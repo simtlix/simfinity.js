@@ -148,7 +148,9 @@ export interface SQLConfiguration { schema?: string }
 export interface SQLInitializationOptions { mode?: 'create' | 'validate' }
 export interface SQLInitializationResult { mode: 'create' | 'validate'; created: string[] }
 export interface SQLValueCodec<Id = string> {
+  /** Any identifier, including `0`; only a stored null, missing value or empty string reads as no reference. */
   createId(): Id;
+  /** Throw a `SimfinityError` with code `NOT_VALID_ID` (400) for a malformed value; never create a new identifier. */
   castId(value: unknown): Id;
   encodeScalar(field: SQLFieldDescription, value: unknown): unknown;
   decodeScalar(field: SQLFieldDescription, value: unknown, gqlField?: GraphQLField<unknown, unknown>): unknown;
@@ -164,7 +166,7 @@ export interface SQLDriver<Configuration extends object = SQLConfiguration, Clie
   rollback(client: Client): void | Promise<unknown>;
   /** Receives the rollback failure when ROLLBACK did not complete; the driver must then discard the connection instead of reusing it. */
   release(client: Client, error?: unknown): void | Promise<unknown>;
-  /** True only for confirmed transaction aborts safe to replay. */
+  /** True only for confirmed transaction aborts safe to replay. Each of up to five retries waits a random delay that starts after `release` completes. */
   isRetryable(error: unknown): boolean;
   normalizeError(error: unknown): unknown;
 }

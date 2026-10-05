@@ -66,6 +66,10 @@ export class SimfinityError extends Error {
   getCode(): string | undefined;
   getStatus(): number | undefined;
   getTimestamp(): string;
+  /** Set on errors that wrap a driver error, such as MongoDB's TRANSACTION_RETRY_EXCEEDED. */
+  cause?: unknown;
+  /** Set on errors that wrap a driver error, such as MongoDB's TRANSACTION_RETRY_EXCEEDED; returns `cause`. */
+  getCause?(): unknown;
 }
 
 export class InternalServerError extends SimfinityError {
@@ -129,6 +133,14 @@ export interface RuntimeRegistration<Model = any, Session = any> extends ModelRe
   controller?: EntityController<Session> | null;
   onModelCreated?: ((model: Model) => void) | null;
   stateMachine?: StateMachine<Session> | null;
+  /**
+   * Set by `createSchema()` before `adapter.prepare()`: true for entity types, those registered
+   * with `connect()` and the targets of non-embedded relations, whose `id` resolves to the stored
+   * `_id`, falling back to `id`. False for types this runtime uses only as embedded values. The `id`
+   * rule follows the type object, so a type that another runtime sharing it treats as an entity
+   * resolves `id` the same way here.
+   */
+  storedIdentity?: boolean;
 }
 export interface MiddlewareContext {
   args: any;
@@ -194,9 +206,15 @@ export interface Runtime<Model = any, Session = any> {
    * (`TYPE_BOUND_TO_OTHER_RUNTIME`) any reachable type that another runtime bound or reserved, or
    * whose field was copied with `toConfig()` after another runtime generated its relation
    * resolver, keeping the generated resolver or its extensions. A list or embedded relation to an unregistered type throws
-   * `UNREGISTERED_RELATION_TARGET` (500). The first schema binds the types whose relation
-   * resolvers it generates to this runtime, and reserves reachable types that still have a
+   * `UNREGISTERED_RELATION_TARGET` (500). A writable non-embedded list relation without a
+   * non-empty child `connectionField`, whose resolver this runtime would generate, throws
+   * `INVALID_MODEL` (400) before `adapter.prepare()`; one with an application resolver or
+   * `readOnly` only logs a `Configuration issue` warning, and its nested writes fail with
+   * `INVALID_MODEL` (500). Fields named like generated query arguments also log a warning. The
+   * first schema binds the types whose relation resolvers it generates to this runtime and
+   * reserves reachable types that still have a
    * non-embedded relation field without a resolver, such as an unregistered custom mutation result.
+   * Every entity type resolves `id` to `_id ?? id`, whatever the allowlists include.
    */
   createSchema(includedQueryTypes?: GraphQLObjectType[] | null, includedMutationTypes?: GraphQLObjectType[] | null, includedCustomMutations?: string[] | null): GraphQLSchema;
   getModel(type: GraphQLObjectType | { name: string }): Model | null | undefined;
@@ -225,12 +243,29 @@ export interface DatabaseAdapter<Model = any, Session = any> {
   validateRegistration?(registration: RuntimeRegistration<Model, Session>): void;
   prepare?(registrations: RuntimeRegistration<Model, Session>[], options: { createCollection: boolean }): void;
   createModel(type: GraphQLObjectType, callback: ((model: Model) => void) | null | undefined, options: { createCollection: boolean }): Model;
+  /**
+   * Casts a reference or batch key to the stored identifier type. Throw a `SimfinityError` with
+   * code `NOT_VALID_ID` (400) for a malformed value; never create a new identifier. A batched
+   * reference read whose ID throws or is normalized reads that ID alone with `getById`. When
+   * `getById` rejects a stored reference with that error, the generated reference field fails with
+   * an `InternalServerError` whose cause is that error, since the client did not send the value.
+   */
   castId(value: any): any;
   stateValue?(state: { name: string; value: any }): any;
   withTransaction<T>(session: Session | null | undefined, callback: (session: Session) => Promise<T> | T, model?: Model): Promise<T>;
   newRecord(model: Model, data: any, session?: Session): any;
   saveRecord(model: Model, record: any, session?: Session): any;
   toObject(record: any): any;
+  /**
+   * Optional. When defined, every nullable, singular embedded object field without a resolver
+   * passes its value through `readEmbeddedValue(value)`. The field is read as graphql's default
+   * resolver reads it: a method on the parent is called with (args, context, info), and the hook
+   * receives its result once a returned promise settles. Return null for a value that a hydrated
+   * record renders as an object although the stored value is an explicit null; return any other
+   * value unchanged. It must depend only on the value: these resolvers read no data and do not bind
+   * their types, so a runtime that reaches a shared type may read through another runtime's hook.
+   */
+  readEmbeddedValue?(value: any): any;
   getById(model: Model, id: any, session?: Session | null, options?: { projection?: Record<string, number>; plain?: boolean; lock?: boolean; requiredId?: any; context?: any }): any;
   /** Optional batch read: the records found for `ids`, in getById shape and any order. After a failure, the runtime reads each ID with getById. */
   getByIds?(model: Model, ids: any[], options?: { context?: any }): any;

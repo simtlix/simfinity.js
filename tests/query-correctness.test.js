@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import mongoose from 'mongoose';
-import { graphql, GraphQLEnumType, GraphQLID, GraphQLInt, GraphQLObjectType, GraphQLScalarType, GraphQLSchema, GraphQLString } from 'graphql';
+import { graphql, GraphQLEnumType, GraphQLID, GraphQLInt, GraphQLList, GraphQLObjectType, GraphQLScalarType, GraphQLSchema, GraphQLString } from 'graphql';
 import * as simfinity from '../packages/mongodb/src/index.js';
 import QLValue from '../packages/mongodb/src/const/QLValue.js';
 
@@ -12,12 +12,18 @@ const authorType = new GraphQLObjectType({
   name: 'CorrectAuthor',
   fields: { id: { type: GraphQLID }, name: { type: GraphQLString }, age: { type: GraphQLInt } },
 });
+const lineType = new GraphQLObjectType({
+  name: 'CorrectLine', fields: { id: { type: GraphQLID }, sku: { type: GraphQLString } },
+});
 const bookType = new GraphQLObjectType({
   name: 'CorrectBook',
   fields: {
     id: { type: GraphQLID }, title: { type: GraphQLString },
     profile: { type: profileType, extensions: { relation: { embedded: true } } },
     author: { type: authorType, extensions: { relation: { connectionField: 'authorId' } } },
+    line: { type: lineType, extensions: { relation: { embedded: true } } },
+    lines: { type: new GraphQLList(lineType), extensions: { relation: { embedded: true } } },
+    coauthors: { type: new GraphQLList(authorType), extensions: { relation: { embedded: true } } },
   },
 });
 const stringIdType = new GraphQLObjectType({
@@ -25,6 +31,15 @@ const stringIdType = new GraphQLObjectType({
 });
 const numericIdType = new GraphQLObjectType({
   name: 'CorrectNumericId', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } },
+});
+const looseType = new GraphQLObjectType({
+  name: 'CorrectLoose', fields: { id: { type: GraphQLID }, title: { type: GraphQLString }, ownerId: { type: GraphQLID } },
+});
+const collisionType = new GraphQLObjectType({
+  name: 'CorrectCollision',
+  fields: {
+    id: { type: GraphQLID }, key: { type: GraphQLString }, conditions: { type: GraphQLString }, aggregation: { type: GraphQLInt },
+  },
 });
 const match = (pipeline) => pipeline.find((stage) => stage.$match).$match;
 const oid = '111111111111111111111111';
@@ -43,12 +58,17 @@ let literalSchema;
 beforeAll(() => {
   simfinity.preventCreatingCollection(true);
   simfinity.addNoEndpointType(profileType);
+  simfinity.addNoEndpointType(lineType);
   simfinity.connect(null, authorType, 'correctAuthor', 'correctAuthors');
   simfinity.connect(null, bookType, 'correctBook', 'correctBooks');
   simfinity.connect(mongoose.model('CorrectStringIdModel', new mongoose.Schema({ _id: String, title: String })),
     stringIdType, 'correctStringId', 'correctStringIds');
   simfinity.connect(mongoose.model('CorrectNumericIdModel', new mongoose.Schema({ _id: Number, title: String })),
     numericIdType, 'correctNumericId', 'correctNumericIds');
+  // A supplied non-strict model that declares no path for ownerId.
+  simfinity.connect(mongoose.model('CorrectLooseModel', new mongoose.Schema({ title: String }, { strict: false })),
+    looseType, 'correctLoose', 'correctLooses');
+  simfinity.connect(null, collisionType, 'correctCollision', 'correctCollisions');
   simfinity.connect(null, typedFilters, 'queryTypedValue', 'queryTypedValues');
   simfinity.connect(null, stateType, 'queryStoredState', 'queryStoredStates', null, null,
     { initialState: { name: 'ACTIVE', value: 7 }, actions: {} });
@@ -95,9 +115,58 @@ describe('query correctness', () => {
     const pipeline = await simfinity.buildQuery({ sort: { terms: [
       { field: 'id', order: 'ASC' }, { field: 'author.id', order: 'DESC' },
       { field: 'author.name', order: 'ASC' }, { field: 'profile.age', order: 'ASC' },
+      { field: 'line.id', order: 'ASC' }, { field: 'lines.id', order: 'DESC' },
     ] } }, bookType);
-    expect(pipeline.find((stage) => stage.$sort)).toEqual({ $sort: { _id: 1, '__sf_l0._id': -1, '__sf_l0.name': 1, 'profile.age': 1 } });
+    expect(pipeline.find((stage) => stage.$sort)).toEqual({ $sort: {
+      _id: 1, '__sf_l0._id': -1, '__sf_l0.name': 1, 'profile.age': 1, 'line.id': 1, 'lines.id': -1,
+    } });
     expect(pipeline.filter((stage) => stage.$lookup)).toHaveLength(1);
+  });
+
+  it('filters embedded-only ids by the declared member that reads return', async () => {
+    const result = match(await simfinity.buildQuery({
+      line: { terms: [{ path: 'id', value: oid }] },
+      lines: { terms: [{ path: 'id', operator: 'NE', value: oid }] },
+    }, bookType));
+    expect(result).toEqual({ 'line.id': new mongoose.Types.ObjectId(oid), 'lines.id': { $ne: new mongoose.Types.ObjectId(oid) } });
+  });
+
+  it('keeps the stored subdocument _id for an entity type embedded as a list', async () => {
+    // Entity ids read `_id` first, and generated embedded list items store one beside the declared `id`.
+    const pipeline = await simfinity.buildQuery({
+      coauthors: { terms: [{ path: 'id', value: oid }] },
+      sort: { terms: [{ field: 'coauthors.id', order: 'ASC' }] },
+    }, bookType);
+    expect(match(pipeline)).toEqual({ 'coauthors._id': new mongoose.Types.ObjectId(oid) });
+    expect(pipeline.find((stage) => stage.$sort)).toEqual({ $sort: { 'coauthors._id': 1 } });
+  });
+
+  it.each([12, 0, 'aaaaaaaaaaaa', 'invalid'])('rejects %j for a GraphQLID field without a schema path instead of minting an ObjectId', async (value) => {
+    await expect(simfinity.buildQuery({ ownerId: { value } }, looseType)).rejects.toMatchObject({ extensions: { code: 'INVALID_FILTER_VALUE', status: 400 } });
+  });
+
+  it('casts an ObjectId value for a GraphQLID field without a schema path', async () => {
+    const hex = 'abcdefabcdef0123456789ab';
+    const result = match(await simfinity.buildQuery({ ownerId: { operator: 'IN', value: [hex, hex.toUpperCase()] } }, looseType));
+    expect(result.ownerId.$in.map((value) => value instanceof mongoose.Types.ObjectId && value.toHexString())).toEqual([hex, hex]);
+  });
+
+  it('filters fields named conditions and aggregation on list and count queries', async () => {
+    expect(match(await simfinity.buildQuery({ conditions: { value: 'c1' } }, collisionType))).toEqual({ conditions: 'c1' });
+    for (const isCount of [false, true]) {
+      const pipeline = await simfinity.buildQuery({ aggregation: { operator: 'GT', value: 5 }, pagination: { page: 1, size: 10, count: true } }, collisionType, isCount);
+      expect(match(pipeline)).toEqual({ aggregation: { $gt: 5 } });
+    }
+    expect(match(await simfinity.buildQuery({ AND: [{ conditions: [{ field: 'aggregation', operator: 'LTE', value: 5 }] }] }, collisionType)))
+      .toEqual({ aggregation: { $lte: 5 } });
+  });
+
+  it.each([
+    { aggregation: { operator: 'GT', value: 5 } },
+    { conditions: [{ field: 'title', value: 'A' }] },
+    { conditions: 'A' },
+  ])('rejects query-control names that are not fields of the type: %j', async (input) => {
+    await expect(simfinity.buildQuery(input, bookType)).rejects.toMatchObject({ extensions: { code: 'INVALID_FILTER_FIELD', status: 400 } });
   });
 
   it('uses a supplied numeric _id schema and casts both range endpoints', async () => {

@@ -1,5 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
-import { GraphQLID, GraphQLObjectType, GraphQLString } from 'graphql';
+import {
+  afterEach, beforeEach, describe, expect, it, vi,
+} from 'vitest';
+import { GraphQLID, GraphQLObjectType, GraphQLString, graphql } from 'graphql';
 import { describeModels } from '@simtlix/simfinity-core';
 import { createRecordStore } from '../packages/sql/src/records.js';
 import { createTransactions } from '../packages/sql/src/transactions.js';
@@ -15,6 +17,10 @@ const stubPlugin = () => ({
   values: { createId() {}, castId() {}, encodeScalar() {}, decodeScalar() {}, encodeEmbedded() {} },
   driver: { assertConfiguration() {}, query() {}, acquire() {}, begin() {}, commit() {}, rollback() {}, release() {}, isRetryable() {}, normalizeError() {} },
 });
+
+// Owned transactions wait Math.random() times the backoff before each retry; zero keeps retry tests immediate.
+beforeEach(() => { vi.spyOn(Math, 'random').mockReturnValue(0); });
+afterEach(() => { vi.restoreAllMocks(); });
 
 describe('SQL plugin binding', () => {
   it('rejects missing and malformed plugins eagerly', () => {
@@ -230,4 +236,64 @@ it.each([
   const models = describeModels([{ gqltype: Item, endpoint: true }]);
   const store = createRecordStore(models, runtime.describeDatabase(), (statement) => plugin.driver.query({}, statement), plugin);
   expect(await store.create(Item.name, { _id: 0, name: 'direct record' })).toEqual({ id: 0, _id: 0, name: 'direct record' });
+});
+
+it.each([
+  ['default connectionField', 'ZeroDefault', undefined, 'author'],
+  ['aliased connectionField', 'ZeroAliased', 'authorId', 'authorId'],
+])('resolves a single reference to a zero identifier: %s', async (label, prefix, connectionField, column) => {
+  const plugin = stubPlugin();
+  plugin.options = {};
+  plugin.capabilities = ['transactions', 'foreignKeys', 'deferredForeignKeys'];
+  plugin.describeSchema = (plan) => plan;
+  let next = 0;
+  plugin.values = { ...plugin.values, createId: () => next++, castId: Number, encodeScalar: (field, value) => value, decodeScalar: (field, value) => value };
+  plugin.compileRecord = (description, operation) => ({ text: operation.kind, values: [operation] });
+  plugin.compileQuery = (models, description, plan) => ({ text: 'query', values: [plan] });
+  plugin.driver.acquire = async () => ({});
+  plugin.driver.normalizeError = (error) => error;
+  const stored = new Map();
+  const statements = [];
+  plugin.driver.query = async (configuration, { text, values: [operation] }) => {
+    statements.push(text);
+    if (text === 'query') {
+      // Batched reference reads select the related rows with one `id IN (...)` plan.
+      expect(operation.where).toMatchObject({ kind: 'predicate', path: ['id'], operator: 'IN' });
+      const ids = operation.where.value.map(Number);
+      return { rows: (stored.get(operation.entity) || []).filter((record) => ids.includes(record.id)) };
+    }
+    const rows = stored.get(operation.table.name) || [];
+    stored.set(operation.table.name, rows);
+    if (text === 'insert') { rows.push(operation.data); return { rows: [operation.data] }; }
+    if (text === 'selectById') return { rows: rows.filter((record) => record.id === operation.id) };
+    throw new Error(`Unexpected statement ${text}`);
+  };
+  const runtime = createSQL({ plugin });
+  const Author = new GraphQLObjectType({ name: `${prefix}Author`, fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+  const Book = new GraphQLObjectType({
+    name: `${prefix}Book`,
+    fields: {
+      id: { type: GraphQLID },
+      title: { type: GraphQLString },
+      author: { type: Author, extensions: { relation: { embedded: false, ...(connectionField ? { connectionField } : {}) } } },
+    },
+  });
+  runtime.connect(null, Author, 'zeroAuthor', 'zeroAuthors');
+  runtime.connect(null, Book, 'zeroBook', 'zeroBooks');
+  const schema = runtime.createSchema();
+  await runtime.initializeDatabase();
+  expect((await runtime.getModel(Author).create({ name: 'Zero' })).id).toBe(0);
+  const added = await graphql({ schema, source: 'mutation { addzeroBook(input: { title: "T", author: { id: "0" } }) { id } }' });
+  expect(added.errors).toBeUndefined();
+  expect(stored.get(Book.name)).toEqual([expect.objectContaining({ id: 1, [column]: 0 })]);
+  const source = `{ zeroBook(id: "${added.data.addzeroBook.id}") { id author { id name } } }`;
+
+  // Without a context object each reference is read by ID; with one, references are read in batches.
+  for (const [contextValue, batchRead] of [[undefined, false], [{}, true]]) {
+    statements.length = 0;
+    const result = await graphql({ schema, source, contextValue });
+    expect(result.errors).toBeUndefined();
+    expect(result.data.zeroBook).toEqual({ id: '1', author: { id: '0', name: 'Zero' } });
+    expect(statements.includes('query')).toBe(batchRead);
+  }
 });

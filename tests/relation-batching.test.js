@@ -268,7 +268,9 @@ describe('relation batching', () => {
     const result = await execute('{ batchsources { label target { name } } }', {});
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0].path).toEqual(['batchsources', 2, 'target']);
-    expect(result.errors[0].extensions.code).toBe('NOT_VALID_ID');
+    // A stored value the adapter cannot cast is a data problem, not the client's input.
+    expect(result.errors[0].extensions.code).toBe('INTERNAL_SERVER_ERROR');
+    expect(result.errors[0].originalError.getCause().extensions).toMatchObject({ code: 'NOT_VALID_ID', status: 400 });
     expect(result.data.batchsources.map((source) => source.target?.name ?? null)).toEqual(
       ['Target t0', 'Target t1', null, 'Target t0'],
     );

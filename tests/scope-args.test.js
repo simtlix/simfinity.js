@@ -152,3 +152,91 @@ describe('query scope after middleware replaces params.args', () => {
     expect(children[0].args.pagination).toEqual({ page: 1, size: 25 });
   });
 });
+
+describe('joined find scopes on fields named like query arguments', () => {
+  const build = () => {
+    const calls = [];
+    const runtime = createRuntime({
+      bind() {},
+      prepare() {},
+      createModel: (gqltype) => ({ name: gqltype.name }),
+      castId: String,
+      withTransaction: async (session, body) => body(session || {}),
+      async getById() { return null; },
+      async find(Model, gqltype, args) {
+        calls.push({ method: 'find', type: gqltype.name, args: structuredClone(args) });
+        return [];
+      },
+      async count() { return 0; },
+      async aggregate() { return []; },
+      async findChildren() { return []; },
+    });
+    // Reached only through references: no list endpoint or collection checks these scope values.
+    const SecretType = new GraphQLObjectType({
+      name: 'ScopeJoinSecret',
+      extensions: { scope: { find: async ({ args, context }) => context.secretScope(args) } },
+      fields: () => ({
+        id: { type: GraphQLID },
+        key: { type: GraphQLString },
+        sort: { type: GraphQLString },
+        aggregation: { type: GraphQLString },
+      }),
+    });
+    const HolderType = new GraphQLObjectType({
+      name: 'ScopeJoinHolder',
+      fields: () => ({
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        secret: { type: SecretType, extensions: { relation: { embedded: false, connectionField: 'secret' } } },
+      }),
+    });
+    runtime.addNoEndpointType(SecretType);
+    runtime.connect(null, HolderType, 'scopeJoinHolder', 'scopeJoinHolders');
+    const schema = runtime.createSchema();
+    const run = (secretScope) => graphql({
+      schema,
+      source: '{ scopeJoinHolders(secret: { terms: [{ path: "key", value: "k" }] }) { id } }',
+      contextValue: { secretScope },
+    });
+    return { calls, run };
+  };
+  const aggregationGroup = { conditions: [{ field: 'secret.aggregation', operator: 'EQ', value: 'A' }] };
+
+  test('a joined scope on a field named aggregation restricts the reference', async () => {
+    const { calls, run } = build();
+    const result = await run((args) => { args.aggregation = { operator: 'EQ', value: 'A' }; });
+
+    expect(result.errors).toBeUndefined();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args.AND).toEqual([aggregationGroup]);
+  });
+
+  test.each([
+    ['a filter-shaped sort', { sort: { operator: 'EQ', value: 'A' } }, 'INVALID_SORT'],
+    ['an empty sort', { sort: { terms: [] } }, 'INVALID_SORT'],
+    ['an unknown sort order', { sort: { terms: [{ field: 'key', order: 'UP' }] } }, 'INVALID_SORT'],
+    ['a filter-shaped pagination', { pagination: { operator: 'EQ', value: 1 } }, 'INVALID_PAGINATION'],
+    ['a negative page', { pagination: { page: -1, size: 10 } }, 'INVALID_PAGINATION'],
+  ])('a joined scope with %s fails closed', async (_name, scopeArgs, code) => {
+    const { calls, run } = build();
+    const result = await run((args) => Object.assign(args, { aggregation: { operator: 'EQ', value: 'A' }, ...scopeArgs }));
+
+    expect(result.errors?.[0]?.extensions).toMatchObject({ code, status: 400 });
+    expect(calls).toEqual([]);
+  });
+
+  test('a joined scope validates and then ignores valid sort and pagination', async () => {
+    const { calls, run } = build();
+    const result = await run((args) => Object.assign(args, {
+      aggregation: { operator: 'EQ', value: 'A' },
+      sort: { terms: [{ field: 'sort', order: 'DESC' }] },
+      pagination: { page: 1, size: 5 },
+    }));
+
+    expect(result.errors).toBeUndefined();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args.AND).toEqual([aggregationGroup]);
+    expect(calls[0].args.sort).toBeUndefined();
+    expect(calls[0].args.pagination).toBeUndefined();
+  });
+});
