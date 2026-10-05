@@ -35,9 +35,9 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22 or newer |
 
-## Upgrade notes for the next release
+## Upgrade to 3.5.4
 
-These changes are in the source after 3.5.3 and ship with the next release. They fix stored data, identifiers, query results and error codes that applications can observe. Keep all directly installed Simfinity packages at the same version. When upgrading from an earlier version, also review the [3.5.3 notes](#upgrade-to-3-5-3) below.
+Version 3.5.4 fixes stored data, identifiers, query results and error codes that applications can observe. Keep all directly installed Simfinity packages at 3.5.4. When upgrading from an earlier version, also review the [3.5.3 notes](#upgrade-to-3-5-3) below.
 
 ### Startup errors and warnings
 
@@ -79,7 +79,7 @@ These are raised or logged while the application starts:
 ### Transactions
 
 - Owned MongoDB transactions now wait a random delay before each complete retry, after the failed attempt is aborted: less than 10, 20, 40, 80 and 160 ms for the five retries. Hooks still run once per attempt, and mutations without conflicts are not delayed. Tests that inject `TransientTransactionError` while fake timers are enabled must advance the timers. See [transaction boundaries](../guide/mutations#transaction-boundaries).
-- Owned PostgreSQL transactions, and those of any SQL plugin, now wait the same random delay before each retry, instead of retrying immediately: less than 10, 20, 40, 80 and 160 ms, which starts once the failed attempt has rolled back and the driver's `release()` has completed, so no connection or lock is held while waiting. Only errors that the driver's `isRetryable()` accepts are retried, on PostgreSQL serialization failures and deadlocks. The limit of five retries, the error after the last one (`TRANSACTION_RETRY_EXCEEDED` (409) on PostgreSQL), and supplied sessions, which are never retried, are unchanged. Tests that make a SQL driver fail with a retryable error while fake timers are enabled must advance the timers, or stub `Math.random` to make the delays zero.
+- Owned PostgreSQL transactions, and those of any SQL plugin, now wait the same random delay before each retry, instead of retrying immediately: less than 10, 20, 40, 80 and 160 ms, which starts once the failed attempt has rolled back and the driver's `release()` has completed, so no connection or lock is held while waiting. Only errors that the driver's `isRetryable()` accepts are retried, on PostgreSQL serialization failures and deadlocks. The limit of five retries, the error after the last one (`TRANSACTION_RETRY_EXCEEDED` (409) on PostgreSQL), and supplied sessions, which are never retried, are unchanged. Tests that make a SQL driver fail with a retryable error while fake timers are enabled must advance the timers, even when `Math.random` is stubbed to make the delays zero.
 - A `WriteConflict` that persists after the five retries of an owned transaction, in generated and custom mutations and in `saveObject()` without a session, now fails with `TRANSACTION_RETRY_EXCEEDED` (409, `Concurrent write could not be completed`), like PostgreSQL's exhausted serialization and deadlock retries. The driver error is available as `error.cause`, which `error.getCause?.()` also returns. Previously the raw `MongoServerError` (code 112) reached clients as `INTERNAL_SERVER_ERROR`, with the driver's message and no status. Other exhausted transient errors, such as network errors, are still returned unchanged.
 - The 409 error carries no `TransientTransactionError` label. A `saveObject()` call without a session inside an owned mutation runs its own transaction; when its conflict is exhausted, the outer mutation now fails instead of retrying the whole mutation. Code that read `error.code === 112` or `errorLabels` from such a call should read `error.cause`.
 - Error masking and monitoring that look for `InternalServerError` or `INTERNAL_SERVER_ERROR` no longer see these conflicts. Log `TRANSACTION_RETRY_EXCEEDED`, or the driver error in `error.cause`, if you track write conflicts. In-process MCP tool results now report this code instead of the driver's message.
@@ -203,7 +203,7 @@ Keep all directly installed Simfinity packages at 3.5.0 and review these behavio
 - MongoDB uses the application's GraphQL and Mongoose peers. Install the optional MCP SDK explicitly for transports; `graphql-middleware` is no longer installed by Simfinity. See [installation](../guide/databases#install-from-npm).
 - Embedded updates enforce required fields when constructing replacement objects or list items; existing embedded objects still accept valid partial patches. SQL sessions reject statements after their callback settles, and a failed rollback discards the connection. See [mutations](../guide/mutations) and the [SQL plugin contract](../guide/sql-plugins#plugin-contract-version-1).
 
-The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.3. Historical archives and the Barber examples retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
+The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.4. Historical archives and the Barber examples retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
 
 ## Upgrade from 3.2.0
 

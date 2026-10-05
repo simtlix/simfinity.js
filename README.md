@@ -108,7 +108,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.3
+npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.4
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies. Keep them within the ranges above so your application and Simfinity share a single Mongoose and GraphQL instance; npm reports an out-of-range version as a peer conflict. The MCP transports need the optional peer `@modelcontextprotocol/sdk@^1.13.0`, which is not installed automatically, and `graphql-middleware` is not a Simfinity dependency.
@@ -152,7 +152,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.3 @modelcontextprotocol/sdk@^1.13.0
+npm install @simtlix/simfinity-mcp@3.5.4 @modelcontextprotocol/sdk@^1.13.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
