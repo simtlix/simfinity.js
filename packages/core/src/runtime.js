@@ -4,7 +4,7 @@ import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
   GraphQLInt, GraphQLEnumType, GraphQLBoolean, GraphQLError, GraphQLInterfaceType, GraphQLUnionType,
-  Kind, defaultFieldResolver, getNamedType,
+  Kind, getNamedType,
 } from 'graphql';
 
 import SimfinityError from './errors/simfinity.error.js';
@@ -267,16 +267,25 @@ export { SimfinityError, InternalServerError };
 // A field named like an Object.prototype member (`constructor`, `toString`, ...) that reads as that
 // very member holds no value: graphql input objects and stored records without the field inherit
 // it, and MongoDB nested paths return it from their own accessors. Other values, overriding members
-// such as class methods and getters, and every other name read as usual.
-const inheritsObjectMember = (value, key) => key in Object.prototype && value[key] === Object.prototype[key];
-const ownValue = (value, key) => (value == null || inheritsObjectMember(value, key) ? undefined : value[key]);
+// such as class methods and getters, and every other name read as usual. The property is read once,
+// so a getter runs once, as with a plain read.
+const isObjectMember = (key, read) => key in Object.prototype && read === Object.prototype[key];
+const ownValue = (value, key) => {
+  if (value == null) return undefined;
+  const read = value[key];
+  return isObjectMember(key, read) ? undefined : read;
+};
 
 // Output fields with such names read through this resolver instead of graphql's default one, which
-// would call the inherited member. It reads no data, so installing it binds no type to a runtime.
-const readOwnField = markGenerated((parent, args, context, info) => (
-  parent != null && inheritsObjectMember(parent, info.fieldName)
-    ? null : defaultFieldResolver(parent, args, context, info)
-));
+// would call the inherited member. Otherwise it resolves as the default one does, calling a method
+// with the parent as receiver, but reads the property only once. It reads no data, so installing it
+// binds no type to a runtime.
+const readOwnField = markGenerated((parent, args, context, info) => {
+  if (parent === null || (typeof parent !== 'object' && typeof parent !== 'function')) return undefined;
+  const property = parent[info.fieldName];
+  if (isObjectMember(info.fieldName, property)) return null;
+  return typeof property === 'function' ? property.call(parent, args, context, info) : property;
+});
 
 const cloneInput = (value, type) => {
   if (value === null || value === undefined || !type) return value;
@@ -1981,8 +1990,12 @@ const autoGenerateResolvers = (gqltype) => {
         // Any stored identifier except null or an empty string, so numeric IDs such as 0 resolve. A
         // function under the field name is a member, such as the class a MongoDB document inherits
         // `constructor` from, not an identifier.
-        const linked = ownValue(parent, fieldName);
-        const relatedId = ownValue(parent, connectionField) ?? (typeof linked === 'function' ? undefined : linked);
+        // The field name is read only when the stored identifier is missing.
+        let relatedId = ownValue(parent, connectionField);
+        if (relatedId == null) {
+          const linked = ownValue(parent, fieldName);
+          relatedId = typeof linked === 'function' ? undefined : linked;
+        }
         const id = relatedId?._id ?? relatedId;
         if (id == null || id === '') return null;
         try {

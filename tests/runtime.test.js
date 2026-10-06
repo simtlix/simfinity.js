@@ -2577,6 +2577,77 @@ describe('fields named like Object.prototype members', () => {
     ]).toEqual([true, true, true, false, false]);
   });
 
+  test('reads a member-named getter once, so a rejected promise it returns is handled once', async () => {
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const adapter = createMemoryAdapter();
+      const runtime = createRuntime(adapter);
+      const Note = new GraphQLObjectType({
+        name: 'ProtoGetterNote',
+        fields: { id: { type: GraphQLID }, name: { type: GraphQLString }, toString: { type: GraphQLString } },
+      });
+      runtime.connect(null, Note, 'protoGetterNote', 'protoGetterNotes');
+      const schema = runtime.createSchema();
+      let reads = 0;
+      await adapter.saveRecord({ name: 'ProtoGetterNote' }, {
+        _id: '1',
+        name: 'n',
+        get toString() {
+          reads += 1;
+          return Promise.reject(new Error('lookup failed'));
+        },
+      });
+
+      const result = await graphql({ schema, source: '{ protoGetterNote(id: "1") { name toString } }' });
+      await new Promise((resolve) => { setImmediate(resolve); });
+
+      expect(reads).toBe(1);
+      expect(result.errors.map(({ message, path }) => [message, path])).toEqual([['lookup failed', ['protoGetterNote', 'toString']]]);
+      expect(result.data).toEqual({ protoGetterNote: { name: 'n', toString: null } });
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  test('reads the field name of a reference only when its stored identifier is missing', async () => {
+    const adapter = createMemoryAdapter();
+    const runtime = createRuntime(adapter);
+    const Author = new GraphQLObjectType({
+      name: 'ProtoLazyAuthor', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } },
+    });
+    const Book = new GraphQLObjectType({
+      name: 'ProtoLazyBook',
+      fields: {
+        id: { type: GraphQLID },
+        title: { type: GraphQLString },
+        author: { type: Author, extensions: { relation: { embedded: false, connectionField: 'authorId' } } },
+      },
+    });
+    runtime.connect(null, Author, 'protoLazyAuthor', 'protoLazyAuthors');
+    runtime.connect(null, Book, 'protoLazyBook', 'protoLazyBooks');
+    const schema = runtime.createSchema();
+    await adapter.saveRecord({ name: 'ProtoLazyAuthor' }, { _id: '2', name: 'Ann' });
+    let reads = 0;
+    await adapter.saveRecord({ name: 'ProtoLazyBook' }, {
+      _id: '1',
+      title: 'T',
+      authorId: '2',
+      get author() {
+        reads += 1;
+        throw new Error('author object not loaded');
+      },
+    });
+
+    for (const contextValue of [undefined, {}]) {
+      const result = await graphql({ schema, contextValue, source: '{ protoLazyBook(id: "1") { title author { name } } }' });
+      expect(result).toEqual({ data: { protoLazyBook: { title: 'T', author: { name: 'Ann' } } } });
+    }
+    expect(reads).toBe(0);
+  });
+
   test('installs a resolver that reads no data, so the types stay shareable', async () => {
     const Meta = new GraphQLObjectType({ name: 'ProtoSharedMeta', fields: { toString: { type: GraphQLString } } });
     const Note = new GraphQLObjectType({
