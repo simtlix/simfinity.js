@@ -31,13 +31,13 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | GraphQL peer | `^16.11.0` |
 | MongoDB facade | Mongoose `^8.24.2`; MongoDB 7 or 8 replica set/sharded cluster for mutations |
 | PostgreSQL facade | PostgreSQL 15, 16, or 18; `pg` `^8.16.3` |
-| Downloadable starters | Node.js 22 or newer, npm and the database selected in the corresponding quick start |
+| Downloadable starters | Node.js 22.15.0 or newer, npm and the database selected in the corresponding quick start |
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22 or newer |
 
 ## Upgrade notes for the next release
 
-The next release fixes values that MongoDB and PostgreSQL stored or reported incorrectly, PostgreSQL schema validation and queries, and how SQL runtimes classify errors and track readiness. On MongoDB, `createSchema()` now rejects fields that Mongoose cannot store; see [fields named like Object.prototype members](#fields-named-like-object-prototype-members). Keep all directly installed Simfinity packages at the same version. When upgrading from an earlier version, also review the [3.5.4 notes](#upgrade-to-3-5-4) below.
+The next release fixes values that MongoDB and PostgreSQL stored or reported incorrectly, PostgreSQL schema validation and queries, and how SQL runtimes classify errors and track readiness. On MongoDB, `createSchema()` now rejects fields that Mongoose cannot store; see [fields named like Object.prototype members](#fields-named-like-object-prototype-members). Keep all directly installed Simfinity packages at the same version. When upgrading from an earlier version, also review the [3.5.5 notes](#upgrade-to-3-5-5) below.
 
 ### Fields named like Object.prototype members
 
@@ -169,9 +169,11 @@ These changes concern custom SQL plugins; the PostgreSQL plugin already follows 
 - `@simtlix/simfinity-postgres` no longer ships `src/adapter.js`, `src/records.js` and `src/transactions.js`. Its `exports` has allowed only the package entry (`.`) since 3.2.0, so they could not be imported. The package entry is unchanged.
 - The `@simtlix/simfinity-sql` subpaths `./internal/adapter`, `./internal/records` and `./internal/transactions` are deprecated. They have no type declarations and no Simfinity package uses them any more; they will be removed in 4.0. Use `createSQL()` and the plugin contract instead.
 
-## Upgrade to 3.5.4
+## Upgrade to 3.5.5
 
-Version 3.5.4 fixes stored data, identifiers, query results and error codes that applications can observe. Keep all directly installed Simfinity packages at 3.5.4. When upgrading from an earlier version, also review the [3.5.3 notes](#upgrade-to-3-5-3) below.
+The 3.5.4 tag was created, but package publication stopped during release validation. Version 3.5.5 is the first published release of the fixes below and updates the vulnerable build, test and documentation dependencies that blocked publication.
+
+Version 3.5.5 fixes stored data, identifiers, query results and error codes that applications can observe. Keep all directly installed Simfinity packages at 3.5.5. When upgrading from an earlier version, also review the [3.5.3 notes](#upgrade-to-3-5-3) below.
 
 ### Startup errors and warnings
 
@@ -337,7 +339,7 @@ Keep all directly installed Simfinity packages at 3.5.0 and review these behavio
 - MongoDB uses the application's GraphQL and Mongoose peers. Install the optional MCP SDK explicitly for transports; `graphql-middleware` is no longer installed by Simfinity. See [installation](../guide/databases#install-from-npm).
 - Embedded updates enforce required fields when constructing replacement objects or list items; existing embedded objects still accept valid partial patches. SQL sessions reject statements after their callback settles, and a failed rollback discards the connection. See [mutations](../guide/mutations) and the [SQL plugin contract](../guide/sql-plugins#plugin-contract-version-1).
 
-The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.4. Historical archives and the Barber examples retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
+The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.5. Historical archives and the Barber examples retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
 
 ## Upgrade from 3.2.0
 

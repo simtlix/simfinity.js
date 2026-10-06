@@ -147,7 +147,7 @@ describe('PostgreSQL error normalization', () => {
 
 describe('PostgreSQL commit', () => {
   // A result without a command comes from a pool wrapper or test double that follows the declared
-  // { rows, rowCount } result, as 3.5.4 accepted.
+  // { rows, rowCount } result, as 3.5.5 accepted.
   it.each([
     ['COMMIT', { command: 'COMMIT', rows: [], rowCount: null }],
     ['no command', { rows: [], rowCount: null }],

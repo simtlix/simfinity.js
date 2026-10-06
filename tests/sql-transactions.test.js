@@ -241,7 +241,7 @@ describe('SQL error classification', () => {
     expect(log).toEqual(['BEGIN', 'ROLLBACK']);
   });
 
-  // A third-party plugin may classify like 3.5.4's PostgreSQL driver, reading error.code without a guard.
+  // A third-party plugin may classify like the 3.5.5 PostgreSQL driver, reading error.code without a guard.
   it.each([null, undefined, 'failed', 0])('never passes a thrown non-object value to the plugin classifiers: %j', async (value) => {
     const isRetryable = vi.fn((error) => ['40001', '40P01'].includes(error.code));
     const normalizeError = vi.fn((error) => (error.code === '23505' ? new Error('duplicate') : error));
