@@ -14,8 +14,8 @@ Choose a plugin when constructing a runtime. Its configuration is bound once, an
 Install the SQL core and the PostgreSQL plugin as direct dependencies when importing both:
 
 ```sh
-npm install @simtlix/simfinity-sql@3.5.5 \
-  @simtlix/simfinity-postgres@3.5.5 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-sql@3.5.6 \
+  @simtlix/simfinity-postgres@3.5.6 graphql@^16.11.0 pg@^8.16.3
 ```
 
 ```javascript
@@ -67,7 +67,7 @@ The SQL core alone cannot execute queries against a database. Installing it does
 
 `planRelationalSchema(models, { schema, naming })` accepts the result of core's `describeModels(registrations)`. It returns serializable logical metadata: `schema`, `tables`, `checkOrder`, `uniqueValues` and `requirements`. Each table describes columns, primary keys, foreign keys, indexes, checks and any embedded ownership. Columns carry a logical `scalar`, `list`, `nullable`, optional identity/value `default`, and optional `presenceColumn`; they contain no SQL type declarations or SQL expressions.
 
-The plugin lowers that plan to its physical schema. The PostgreSQL lowering preserves the generated descriptions and DDL from 3.2.0, including private names and constraints, except that `[ID]` list columns no longer get a generated index since the next release; databases that already have that index keep it and still validate. Upgrading an unchanged model from 3.2.0 to 3.3.0 does not require a generated-schema migration. Existing drift or a changed domain model still requires an explicit migration; initialization never silently alters incompatible storage.
+The plugin lowers that plan to its physical schema. The PostgreSQL lowering preserves the generated descriptions and DDL from 3.2.0, including private names and constraints, except that `[ID]` list columns no longer get a generated index since 3.5.6; databases that already have that index keep it and still validate. Upgrading an unchanged model from 3.2.0 to 3.3.0 does not require a generated-schema migration. Existing drift or a changed domain model still requires an explicit migration; initialization never silently alters incompatible storage.
 
 | Domain metadata | Shared relational plan | PostgreSQL implementation |
 | --- | --- | --- |

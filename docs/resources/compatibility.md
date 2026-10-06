@@ -35,9 +35,9 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22 or newer |
 
-## Upgrade notes for the next release
+## Upgrade to 3.5.6
 
-The next release fixes values that MongoDB and PostgreSQL stored or reported incorrectly, PostgreSQL schema validation and queries, and how SQL runtimes classify errors and track readiness. On MongoDB, `createSchema()` now rejects fields that Mongoose cannot store; see [fields named like Object.prototype members](#fields-named-like-object-prototype-members). Keep all directly installed Simfinity packages at the same version. When upgrading from an earlier version, also review the [3.5.5 notes](#upgrade-to-3-5-5) below.
+Version 3.5.6 fixes values that MongoDB and PostgreSQL stored or reported incorrectly, PostgreSQL schema validation and queries, and how SQL runtimes classify errors and track readiness. On MongoDB, `createSchema()` now rejects fields that Mongoose cannot store; see [fields named like Object.prototype members](#fields-named-like-object-prototype-members). Keep all directly installed Simfinity packages at 3.5.6. When upgrading from an earlier version, also review the [3.5.5 notes](#upgrade-to-3-5-5) below.
 
 ### Fields named like Object.prototype members
 
@@ -166,6 +166,7 @@ These changes concern custom SQL plugins; the PostgreSQL plugin already follows 
 
 ### Packages
 
+- The optional `@modelcontextprotocol/sdk` peer for MCP and the MongoDB facade now requires `^1.31.0`, which includes the fix for [GHSA-6qxp-vccf-f47h](https://github.com/advisories/GHSA-6qxp-vccf-f47h). Tool generation still works without the SDK. Simfinity uses the SDK server APIs; the upstream advisory concerns OAuth clients. Applications that also use those client APIs should follow the advisory's credential and issuer migration guidance.
 - `@simtlix/simfinity-postgres` no longer ships `src/adapter.js`, `src/records.js` and `src/transactions.js`. Its `exports` has allowed only the package entry (`.`) since 3.2.0, so they could not be imported. The package entry is unchanged.
 - The `@simtlix/simfinity-sql` subpaths `./internal/adapter`, `./internal/records` and `./internal/transactions` are deprecated. They have no type declarations and no Simfinity package uses them any more; they will be removed in 4.0. Use `createSQL()` and the plugin contract instead.
 
@@ -339,7 +340,7 @@ Keep all directly installed Simfinity packages at 3.5.0 and review these behavio
 - MongoDB uses the application's GraphQL and Mongoose peers. Install the optional MCP SDK explicitly for transports; `graphql-middleware` is no longer installed by Simfinity. See [installation](../guide/databases#install-from-npm).
 - Embedded updates enforce required fields when constructing replacement objects or list items; existing embedded objects still accept valid partial patches. SQL sessions reject statements after their callback settles, and a failed rollback discards the connection. See [mutations](../guide/mutations) and the [SQL plugin contract](../guide/sql-plugins#plugin-contract-version-1).
 
-The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.5. Historical archives and the Barber examples retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
+The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.6. Historical archives and the Barber examples retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
 
 ## Upgrade from 3.2.0
 

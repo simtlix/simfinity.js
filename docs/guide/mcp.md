@@ -16,7 +16,7 @@ The MongoDB facade retains MCP compatibility exports. For either database, the d
 The following examples import `@simtlix/simfinity-mcp`, which works with either adapter. In either application, install it from npm:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.5
+npm install @simtlix/simfinity-mcp@3.5.6
 ```
 
 Keep it at the same version as your other Simfinity packages. The archived MongoDB starter already includes its matching version for compatibility. The published MongoDB 3.0.1 release instead exports these functions from `@simtlix/simfinity-js`.
@@ -65,7 +65,7 @@ Generated inputs distinguish omission from explicit null: defaulted arguments us
 Install the SDK for protocol transports:
 
 ```sh
-npm install @modelcontextprotocol/sdk@^1.13.0
+npm install @modelcontextprotocol/sdk@^1.31.0
 ```
 
 Create a standalone entry point that initializes your database and schema, then starts the transport:

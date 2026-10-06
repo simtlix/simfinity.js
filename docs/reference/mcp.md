@@ -17,7 +17,7 @@ The MCP functions are named exports of the opt-in `@simtlix/simfinity-mcp` packa
 | `startStdioMCPServer(schema, options = {})` | Promise of a connected server | Create and connect the stdio transport. |
 | `createHTTPMCPHandler(schema, options = {})` | Promise of `(req, res) => Promise<void>` | Create an Express-style Streamable HTTP handler. |
 
-Only the transport/server factories require `@modelcontextprotocol/sdk`. Definitions are generated from root query and mutation fields; subscriptions are not exposed as tools.
+Only the transport/server factories require `@modelcontextprotocol/sdk@^1.31.0`. Definitions are generated from root query and mutation fields; subscriptions are not exposed as tools.
 
 ### Generated result
 
