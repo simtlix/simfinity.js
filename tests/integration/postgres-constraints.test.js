@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { GraphQLObjectType, GraphQLString, GraphQLInt, GraphQLList, GraphQLNonNull, GraphQLEnumType, GraphQLScalarType, graphql } from 'graphql';
+import { GraphQLObjectType, GraphQLString, GraphQLID, GraphQLInt, GraphQLList, GraphQLNonNull, GraphQLEnumType, GraphQLScalarType, graphql } from 'graphql';
 import pg from 'pg';
 import mongoose from 'mongoose';
 import { createMongoModel } from '../../packages/mongodb/src/mongo/models.js';
@@ -69,13 +69,44 @@ describe.skipIf(!uri)('database-enforced embedded constraints', () => {
     for (const value of [null, { required: 'x' }, { required: 'x', count: null, names: [], time: '2026-09-12T10:00:00.000Z' }]) await pool.query(`INSERT INTO ${sqlTable('ConstraintShape')} (value, values) VALUES ($1::jsonb, '[null]')`, [JSON.stringify(value)]);
   });
 
-  it.each(['0000-01-01T00:00:00.000Z', '+010000-01-01T00:00:00.000Z', '-000001-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'])('accepts the same runtime DateTime in native and JSONB storage: %s', async (iso) => {
+  it.each(['-004713-11-24T00:00:00.000Z', '0000-01-01T00:00:00.000Z', '+010000-01-01T00:00:00.000Z', '-000001-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'])('accepts the same runtime DateTime in native and JSONB storage: %s', async (iso) => {
     const time = new Date(iso);
     const native = await model('Shape').create({ nativeTime: time, value: null });
     expect(native.nativeTime.toISOString()).toBe(iso);
     const json = await model('Shape').create({ value: { required: 'date', time } });
     expect(json.value.time.toISOString()).toBe(iso);
     expect((await model('Shape').findById(json.id)).value.time.toISOString()).toBe(iso);
+  });
+
+  it.each([
+    ['a native DateTime before 4714-11-24 BC', () => model('Shape').create({ nativeTime: new Date('-005000-01-01T00:00:00.000Z'), value: null }), '22008'],
+    ['NUL in a native text list', () => model('Native').create({ codes: ['a\u0000'] }), '22021'],
+    ['NUL in a JSONB embedded string', () => model('Shape').create({ value: { required: 'a\u0000' } }), '22P05'],
+  ])('rejects %s with INVALID_VALUE (400) and writes nothing', async (label, write, sqlstate) => {
+    const error = await write().catch((caught) => caught);
+    expect(error).toMatchObject({ extensions: { code: 'INVALID_VALUE', status: 400 } });
+    expect(error.getCause()).toMatchObject({ code: sqlstate, severity: 'ERROR' });
+    expect(await model('Shape').find()).toEqual([]);
+    expect(await model('Native').find()).toEqual([]);
+  });
+
+  it('reports filter and input values PostgreSQL cannot represent as INVALID_VALUE (400)', async () => {
+    for (const source of [
+      '{shapes(nativeTime:{operator:LT,value:"-005000-01-01T00:00:00.000Z"}){nativeTime}}',
+      '{natives(codes:{value:"a\\u0000"}){codes}}',
+      '{natives(codes:{operator:LIKE,value:"a\\u0000"}){codes}}',
+      'mutation{addshape(input:{nativeTime:"-005000-01-01T00:00:00.000Z",value:{required:"x"}}){nativeTime}}',
+    ]) {
+      const result = await graphql({ schema, source });
+      expect(result.errors?.[0].extensions, source).toMatchObject({ code: 'INVALID_VALUE', status: 400 });
+    }
+    // Class 22 errors from application SQL inside a transaction are reported the same way.
+    const own = await api.withTransaction(null, (session) => session.query('SELECT make_date(2026, 13, 1)')).catch((error) => error);
+    expect(own).toMatchObject({ extensions: { code: 'INVALID_VALUE', status: 400 } });
+    expect(own.getCause().code).toBe('22008');
+    // JSONB DateTime values keep the JavaScript range, as documented.
+    const time = new Date('-005000-01-01T00:00:00.000Z');
+    expect((await model('Shape').create({ value: { required: 'old', time } })).value.time).toEqual(time);
   });
 
   it('enforces required descendants when inline array defaults materialize an optional parent', async () => {
@@ -353,6 +384,83 @@ describe.skipIf(!uri)('database-enforced embedded constraints', () => {
     expect(JSON.parse(JSON.stringify(db))).toEqual(db);
     expect(await initializeDatabase(pool, db, { mode: 'validate' })).toEqual({ mode: 'validate', created: [] });
     expect(await initializeDatabase(pool, db)).toEqual({ mode: 'create', created: [] });
+  });
+});
+
+// literal() writes these values as E'' strings; pg_get_expr renders them as standard strings.
+describe.skipIf(!uri)('enum internal values containing backslashes and quotes', () => {
+  let pool;
+  const schemas = [];
+  beforeAll(() => { pool = new pg.Pool({ connectionString: uri }); });
+  afterAll(async () => {
+    for (const name of schemas) await pool.query(`DROP SCHEMA IF EXISTS "${name}" CASCADE`);
+    await pool.end();
+  });
+  const fixture = () => {
+    const Kind = new GraphQLEnumType({ name: 'SlashKind', values: { WIN: { value: 'C:\\dir' }, QUOTE: { value: 'it\'s\\x' }, TRAIL: { value: 'end\\' }, PLAIN: { value: 'plain' } } });
+    const Target = new GraphQLObjectType({ name: 'SlashTarget', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+    const Info = new GraphQLObjectType({ name: 'SlashInfo', fields: { kind: { type: Kind } } });
+    const Link = new GraphQLObjectType({ name: 'SlashLink', fields: { kind: { type: Kind }, target: { type: Target, extensions: { relation: { embedded: false } } } } });
+    const Item = new GraphQLObjectType({ name: 'SlashItem', fields: {
+      id: { type: GraphQLID }, kind: { type: Kind }, kinds: { type: new GraphQLList(Kind) },
+      info: { type: Info, extensions: embedded }, links: { type: new GraphQLList(Link), extensions: embedded },
+    } });
+    return { Target, Info, Link, Item };
+  };
+  const schemaName = () => {
+    const name = `slash_${randomUUID().replaceAll('-', '')}`;
+    schemas.push(name);
+    return name;
+  };
+
+  it('creates, validates and enforces enum values with backslashes and quotes', async () => {
+    const name = schemaName();
+    const types = fixture();
+    const api = createPostgres({ pool, schema: name });
+    api.connect(null, types.Item, 'slashItem', 'slashItems');
+    api.connect(null, types.Target, 'slashTarget', 'slashTargets');
+    api.addNoEndpointType(types.Info);
+    api.addNoEndpointType(types.Link);
+    const gql = api.createSchema();
+    expect((await api.initializeDatabase()).mode).toBe('create');
+    await expect(api.initializeDatabase({ mode: 'validate' })).resolves.toEqual({ mode: 'validate', created: [] });
+    await expect(api.initializeDatabase()).resolves.toEqual({ mode: 'create', created: [] });
+    const created = await graphql({ schema: gql, source: 'mutation{addslashItem(input:{kind:WIN,kinds:[QUOTE,TRAIL,null],info:{kind:TRAIL},links:[{kind:QUOTE}]}){id kind kinds info{kind} links{kind}}}' });
+    expect(created.errors).toBeUndefined();
+    expect(created.data.addslashItem).toMatchObject({ kind: 'WIN', kinds: ['QUOTE', 'TRAIL', null], info: { kind: 'TRAIL' }, links: [{ kind: 'QUOTE' }] });
+    const found = await graphql({ schema: gql, source: '{slashItems(kind:{operator:EQ,value:"WIN"}){kind links{kind}}}' });
+    expect(found.errors).toBeUndefined();
+    expect(found.data.slashItems).toEqual([{ kind: 'WIN', links: [{ kind: 'QUOTE' }] }]);
+    const table = `"${name}"."SlashItem"`;
+    expect((await pool.query(`SELECT kind, kinds FROM ${table}`)).rows[0]).toEqual({ kind: 'C:\\dir', kinds: ['it\'s\\x', 'end\\', null] });
+    for (const bad of ['C:\\\\dir', 'C:dir', 'end']) await expect(pool.query(`INSERT INTO ${table} (kind) VALUES ($1)`, [bad])).rejects.toMatchObject({ code: '23514' });
+    await expect(pool.query(`INSERT INTO ${table} (info, "__field__info__present") VALUES ($1, true)`, [JSON.stringify({ kind: 'C:\\\\dir' })])).rejects.toMatchObject({ code: '23514' });
+
+    // A check constant with a different value is still drift.
+    const check = api.describeDatabase().tables.find((item) => item.name === 'SlashItem').checks.find((item) => item.name.endsWith('__kind__enum'));
+    expect(check.expression).toContain(String.raw`E'C:\\dir'`);
+    await pool.query(`DELETE FROM ${table}`);
+    await pool.query(`ALTER TABLE ${table} DROP CONSTRAINT "${check.name}"`);
+    await pool.query(`ALTER TABLE ${table} ADD CONSTRAINT "${check.name}" CHECK (${check.expression.replace(String.raw`E'C:\\dir'`, String.raw`E'C:\\\\dir'`)})`);
+    const stored = await pool.query('SELECT pg_get_expr(conbin, conrelid) AS expression FROM pg_constraint WHERE conname = $1 AND conrelid = $2::regclass', [check.name, table]);
+    expect(stored.rows[0].expression).toContain(String.raw`'C:\\dir'`);
+    await expect(api.initializeDatabase({ mode: 'validate' })).rejects.toMatchObject({ extensions: { code: 'SCHEMA_MISMATCH' } });
+  });
+
+  it('validates exported enum DDL executed with standard_conforming_strings off', async () => {
+    const name = schemaName();
+    const types = fixture();
+    const description = describeDatabase([{ gqltype: types.Item }, { gqltype: types.Target }], { schema: name });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET LOCAL standard_conforming_strings = \'off\'');
+      for (const statement of compileDatabaseSchema(description)) await client.query(statement);
+      await client.query('COMMIT');
+    } finally { client.release(); }
+    await expect(initializeDatabase(pool, description, { mode: 'validate' })).resolves.toEqual({ mode: 'validate', created: [] });
+    await expect(initializeDatabase(pool, description)).resolves.toEqual({ mode: 'create', created: [] });
+    await pool.query(`INSERT INTO "${name}"."SlashItem" (kind, kinds) VALUES ($1, $2)`, ['C:\\dir', ['end\\', 'it\'s\\x']]);
   });
 });
 

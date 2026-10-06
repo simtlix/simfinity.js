@@ -3,6 +3,12 @@ import { SimfinityError } from '@simtlix/simfinity-core';
 
 const missing = (name) => { throw new SimfinityError(`Required value ${name} is missing`, 'REQUIRED_VALUE', 400); };
 const shapeError = (name) => { throw new SimfinityError(`Invalid value for ${name}`, 'INVALID_VALUE', 400); };
+// An absent field named like an Object.prototype member (`constructor`, `toString`, ...) must not
+// resolve to the inherited member. Other inherited values, such as class getters, are kept.
+const own = (data, key) => {
+  const value = data[key];
+  return !Object.hasOwn(data, key) && value === Object.prototype[key] ? undefined : value;
+};
 
 export const createRecordStore = (models, database, query, plugin) => {
   const { castId, encodeScalar, decodeScalar, createId, encodeEmbedded } = plugin.values;
@@ -42,7 +48,7 @@ export const createRecordStore = (models, database, query, plugin) => {
     const result = { ...data };
     for (const field of fields) {
       if (field.kind === 'collection' || (!full && !Object.hasOwn(data, field.storageName))) continue;
-      let value = data[field.storageName];
+      let value = own(data, field.storageName);
       if (value === undefined && !full) continue;
       if (value === undefined && full && field.list) value = [];
       if (field.kind === 'embedded' && value !== null) {
@@ -65,7 +71,7 @@ export const createRecordStore = (models, database, query, plugin) => {
     const result = {};
     for (const field of fields) {
       if (field.kind === 'collection') continue;
-      const value = data[field.storageName];
+      const value = own(data, field.storageName);
       if (value == null && field.required) missing(field.name);
       if (value !== undefined) result[field.storageName] = encodeValue(field, value);
       else if (field.list) result[field.storageName] = [];
@@ -75,9 +81,11 @@ export const createRecordStore = (models, database, query, plugin) => {
   const decodeFields = (fields, data, gqltype) => {
     const result = {};
     for (const field of fields) {
-      if (field.kind === 'collection' || data[field.storageName] === undefined) continue;
-      const value = data[field.storageName];
-      const gqlField = gqlFields(gqltype)[field.name];
+      if (field.kind === 'collection') continue;
+      // An absent key stays absent, also when it is named like an Object.prototype member.
+      const value = own(data, field.storageName);
+      if (value === undefined) continue;
+      const gqlField = own(gqlFields(gqltype), field.name);
       if (field.kind === 'embedded') result[field.storageName] = mapEmbedded(field, value, decodeFields, gqlField && getNamedType(gqlField.type));
       else result[field.storageName] = field.list && value ? value.map((item) => decodeScalar(field, item, gqlField)) : decodeScalar(field, value, gqlField);
     }
@@ -120,7 +128,7 @@ export const createRecordStore = (models, database, query, plugin) => {
     for (const field of fields) {
       if (field.kind === 'collection' || (!storage.ownership && ['id', '_id'].includes(field.name))) continue;
       const present = Object.hasOwn(data, field.storageName);
-      let value = data[field.storageName];
+      let value = present ? data[field.storageName] : undefined;
       if (!present && !full) continue;
       if (!present && full && field.list && !nullItem) value = [];
       const owned = child(storage, field);
@@ -175,7 +183,7 @@ export const createRecordStore = (models, database, query, plugin) => {
     const rows = (await execute({ kind: 'selectById', table: table(name), id, lock }, session)).rows;
     const [record] = await hydrateRows(name, rows, session);
     if (!record) return null;
-    return projection ? Object.fromEntries(Object.entries(record).filter(([key]) => key === '_id' || key === 'id' || projection[key])) : record;
+    return projection ? Object.fromEntries(Object.entries(record).filter(([key]) => key === '_id' || key === 'id' || own(projection, key))) : record;
   };
   const create = async (name, record, session) => {
     const entity = model(name);

@@ -4,7 +4,7 @@ import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
   GraphQLInt, GraphQLEnumType, GraphQLBoolean, GraphQLError, GraphQLInterfaceType, GraphQLUnionType,
-  Kind, defaultFieldResolver, getNamedType,
+  Kind, getNamedType,
 } from 'graphql';
 
 import SimfinityError from './errors/simfinity.error.js';
@@ -263,6 +263,29 @@ export const buildErrorFormatter = (callback) => (error) => {
 };
 
 export { SimfinityError, InternalServerError };
+
+// A field named like an Object.prototype member (`constructor`, `toString`, ...) that reads as that
+// very member holds no value: graphql input objects and stored records without the field inherit
+// it, and MongoDB nested paths return it from their own accessors. Other values, overriding members
+// such as class methods and getters, and every other name read as usual. The property is read once,
+// so a getter runs once, as with a plain read.
+const isObjectMember = (key, read) => key in Object.prototype && read === Object.prototype[key];
+const ownValue = (value, key) => {
+  if (value == null) return undefined;
+  const read = value[key];
+  return isObjectMember(key, read) ? undefined : read;
+};
+
+// Output fields with such names read through this resolver instead of graphql's default one, which
+// would call the inherited member. Otherwise it resolves as the default one does, calling a method
+// with the parent as receiver, but reads the property only once. It reads no data, so installing it
+// binds no type to a runtime.
+const readOwnField = markGenerated((parent, args, context, info) => {
+  if (parent === null || (typeof parent !== 'object' && typeof parent !== 'function')) return undefined;
+  const property = parent[info.fieldName];
+  if (isObjectMember(info.fieldName, property)) return null;
+  return typeof property === 'function' ? property.call(parent, args, context, info) : property;
+});
 
 const cloneInput = (value, type) => {
   if (value === null || value === undefined || !type) return value;
@@ -791,28 +814,29 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
   const collectionFields = {};
 
   for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
+    const fieldValue = ownValue(args, fieldEntryName);
     if (fieldEntry.extensions && fieldEntry.extensions.validations
       && fieldEntry.extensions.validations[operation]) {
       for (const validator of fieldEntry.extensions.validations[operation]) {
-        await validator.validate(gqltype.name, fieldEntryName, args[fieldEntryName], session);
+        await validator.validate(gqltype.name, fieldEntryName, fieldValue, session);
       }
     }
 
-    if (args[fieldEntryName] !== undefined && args[fieldEntryName] !== null) {
+    if (fieldValue !== undefined && fieldValue !== null) {
       if (fieldEntry.type instanceof GraphQLScalarType
         || fieldEntry.type instanceof GraphQLEnumType
         || isNonNullOfType(fieldEntry.type, GraphQLScalarType)
         || isNonNullOfType(fieldEntry.type, GraphQLEnumType)) {
-        modelArgs[fieldEntryName] = args[fieldEntryName];
+        modelArgs[fieldEntryName] = fieldValue;
       } else if (fieldEntry.type instanceof GraphQLObjectType
         || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
         if (fieldEntry.extensions && fieldEntry.extensions.relation) {
           if (!fieldEntry.extensions.relation.embedded) {
-            modelArgs[getFieldStorageName(fieldEntryName, fieldEntry)] = adapter.castId(args[fieldEntryName].id);
+            modelArgs[getFieldStorageName(fieldEntryName, fieldEntry)] = adapter.castId(fieldValue.id);
           } else {
             const fieldType = fieldEntry.type instanceof GraphQLNonNull
               ? fieldEntry.type.ofType : fieldEntry.type;
-            modelArgs[fieldEntryName] = (await materializeModel(args[fieldEntryName], fieldType,
+            modelArgs[fieldEntryName] = (await materializeModel(fieldValue, fieldType,
               null, operation, session)).modelArgs;
           }
         } else {
@@ -827,11 +851,11 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
         if (itemType instanceof GraphQLObjectType && fieldEntry.extensions
           && fieldEntry.extensions.relation) {
           if (!fieldEntry.extensions.relation.embedded) {
-            collectionFields[fieldEntryName] = args[fieldEntryName];
+            collectionFields[fieldEntryName] = fieldValue;
           } else if (fieldEntry.extensions.relation.embedded) {
             const collectionEntries = [];
 
-            for (const element of args[fieldEntryName]) {
+            for (const element of fieldValue) {
               if (element === null) {
                 collectionEntries.push(null);
               } else {
@@ -843,9 +867,15 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
             modelArgs[fieldEntryName] = collectionEntries;
           }
         } else if (itemType instanceof GraphQLScalarType || itemType instanceof GraphQLEnumType) {
-          modelArgs[fieldEntryName] = args[fieldEntryName];
+          modelArgs[fieldEntryName] = fieldValue;
         }
       }
+    } else if (operation === 'CREATE' && fieldEntryName in Object.prototype && getListShape(fieldEntry.type)
+      && !(fieldEntry.extensions?.relation && !fieldEntry.extensions.relation.embedded)) {
+      // A create without a value stores [] for a list: SQL backends store it for every list, and
+      // Mongoose defaults to it, except for a list named like an Object.prototype member, where it
+      // finds the inherited member. Collections are not stored on the record.
+      modelArgs[fieldEntryName] = [];
     }
   }
 
@@ -931,9 +961,9 @@ const completeEmbeddedValue = (fieldName, fieldEntry, value, patch = null) => {
       const memberList = getListShape(member.type);
       if (relation && !relation.embedded && memberList) continue;
       const storageName = getFieldStorageName(memberName, member);
-      if (item[storageName] === undefined && memberList) item[storageName] = [];
+      if (ownValue(item, storageName) === undefined && memberList) item[storageName] = [];
       if (memberName === 'id' || member.extensions?.readOnly) continue;
-      const memberValue = item[storageName];
+      const memberValue = ownValue(item, storageName);
       if (memberValue === null || memberValue === undefined) {
         if (member.type instanceof GraphQLNonNull) {
           throw new SimfinityError(`Required value ${memberName} is missing`, 'REQUIRED_VALUE', 400);
@@ -979,8 +1009,8 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
     });
     if (currentObject) {
       for (const fieldEntryName of embeddedFieldNames) {
-        const oldObjectData = currentObject[fieldEntryName];
-        const newObjectData = materializedModel.modelArgs[fieldEntryName];
+        const oldObjectData = ownValue(currentObject, fieldEntryName);
+        const newObjectData = ownValue(materializedModel.modelArgs, fieldEntryName);
         if (newObjectData) {
           if (Array.isArray(newObjectData)) {
             materializedModel.modelArgs[fieldEntryName] = newObjectData;
@@ -988,7 +1018,7 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
           } else {
             materializedModel.modelArgs[fieldEntryName] = { ...oldObjectData, ...newObjectData };
             clearNullEmbeddedMembers(materializedModel.modelArgs[fieldEntryName],
-              argTypes[fieldEntryName], args[fieldEntryName]);
+              argTypes[fieldEntryName], ownValue(args, fieldEntryName));
             completeEmbeddedValue(fieldEntryName, argTypes[fieldEntryName],
               materializedModel.modelArgs[fieldEntryName], newObjectData);
           }
@@ -1724,8 +1754,9 @@ const installIdResolver = (gqltype) => {
 // this runtime: another runtime that reaches a shared type reads the same value through it.
 // The value is read as graphql's default resolver reads it, so a method on the parent, such as one a
 // custom mutation result supplies, is still called; a promise it returns is read once it settles.
+// Only a field named like an Object.prototype member that reads as that member reads as null.
 const readEmbeddedField = markGenerated((parent, args, context, info) => {
-  const value = defaultFieldResolver(parent, args, context, info);
+  const value = readOwnField(parent, args, context, info);
   return isThenable(value)
     ? value.then((resolved) => adapter.readEmbeddedValue(resolved))
     : adapter.readEmbeddedValue(value);
@@ -1741,6 +1772,20 @@ const installEmbeddedValueResolvers = (gqltype, visited) => {
       fieldEntry.resolve = readEmbeddedField;
     }
     installEmbeddedValueResolvers(listShape ? listShape.itemType : unwrapNonNull(fieldEntry.type), visited);
+  }
+};
+
+// Fields named like Object.prototype members, of registered types and the embedded types they reach,
+// read through readOwnField when they have no resolver yet; references and collections keep the ones
+// autoGenerateResolvers gives them.
+const installObjectMemberResolvers = (gqltype, visited) => {
+  if (!(gqltype instanceof GraphQLObjectType) || visited.has(gqltype)) return;
+  visited.add(gqltype);
+  for (const [fieldName, fieldEntry] of Object.entries(gqltype.getFields())) {
+    const relation = fieldEntry.extensions?.relation;
+    if (relation && !relation.embedded) continue;
+    if (fieldName in Object.prototype && !fieldEntry.resolve) fieldEntry.resolve = readOwnField;
+    if (relation) installObjectMemberResolvers(unwrapListAndNonNull(fieldEntry.type), visited);
   }
 };
 
@@ -1827,6 +1872,9 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
       }
     }
   });
+  // After every type has its relation and embedded value resolvers, which these fields keep.
+  const objectMemberTypes = new Set();
+  Object.values(typesDict.types).forEach(({ gqltype }) => installObjectMemberResolvers(gqltype, objectMemberTypes));
 
   const query = buildRootQuery('RootQueryType', includedQueryTypes);
   Object.values(typesDict.types).forEach(({ gqltype }) => {
@@ -1939,8 +1987,15 @@ const autoGenerateResolvers = (gqltype) => {
         if (!relatedTypeInfo || !relatedTypeInfo.model) {
           throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
         }
-        // Any stored identifier except null or an empty string, so numeric IDs such as 0 resolve.
-        const relatedId = parent[connectionField] ?? parent[fieldName];
+        // Any stored identifier except null or an empty string, so numeric IDs such as 0 resolve. A
+        // function under the field name is a member, such as the class a MongoDB document inherits
+        // `constructor` from, not an identifier.
+        // The field name is read only when the stored identifier is missing.
+        let relatedId = ownValue(parent, connectionField);
+        if (relatedId == null) {
+          const linked = ownValue(parent, fieldName);
+          relatedId = typeof linked === 'function' ? undefined : linked;
+        }
         const id = relatedId?._id ?? relatedId;
         if (id == null || id === '') return null;
         try {

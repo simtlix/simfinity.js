@@ -6,7 +6,9 @@ import {
   GraphQLBoolean, GraphQLFloat, GraphQLID, GraphQLInt, GraphQLList, GraphQLNonNull,
   GraphQLObjectType, GraphQLScalarType, GraphQLString,
 } from 'graphql';
-import { createValidatedScalar, scalars } from '../packages/mongodb/src/index.js';
+import {
+  createMongoAdapter, createRuntime, createValidatedScalar, scalars,
+} from '../packages/mongodb/src/index.js';
 import { createMongoModel, resolveStorageScalar } from '../packages/mongodb/src/mongo/models.js';
 
 const accept = () => {};
@@ -188,6 +190,118 @@ describe('createMongoModel', () => {
 
       expect(unhandled).toEqual([]);
       expect(warn).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('fields named like Object.prototype members', () => {
+  const members = ['constructor', 'hasOwnProperty', 'isPrototypeOf', 'propertyIsEnumerable', 'toLocaleString', 'toString', 'valueOf'];
+  const depths = ['at the root', 'in an embedded object', 'in embedded list items'];
+  const embeddedReason = 'embedded fields cannot be named like Object.prototype members';
+  const constructorReason = 'Mongoose drops a stored path named constructor';
+  let built = 0;
+
+  // A Doc type with the given fields at the root, or in a Holder it embeds as an object or a list.
+  const build = (depth, createFields) => {
+    built += 1;
+    const prefix = `ModelProto${built}_`;
+    createdModels.push(new RegExp(`^${prefix}`));
+    const Maker = new GraphQLObjectType({ name: `${prefix}Maker`, fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+    const Inner = new GraphQLObjectType({ name: `${prefix}Inner`, fields: { label: { type: GraphQLString } } });
+    const shaped = { label: { type: GraphQLString }, ...createFields({ Maker, Inner }) };
+    const Holder = new GraphQLObjectType({ name: `${prefix}Holder`, fields: shaped });
+    const holder = {
+      type: depth === 'in an embedded object' ? Holder : new GraphQLList(Holder),
+      extensions: { relation: { embedded: true } },
+    };
+    const Doc = new GraphQLObjectType({
+      name: `${prefix}Doc`,
+      fields: { id: { type: GraphQLID }, name: { type: GraphQLString }, ...(depth === 'at the root' ? shaped : { holder }) },
+    });
+    const runtime = createRuntime(createMongoAdapter());
+    runtime.preventCreatingCollection(true);
+    runtime.connect(null, Maker, `${prefix}maker`, `${prefix}makers`);
+    runtime.addNoEndpointType(Inner);
+    if (depth !== 'at the root') runtime.addNoEndpointType(Holder);
+    runtime.connect(null, Doc, `${prefix}doc`, `${prefix}docs`);
+    return { runtime, Doc, owner: depth === 'at the root' ? Doc.name : Holder.name };
+  };
+
+  const embeddedField = (name, list) => ({ Inner }) => ({
+    [name]: { type: list ? new GraphQLList(Inner) : Inner, extensions: { relation: { embedded: true } } },
+  });
+  const rejected = depths.flatMap((depth) => [
+    ...members.flatMap((name) => [
+      [`an embedded object named ${name}`, depth, name, embeddedField(name, false), embeddedReason],
+      [`an embedded list named ${name}`, depth, name, embeddedField(name, true), embeddedReason],
+    ]),
+    ['a scalar named constructor', depth, 'constructor', () => ({ constructor: { type: GraphQLString } }), constructorReason],
+    ['a scalar list named constructor', depth, 'constructor',
+      () => ({ constructor: { type: new GraphQLList(GraphQLString) } }), constructorReason],
+    ['a reference named constructor', depth, 'constructor',
+      ({ Maker }) => ({ constructor: { type: Maker, extensions: { relation: { embedded: false } } } }), constructorReason],
+    ['a reference stored as constructor', depth, 'maker',
+      ({ Maker }) => ({ maker: { type: Maker, extensions: { relation: { embedded: false, connectionField: 'constructor' } } } }),
+      constructorReason],
+  ]);
+
+  test.each(rejected)('rejects %s %s before building its Mongoose model', (label, depth, field, createFields, reason) => {
+    const { runtime, Doc, owner } = build(depth, createFields);
+
+    expect(() => runtime.createSchema()).toThrow(expect.objectContaining({
+      message: `${owner}.${field} cannot be stored on MongoDB: ${reason}`,
+      extensions: expect.objectContaining({ code: 'INVALID_MODEL', status: 400 }),
+    }));
+    expect(mongoose.modelNames()).not.toContain(Doc.name);
+  });
+
+  test('rejects a collection whose child stores its link under a private constructor path', () => {
+    const prefix = 'ModelProtoCollection_';
+    createdModels.push(new RegExp(`^${prefix}`));
+    const Thing = new GraphQLObjectType({ name: `${prefix}Thing`, fields: { id: { type: GraphQLID }, label: { type: GraphQLString } } });
+    const Owner = new GraphQLObjectType({
+      name: `${prefix}Owner`,
+      fields: {
+        id: { type: GraphQLID },
+        things: { type: new GraphQLList(Thing), extensions: { relation: { embedded: false, connectionField: 'constructor' } } },
+      },
+    });
+    const runtime = createRuntime(createMongoAdapter());
+    runtime.preventCreatingCollection(true);
+    runtime.connect(null, Thing, `${prefix}thing`, `${prefix}things`);
+    runtime.connect(null, Owner, `${prefix}owner`, `${prefix}owners`);
+
+    expect(() => runtime.createSchema()).toThrow(expect.objectContaining({
+      message: `${Thing.name}.constructor cannot be stored on MongoDB: ${constructorReason}`,
+      extensions: expect.objectContaining({ code: 'INVALID_MODEL', status: 400 }),
+    }));
+    expect(mongoose.modelNames()).not.toContain(Thing.name);
+  });
+
+  // The other members, as scalars, scalar lists or references, next to a reference named
+  // constructor that its connectionField stores as makerId.
+  const others = members.filter((name) => name !== 'constructor');
+  const stored = [
+    ['scalars', () => ({ type: GraphQLString }), 'String'],
+    ['scalar lists', () => ({ type: new GraphQLList(GraphQLString) }), 'Array'],
+    ['references', ({ Maker }) => ({ type: Maker, extensions: { relation: { embedded: false } } }), 'ObjectId'],
+  ];
+  test.each(depths.flatMap((depth) => stored.map((shape) => [...shape, depth])))('stores %s so named %s', (label, createField, instance, depth) => {
+    const { runtime, Doc } = build(depth, (types) => ({
+      ...Object.fromEntries(others.map((name) => [name, createField(types)])),
+      constructor: { type: types.Maker, extensions: { relation: { embedded: false, connectionField: 'makerId' } } },
+    }));
+
+    runtime.createSchema();
+    const { schema } = runtime.getModel(Doc);
+    const pathOf = (name) => {
+      if (depth === 'at the root') return schema.path(name);
+      if (depth === 'in an embedded object') return schema.path(`holder.${name}`);
+      return schema.path('holder').schema.path(name);
+    };
+    expect(Object.fromEntries([...others, 'makerId'].map((name) => [name, pathOf(name)?.instance]))).toEqual({
+      ...Object.fromEntries(others.map((name) => [name, instance])),
+      makerId: 'ObjectId',
     });
   });
 });

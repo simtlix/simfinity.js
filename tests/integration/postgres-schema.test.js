@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
-import { GraphQLObjectType, GraphQLNonNull } from 'graphql';
+import { GraphQLID, GraphQLList, GraphQLObjectType, GraphQLNonNull, GraphQLString } from 'graphql';
 import { createContractModelFixtures } from '../contracts/model-fixtures.js';
 import { schemaFixture } from '../contracts/postgres-fixtures.js';
-import { describeDatabase, compileDatabaseSchema, initializeDatabase } from '../../packages/postgres/src/index.js';
+import {
+  addNoEndpointType, compileDatabaseSchema, configure, connect, createPostgres, createSchema, describeDatabase,
+  getModel, getRegistrations, initializeDatabase, postgresPlugin,
+} from '../../packages/postgres/src/index.js';
 
 const uri = process.env.SIMFINITY_POSTGRES_URI;
 describe.skipIf(!uri)('generated PostgreSQL schema on a real server', () => {
@@ -166,5 +169,183 @@ describe.skipIf(!uri)('generated PostgreSQL schema on a real server', () => {
     broken.tables.find((item) => item.name === 'Child').foreignKeys[0].targetTable = 'Missing';
     await expect(initializeDatabase(pool, broken)).rejects.toThrow();
     expect((await pool.query('SELECT 1 FROM pg_namespace WHERE nspname = $1', [missing])).rowCount).toBe(0);
+  });
+});
+
+const uuids = (count) => Array.from({ length: count }, () => randomUUID());
+describe.skipIf(!uri)('PostgreSQL [ID] list columns', () => {
+  const schema = `simfinity_${randomUUID().replaceAll('-', '')}_ids`;
+  const legacySchema = `${schema}_legacy`;
+  const long = 'aVeryLongFieldNameForRelatedIdentifiersThatHashesTheIndexName';
+  let pool; let api; let types; let warn;
+  const listIndexes = async (name) => (await pool.query(`SELECT i.indexname FROM pg_indexes i WHERE i.schemaname = $1
+    AND EXISTS (SELECT 1 FROM pg_index x JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = ANY (x.indkey)
+      WHERE x.indexrelid = format('%I.%I', i.schemaname, i.indexname)::regclass AND a.atttypid = 'uuid[]'::regtype) ORDER BY 1`, [name])).rows.map((row) => row.indexname);
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: uri });
+    const Author = new GraphQLObjectType({ name: 'IdListAuthor', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+    const Link = new GraphQLObjectType({ name: 'IdListLink', fields: {
+      author: { type: Author, extensions: { relation: { embedded: false, connectionField: 'author' } } },
+      refIds: { type: new GraphQLList(GraphQLID) }, refId: { type: GraphQLID },
+    } });
+    const Post = new GraphQLObjectType({ name: 'IdListPost', fields: {
+      id: { type: GraphQLID }, title: { type: GraphQLString }, externalId: { type: GraphQLID },
+      relatedIds: { type: new GraphQLList(GraphQLID) },
+      requiredIds: { type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(GraphQLID))) },
+      [long]: { type: new GraphQLList(GraphQLID) },
+      links: { type: new GraphQLList(Link), extensions: { relation: { embedded: true } } },
+    } });
+    types = { Author, Link, Post };
+    api = createPostgres({ pool, schema });
+    api.connect(null, Author, 'idListAuthor', 'idListAuthors');
+    api.connect(null, Post, 'idListPost', 'idListPosts');
+    api.addNoEndpointType(Link);
+    api.createSchema();
+  });
+  beforeEach(() => { warn = vi.spyOn(console, 'warn').mockImplementation(() => {}); });
+  afterEach(() => { warn.mockRestore(); });
+  afterAll(async () => {
+    for (const name of [schema, legacySchema]) await pool.query(`DROP SCHEMA IF EXISTS "${name}" CASCADE`);
+    await pool.end();
+  });
+
+  it('stores and updates [ID] lists beyond the btree row size limit, at the root and in owned tables', async () => {
+    await api.initializeDatabase();
+    expect(await listIndexes(schema)).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+    const author = await api.getModel(types.Author).create({ name: 'Author' });
+    const values = { relatedIds: uuids(1000), requiredIds: uuids(168), [long]: uuids(300), links: [{ author: author.id, refIds: uuids(500), refId: randomUUID() }] };
+    const post = await api.getModel(types.Post).create({ title: 'Long lists', externalId: randomUUID(), ...values });
+    const stored = await api.getModel(types.Post).findById(post.id);
+    expect(stored).toMatchObject({ relatedIds: values.relatedIds, requiredIds: values.requiredIds, [long]: values[long] });
+    expect(stored.links[0].refIds).toEqual(values.links[0].refIds);
+    const replaced = uuids(400);
+    await api.getModel(types.Post).update(post.id, { relatedIds: replaced });
+    expect((await api.getModel(types.Post).findById(post.id)).relatedIds).toEqual(replaced);
+    expect((await api.getModel(types.Post).find({ relatedIds: { operator: 'EQ', value: replaced[399] } })).map((item) => item.id)).toEqual([post.id]);
+    // Single ID columns, references included, keep their generated index.
+    expect((await pool.query('SELECT indexname FROM pg_indexes WHERE schemaname = $1', [schema])).rows.map((row) => row.indexname))
+      .toEqual(expect.arrayContaining(['IdListPost__externalId__idx', 'IdListPost__links__refId__idx', 'IdListPost__links__author__idx']));
+  });
+
+  it('keeps and reports the btree indexes earlier versions generated on [ID] list columns', async () => {
+    const description = describeDatabase(api.getRegistrations(), { schema: legacySchema });
+    // A database created by an earlier version: the same description plus one index per [ID] list column.
+    const legacy = structuredClone(description);
+    const { generatedName } = postgresPlugin().naming;
+    const names = [];
+    for (const table of legacy.tables) {
+      for (const column of table.columns.filter((item) => item.type === 'uuid[]')) {
+        const name = generatedName(table.name, column.name, 'idx');
+        if (!table.indexes.some((index) => index.name === name)) table.indexes.push({ name, columns: [column.name], unique: false, nullsNotDistinct: false });
+        names.push(name);
+      }
+    }
+    expect(names).toEqual(expect.arrayContaining(['IdListPost__relatedIds__idx', 'IdListPost__requiredIds__idx', 'IdListPost__links__refIds__idx']));
+    expect(names.some((name) => /^IdListPost__aVeryLong.*_[0-9a-f]{12}$/.test(name))).toBe(true);
+    await initializeDatabase(pool, legacy);
+    expect(await listIndexes(legacySchema)).toEqual([...names].sort());
+    await expect(pool.query(`INSERT INTO "${legacySchema}"."IdListPost" ("relatedIds", "requiredIds") VALUES ($1, $2)`, [uuids(168), []])).rejects.toMatchObject({ code: '54000' });
+    // Indexes a DBA created on the same column are neither reported nor dropped.
+    await pool.query(`CREATE INDEX dba_related_btree ON "${legacySchema}"."IdListPost" ("relatedIds")`);
+    await pool.query(`CREATE INDEX dba_related_partial ON "${legacySchema}"."IdListPost" ("relatedIds") WHERE "relatedIds" IS NOT NULL`);
+    warn.mockClear();
+
+    expect(await initializeDatabase(pool, description, { mode: 'validate' })).toEqual({ mode: 'validate', created: [] });
+    expect(await initializeDatabase(pool, description)).toEqual({ mode: 'create', created: [] });
+    expect(warn).toHaveBeenCalledTimes(2);
+    for (const [message] of warn.mock.calls) {
+      for (const name of names) expect(message).toContain(`DROP INDEX CONCURRENTLY IF EXISTS "${legacySchema}"."${name}";`);
+      expect(message).toContain('167');
+      expect(message).not.toContain('dba_related');
+    }
+    expect(await listIndexes(legacySchema)).toEqual([...names, 'dba_related_btree', 'dba_related_partial'].sort());
+
+    // The documented migration drops them (CONCURRENTLY in production); nothing is reported or re-created afterwards.
+    for (const name of names) await pool.query(`DROP INDEX "${legacySchema}"."${name}"`);
+    warn.mockClear();
+    expect(await initializeDatabase(pool, description, { mode: 'validate' })).toEqual({ mode: 'validate', created: [] });
+    expect(await initializeDatabase(pool, description)).toEqual({ mode: 'create', created: [] });
+    expect(warn).not.toHaveBeenCalled();
+    expect(await listIndexes(legacySchema)).toEqual(['dba_related_btree', 'dba_related_partial']);
+    await pool.query(`INSERT INTO "${legacySchema}"."IdListPost" ("requiredIds") VALUES ($1)`, [uuids(1000)]);
+
+    // The generated name alone does not make an index legacy: a DBA's index of another shape under the
+    // freed name is kept and never reported.
+    const reused = 'IdListPost__relatedIds__idx';
+    const exists = async () => (await pool.query('SELECT 1 FROM pg_indexes WHERE schemaname = $1 AND indexname = $2', [legacySchema, reused])).rowCount === 1;
+    for (const shape of [
+      'USING gin ("relatedIds")',
+      '("relatedIds") WHERE "relatedIds" IS NOT NULL',
+      '((array_length("relatedIds", 1)))',
+      '("relatedIds", title)',
+    ]) {
+      await pool.query(`CREATE INDEX "${reused}" ON "${legacySchema}"."IdListPost" ${shape}`);
+      expect(await initializeDatabase(pool, description, { mode: 'validate' })).toEqual({ mode: 'validate', created: [] });
+      expect(await initializeDatabase(pool, description)).toEqual({ mode: 'create', created: [] });
+      expect(warn, shape).not.toHaveBeenCalled();
+      expect(await exists()).toBe(true);
+      await pool.query(`DROP INDEX "${legacySchema}"."${reused}"`);
+    }
+    // A unique index is never a generated list index; initialization rejects it as for any other name.
+    await pool.query(`CREATE UNIQUE INDEX "${reused}" ON "${legacySchema}"."IdListPost" ("relatedIds")`);
+    for (const options of [{ mode: 'validate' }, {}]) {
+      await expect(initializeDatabase(pool, description, options)).rejects.toMatchObject({ message: expect.stringContaining('unexpected unique index'), extensions: { code: 'SCHEMA_MISMATCH' } });
+    }
+    expect(warn).not.toHaveBeenCalled();
+    expect(await exists()).toBe(true);
+  });
+});
+
+// The no-argument module calls use the default instance and the schema given to configure().
+describe.skipIf(!uri)('PostgreSQL DDL exported by the configured default instance', () => {
+  const schema = `simfinity_${randomUUID().replaceAll('-', '')}_export`;
+  let pool;
+  beforeAll(() => { pool = new pg.Pool({ connectionString: uri }); });
+  afterAll(async () => {
+    await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await pool.end();
+  });
+
+  it('creates an empty non-public schema that validation accepts', async () => {
+    const Tag = new GraphQLObjectType({ name: 'ExportTag', fields: { id: { type: GraphQLID }, label: { type: new GraphQLNonNull(GraphQLString), extensions: { unique: true } } } });
+    const Contact = new GraphQLObjectType({ name: 'ExportContact', fields: {
+      label: { type: GraphQLString, extensions: { unique: true } },
+      tag: { type: Tag, extensions: { relation: { embedded: false } } },
+    } });
+    const Owner = new GraphQLObjectType({ name: 'ExportOwner', fields: {
+      id: { type: GraphQLID }, name: { type: GraphQLString },
+      tag: { type: Tag, extensions: { relation: { embedded: false } } },
+      contacts: { type: new GraphQLList(Contact), extensions: { relation: { embedded: true } } },
+    } });
+    configure({ pool, schema });
+    connect(null, Tag, 'exportTag', 'exportTags');
+    connect(null, Owner, 'exportOwner', 'exportOwners');
+    addNoEndpointType(Contact);
+    createSchema();
+    const description = describeDatabase();
+    expect(description.schema).toBe(schema);
+    expect(description.tables.some((table) => table.ownership)).toBe(true);
+    expect(description.tables.some((table) => table.foreignKeys.length)).toBe(true);
+    expect(description.tables.some((table) => table.indexes.some((index) => index.unique))).toBe(true);
+    expect(description.functions.length).toBeGreaterThan(0);
+    expect(description.triggers.length).toBeGreaterThan(0);
+    // The low-level describer keeps defaulting to public.
+    expect(describeDatabase(getRegistrations()).schema).toBe('public');
+
+    const ddl = compileDatabaseSchema();
+    expect(ddl[0]).toBe(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
+    expect(ddl.join('\n')).not.toContain('"public"');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const statement of ddl) await client.query(statement);
+      await client.query('COMMIT');
+    } finally { client.release(); }
+    expect(await initializeDatabase({ mode: 'validate' })).toEqual({ mode: 'validate', created: [] });
+    const tag = await getModel(Tag).create({ label: 'Exported' });
+    const owner = await getModel(Owner).create({ name: 'Owner', tag: tag.id, contacts: [{ label: 'a', tag: tag.id }] });
+    expect((await getModel(Owner).findById(owner.id)).contacts).toEqual([{ label: 'a', tag: tag.id }]);
+    await expect(getModel(Owner).create({ contacts: [{ label: 'a' }] })).rejects.toMatchObject({ extensions: { code: 'DUPLICATE_KEY' } });
   });
 });

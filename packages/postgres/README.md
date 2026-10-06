@@ -31,11 +31,11 @@ import { postgresPlugin } from '@simtlix/simfinity-postgres';
 const simfinity = createSQL({ plugin: postgresPlugin({ pool, schema: 'library' }) });
 ```
 
-Install `@simtlix/simfinity-sql@3.5.5` as a direct dependency when importing its factory. PostgreSQL 15 or later is the only supported SQL plugin. The [SQL package guide](https://github.com/simtlix/simfinity.js/tree/master/packages/sql) documents relational planning and the versioned plugin contract.
+Install `@simtlix/simfinity-sql@3.5.6` as a direct dependency when importing its factory. PostgreSQL 15 or later is the only supported SQL plugin. The [SQL package guide](https://github.com/simtlix/simfinity.js/tree/master/packages/sql) documents relational planning and the versioned plugin contract.
 
-Both factories permanently bind one pool and schema. The returned runtime supports registration, generated queries and mutations, middleware and scopes, controllers and validators, custom mutations, state machines, nested relationship writes, embedded reconstruction, and native PostgreSQL model handles. Native handles expose `findById`, `find`, `create`, `update`, and `delete`; they are not Mongoose models. `find(args, { session })` accepts the generated GraphQL list query arguments. Existing `pg.Pool` configuration and `pg.PoolClient` query interfaces remain compatible across both factories.
+Both factories permanently bind one pool and schema. The returned runtime supports registration, generated queries and mutations, middleware and scopes, controllers and validators, custom mutations, state machines, nested relationship writes, embedded reconstruction, and native PostgreSQL model handles. Native handles expose `findById`, `find`, `create`, `update`, and `delete`; they are not Mongoose models. `find(args, { session })` accepts the generated GraphQL list query arguments. Existing `pg.Pool` configuration and `pg.PoolClient` query interfaces remain compatible across both factories. A custom pool or client wrapper should pass `pg`'s `command` through in query results: the plugin reads it from the `COMMIT` result to detect a transaction that PostgreSQL rolled back because one of its statements failed, and without it such a transaction reports success with nothing stored.
 
-Operations attempted before successful initialization fail with `DATABASE_NOT_INITIALIZED`. Call `createSchema` before `initializeDatabase`. Configuration and registrations become immutable once schema preparation begins. `preventCreatingCollection(true)` makes instance initialization validate existing storage without issuing creation DDL.
+Operations attempted before successful initialization fail with `DATABASE_NOT_INITIALIZED`. Call `createSchema` before `initializeDatabase`. Configuration and registrations become immutable once schema preparation begins. `preventCreatingCollection(true)` makes instance initialization validate existing storage without issuing creation DDL. A rejected initialization request leaves readiness as it was; a ready instance keeps serving while it is initialized again, and becomes unavailable if that initialization fails. Use `mode: 'validate'` to check a live instance, because `create` mode locks the managed tables against writes until it commits. `simfinity.compileDatabaseSchema()` returns the instance's DDL for review or export.
 
 A default module instance is also available when a singleton facade is preferable:
 
@@ -53,6 +53,8 @@ const schema = createSchema();
 await initializeDatabase({ mode: 'validate' });
 ```
 
+Called without arguments after `createSchema()`, the module's `describeDatabase()` and `compileDatabaseSchema()` describe and compile this default instance in its configured schema.
+
 Transactions use one borrowed `pg` client and repeatable-read isolation. A supplied Simfinity PostgreSQL session joins the active transaction. Serialization failures and deadlocks are retried up to five times, each after a short random delay that starts once the client is released; mutation input is reset for each attempt. Unknown commit outcomes are not replayed. The caller owns the pool lifecycle.
 
 The module and every `createPostgres` instance expose the shared `auth`, `validators`, `scalars`, and `plugins` helpers. These are the same helper objects exported by the MongoDB package, so rules, scalar identities, and errors can be shared safely between backends.
@@ -60,7 +62,7 @@ The module and every `createPostgres` instance expose the shared `auth`, `valida
 MCP integration is an independent opt-in and does not add MCP dependencies to PostgreSQL applications:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.5 @modelcontextprotocol/sdk@^1.13.0
+npm install @simtlix/simfinity-mcp@3.5.6 @modelcontextprotocol/sdk@^1.31.0
 ```
 
 ```javascript
@@ -71,9 +73,11 @@ const mcpServer = await createMCPServer(schema);
 
 ## Storage and compatible subset
 
-Entity identities and references use UUIDs. Scalars use native PostgreSQL types, scalar lists use arrays, reference-free embedded values use JSONB, and embedded values containing references use private owned tables. Foreign keys, inverse collections, explicit linking entities, missing/null markers, nullable embedded-list items, hooks, rollback, and state transitions are supported by the runtime.
+Entity identities and references use UUIDs. Scalars use native PostgreSQL types, scalar lists (including `[ID]` lists) use arrays without a generated index, reference-free embedded values use JSONB, and embedded values containing references use private owned tables. Foreign keys, inverse collections, explicit linking entities, missing/null markers, nullable embedded-list items, hooks, rollback, and state transitions are supported by the runtime.
 
 Queries support nested scalar/reference paths, logical filter groups, scopes, sort, pagination, count, and grouped `SUM`, `COUNT`, `AVG`, `MIN`, and `MAX` facts. The PostgreSQL implementation preserves root multiplicity when joining collection paths.
+
+Errors that PostgreSQL reports become `SimfinityError`s without SQL details, with the driver error as `getCause()`; errors that application code throws propagate unchanged. Text cannot contain NUL and native date-times start at 4714-11-24 BC: such input fails with `INVALID_VALUE` (400).
 
 PostgreSQL enforces required values, real FKs, JSONB/owned embedded shapes, root and embedded scalar/reference uniqueness, and scalar-list multikey uniqueness. Root unique indexes use `NULLS NOT DISTINCT`; private typed owner-key tables allow repeated keys within one owner but reject the same key across owners. Presence markers preserve missing versus explicit null fields. This is stronger and broader than generated Mongoose storage.
 
@@ -97,4 +101,4 @@ const statements = compileDatabaseSchema(description);
 await initializeDatabase(pool, description, { mode: 'validate' });
 ```
 
-`compileDatabaseSchema` returns reviewable SQL. Low-level `initializeDatabase(pool, description, { mode })` creates or validates storage transactionally and never closes the pool. Create mode adds missing objects and rejects incompatible definitions; validate mode performs no DDL. Neither mode performs destructive schema synchronization or data migration.
+Low-level `describeDatabase(registrations, { schema })` uses the `public` schema when `schema` is omitted, not the schema of a configured runtime; pass the schema given to `configure()` or `createPostgres()`, or call `describeDatabase()` and `compileDatabaseSchema()` without arguments for the default instance. `compileDatabaseSchema` returns reviewable SQL. Low-level `initializeDatabase(pool, description, { mode })` creates or validates storage transactionally and never closes the pool. Create mode adds missing objects and rejects incompatible definitions; validate mode performs no DDL. Neither mode performs destructive schema synchronization or data migration.

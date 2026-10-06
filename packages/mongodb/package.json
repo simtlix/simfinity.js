@@ -1,6 +1,6 @@
 {
   "name": "@simtlix/simfinity-js",
-  "version": "3.5.5",
+  "version": "3.5.6",
   "description": "MongoDB/Mongoose adapter and compatibility facade for Simfinity GraphQL APIs",
   "main": "src/index.js",
   "types": "./types/index.d.ts",
@@ -16,7 +16,7 @@
     "directory": "packages/mongodb"
   },
   "peerDependencies": {
-    "@modelcontextprotocol/sdk": "^1.13.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "graphql": "^16.11.0",
     "mongoose": "^8.24.2"
   },
@@ -29,8 +29,8 @@
     "owner": "simtlix"
   },
   "dependencies": {
-    "@simtlix/simfinity-core": "3.5.5",
-    "@simtlix/simfinity-mcp": "3.5.5"
+    "@simtlix/simfinity-core": "3.5.6",
+    "@simtlix/simfinity-mcp": "3.5.6"
   },
   "files": [
     "src",

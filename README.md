@@ -108,10 +108,10 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.5
+npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.6
 ```
 
-**Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies. Keep them within the ranges above so your application and Simfinity share a single Mongoose and GraphQL instance; npm reports an out-of-range version as a peer conflict. The MCP transports need the optional peer `@modelcontextprotocol/sdk@^1.13.0`, which is not installed automatically, and `graphql-middleware` is not a Simfinity dependency.
+**Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies. Keep them within the ranges above so your application and Simfinity share a single Mongoose and GraphQL instance; npm reports an out-of-range version as a peer conflict. The MCP transports need the optional peer `@modelcontextprotocol/sdk@^1.31.0`, which is not installed automatically, and `graphql-middleware` is not a Simfinity dependency.
 
 ## PostgreSQL support
 
@@ -152,7 +152,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.5 @modelcontextprotocol/sdk@^1.13.0
+npm install @simtlix/simfinity-mcp@3.5.6 @modelcontextprotocol/sdk@^1.31.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
@@ -1449,6 +1449,8 @@ const OrderType = new GraphQLObjectType({
 });
 ```
 
+Use a GraphQL enum for the `state` field. PostgreSQL and other SQL backends require it: `createSchema()` rejects any other `state` field with `INVALID_MODEL` (400).
+
 ### 3. Configure State Machine
 
 ```javascript
@@ -2729,12 +2731,12 @@ Each generated tool follows MCP best practices so an agent can use it without ex
 
 On execution, each tool returns both a serialized JSON `text` content block and a machine-readable `structuredContent` (the GraphQL `data`) that conforms to the `outputSchema`. When the caller requests `pagination: { count: true }` on a **list** tool, the total record count is delivered in the tool result `_meta.count` (aggregate tools ignore the flag — their resolver never computes a total).
 
-> The MCP transports require the optional `@modelcontextprotocol/sdk` dependency (`^1.13.0` or newer). Install it with `npm install @modelcontextprotocol/sdk@^1.13.0`. `generateMCPTools` works without it. SDK load problems raise distinct error codes: `MCP_SDK_NOT_INSTALLED` (not installed), `MCP_SDK_INCOMPATIBLE` (installed but too old to provide the requested transport — upgrade it), `MCP_SDK_LOAD_FAILED` (any other import failure).
+> The MCP transports require the optional `@modelcontextprotocol/sdk` dependency (`^1.31.0`). Install it with `npm install @modelcontextprotocol/sdk@^1.31.0`. `generateMCPTools` works without it. SDK load problems raise distinct error codes: `MCP_SDK_NOT_INSTALLED` (not installed), `MCP_SDK_INCOMPATIBLE` (installed but too old to provide the requested transport — upgrade it), `MCP_SDK_LOAD_FAILED` (any other import failure).
 
 ### Installation
 
 ```bash
-npm install @modelcontextprotocol/sdk@^1.13.0
+npm install @modelcontextprotocol/sdk@^1.31.0
 ```
 
 ### Generating tool definitions

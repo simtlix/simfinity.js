@@ -44,19 +44,40 @@ export const decodeScalar = (field, value, gqlField) => {
   return value;
 };
 
+const databaseErrors = {
+  '23503': ['Reference constraint violated', 'REFERENCE_CONSTRAINT_VIOLATION', 409],
+  '23505': ['Unique value already exists', 'DUPLICATE_KEY', 409],
+  '23502': ['A required value is missing', 'REQUIRED_VALUE', 400],
+  '23514': ['A value violates the generated schema', 'INVALID_VALUE', 400],
+  '22P02': ['Invalid stored value', 'INVALID_VALUE', 400],
+  '22003': ['Numeric value is out of range', 'INVALID_VALUE', 400],
+  // Values PostgreSQL cannot store: longer than a sized column, a timestamp or date outside its range
+  // (including generated make_date calls), and text or JSON with NUL (U+0000) or a character the
+  // server encoding lacks. Index row size limits (54000) stay a DATABASE_ERROR.
+  '22001': ['Value is too long', 'INVALID_VALUE', 400],
+  '22008': ['Date or time value is out of range', 'INVALID_VALUE', 400],
+  '22021': ['Text contains a character the database cannot store', 'INVALID_VALUE', 400],
+  '22P05': ['Text contains a character the database cannot store', 'INVALID_VALUE', 400],
+  '40001': ['Concurrent write could not be completed', 'TRANSACTION_RETRY_EXCEEDED', 409],
+  '40P01': ['Concurrent write could not be completed', 'TRANSACTION_RETRY_EXCEEDED', 409],
+};
+
+/** Serialization failures and deadlocks: confirmed aborts that are safe to retry. */
+export const isRetryableDatabaseError = (error) => ['40001', '40P01'].includes(error?.code);
+
+// An error the server reported, as node-postgres exposes it: a five-character SQLSTATE and a severity.
+// An application error that only has a `code`, such as ECONNREFUSED or a domain code, is not one.
+export const isPostgresError = (error) => typeof error?.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) && typeof error.severity === 'string';
+
+/** Maps PostgreSQL errors (and exhausted retries) without SQL details; returns every other value unchanged. */
 export const normalizeDatabaseError = (error) => {
-  if (error instanceof SimfinityError || !error.code) return error;
-  const errors = {
-    '23503': ['Reference constraint violated', 'REFERENCE_CONSTRAINT_VIOLATION', 409],
-    '23505': ['Unique value already exists', 'DUPLICATE_KEY', 409],
-    '23502': ['A required value is missing', 'REQUIRED_VALUE', 400],
-    '23514': ['A value violates the generated schema', 'INVALID_VALUE', 400],
-    '22P02': ['Invalid stored value', 'INVALID_VALUE', 400],
-    '22003': ['Numeric value is out of range', 'INVALID_VALUE', 400],
-    '40001': ['Concurrent write could not be completed', 'TRANSACTION_RETRY_EXCEEDED', 409],
-    '40P01': ['Concurrent write could not be completed', 'TRANSACTION_RETRY_EXCEEDED', 409],
-  };
-  return new SimfinityError(...(errors[error.code] || ['Database operation failed', 'DATABASE_ERROR', 500]));
+  if (error instanceof SimfinityError || !(isPostgresError(error) || isRetryableDatabaseError(error))) return error;
+  const normalized = new SimfinityError(...(databaseErrors[error.code] || ['Database operation failed', 'DATABASE_ERROR', 500]));
+  // Kept for server logging, but non-enumerable as on a native Error, so serializing or spreading the
+  // client-facing error never copies the driver's detail, table or constraint.
+  Object.defineProperty(normalized, 'cause', { value: error, writable: true, configurable: true, enumerable: false });
+  normalized.getCause = () => normalized.cause;
+  return normalized;
 };
 
 /** pg's local Date formatting truncates historical offset seconds; use UTC per parameter. */

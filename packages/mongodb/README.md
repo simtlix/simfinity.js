@@ -6,7 +6,7 @@ MongoDB/Mongoose adapter and compatibility facade for Simfinity. This package ge
 npm install @simtlix/simfinity-js graphql@^16.11.0 mongoose@^8.24.2
 ```
 
-`graphql` and `mongoose` are peer dependencies: the facade uses your application's copies, and npm reports an out-of-range version as a peer conflict instead of installing a second copy. The MCP transports (`createMCPServer`, `startStdioMCPServer`, `createHTTPMCPHandler`) need the optional peer `@modelcontextprotocol/sdk@^1.13.0`; install it only when you use them. `generateMCPTools` works without it. The package does not install `graphql-middleware`.
+`graphql` and `mongoose` are peer dependencies: the facade uses your application's copies, and npm reports an out-of-range version as a peer conflict instead of installing a second copy. The MCP transports (`createMCPServer`, `startStdioMCPServer`, `createHTTPMCPHandler`) need the optional peer `@modelcontextprotocol/sdk@^1.31.0`; install it only when you use them. `generateMCPTools` works without it. The package does not install `graphql-middleware`.
 
 ```javascript
 import mongoose from 'mongoose';

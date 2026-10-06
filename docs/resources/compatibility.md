@@ -35,6 +35,141 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22 or newer |
 
+## Upgrade to 3.5.6
+
+Version 3.5.6 fixes values that MongoDB and PostgreSQL stored or reported incorrectly, PostgreSQL schema validation and queries, and how SQL runtimes classify errors and track readiness. On MongoDB, `createSchema()` now rejects fields that Mongoose cannot store; see [fields named like Object.prototype members](#fields-named-like-object-prototype-members). Keep all directly installed Simfinity packages at 3.5.6. When upgrading from an earlier version, also review the [3.5.5 notes](#upgrade-to-3-5-5) below.
+
+### Fields named like Object.prototype members
+
+These changes apply to fields named `constructor`, `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`, `toLocaleString`, `toString` or `valueOf`, at the root of a type or inside embedded types. See [fields named like Object.prototype members](../guide/schema#fields-named-like-object-prototype-members).
+
+- On MongoDB, a generated create or a `saveObject()` call that omitted a `String` field with such a name stored the text `function toString() { [native code] }`, with the member's name, and an omitted `[String]` list stored a list holding that text. A generated update that did not mention such a field or list replaced its stored value with that text. Fields inside embedded objects were affected too. Now an omitted scalar stores no key, an omitted list stores `[]`, and an update that does not mention a field keeps the stored value.
+- On PostgreSQL, a create that omitted a scalar field with such a name, and an update that did not mention it, failed with `INVALID_FILTER_VALUE` (400, `Expected a string for toString`), and the same writes failed for a list field with such a name with `INVALID_VALUE` (400, `Invalid value for toString`). When a write supplied those fields, an omitted embedded object field with such a name was stored as an object built from the inherited function: its members named `name` and `length` held the function's name and arity, such as `{"name": "Object", "length": 1}` for `constructor` or `{"name": "valueOf", "length": 0}` for `valueOf`, and a later partial update of it kept them. Now these writes succeed, and omitted fields are stored as SQL `NULL`, as absent JSON keys, or as `[]` for lists.
+- A create that omits a list with such a name, or sends `null` for it, now stores `[]` at the root, in embedded objects and in embedded list items, as for a list with another name, and type-level validators and controllers receive `[]` for it. Previously a create that omitted an embedded list with such a name failed on both backends with a `TypeError` (`args[fieldEntryName] is not iterable`); on MongoDB such lists are now rejected at startup, as described below. Collections are not stored on the record and are unchanged.
+- A reference with such a name, stored under its own name or under another `connectionField`, no longer fails creates that omit it, or updates that do not mention it, with `NOT_VALID_ID` (400) on either backend, and an unset one reads `null` instead of failing the read.
+- On MongoDB, `createSchema()` now rejects the fields that Mongoose cannot store, with `INVALID_MODEL` (400, `Type.field cannot be stored on MongoDB: …`), where `Type` is the type that declares the field, an embedded type for a nested one:
+  - An embedded object or embedded list with such a name, at any depth (`embedded fields cannot be named like Object.prototype members`). Previously an embedded object field made `createSchema()` fail with Mongoose's `Cannot set nested path …` error, or was dropped from every write when named `constructor`. An embedded list was stored, but the MongoDB Node.js driver returns the items of a list with such a name as raw BSON buffers, so every read returned the items with all members `null`.
+  - Any field stored under the path `constructor`: a scalar or a scalar list named `constructor`, a reference named `constructor` stored under its own name, and a reference whose `connectionField` is `constructor` (`Mongoose drops a stored path named constructor`). Previously Mongoose dropped the value from every write without an error, so it read `null`, and reads of such a reference could fail with `Type.field stores an invalid identifier`.
+
+  Rename these fields, and give such references another `connectionField`. Scalars, scalar lists and references with the other names, and a reference named `constructor` stored under another `connectionField`, are unchanged. Models that you pass to `connect()` are not checked. Embedded list items that earlier versions stored are intact on the server; after you rename the field, move them to the new name, for example with `db.Gauge.updateMany({}, { $rename: { valueOf: 'readings', 'spec.valueOf': 'spec.readings' } })` for fields outside lists, or with an update pipeline for fields inside embedded list items. Values stored under `constructor` were never written. PostgreSQL stores all these fields.
+- Absent values of such fields now read `null`. Previously reads returned the inherited member: on MongoDB the text `[object Object]`, or an object with `null` members for an embedded field, and on PostgreSQL a GraphQL error such as `String cannot represent value: {}`. Simfinity installs a generated resolver on output fields with these names that have no resolver of their own, on registered types and the embedded types they reach; it reads own values, methods and class getters as before.
+- Values that earlier versions stored are not repaired, and values that were overwritten cannot be recovered. These checks find candidates; they are heuristic, so review every match before you change it. On MongoDB, search each collection for the text of a native function in every path where such a field or list occurs; a regular expression also matches the elements of a list:
+
+  ```javascript
+  const nativeCode = /^function \w+\(\) \{ \[native code\] \}$/;
+  db.Gauge.find({ $or: [{ toString: nativeCode }, { valueOf: nativeCode }, { 'spec.valueOf': nativeCode }, { 'items.toString': nativeCode }] });
+  ```
+
+  On PostgreSQL, search each JSONB column that holds such an embedded field, at the top of the column or nested, for an object whose `name` and `length` are the inherited function's: `Object` and 1 for `constructor`, the member's own name and 1 for `hasOwnProperty`, `isPrototypeOf` and `propertyIsEnumerable`, and the member's own name and 0 for `toLocaleString`, `toString` and `valueOf`. An embedded type that contains references or unique fields is stored in an owned table, whose `name` and `length` columns you check instead:
+
+  ```sql
+  SELECT id FROM "app"."Gauge"
+  WHERE "constructor"->>'name' = 'Object'
+     OR jsonb_path_exists("spec", 'lax $.**.valueOf ? (@.name == "valueOf" && @.length == 0)');
+  ```
+
+- graphql-js 16 reads variable input objects with plain property access, so a JSON variable that omits such a field passes the inherited function, and the request fails before Simfinity runs, with errors such as `Variable "$input" got invalid value [function toString] at "input.toString"; String cannot represent a non string value: [function toString]`. Nothing is written. Inline literal arguments are not affected. Clients that send input as variables, including MCP tool calls, must include these fields: `null` stores nothing in a create, and clears the stored value in an update, so send the current value to keep it.
+- On MongoDB, a document stored without a list with such a name, such as one written before the field was added, written outside Simfinity, or from which you removed a corrupted value, reads `null` for that list in by-ID reads and mutation results, where a missing list with another name reads `[]`; list queries read `null` for both. This applies at the root and in embedded objects. The next update of an embedded object stores `[]` for its missing list members, but a missing root list stays missing until a write sets it. Store `[]` in such documents to read `[]` everywhere.
+
+### Commits after a failed statement
+
+- On PostgreSQL, an owned transaction in which a statement failed and your code caught the error, and that then reaches `COMMIT` without running another statement, now fails with `DATABASE_ERROR` (500, `Transaction was rolled back because one of its statements failed`), and is not retried. Examples are an `onSaved` or `onUpdated` hook, or a `withTransaction` callback or custom mutation that issues no statement after the one it wraps in `try`/`catch`. PostgreSQL answers the `COMMIT` of such a transaction by rolling it back without an error. Like the other PostgreSQL database errors, this one has a non-enumerable `cause`, here an `Error` with the message `COMMIT reported ROLLBACK`, which `error.getCause()` returns. Previously these generated or custom mutations, `saveObject()` and `withTransaction()` calls reported success, including the new record's `id`, while nothing was stored. When another statement runs after the caught failure, such as Simfinity's own write after `onSaving`, `onUpdating` or `onDelete`, that statement fails and the operation fails with `DATABASE_ERROR` (500, `Database operation failed`), as before. To continue after an expected statement error, run `SAVEPOINT` before the statement and `ROLLBACK TO SAVEPOINT` after the error. `session.query()` still rejects with the driver's own error, so the callback can inspect its `code`.
+- The plugin detects the rollback from the command that the `COMMIT` result reports, `ROLLBACK`, as `pg` clients and pg-native return it. A custom pool or client wrapper that returns results without `command`, such as `{ rows, rowCount }`, keeps working, but then such a transaction reports success with nothing stored, as before; pass `pg`'s `command` through to get the check.
+
+### PostgreSQL [ID] list indexes
+
+- New databases no longer get a generated btree index on `[ID]` list columns (`uuid[]`), at the root or in owned tables. That index limited each list to about 167 identifiers: writing 168 or more failed with `DATABASE_ERROR` (500), PostgreSQL error `54000`. No generated filter, sort or aggregate used it. Single `ID` columns and references keep their indexes. `describeDatabase()` and `compileDatabaseSchema()` no longer list these indexes, which schema-diff tooling will notice.
+- Existing databases keep the index: `create` and `validate` modes accept it as an additional non-unique index and do not drop it, so the limit applies until you drop it. While such indexes exist, every successful `initializeDatabase()` call prints one console warning, in both modes, that names them and gives the statements to run:
+
+  ```text
+  Simfinity: PostgreSQL schema "app" has btree indexes that earlier versions generated on [ID] list columns: "app"."Post__relatedIds__idx", "app"."Post__links__refIds__idx". Each limits its list to about 167 identifiers and no generated query uses it. Once every process that uses this schema runs this version, drop them: DROP INDEX CONCURRENTLY IF EXISTS "app"."Post__relatedIds__idx"; DROP INDEX CONCURRENTLY IF EXISTS "app"."Post__links__refIds__idx"; See the upgrade notes at https://simtlix.github.io/simfinity.js/resources/compatibility.html
+  ```
+
+  The warning names only indexes with the exact generated name and shape, including shortened long names: btree, non-unique, on the list column alone, with no predicate or expression. Indexes that your DBAs created are never named.
+- To remove the limit, first upgrade every process that uses the schema, as described below. Then run the statements from the warning, or generate them with this catalog query:
+
+  ```sql
+  SELECT format('DROP INDEX CONCURRENTLY IF EXISTS %I.%I;', n.nspname, ic.relname)
+  FROM pg_index i
+  JOIN pg_class ic ON ic.oid = i.indexrelid
+  JOIN pg_class t ON t.oid = i.indrelid
+  JOIN pg_namespace n ON n.oid = t.relnamespace
+  JOIN pg_am am ON am.oid = ic.relam
+  JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+  CROSS JOIN LATERAL (SELECT t.relname || '__' || a.attname || '__idx' AS name) g
+  WHERE n.nspname = 'app'
+    AND t.relname = ANY(ARRAY['Post', 'Post__guard', 'Post__links'])
+    AND am.amname = 'btree' AND NOT i.indisunique AND NOT i.indisprimary
+    AND i.indnatts = 1 AND i.indpred IS NULL AND i.indexprs IS NULL
+    AND a.atttypid = 'uuid[]'::regtype
+    AND ic.relname = CASE WHEN octet_length(g.name) <= 63 THEN g.name
+      ELSE left(g.name, 50) || '_' || left(encode(sha256(convert_to(g.name, 'UTF8')), 'hex'), 12) END;
+  ```
+
+  Replace `app` with your schema, and the array with the table names that `simfinity.describeDatabase().tables.map((table) => table.name)` returns on the new version. The query then selects the indexes that the warning names, and leaves out tables that Simfinity does not describe, such as your own tables or those of removed types, even when their indexes follow the same naming pattern. The shortened-name branch is exact only for ASCII table and field names; review the output before you run it. `DROP INDEX CONCURRENTLY` cannot run inside a transaction block, such as a migration tool's transaction; for small tables, a plain `DROP INDEX` inside the migration also works.
+- Earlier versions expect the index. Their `validate` mode fails with `SCHEMA_MISMATCH` (409, `index is missing`) on a database that the new version created or from which the index was dropped. Their `create` mode re-creates it with a non-concurrent `CREATE INDEX` while it holds locks that block writes, and fails, rolling back the whole initialization, once any stored list has 168 or more identifiers. Upgrade every process that initializes or uses the schema before you drop the indexes, and do not let an older process create or validate a schema that the new version created first. The same applies to a downgrade.
+- Keep treating the `<Table>__<field>__idx` names of these indexes as taken: on a database that still has one, creating a table with the same name, such as the owned table of an embedded field literally named `<field>__idx`, fails. Drop the index first.
+
+### PostgreSQL schema validation and queries
+
+- Filters, sorts, counts and aggregates that go through an embedded list stored in owned tables, because it contains references or unique fields, no longer fail with `DATABASE_ERROR` (500) when the physical column order of an owned table differs from the order of the embedded type's fields: after a migration appended columns with `ALTER TABLE … ADD COLUMN`, or after the fields were reordered. This includes nested embedded lists, singular embedded objects inside such a list, and every field reached through them. Generated queries now select those columns by name. No action is required.
+- Column order is not significant, but a migration must still bring every generated object in line with the new `describeDatabase()` or `compileDatabaseSchema()` output. Adding or reordering fields can change the bodies of generated functions such as `<Root>__owned_valid`, `<Root>__refresh` and `<Table>__<field>__json_valid`; replace them with `CREATE OR REPLACE FUNCTION` before you validate. A `NOT NULL` column added with a temporary `DEFAULT` must have that default dropped. Validation reports whatever differs as `SCHEMA_MISMATCH` (409).
+- An enum whose internal values contain a backslash, such as `C:\dir`, no longer makes `initializeDatabase()` fail with `SCHEMA_MISMATCH` (409, `check constraint differs`). Previously `create` mode always rolled back, and a schema created from exported DDL never validated. Check constants are now compared by value; the generated DDL is unchanged. No action is required. A constraint that holds a different value is still reported.
+
+### PostgreSQL and SQL errors
+
+These changes apply to PostgreSQL and to other SQL plugins that follow the [plugin contract](#sql-plugin-contract). MongoDB is unchanged. See [PostgreSQL database errors](../reference/errors#postgresql-database-errors).
+
+- Errors that your code throws inside a transaction that Simfinity owns now propagate unchanged, whether or not they carry a `code`, as on MongoDB. This covers validators, controllers, nested middleware, state-machine callbacks, custom mutations and `withTransaction` callbacks. Previously any such error with a `code`, such as a domain error with `code: 'PAYMENT_DECLINED'`, a Node.js system error from an HTTP client or a `DOMException`, became `DATABASE_ERROR` (500, `Database operation failed`), and an error whose `code` looked like a PostgreSQL code, such as `{ code: '23505' }`, was relabelled, here as `DUPLICATE_KEY` (409). Their messages now reach clients unless you mask them, as messages of errors without a `code` already did: [buildErrorFormatter](../reference/errors#builderrorformatter) wraps them in an `InternalServerError`, which its callback can hide. A thrown `null` or other value that is not an object no longer becomes a `TypeError` (`Cannot read properties of null`); GraphQL reports it as `Unexpected error value`.
+- Errors that PostgreSQL itself reports, recognized by a five-character SQLSTATE and a `severity`, are still mapped wherever they come from: Simfinity's statements, `session.query()`, `session.client` and other `pg` connections used inside the callback. A client-side failure of a connection that Simfinity did not open, such as a refused connection or a timeout of your own `pg.Pool` used in a hook, is an application error and now propagates unchanged, with the host and port in its message, such as `connect ECONNREFUSED 10.0.0.5:5432`. Previously it became `DATABASE_ERROR`. Mask it with `buildErrorFormatter()`.
+- A failure of the driver calls that Simfinity makes, acquiring a connection, `BEGIN`, a statement or `COMMIT`, that is not a PostgreSQL error, such as a refused or dropped connection, `timeout exceeded when trying to connect` or `Connection terminated unexpectedly`, is now `DATABASE_ERROR` (500, `Database operation failed`) on every path. Previously a connection that mutations, `saveObject()` or `withTransaction()` could not acquire, and any such failure without a `code`, reached clients as the raw `pg` error, with the host and port in its message. Code that matched raw driver messages should read `error.getCause()`. A `DATABASE_ERROR` caused by a connection lost during `COMMIT` has an unknown outcome: the transaction may have committed.
+- Mapped PostgreSQL errors and these masked failures keep the driver error as `error.cause`, which `error.getCause()` also returns. The property is not enumerable, so `JSON.stringify()`, object spread and GraphQL responses leave it out. Server logs that print the cause can show SQL details, such as a constraint name and a duplicate key.
+- Input that PostgreSQL cannot store now fails with `INVALID_VALUE` (400) instead of `DATABASE_ERROR` (500), with these messages:
+  - `Date or time value is out of range` (`22008`): a native `DateTime` value before 4714-11-24 00:00 BC UTC, written or used in a filter, and out-of-range dates in your own SQL, such as `make_date(2026, 13, 1)`.
+  - `Text contains a character the database cannot store` (`22021`, `22P05`): NUL (U+0000) in text, text lists and JSONB strings, or a character that the server encoding lacks.
+  - `Value is too long` (`22001`): only from your own SQL, because generated text columns have no length limit.
+
+  The same codes from your own SQL inside a transaction are reported the same way, as are `22P02` and `22003`, which were already mapped. Other data exceptions, such as division by zero (`22012`), and PostgreSQL error `54000`, such as an index row over the btree size limit, are still `DATABASE_ERROR` (500, `Database operation failed`). MongoDB accepts these values.
+- Unchanged: an application error with `code` `40001` or `40P01` is still retried and ends as `TRANSACTION_RETRY_EXCEEDED` (409), now with a cause. Inside the callback, `session.query()` rejects with the driver's own error, so a savepoint can recover from it; the mapping applies when the error leaves the transaction. `withTransaction()` with a session you supply passes its callback's errors on unchanged. Errors that `initializeDatabase()` raises, such as a refused connection, are still passed on as the driver reports them.
+
+### Initialization and readiness
+
+- A rejected `initializeDatabase()` request no longer takes a serving SQL runtime offline. Previously each call first marked storage unavailable, so a request rejected with `DATABASE_CREATION_DISABLED` (409, a non-empty mode other than `validate` on a validation-only runtime) or `INVALID_INITIALIZATION_MODE` (400, an unknown mode) made every later operation fail with `DATABASE_NOT_INITIALIZED` (503) until another initialization succeeded. Such requests now leave readiness as it was.
+- A runtime that is ready keeps serving while `initializeDatabase()` runs again; previously operations failed with `DATABASE_NOT_INITIALIZED` meanwhile. The first initialization still fails closed until it succeeds. Any failure of an initialization, such as `SCHEMA_MISMATCH` or a connection error, makes storage unavailable until a later one succeeds. When initializations overlap, the one started last decides.
+- Running `create` mode again on a serving PostgreSQL runtime locks each existing managed table in `SHARE ROW EXCLUSIVE` mode until it commits, so writers wait, and a deadlock or lock timeout fails the initialization and makes storage unavailable. Use `mode: 'validate'` to check a live runtime.
+- The SQL runtime checks the mode before it calls the plugin. On a runtime that allows creation, any mode other than `create`, `validate` or an omitted mode, including `null` and `''`, fails with `INVALID_INITIALIZATION_MODE` (400, `Unknown initialization mode: …`), as PostgreSQL already did. A validation-only runtime (`preventCreatingCollection(true)`) still validates when the mode is `null`, `''` or another false value, and rejects every other mode except `validate` with `DATABASE_CREATION_DISABLED`.
+
+### State machine fields on SQL backends
+
+- On PostgreSQL and other SQL backends, `createSchema()` now rejects a state machine whose `state` field is not a GraphQL enum, such as a `String`, `Int`, `[String]` or embedded object field, with `INVALID_MODEL` (400, `State machine field Type.state must be a GraphQL enum on SQL backends`). Previously it failed with a `TypeError` (`getValues is not a function`), so no working application is affected. Enum `state` fields are unchanged, and MongoDB is unchanged. See [state machines](../guide/state-machines#define-the-lifecycle).
+
+### DDL export
+
+- SQL runtimes created with `createSQL()` or `createPostgres()` have a new `compileDatabaseSchema()` method. It returns the plugin's DDL for the runtime's description and schema, for review or export, without touching storage, and throws `SCHEMA_NOT_CREATED` (500) before `createSchema()`.
+- The PostgreSQL module functions `describeDatabase()` and `compileDatabaseSchema()`, called without arguments, now describe and compile the default module instance in the schema given to `configure()`. Previously `describeDatabase()` failed with `INVALID_MODEL` (`registrations must be an array`) and `compileDatabaseSchema()` with a `TypeError`. Calls with arguments are unchanged: the low-level `describeDatabase(registrations, { schema })` still uses the `public` schema when you omit `schema`, not the configured one. Pass the schema you gave to `configure()` or `createPostgres()`, or call the functions without arguments.
+
+### MCP tool results
+
+- In-process MCP execution does not apply `buildErrorFormatter()`, so the [error changes](#postgresql-and-sql-errors) reach tool results on PostgreSQL as they are. Application errors that carry a `code`, such as a Node.js system error from a hook's HTTP client (`connect ECONNREFUSED 10.0.0.5:8443`), now appear with their own message instead of `Database operation failed`. Connections that Simfinity could not acquire from its pool, which mutations previously reported with the driver's message, now appear as `Database operation failed` with `DATABASE_ERROR`. See [results and errors](../reference/mcp#results-and-errors).
+
+### SQL plugin contract
+
+These changes concern custom SQL plugins; the PostgreSQL plugin already follows them. See the [plugin contract](../guide/sql-plugins#plugin-contract-version-1).
+
+- `driver.normalizeError(error)` must map its own engine's errors and return every other error unchanged. It receives any object thrown in an owned transaction or operation, application errors included, but never a `SimfinityError`, `null` or another value that is not an object. A plugin that wraps every error still turns application errors into its own. When the plugin returns the same object for a failed `acquire`, `begin`, `query` or `commit` call, the runtime now replaces it with `DATABASE_ERROR` (500), keeping it as the non-enumerable `cause`; previously it reached clients unchanged. That includes a plugin that adds extensions to the error and returns it, so return a new object, or a `SimfinityError`, to keep your own mapping.
+- `driver.isRetryable(error)` receives only objects.
+- `driver.commit(client)` must reject when the engine did not commit, for example when it rolled the transaction back because a statement had failed. The runtime then rolls back, and retries only when `isRetryable` accepts the error: reject with an error it does not accept when a failed statement caused the rollback, as PostgreSQL does with `DATABASE_ERROR` (500), and with a retryable one only for an abort that is safe to replay, such as a serialization failure reported at `COMMIT`. The PostgreSQL plugin rejects when the `COMMIT` result reports the `ROLLBACK` command; a result without `command` resolves, as before.
+- `initialize(configuration, description, options)` receives only `create`, `validate` or no mode. Before it calls the plugin, the runtime rejects any other mode with `INVALID_INITIALIZATION_MODE` (400) on a runtime that allows creation. On a validation-only runtime it rejects every mode except `validate` and a missing or false one with `DATABASE_CREATION_DISABLED` (409), and passes `validate`. See [initialization and readiness](#initialization-and-readiness).
+- `planRelationalSchema()` no longer emits an index for `[ID]` list columns, at the root or in owned tables, so plugins receive one index fewer for each such list. A plugin's `create` and `validate` modes must keep accepting the index that earlier versions generated on databases the plugin already created, as PostgreSQL does.
+- `stateNames` appears only on enum state fields, which SQL runtimes now require.
+- `compileSchema(description)` remains required. The runtime now calls it, only from `runtime.compileDatabaseSchema()`.
+
+### Packages
+
+- The optional `@modelcontextprotocol/sdk` peer for MCP and the MongoDB facade now requires `^1.31.0`, which includes the fix for [GHSA-6qxp-vccf-f47h](https://github.com/advisories/GHSA-6qxp-vccf-f47h). Tool generation still works without the SDK. Simfinity uses the SDK server APIs; the upstream advisory concerns OAuth clients. Applications that also use those client APIs should follow the advisory's credential and issuer migration guidance.
+- `@simtlix/simfinity-postgres` no longer ships `src/adapter.js`, `src/records.js` and `src/transactions.js`. Its `exports` has allowed only the package entry (`.`) since 3.2.0, so they could not be imported. The package entry is unchanged.
+- The `@simtlix/simfinity-sql` subpaths `./internal/adapter`, `./internal/records` and `./internal/transactions` are deprecated. They have no type declarations and no Simfinity package uses them any more; they will be removed in 4.0. Use `createSQL()` and the plugin contract instead.
+
 ## Upgrade to 3.5.5
 
 The 3.5.4 tag was created, but package publication stopped during release validation. Version 3.5.5 is the first published release of the fixes below and updates the vulnerable build, test and documentation dependencies that blocked publication.
@@ -205,7 +340,7 @@ Keep all directly installed Simfinity packages at 3.5.0 and review these behavio
 - MongoDB uses the application's GraphQL and Mongoose peers. Install the optional MCP SDK explicitly for transports; `graphql-middleware` is no longer installed by Simfinity. See [installation](../guide/databases#install-from-npm).
 - Embedded updates enforce required fields when constructing replacement objects or list items; existing embedded objects still accept valid partial patches. SQL sessions reject statements after their callback settles, and a failed rollback discards the connection. See [mutations](../guide/mutations) and the [SQL plugin contract](../guide/sql-plugins#plugin-contract-version-1).
 
-The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.5. Historical archives and the Barber examples retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
+The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.6. Historical archives and the Barber examples retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
 
 ## Upgrade from 3.2.0
 

@@ -129,6 +129,19 @@ await AuditModel.create(
 
 `AuditModel` is an application-defined Mongoose model. This write can participate in the same MongoDB transaction as the entity change. PostgreSQL controllers use `session.query(sql, values)` or a PostgreSQL Model method with `{ session }` instead.
 
+On PostgreSQL, a statement that fails aborts the whole transaction, even when the hook catches its error: the mutation then fails with `DATABASE_ERROR` (500) and nothing is stored. When another statement runs in the aborted transaction, such as Simfinity's own write after `onSaving`, `onUpdating` or `onDelete`, or a later query of the hook, that statement fails and the message is `Database operation failed`. When nothing runs after the failure, as after `onSaved` or `onUpdated`, PostgreSQL rolls the transaction back at `COMMIT` and the message is `Transaction was rolled back because one of its statements failed`. To make a statement optional, wrap it in a savepoint:
+
+```javascript
+await session.query('SAVEPOINT audit');
+try {
+  await session.query('INSERT INTO audit_log (entity_id) VALUES ($1)', [document.id]);
+} catch (error) {
+  await session.query('ROLLBACK TO SAVEPOINT audit');
+}
+```
+
+`session.query()` rejects with the `pg` error itself, so the hook can inspect its `code` before deciding to continue. Errors that a hook throws propagate unchanged, as on MongoDB.
+
 Transaction retries can execute hooks more than once, up to five retries after the initial attempt. Each complete retry first waits a short random delay. On MongoDB, an uncertain commit result retries only the commit without repeating hooks; PostgreSQL retries confirmed serialization/deadlock aborts as complete attempts. When a concurrent write still conflicts after the retries, the mutation fails with `TRANSACTION_RETRY_EXCEEDED` (409) and its hooks' database work is rolled back; see [transaction boundaries](./mutations#transaction-boundaries). If an outcome remains uncertain, reconcile it before repeating the mutation. For email, webhooks, or other irreversible external actions, store an outbox event within the transaction and process it after commit. Calling an external service inside a hook does not make that call transactional.
 
 ## Nested writes and direct model access
