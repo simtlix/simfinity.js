@@ -11,6 +11,7 @@ import {
   GraphQLString,
 } from 'graphql';
 import mongoose from 'mongoose';
+import { SimfinityError } from '@simtlix/simfinity-core';
 import { getFieldStorageName } from '@simtlix/simfinity-core/internal/relation-storage';
 
 const isNonNullOfType = (fieldEntryType, graphQLType) => (
@@ -71,6 +72,21 @@ const enumStorageType = (enumType, fieldName) => {
   return mongoose.Schema.Types.Mixed;
 };
 
+// Mongoose cannot store some fields named like Object.prototype members, because it looks paths up
+// on plain objects that inherit those members. An embedded object so named fails to build, the items
+// of an embedded list so named come back from the driver as raw BSON buffers whose members read as
+// null, and a stored path named `constructor` is dropped from every write. Other scalars, scalar lists and references with
+// these names are stored as usual.
+const unstorableField = (gqlType, fieldEntryName, reason) => new SimfinityError(
+  `${gqlType.name}.${fieldEntryName} cannot be stored on MongoDB: ${reason}`, 'INVALID_MODEL', 400,
+);
+
+const assertEmbeddedFieldName = (gqlType, fieldEntryName) => {
+  if (fieldEntryName in Object.prototype) {
+    throw unstorableField(gqlType, fieldEntryName, 'embedded fields cannot be named like Object.prototype members');
+  }
+};
+
 const generateSchemaDefinition = (gqlType, nested = false) => {
   const argTypes = gqlType.getFields();
   const schemaArg = {};
@@ -93,6 +109,7 @@ const generateSchemaDefinition = (gqlType, nested = false) => {
         if (!fieldEntry.extensions.relation.embedded) {
           schemaArg[getFieldStorageName(fieldEntryName, fieldEntry)] = mongoose.Schema.Types.ObjectId;
         } else {
+          assertEmbeddedFieldName(gqlType, fieldEntryName);
           const entryType = unwrapNonNull(type);
           if (entryType === gqlType) {
             throw new Error('A type cannot have a field of its same type and embedded');
@@ -108,6 +125,7 @@ const generateSchemaDefinition = (gqlType, nested = false) => {
       const itemType = getListItemType(type);
       if (fieldEntry.extensions && fieldEntry.extensions.relation) {
         if (fieldEntry.extensions.relation.embedded) {
+          assertEmbeddedFieldName(gqlType, fieldEntryName);
           if (itemType === gqlType) {
             throw new Error('A type cannot have a field of its same type and embedded');
           }
@@ -128,6 +146,11 @@ const generateSchemaDefinition = (gqlType, nested = false) => {
       }
     } else if (isGraphQLisoDate(getEffectiveTypeName(unwrapNonNull(type)))) {
       schemaArg[fieldEntryName] = Date;
+    }
+
+    // Whichever stored field takes the `constructor` path, also a reference whose connectionField it is.
+    if (Object.hasOwn(schemaArg, 'constructor')) {
+      throw unstorableField(gqlType, fieldEntryName, 'Mongoose drops a stored path named constructor');
     }
   }
 

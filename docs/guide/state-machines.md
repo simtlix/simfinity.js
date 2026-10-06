@@ -81,7 +81,9 @@ const schema = simfinity.createSchema();
 
 This is a self-contained `Season` type. Add the `serie` relationship from the [relationships guide](./relationships) if you are building on the catalog example.
 
-Use enum values whose internal value equals the enum name, as above. Simfinity persists state names and returns the configured values on creation and transition; keeping these equal makes reads and mutation responses consistent.
+Use enum values whose internal value equals the enum name, as above. MongoDB persists state names and PostgreSQL persists the enum's internal values, and both return the configured values on creation and transition; keeping these equal makes reads and mutation responses consistent.
+
+On PostgreSQL and other SQL backends, `state` must be a GraphQL enum field: `createSchema()` rejects a `String`, `Int`, embedded object or other `state` field with `INVALID_MODEL` (400, `State machine field Season.state must be a GraphQL enum on SQL backends`).
 
 ## Create in the initial state
 

@@ -87,9 +87,12 @@ export const compileQuery = (models, database, plan, extra = null) => {
             const stored = alias();
             // Missing/null lists contribute a missing path, empty lists and null items do not.
             const condition = `${col(stored, '__owner_id')} = ${ownerId} AND ${state}${presence(stored)}`;
+            // UNION ALL pairs columns by position, and stored.* would follow the physical column order,
+            // which a migration that appends columns changes. Both branches list the description's columns.
+            const storedRow = owned.columns.map((column) => col(stored, column.name)).join(', ');
             const nullRow = owned.columns.map((column) => `NULL::${column.type} AS ${q(column.name)}`).join(', ');
             const noItems = usage === 'sort' ? ` OR NOT EXISTS (SELECT 1 FROM ${qualified(database.schema, owned.name)} empty_child WHERE empty_child.__owner_id = ${ownerId})` : '';
-            const source = `LATERAL (SELECT ${stored}.* FROM ${qualified(database.schema, owned.name)} ${stored} WHERE ${condition} UNION ALL SELECT ${nullRow} WHERE ${col(ownerAlias, owned.ownership.stateColumn)} IS DISTINCT FROM 'present'${noItems}) ${name}`;
+            const source = `LATERAL (SELECT ${storedRow} FROM ${qualified(database.schema, owned.name)} ${stored} WHERE ${condition} UNION ALL SELECT ${nullRow} WHERE ${col(ownerAlias, owned.ownership.stateColumn)} IS DISTINCT FROM 'present'${noItems}) ${name}`;
             const vector = context.vector
               ? { from: `${context.vector.from} CROSS JOIN ${source}`, where: context.vector.where }
               : { from: source, where: 'TRUE' };

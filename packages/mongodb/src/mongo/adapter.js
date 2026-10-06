@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { SimfinityError } from '@simtlix/simfinity-core';
 import { getListShape, normalizeConnectionField } from '@simtlix/simfinity-core/internal/relation-storage';
 
 import { createMongoModel } from './models.js';
@@ -78,6 +79,13 @@ export const createMongoAdapter = (options) => {
           // self-referencing collections), the child gets a private ObjectId field.
           const connection = normalizeConnectionField(listShape.itemType, relation.connectionField);
           if (!connection.graphqlFieldName) {
+            // Mongoose drops a stored path named constructor, so the link would never be written.
+            if (connection.storageFieldName === 'constructor') {
+              throw new SimfinityError(
+                `${listShape.itemType.name}.constructor cannot be stored on MongoDB: Mongoose drops a stored path named constructor`,
+                'INVALID_MODEL', 400,
+              );
+            }
             addPrivateConnectionField(listShape.itemType.name, connection.storageFieldName);
           }
         }

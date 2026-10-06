@@ -1,4 +1,4 @@
-import { GraphQLEnumType, GraphQLObjectType, GraphQLString, GraphQLList } from 'graphql';
+import { GraphQLEnumType, GraphQLID, GraphQLObjectType, GraphQLString, GraphQLList } from 'graphql';
 import { describe, it, expect } from 'vitest';
 import { describeModels } from '../packages/core/src/metadata.js';
 import { createQueryPlan } from '../packages/core/src/query-plan.js';
@@ -70,6 +70,58 @@ describe('PostgreSQL query compilation', () => {
     expect(() => compileQuery(models, database, createQueryPlan(models, 'CompileRoot', { aggregation: { groupId: 'entries', facts: [{ path: 'entries.texts', operation: 'COUNT', factName: 'n' }] } }, { mode: 'aggregate' }))).toThrow('Whole embedded objects');
   });
 
+  // UNION ALL pairs columns by position; `alias.*` would follow the physical order, which appended or
+  // reordered columns change, so both branches must list the description's columns by name.
+  const expectNamedOwnedRows = (text, database, tables) => {
+    expect(text).not.toMatch(/LATERAL \(SELECT t\d+\.\*/);
+    for (const name of tables) {
+      const owned = database.tables.find((table) => table.name === name);
+      const branch = text.match(new RegExp(`LATERAL \\(SELECT ([^()]+?) FROM "${database.schema}"\\."${name}" (t\\d+) WHERE`));
+      expect(branch, name).not.toBeNull();
+      expect(branch[1]).toBe(owned.columns.map((column) => `${branch[2]}."${column.name}"`).join(', '));
+      expect(text).toContain(`UNION ALL SELECT ${owned.columns.map((column) => `NULL::${column.type} AS "${column.name}"`).join(', ')} WHERE`);
+    }
+  };
+  it('projects owned-list rows by description column name in both UNION branches', () => {
+    const { registrations } = createContractModelFixtures();
+    const models = describeModels(registrations);
+    const database = describeDatabase(registrations, { schema: 'app' });
+    for (const args of [
+      { credits: { terms: [{ path: 'role', value: 'x' }] } },
+      { credits: { terms: [{ path: 'star.name', value: 'x' }] } },
+      { sort: { terms: [{ field: 'credits.role', order: 'ASC' }] } },
+    ]) {
+      expectNamedOwnedRows(compileQuery(models, database, createQueryPlan(models, 'ContractSerie', args)).text, database, ['ContractSerie__credits']);
+    }
+    const aggregate = compileQuery(models, database, createQueryPlan(models, 'ContractSerie', { aggregation: { groupId: 'credits.star.name', facts: [{ path: 'id', operation: 'COUNT', factName: 'n' }] } }, { mode: 'aggregate' }));
+    expectNamedOwnedRows(aggregate.text, database, ['ContractSerie__credits']);
+  });
+
+  it('projects nested owned lists and singular owned objects inside lists by column name', () => {
+    const Star = new GraphQLObjectType({ name: 'NamedStar', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+    const reference = { relation: { embedded: false } };
+    const Credit = new GraphQLObjectType({ name: 'NamedCredit', fields: { role: { type: GraphQLString }, star: { type: Star, extensions: reference } } });
+    const Detail = new GraphQLObjectType({ name: 'NamedDetail', fields: { tag: { type: GraphQLString }, star: { type: Star, extensions: reference } } });
+    const Season = new GraphQLObjectType({ name: 'NamedSeason', fields: {
+      number: { type: GraphQLString },
+      detail: { type: Detail, extensions: { relation: { embedded: true } } },
+      credits: { type: new GraphQLList(Credit), extensions: { relation: { embedded: true } } },
+    } });
+    const Serie = new GraphQLObjectType({ name: 'NamedSerie', fields: { id: { type: GraphQLID }, seasons: { type: new GraphQLList(Season), extensions: { relation: { embedded: true } } } } });
+    const registrations = [{ gqltype: Serie }, { gqltype: Star }];
+    const models = describeModels(registrations);
+    const database = describeDatabase(registrations, { schema: 'app' });
+    expect(database.tables.map((table) => table.name)).toEqual(expect.arrayContaining(['NamedSerie__seasons', 'NamedSerie__seasons__credits', 'NamedSerie__seasons__detail']));
+    const compile = (args) => compileQuery(models, database, createQueryPlan(models, 'NamedSerie', args)).text;
+    for (const path of ['credits.role', 'credits.star.name']) {
+      expectNamedOwnedRows(compile({ seasons: { terms: [{ path, value: 'x' }] } }), database, ['NamedSerie__seasons', 'NamedSerie__seasons__credits']);
+    }
+    expectNamedOwnedRows(compile({ seasons: { terms: [{ path: 'number', value: 'x' }] } }), database, ['NamedSerie__seasons']);
+    for (const path of ['detail.tag', 'detail.star.name']) {
+      expectNamedOwnedRows(compile({ seasons: { terms: [{ path, value: 'x' }] } }), database, ['NamedSerie__seasons', 'NamedSerie__seasons__detail']);
+    }
+    expectNamedOwnedRows(compile({ sort: { terms: [{ field: 'seasons.credits.role', order: 'DESC' }] } }), database, ['NamedSerie__seasons', 'NamedSerie__seasons__credits']);
+  });
 });
 
 const compileEnum = (field, operator, value) => {

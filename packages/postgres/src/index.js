@@ -1,10 +1,10 @@
 import { createSQL } from '@simtlix/simfinity-sql';
 import { postgresPlugin } from './plugin.js';
+import { describeDatabase as describeSchema } from './schema/describe.js';
+import { compileDatabaseSchema as compileSchemaSQL } from './schema/ddl.js';
 import { initializeDatabase as initializeSchema } from './schema/initialize.js';
 
 export { postgresPlugin } from './plugin.js';
-export { describeDatabase } from './schema/describe.js';
-export { compileDatabaseSchema } from './schema/ddl.js';
 export {
   auth,
   buildErrorFormatter,
@@ -25,3 +25,14 @@ export const { configureQueryLimits, configureMutationLimits, configure, connect
 export const initializeDatabase = (poolOrOptions, description, options) => description
   ? initializeSchema(poolOrOptions, description, options)
   : defaultInstance.initializeDatabase(poolOrOptions);
+/**
+ * With arguments, the low-level describer, whose schema defaults to `public`; without, the configured
+ * default instance's description, in the schema given to configure().
+ */
+export const describeDatabase = (registrations, options) => registrations === undefined && options === undefined
+  ? defaultInstance.describeDatabase()
+  : describeSchema(registrations, options);
+/** With a description, the low-level DDL compiler; without, the configured default instance's DDL. */
+export const compileDatabaseSchema = (description) => description === undefined
+  ? defaultInstance.compileDatabaseSchema()
+  : compileSchemaSQL(description);

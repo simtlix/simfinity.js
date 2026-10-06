@@ -1,5 +1,5 @@
 import { SimfinityError } from '@simtlix/simfinity-core';
-import { identifier, qualified } from './sql.js';
+import { identifier, qualified, generatedName } from './sql.js';
 import { createTableSQL, createForeignKeySQL, createIndexSQL, createFunctionSQL, createTriggerSQL } from './ddl.js';
 
 const mismatch = (object, reason) => {
@@ -7,12 +7,24 @@ const mismatch = (object, reason) => {
 };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
+// literal() writes a value containing a backslash as E'' with doubled backslashes, while pg_get_expr,
+// read with standard_conforming_strings on, never renders E'' and doubles only quotes. Compare string
+// constants by value: decode either form and re-emit one standard form. The decoder inverts only the
+// escapes literal() emits (\\ and ''); it is not a general E'' decoder (\n or \x41 would be wrong).
+const canonicalString = (token) => {
+  const escape = token[0] !== '\'';
+  const body = token.slice(escape ? 2 : 1, -1);
+  const value = escape ? body.replace(/\\(.)|''/gs, (match, character) => character ?? '\'') : body.replaceAll('\'\'', '\'');
+  return `'${value.replaceAll('\'', '\'\'')}'`;
+};
+
 // Ignore renderer whitespace/optional quotes, keeping string contents and expression grouping.
-const normalizeExpression = (expression) => {
+export const normalizeExpression = (expression) => {
   if (expression == null) return null;
-  const tokens = expression.match(/'(?:[^']|'')*'|"(?:[^"]|"")*"|\s+|./gs) || [];
+  // An E-string is one token unless the E ends an identifier.
+  const tokens = expression.match(/(?<![\w$"])[Ee]'(?:\\.|''|[^'\\])*'|'(?:[^']|'')*'|"(?:[^"]|"")*"|\s+|./gs) || [];
   let value = tokens.map((token) => {
-    if (token.startsWith('\'')) return token;
+    if (token.length > 1 && /^[Ee]?'/.test(token)) return canonicalString(token);
     if (/^"[a-z_][a-z0-9_]*"$/.test(token)) return token.slice(1, -1);
     return /^\s+$/.test(token) ? '' : token;
   }).join('');
@@ -122,6 +134,16 @@ const validateIndex = (schema, table, index, actual) => {
   }
 };
 
+// Earlier versions generated a btree index on every [ID] list column. It caps each list at about 167
+// identifiers (btree row size) and no generated query uses it. Initialization keeps it, as it keeps
+// any extra non-unique index, but reports it when it carries the exact generated name and shape.
+const legacyListIndexes = (schema, table, actual) => table.columns
+  .filter((column) => column.type === 'uuid[]')
+  .map((column) => ({ column: column.name, name: generatedName(table.name, column.name, 'idx') }))
+  .filter(({ column, name }) => !table.indexes.some((item) => item.name === name) && actual.indexes.some((index) => index.name === name
+    && !index.unique && !index.primary && index.method === 'btree' && same(index.columns, [column]) && index.no_predicate && index.no_expression))
+  .map(({ name }) => `${identifier(schema)}.${identifier(name)}`);
+
 const ensureFunctions = async (client, description, mode, created) => {
   for (const fn of description.functions || []) {
     const { rows } = await client.query(`SELECT p.oid, pg_get_function_identity_arguments(p.oid) AS arguments,
@@ -205,6 +227,7 @@ export const initializeDatabase = async (pool, description, { mode = 'create' } 
   if (schema.startsWith('pg_') || schema === 'information_schema') throw new SimfinityError('System schemas cannot be managed', 'INVALID_DATABASE_SCHEMA', 400);
   const client = await pool.connect();
   const created = [];
+  const legacy = [];
   let rollbackError;
   try {
     await client.query(mode === 'validate' ? 'BEGIN READ ONLY' : 'BEGIN');
@@ -258,10 +281,16 @@ export const initializeDatabase = async (pool, description, { mode = 'create' } 
       for (const index of actual.indexes) {
         if (index.unique && !index.primary && !table.indexes.some((item) => item.name === index.name)) mismatch(`${schema}.${table.name}.${index.name}`, 'unexpected unique index');
       }
+      legacy.push(...legacyListIndexes(schema, table, actual));
     }
     await ensureTriggers(client, description, mode, created);
     if (mode === 'create' && created.length) await backfill(client, description);
     await client.query('COMMIT');
+    if (legacy.length) {
+      console.warn(`Simfinity: PostgreSQL schema ${identifier(schema)} has btree indexes that earlier versions generated on [ID] list columns: ${legacy.join(', ')}. `
+        + 'Each limits its list to about 167 identifiers and no generated query uses it. Once every process that uses this schema runs this version, drop them: '
+        + `${legacy.map((name) => `DROP INDEX CONCURRENTLY IF EXISTS ${name};`).join(' ')} See the upgrade notes at https://simtlix.github.io/simfinity.js/resources/compatibility.html`);
+    }
     return { mode, created };
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch (failure) { rollbackError = failure; }

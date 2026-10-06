@@ -97,7 +97,9 @@ export const planRelationalSchema = (models, { schema = 'public', naming = defau
       if (presenceColumn) addColumn(table, { name: presenceColumn, scalar: 'Boolean', nullable: false, default: { kind: 'value', value: false } });
       if (conditional && field.required) addCheck(table, field.storageName, 'required', { kind: 'requiredWhenItem' });
       if (field.kind === 'reference') addReference(table, field.storageName, field.target);
-      if (field.scalar === 'ID') addIndex(table, [field.storageName]);
+      // No generated filter can use a btree on an [ID] list, and its index rows cap the list length,
+      // so only single ID columns are indexed. Databases created earlier keep the index they have.
+      if (field.scalar === 'ID' && !field.list) addIndex(table, [field.storageName]);
       if (field.kind === 'embedded') addCheck(table, field.storageName, 'shape', { kind: 'embeddedShape', field: storedField(field) });
       if (field.unique) {
         if (field.list || table.ownership) {

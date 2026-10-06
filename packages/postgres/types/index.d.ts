@@ -109,19 +109,37 @@ export interface DatabaseDescription {
 }
 export interface DatabasePool {
   connect(): Promise<{
-    query(sql: string, values?: unknown[]): Promise<{ rows: any[]; rowCount: number | null }>;
+    query(sql: string, values?: unknown[]): Promise<{
+      rows: any[];
+      rowCount: number | null;
+      /** Command tag reported by pg, such as `COMMIT`. Wrappers should pass pg's `command` through, so that a COMMIT that PostgreSQL turned into ROLLBACK is detected. */
+      command?: string;
+    }>;
     /** An error means the connection must be destroyed instead of reused. */
     release(error?: unknown): void;
   }>;
 }
+/**
+ * Low-level describer for any registrations. `options.schema` defaults to `public`, not to the schema
+ * of a configured runtime; pass the schema given to configure() or createPostgres().
+ */
 export function describeDatabase(registrations: ModelRegistration[], options?: { schema?: string }): DatabaseDescription;
+/** Describes the default module instance in its configured schema, after configure/connect/createSchema. */
+export function describeDatabase(): DatabaseDescription;
 /** Accepts a trusted description produced by describeDatabase. */
 export function compileDatabaseSchema(description: DatabaseDescription): string[];
+/** DDL of the default module instance in its configured schema, after configure/connect/createSchema. */
+export function compileDatabaseSchema(): string[];
 /** Borrows one pool client; owns its transaction, not the pool lifecycle. PostgreSQL >=15. */
 export function initializeDatabase(pool: DatabasePool, description: DatabaseDescription, options?: { mode?: 'create' | 'validate' }): Promise<{ mode: 'create' | 'validate'; created: string[] }>;
 
 export interface DatabaseQueryable {
-  query(sql: string, values?: any[]): Promise<{ rows: any[]; rowCount: number | null }>;
+  query(sql: string, values?: any[]): Promise<{
+    rows: any[];
+    rowCount: number | null;
+    /** Command tag reported by pg, such as `COMMIT`. Wrappers should pass pg's `command` through, so that a COMMIT that PostgreSQL turned into ROLLBACK is detected. */
+    command?: string;
+  }>;
 }
 export interface PostgresPool extends DatabasePool, DatabaseQueryable {}
 export interface PostgresSession extends DatabaseQueryable {
@@ -156,7 +174,14 @@ export interface PostgresRuntime extends Runtime<PostgresModel, PostgresSession>
   /** Bind pool/schema once, before createSchema. The caller owns the pool lifetime. */
   configure(options: PostgresConfiguration): void;
   describeDatabase(): DatabaseDescription;
-  /** Must be awaited before operations execute. Does not synchronize incompatible schemas. */
+  /** Physical DDL for this instance's description and schema, for review or export; initializeDatabase does not run it. */
+  compileDatabaseSchema(): string[];
+  /**
+   * Must be awaited before operations execute. Does not synchronize incompatible schemas. A request rejected before
+   * storage is touched, such as an unknown mode (INVALID_INITIALIZATION_MODE, 400) or, on a validation-only runtime,
+   * a non-empty mode other than validate (DATABASE_CREATION_DISABLED, 409), keeps the current readiness; a ready runtime keeps serving while it is initialized again, and any failure of the latest
+   * initialization makes it unavailable.
+   */
   initializeDatabase(options?: InitializationOptions): Promise<InitializationResult>;
   withTransaction<T>(session: PostgresSession | null | undefined, callback: (session: PostgresSession) => Promise<T> | T): Promise<T>;
 }
@@ -165,7 +190,12 @@ export function postgresPlugin(options?: PostgresConfiguration): SQLPlugin<
   PostgresConfiguration,
   DatabaseQueryable,
   DatabaseDescription,
-  { rows: Record<string, unknown>[]; rowCount: number | null }
+  {
+    rows: Record<string, unknown>[];
+    rowCount: number | null;
+    /** Command tag reported by pg, such as `COMMIT`. Wrappers should pass pg's `command` through, so that a COMMIT that PostgreSQL turned into ROLLBACK is detected. */
+    command?: string;
+  }
 >;
 export function createPostgres(options?: PostgresConfiguration): PostgresRuntime;
 export const configure: PostgresRuntime['configure'];

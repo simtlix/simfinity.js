@@ -14,6 +14,7 @@ export const createSQL = ({ plugin } = {}) => {
     configure: (configuration) => adapter.configure(configuration),
     initializeDatabase: (initialization) => adapter.initialize(initialization),
     describeDatabase: () => adapter.describeDatabase(),
+    compileDatabaseSchema: () => adapter.compileDatabaseSchema(),
     plugins,
     scalars,
     validators,

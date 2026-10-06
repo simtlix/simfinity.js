@@ -189,6 +189,8 @@ A successful call returns text JSON and structured data using the original Graph
 
 Execution errors return `isError: true` and text containing `{ errors, data? }`. Partial GraphQL data is preserved when available and within `maxResultBytes`; `structuredContent` is omitted on errors.
 
+In-process execution serializes the GraphQL errors as graphql-js produces them and does not apply [`buildErrorFormatter()`](/reference/errors#builderrorformatter). An error that a hook, validator or custom mutation throws therefore reaches the tool result with its own message, such as `connect ECONNREFUSED 10.0.0.5:8443` from a Node.js HTTP client, on both backends. Database failures appear as the adapter reports them, such as PostgreSQL's `Database operation failed` with `DATABASE_ERROR`. Replace sensitive results in [tool middleware](#tool-middleware) when tools are exposed to untrusted clients.
+
 For a counted list call, in-process execution isolates the count per call and returns `_meta: { count }`, including zero. Remote execution reads numeric `extensions.count` from the GraphQL response. Aggregation resolvers do not compute counts.
 
 | Code | Behavior |

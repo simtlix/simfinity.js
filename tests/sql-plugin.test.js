@@ -1,12 +1,19 @@
+import { randomUUID } from 'node:crypto';
 import {
   afterEach, beforeEach, describe, expect, it, vi,
 } from 'vitest';
-import { GraphQLID, GraphQLObjectType, GraphQLString, graphql } from 'graphql';
+import {
+  GraphQLEnumType, GraphQLID, GraphQLInt, GraphQLList, GraphQLNonNull, GraphQLObjectType, GraphQLString, graphql,
+} from 'graphql';
 import { describeModels } from '@simtlix/simfinity-core';
 import { createRecordStore } from '../packages/sql/src/records.js';
 import { createTransactions } from '../packages/sql/src/transactions.js';
 import { createSQL } from '../packages/sql/src/index.js';
+import { planRelationalSchema } from '../packages/sql/src/schema/plan.js';
 import { createPostgres, postgresPlugin } from '../packages/postgres/src/index.js';
+import { castId, decodeScalar, encodeScalar } from '../packages/postgres/src/codecs.js';
+import { describeDatabase } from '../packages/postgres/src/schema/describe.js';
+import { compileDatabaseSchema } from '../packages/postgres/src/schema/ddl.js';
 import { bindPlugin, assertCapabilities } from '../packages/sql/src/plugin.js';
 
 const stubPlugin = () => ({
@@ -195,7 +202,10 @@ it('never replays an unknown commit outcome and bounds confirmed abort retries',
   plugin.driver.release = vi.fn();
   const body = vi.fn(async () => 'result');
   const unknown = createTransactions(() => ({}), () => {}, bindPlugin(plugin));
-  await expect(unknown.withTransaction(null, body)).rejects.toThrow('unknown commit');
+  // A failed driver call that the plugin does not map is masked; the driver error stays available as its cause.
+  const unknownOutcome = await unknown.withTransaction(null, body).catch((error) => error);
+  expect(unknownOutcome).toMatchObject({ message: 'Database operation failed', extensions: { code: 'DATABASE_ERROR', status: 500 } });
+  expect(unknownOutcome.getCause().message).toBe('unknown commit');
   expect(body).toHaveBeenCalledOnce();
   expect(plugin.driver.release).toHaveBeenCalledOnce();
   plugin.driver.commit = () => {};
@@ -296,4 +306,229 @@ it.each([
     expect(result.data.zeroBook).toEqual({ id: '1', author: { id: '0', name: 'Zero' } });
     expect(statements.includes('query')).toBe(batchRead);
   }
+});
+
+describe('SQL records with fields named like Object.prototype members', () => {
+  // The real PostgreSQL value codecs over an in-memory table store. Embedded values are stored as JSON
+  // text and parsed on reads, as pg returns jsonb, so absent keys are absent from ordinary objects.
+  const fixture = () => {
+    const Person = new GraphQLObjectType({ name: 'ProtoPerson', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+    const Spec = new GraphQLObjectType({ name: 'ProtoSpec', fields: { label: { type: GraphQLString }, constructor: { type: GraphQLString } } });
+    const Meta = new GraphQLObjectType({ name: 'ProtoMeta', fields: { name: { type: GraphQLString }, length: { type: GraphQLInt } } });
+    const Member = new GraphQLObjectType({ name: 'ProtoMember', fields: {
+      person: { type: Person, extensions: { relation: { embedded: false } } }, toString: { type: GraphQLString },
+    } });
+    const Team = new GraphQLObjectType({ name: 'ProtoTeam', fields: {
+      id: { type: GraphQLID }, name: { type: GraphQLString }, constructor: { type: GraphQLString }, toString: { type: GraphQLString },
+      spec: { type: Spec, extensions: { relation: { embedded: true } } },
+      valueOf: { type: Meta, extensions: { relation: { embedded: true } } },
+      members: { type: new GraphQLList(Member), extensions: { relation: { embedded: true } } },
+    } });
+    const models = describeModels([{ gqltype: Person }, { gqltype: Team }]);
+    const database = planRelationalSchema(models, { schema: 'main', naming: { validateIdentifier() {}, generatedName: (...parts) => parts.join('_') } });
+    const tables = new Map(database.tables.map((table) => [table.name, []]));
+    const read = (table, row) => {
+      const result = { ...row };
+      for (const column of table.columns) if (column.scalar === 'Embedded' && typeof result[column.name] === 'string') result[column.name] = JSON.parse(result[column.name]);
+      return result;
+    };
+    const query = async ({ text, values: [operation] }) => {
+      const { table } = operation;
+      const rows = tables.get(table.name);
+      if (text === 'insert') { rows.push({ ...operation.data }); return { rows: [read(table, operation.data)] }; }
+      if (text === 'selectById') return { rows: rows.filter((row) => row.id === operation.id).map((row) => read(table, row)) };
+      if (text === 'selectOwned') return { rows: rows.filter((row) => operation.ids.includes(row.__owner_id)).map((row) => read(table, row)) };
+      if (text === 'update') {
+        const row = rows.find((item) => item.id === operation.id);
+        Object.assign(row, operation.data);
+        return { rows: [read(table, row)] };
+      }
+      if (text === 'deleteOwned') tables.set(table.name, rows.filter((row) => row.__owner_id !== operation.ownerId));
+      return { rows: [] };
+    };
+    const plugin = stubPlugin();
+    plugin.values = { createId: randomUUID, castId, encodeScalar, decodeScalar, encodeEmbedded: JSON.stringify };
+    plugin.compileRecord = (description, operation) => ({ text: operation.kind, values: [operation] });
+    return { store: createRecordStore(models, database, query, bindPlugin(plugin)), tables };
+  };
+
+  it('stores absent prototype-named fields as missing at the root, in JSON values and in owned tables', async () => {
+    const { store, tables } = fixture();
+    const id = randomUUID();
+    const created = await store.create('ProtoTeam', { _id: id, id, name: 'team', spec: { label: 'a' }, members: [{ person: null }] });
+    const [row] = tables.get('ProtoTeam');
+    expect([row.constructor, row.toString, row.valueOf, row.__field_valueOf_present]).toEqual([null, null, null, false]);
+    expect(row.spec).toBe('{"label":"a"}');
+    const [member] = tables.get('ProtoTeam_members');
+    expect([member.person, member.toString, member.__field_toString_present]).toEqual([null, null, false]);
+    expect([created.constructor, created.toString]).toEqual([null, null]);
+    expect(Object.hasOwn(created.members[0], 'toString')).toBe(false);
+  });
+
+  it('never encodes inherited members into embedded values written by a create or an update', async () => {
+    const { store, tables } = fixture();
+    const id = randomUUID();
+    await store.create('ProtoTeam', { _id: id, id, name: 'team', spec: { label: 'a', constructor: 'kept' } });
+    expect(tables.get('ProtoTeam')[0].spec).toBe('{"label":"a","constructor":"kept"}');
+    // Values inherited from other prototypes, such as class getters, are still read.
+    class MetaValue { get name() { return 'from getter'; } }
+    await store.update('ProtoTeam', id, { spec: { label: 'b' }, valueOf: new MetaValue() });
+    const [row] = tables.get('ProtoTeam');
+    expect([row.spec, row.valueOf, row.__field_valueOf_present]).toEqual(['{"label":"b"}', '{"name":"from getter"}', true]);
+  });
+
+  it('reads absent prototype-named keys as absent, never as the inherited member', async () => {
+    const { store, tables } = fixture();
+    const id = randomUUID();
+    tables.get('ProtoTeam').push({
+      id, name: 'legacy', constructor: null, toString: null, spec: '{"label":"z"}', __field_spec_present: true,
+      valueOf: null, __field_valueOf_present: false, __members_state: 'missing',
+    });
+    const team = await store.getById('ProtoTeam', id);
+    expect(team.spec).toEqual({ label: 'z' });
+    expect(Object.hasOwn(team.spec, 'constructor')).toBe(false);
+    expect(Object.hasOwn(team, 'valueOf')).toBe(false);
+    // A projection object inherits members too; only the fields it names are kept.
+    const projected = await store.getById('ProtoTeam', id, null, { projection: { spec: 1 } });
+    expect(Object.keys(projected).sort()).toEqual(['_id', 'id', 'spec']);
+  });
+});
+
+describe('SQL state machine fields', () => {
+  const machine = {
+    initialState: { name: 'OPEN', value: 'OPEN' },
+    actions: { close: { from: { name: 'OPEN', value: 'OPEN' }, to: { name: 'CLOSED', value: 'CLOSED' } } },
+  };
+  const recordingRuntime = () => {
+    const plugin = stubPlugin();
+    plugin.options = {};
+    plugin.capabilities = postgresPlugin().capabilities;
+    plugin.describeSchema = (plan) => plan;
+    plugin.initialize = async () => ({ mode: 'validate', created: [] });
+    plugin.compileQuery = vi.fn(() => ({ text: 'query', values: [] }));
+    plugin.driver = { ...plugin.driver, query: async () => ({ rows: [] }), isRetryable: () => false, normalizeError: (error) => error };
+    return { plugin, runtime: createSQL({ plugin }) };
+  };
+  const ticket = (name, state) => new GraphQLObjectType({ name, fields: { id: { type: GraphQLID }, title: { type: GraphQLString }, ...(state ? { state: { type: state } } : {}) } });
+  const Meta = new GraphQLObjectType({ name: 'TicketStateMeta', fields: { label: { type: GraphQLString } } });
+
+  it.each([
+    ['String', GraphQLString],
+    ['NonNull(String)', new GraphQLNonNull(GraphQLString)],
+    ['List(String)', new GraphQLList(GraphQLString)],
+    ['Int', GraphQLInt],
+    ['embedded object', Meta],
+  ])('rejects a %s state field with INVALID_MODEL when the schema is created', (label, type) => {
+    const { plugin, runtime } = recordingRuntime();
+    const name = `Ticket${label.replace(/\W/g, '')}`;
+    const Ticket = new GraphQLObjectType({ name, fields: { id: { type: GraphQLID }, state: { type, ...(type === Meta ? { extensions: { relation: { embedded: true } } } : {}) } } });
+    runtime.connect(null, Ticket, `ticket${label.replace(/\W/g, '')}`, `tickets${label.replace(/\W/g, '')}`, null, null, machine);
+    expect(() => runtime.createSchema()).toThrow(expect.objectContaining({
+      message: `State machine field ${name}.state must be a GraphQL enum on SQL backends`,
+      extensions: expect.objectContaining({ code: 'INVALID_MODEL', status: 400 }),
+    }));
+    expect(plugin.compileQuery).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['an enum', (State) => State],
+    ['a required enum', (State) => new GraphQLNonNull(State)],
+    ['an enum list', (State) => new GraphQLList(State)],
+  ])('maps the stored values of %s state field back to its names', async (label, wrap) => {
+    const { plugin, runtime } = recordingRuntime();
+    const prefix = label.replace(/\W/g, '');
+    const State = new GraphQLEnumType({ name: `${prefix}State`, values: { OPEN: { value: 'CLOSED' }, CLOSED: { value: 2 } } });
+    const Ticket = ticket(`${prefix}Ticket`, wrap(State));
+    const states = {
+      initialState: { name: 'OPEN', value: 'CLOSED' },
+      actions: { close: { from: { name: 'OPEN', value: 'CLOSED' }, to: { name: 'CLOSED', value: 2 } } },
+    };
+    runtime.connect(null, Ticket, `ticket${prefix}`, `tickets${prefix}`, null, null, states);
+    runtime.createSchema();
+    await runtime.initializeDatabase();
+    await runtime.getModel(Ticket).find();
+    const [models] = plugin.compileQuery.mock.calls[0];
+    const state = models.entities.find((entity) => entity.name === Ticket.name).fields.find((field) => field.name === 'state');
+    expect(state.stateNames).toEqual([{ value: 'CLOSED', name: 'OPEN' }, { value: '2', name: 'CLOSED' }]);
+  });
+});
+
+describe('SQL runtime DDL export', () => {
+  const Shop = () => new GraphQLObjectType({ name: 'ExportShop', fields: { id: { type: GraphQLID }, name: { type: GraphQLString, extensions: { unique: true } } } });
+
+  it('compiles the bound plugin DDL for the runtime schema without touching storage', () => {
+    const plugin = stubPlugin();
+    plugin.options = {};
+    plugin.capabilities = postgresPlugin().capabilities;
+    plugin.describeSchema = (plan) => ({ ...plan, described: true });
+    plugin.compileSchema = vi.fn(() => ['CREATE TABLE shop']);
+    plugin.initialize = vi.fn();
+    const runtime = createSQL({ plugin });
+    runtime.connect(null, Shop(), 'shop', 'shops');
+    expect(() => runtime.compileDatabaseSchema()).toThrow(expect.objectContaining({ extensions: expect.objectContaining({ code: 'SCHEMA_NOT_CREATED' }) }));
+    runtime.createSchema();
+    expect(runtime.compileDatabaseSchema()).toEqual(['CREATE TABLE shop']);
+    expect(plugin.compileSchema).toHaveBeenCalledOnce();
+    const [description] = plugin.compileSchema.mock.calls[0];
+    expect(description).toEqual(runtime.describeDatabase());
+    expect(description).toMatchObject({ schema: 'main', described: true });
+    expect(plugin.initialize).not.toHaveBeenCalled();
+  });
+
+  it('exports PostgreSQL DDL for the configured schema rather than public', () => {
+    const pool = { connect: vi.fn(), query: vi.fn() };
+    const runtime = createSQL({ plugin: postgresPlugin({ pool, schema: 'exported' }) });
+    runtime.connect(null, Shop(), 'shop', 'shops');
+    runtime.createSchema();
+    const ddl = runtime.compileDatabaseSchema();
+    expect(ddl).toEqual(compileDatabaseSchema(describeDatabase(runtime.getRegistrations(), { schema: 'exported' })));
+    expect(ddl[0]).toContain('"exported"');
+    expect(ddl.join('\n')).not.toContain('"public"');
+    expect(pool.connect).not.toHaveBeenCalled();
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  const uri = process.env.SIMFINITY_POSTGRES_URI;
+  it.skipIf(!uri)('validates PostgreSQL storage created from the exported DDL in an empty schema', async () => {
+    const { default: pg } = await import('pg');
+    const pool = new pg.Pool({ connectionString: uri });
+    const schema = `export_${randomUUID().replaceAll('-', '')}`;
+    try {
+      const runtime = createSQL({ plugin: postgresPlugin({ pool, schema }) });
+      const Owner = new GraphQLObjectType({ name: 'ExportOwner', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+      const Contact = new GraphQLObjectType({ name: 'ExportContact', fields: {
+        owner: { type: Owner, extensions: { relation: { embedded: false } } }, email: { type: GraphQLString, extensions: { unique: true } },
+      } });
+      const State = new GraphQLEnumType({ name: 'ExportState', values: { OPEN: { value: 'OPEN' }, DONE: { value: 'DONE' } } });
+      const Order = new GraphQLObjectType({ name: 'ExportOrder', fields: {
+        id: { type: GraphQLID }, code: { type: new GraphQLNonNull(GraphQLString), extensions: { unique: true } },
+        owner: { type: Owner, extensions: { relation: { embedded: false } } }, state: { type: State },
+        tags: { type: new GraphQLList(GraphQLString) }, relatedIds: { type: new GraphQLList(GraphQLID) },
+        contacts: { type: new GraphQLList(Contact), extensions: { relation: { embedded: true } } },
+      } });
+      runtime.connect(null, Owner, 'exportOwner', 'exportOwners');
+      runtime.addNoEndpointType(Contact);
+      runtime.connect(null, Order, 'exportOrder', 'exportOrders', null, null, {
+        initialState: { name: 'OPEN', value: 'OPEN' }, actions: { finish: { from: { name: 'OPEN', value: 'OPEN' }, to: { name: 'DONE', value: 'DONE' } } },
+      });
+      runtime.createSchema();
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const statement of runtime.compileDatabaseSchema()) await client.query(statement);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally { client.release(); }
+      expect(await runtime.initializeDatabase({ mode: 'validate' })).toEqual({ mode: 'validate', created: [] });
+      expect(await runtime.initializeDatabase({ mode: 'create' })).toEqual({ mode: 'create', created: [] });
+      const owner = await runtime.getModel(Owner).create({ name: 'Owner' });
+      const order = await runtime.getModel(Order).create({ code: 'A1', owner: owner.id, state: 'OPEN', contacts: [{ owner: owner.id, email: 'a@example.com' }] });
+      expect((await runtime.getModel(Order).findById(order.id)).contacts).toEqual([expect.objectContaining({ email: 'a@example.com' })]);
+    } finally {
+      await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await pool.end();
+    }
+  });
 });

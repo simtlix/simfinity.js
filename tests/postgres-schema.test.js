@@ -1,7 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { GraphQLObjectType, GraphQLString, GraphQLID, GraphQLList } from 'graphql';
 import { schemaFixture } from './contracts/postgres-fixtures.js';
-import { describeDatabase, compileDatabaseSchema } from '../packages/postgres/src/index.js';
+import {
+  describeDatabase, compileDatabaseSchema, configure, connect, createPostgres, createSchema, getRegistrations,
+} from '../packages/postgres/src/index.js';
+import { normalizeExpression } from '../packages/postgres/src/schema/initialize.js';
 
 describe('PostgreSQL schema compiler', () => {
   it('generates real deduplicated FKs, typed values and association uniqueness', () => {
@@ -87,4 +90,67 @@ describe('PostgreSQL schema compiler', () => {
     expect(() => describeDatabase([{ gqltype: Root }, { gqltype: Collision }])).toThrow(/collision/i);
   });
 
+  it('compares generated escape-string literals with catalog-rendered standard strings by value', () => {
+    // literal() writes E'' with doubled backslashes; pg_get_expr renders standard strings, without E.
+    const same = (generated, catalog) => expect(normalizeExpression(generated)).toBe(normalizeExpression(catalog));
+    same(String.raw`"kind" = ANY (ARRAY[E'C:\\dir'::text, 'plain'::text])`, String.raw`(kind = ANY (ARRAY['C:\dir'::text, 'plain'::text]))`);
+    same(String.raw`"kind" = ANY (ARRAY[E'it''s\\y'::text, E'end\\'::text])`, String.raw`(kind = ANY (ARRAY['it''s\y'::text, 'end\'::text]))`);
+    same(String.raw`array_remove("kinds", NULL::text) <@ ARRAY[E'C:\\dir'::text]`, String.raw`(array_remove(kinds, NULL::text) <@ ARRAY['C:\dir'::text])`);
+    same(String.raw`"kind" = ANY (ARRAY[e'a\\b'::text])`, String.raw`(kind = ANY (ARRAY['a\b'::text]))`);
+    // A different stored value is still drift: a catalog 'C:\\dir' holds two backslashes.
+    expect(normalizeExpression(String.raw`"kind" = ANY (ARRAY[E'C:\\dir'::text])`)).not.toBe(normalizeExpression(String.raw`(kind = ANY (ARRAY['C:\\dir'::text]))`));
+    expect(normalizeExpression(String.raw`"kind" = ANY (ARRAY[E'C:\\dir'::text])`)).not.toBe(normalizeExpression(String.raw`(kind = ANY (ARRAY['C:dir'::text]))`));
+    // Expressions without escape strings normalize exactly as before.
+    expect(normalizeExpression(String.raw`"kind" = ANY (ARRAY['plain'::text, 'it''s'::text])`)).toBe(String.raw`kind=ANY(ARRAY['plain'::text,'it''s'::text])`);
+    same(String.raw`"kind" = E'it''s'`, String.raw`(kind = 'it''s')`);
+    expect(normalizeExpression(String.raw`"kind" = 'E'`)).toBe(String.raw`kind='E'`);
+    // An E that ends an identifier does not start an escape string.
+    expect(normalizeExpression(String.raw`typE'x\\'`)).toBe(String.raw`typE'x\\'`);
+    expect(normalizeExpression(null)).toBeNull();
+  });
+});
+
+describe('PostgreSQL DDL export for configured runtimes', () => {
+  const library = (prefix) => {
+    const Author = new GraphQLObjectType({ name: `${prefix}Author`, fields: { id: { type: GraphQLID }, name: { type: GraphQLString, extensions: { unique: true } } } });
+    const Book = new GraphQLObjectType({ name: `${prefix}Book`, fields: {
+      id: { type: GraphQLID }, title: { type: GraphQLString },
+      author: { type: Author, extensions: { relation: { embedded: false, connectionField: 'author' } } },
+    } });
+    return { Author, Book };
+  };
+
+  it('compiles an instance description in the instance schema', () => {
+    const pool = { connect: vi.fn(), query: vi.fn() };
+    const api = createPostgres({ pool, schema: 'app' });
+    expect(() => api.compileDatabaseSchema()).toThrow(expect.objectContaining({ extensions: expect.objectContaining({ code: 'SCHEMA_NOT_CREATED' }) }));
+    const { Author, Book } = library('Exported');
+    api.connect(null, Author, 'author', 'authors');
+    api.connect(null, Book, 'book', 'books');
+    api.createSchema();
+    const ddl = api.compileDatabaseSchema();
+    expect(ddl[0]).toBe('CREATE SCHEMA IF NOT EXISTS "app"');
+    expect(ddl).toEqual(compileDatabaseSchema(describeDatabase(api.getRegistrations(), { schema: 'app' })));
+    expect(ddl).toEqual(compileDatabaseSchema(api.describeDatabase()));
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('resolves the module-level no-argument calls to the configured default instance', () => {
+    expect(() => describeDatabase()).toThrow(expect.objectContaining({ extensions: expect.objectContaining({ code: 'SCHEMA_NOT_CREATED' }) }));
+    expect(() => compileDatabaseSchema()).toThrow(expect.objectContaining({ extensions: expect.objectContaining({ code: 'SCHEMA_NOT_CREATED' }) }));
+    const pool = { connect: vi.fn(), query: vi.fn() };
+    configure({ pool, schema: 'barber' });
+    const { Author, Book } = library('Namespace');
+    connect(null, Author, 'author', 'authors');
+    connect(null, Book, 'book', 'books');
+    createSchema();
+    expect(describeDatabase().schema).toBe('barber');
+    expect(compileDatabaseSchema()[0]).toBe('CREATE SCHEMA IF NOT EXISTS "barber"');
+    expect(compileDatabaseSchema()).toEqual(compileDatabaseSchema(describeDatabase()));
+    // The low-level describer keeps its own default schema; pass the configured one explicitly.
+    expect(describeDatabase(getRegistrations()).schema).toBe('public');
+    expect(describeDatabase(getRegistrations(), { schema: 'barber' })).toEqual(describeDatabase());
+    expect(() => describeDatabase(undefined, { schema: 'barber' })).toThrow(expect.objectContaining({ extensions: expect.objectContaining({ code: 'INVALID_MODEL' }) }));
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
 });

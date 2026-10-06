@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
+import { GraphQLID, GraphQLList, GraphQLNonNull, GraphQLObjectType, GraphQLString } from 'graphql';
 import { describeModels } from '@simtlix/simfinity-core';
 import { sqlSchemaFixtures } from './contracts/sql-schema-fixtures.js';
 import * as postgres from '../packages/postgres/src/schema/describe.js';
@@ -39,5 +40,41 @@ describe('SQL relational planning', () => {
     const description = postgres.describeDatabase(registrations, options);
     expect(hash(description)).toBe(saved.description);
     expect(hash(compileDatabaseSchema(description))).toBe(saved.ddl);
+  });
+
+  it('indexes single ID columns but not [ID] list columns, at the root or in owned tables', async () => {
+    const { planRelationalSchema } = await import('../packages/sql/src/schema/plan.js');
+    const registrations = () => {
+      const Author = new GraphQLObjectType({ name: 'IdListAuthor', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+      const Link = new GraphQLObjectType({ name: 'IdListLink', fields: {
+        author: { type: Author, extensions: { relation: { embedded: false } } },
+        refIds: { type: new GraphQLList(GraphQLID) },
+        refId: { type: GraphQLID },
+      } });
+      const Post = new GraphQLObjectType({ name: 'IdListPost', fields: {
+        id: { type: GraphQLID }, externalId: { type: GraphQLID },
+        relatedIds: { type: new GraphQLList(GraphQLID) },
+        requiredIds: { type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(GraphQLID))) },
+        uniqueIds: { type: new GraphQLList(GraphQLID), extensions: { unique: true } },
+        links: { type: new GraphQLList(Link), extensions: { relation: { embedded: true } } },
+      } });
+      return [{ gqltype: Author }, { gqltype: Post }];
+    };
+    const plan = planRelationalSchema(describeModels(registrations()), { schema: 'app', naming });
+    const indexed = (name) => plan.tables.find((table) => table.name === name).indexes.filter((index) => !index.unique).map((index) => index.columns.join());
+    expect(indexed('IdListPost')).toEqual(['externalId']);
+    expect(indexed('IdListPost__links')).toEqual(['__owner_id', 'author', 'refId']);
+    const listColumns = plan.tables.flatMap((table) => table.columns.filter((column) => column.scalar === 'ID' && column.list).map((column) => [table.name, column.name]));
+    expect(listColumns).toEqual([['IdListPost', 'relatedIds'], ['IdListPost', 'requiredIds'], ['IdListPost', 'uniqueIds'], ['IdListPost__links', 'refIds']]);
+    for (const [name, column] of listColumns) {
+      expect(plan.tables.find((table) => table.name === name).indexes.some((index) => index.columns.includes(column))).toBe(false);
+    }
+    // Declared list uniqueness still uses the private key table, whose key column is a single uuid.
+    const description = postgres.describeDatabase(registrations(), { schema: 'app' });
+    expect(description.tables.find((table) => table.uniqueKeys).columns.find((column) => column.name === 'value').type).toBe('uuid');
+    const ddl = compileDatabaseSchema(description).join('\n');
+    expect(ddl).not.toMatch(/INDEX "[^"]*" ON "app"\."IdListPost(__links)?" \("(relatedIds|requiredIds|uniqueIds|refIds)"\)/);
+    expect(ddl).toContain('CREATE INDEX "IdListPost__externalId__idx" ON "app"."IdListPost" ("externalId")');
+    expect(ddl).toContain('CREATE INDEX "IdListPost__links__refId__idx" ON "app"."IdListPost__links" ("refId")');
   });
 });

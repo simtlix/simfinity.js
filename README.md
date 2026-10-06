@@ -1449,6 +1449,8 @@ const OrderType = new GraphQLObjectType({
 });
 ```
 
+Use a GraphQL enum for the `state` field. PostgreSQL and other SQL backends require it: `createSchema()` rejects any other `state` field with `INVALID_MODEL` (400).
+
 ### 3. Configure State Machine
 
 ```javascript

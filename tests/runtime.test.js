@@ -2284,3 +2284,319 @@ describe('embedded value hook', () => {
     expect(types.Address.getFields().geo.resolve).toBeUndefined();
   });
 });
+
+describe('fields named like Object.prototype members', () => {
+  // A scalar, an embedded object and a reference stored as makerId, each named like a member every
+  // plain object inherits; Meta has a scalar list so named next to a normally named one.
+  const createGaugeTypes = (prefix, validate = () => {}) => {
+    const Maker = createType(`${prefix}Maker`);
+    const Meta = new GraphQLObjectType({
+      name: `${prefix}Meta`,
+      fields: {
+        name: { type: GraphQLString },
+        length: { type: GraphQLInt },
+        tags: { type: new GraphQLList(GraphQLString) },
+        toString: { type: new GraphQLList(GraphQLString) },
+      },
+    });
+    // Unregistered and read-only, so only reachable from Gauge.
+    const Snapshot = new GraphQLObjectType({ name: `${prefix}Snapshot`, fields: { toString: { type: GraphQLString } } });
+    const Gauge = new GraphQLObjectType({
+      name: `${prefix}Gauge`,
+      fields: {
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        toString: { type: GraphQLString, extensions: { validations: { CREATE: [{ validate }], UPDATE: [{ validate }] } } },
+        valueOf: { type: Meta, extensions: { relation: { embedded: true } } },
+        constructor: { type: Maker, extensions: { relation: { embedded: false, connectionField: 'makerId' } } },
+        snapshot: { type: Snapshot, extensions: { relation: { embedded: true }, readOnly: true } },
+      },
+    });
+    return {
+      Maker, Meta, Snapshot, Gauge,
+    };
+  };
+
+  const register = (runtime, types, endpoint) => {
+    runtime.connect(null, types.Maker, `${endpoint}maker`, `${endpoint}makers`);
+    runtime.addNoEndpointType(types.Meta);
+    runtime.connect(null, types.Gauge, `${endpoint}gauge`, `${endpoint}gauges`);
+  };
+
+  test('writes no inherited member for a field a create or an update omits', async () => {
+    const adapter = createMemoryAdapter();
+    const validate = vi.fn();
+    const runtime = createRuntime(adapter);
+    const types = createGaugeTypes('ProtoWrite', validate);
+    register(runtime, types, 'protoWrite');
+    const schema = runtime.createSchema();
+    const run = async (source) => {
+      const result = await graphql({ schema, source });
+      expect(result.errors).toBeUndefined();
+      return result.data;
+    };
+
+    await run('mutation { addprotoWritegauge(input: { name: "omitted" }) { id } }');
+    const kept = await run('mutation { addprotoWritegauge(input: { name: "kept", toString: "t", valueOf: { name: "n" } }) { id } }');
+    const id = kept.addprotoWritegauge.id;
+    const [omittedRecord, keptRecord] = adapter.getRecords();
+
+    expect(['toString', 'valueOf', 'makerId'].filter((key) => Object.hasOwn(omittedRecord, key))).toEqual([]);
+    // The create stores [] for the omitted list so named; the adapter defaults the other one.
+    expect(keptRecord.valueOf).toEqual({ name: 'n', toString: [] });
+
+    await run(`mutation { updateprotoWritegauge(input: { id: "${id}", name: "renamed" }) { id } }`);
+    expect(keptRecord).toMatchObject({ name: 'renamed', toString: 't' });
+    expect(keptRecord.valueOf).toEqual({ name: 'n', toString: [] });
+    expect(Object.hasOwn(keptRecord, 'makerId')).toBe(false);
+
+    // A partial embedded update fills omitted lists with [], whatever their names, also in a value
+    // stored without them.
+    delete keptRecord.valueOf.toString;
+    await run(`mutation { updateprotoWritegauge(input: { id: "${id}", valueOf: { length: 2 } }) { id } }`);
+    expect(keptRecord.valueOf).toEqual({
+      name: 'n', length: 2, tags: [], toString: [],
+    });
+    expect(keptRecord.toString).toBe('t');
+    expect(validate.mock.calls.map(([, , value]) => value)).toEqual([undefined, 't', undefined, undefined]);
+  });
+
+  test('a create stores [] for an omitted list so named, at the root and in embedded values', async () => {
+    const adapter = createMemoryAdapter();
+    const runtime = createRuntime(adapter);
+    const Part = new GraphQLObjectType({
+      name: 'ProtoListPart',
+      fields: { label: { type: GraphQLString }, valueOf: { type: new GraphQLList(GraphQLString) } },
+    });
+    const Item = new GraphQLObjectType({
+      name: 'ProtoListItem',
+      fields: { id: { type: GraphQLID }, name: { type: GraphQLString }, boardId: { type: GraphQLID } },
+    });
+    const Board = new GraphQLObjectType({
+      name: 'ProtoListBoard',
+      fields: {
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        tags: { type: new GraphQLList(GraphQLString) },
+        toString: { type: new GraphQLList(GraphQLString) },
+        valueOf: { type: new GraphQLList(GraphQLString) },
+        hasOwnProperty: { type: new GraphQLList(Part), extensions: { relation: { embedded: true } } },
+        part: { type: Part, extensions: { relation: { embedded: true } } },
+        parts: { type: new GraphQLList(Part), extensions: { relation: { embedded: true } } },
+        isPrototypeOf: { type: new GraphQLList(Item), extensions: { relation: { embedded: false, connectionField: 'boardId' } } },
+      },
+    });
+    runtime.connect(null, Item, 'protoListitem', 'protoListitems');
+    runtime.addNoEndpointType(Part);
+    runtime.connect(null, Board, 'protoListboard', 'protoListboards');
+    const schema = runtime.createSchema();
+
+    const created = await graphql({
+      schema,
+      source: `mutation { addprotoListboard(input: { name: "b", valueOf: null, part: { label: "p" }, parts: [{ label: "q" }] }) {
+        toString valueOf hasOwnProperty { label } part { valueOf } parts { valueOf } } }`,
+    });
+    const [record] = adapter.getRecords().filter((stored) => stored.Model.name === 'ProtoListBoard');
+
+    expect(created).toEqual({
+      data: {
+        addprotoListboard: {
+          toString: [], valueOf: [], hasOwnProperty: [], part: { valueOf: [] }, parts: [{ valueOf: [] }],
+        },
+      },
+    });
+    expect(['toString', 'valueOf', 'hasOwnProperty', 'part', 'parts'].map((key) => [key, record[key]])).toEqual([
+      ['toString', []], ['valueOf', []], ['hasOwnProperty', []], ['part', { label: 'p', valueOf: [] }], ['parts', [{ label: 'q', valueOf: [] }]],
+    ]);
+    // Lists with other names keep the adapter's default, and collections are not stored on the record.
+    expect(['tags', 'isPrototypeOf'].filter((key) => Object.hasOwn(record, key))).toEqual([]);
+
+    // Only a create fills the default: an update that does not mention such a list keeps its value.
+    const { id } = await graphql({ schema, source: '{ protoListboards { id } }' }).then(({ data }) => data.protoListboards[0]);
+    await graphql({ schema, source: `mutation { updateprotoListboard(input: { id: "${id}", toString: ["t"], valueOf: ["v"] }) { id } }` });
+    const updated = await graphql({ schema, source: `mutation { updateprotoListboard(input: { id: "${id}", name: "c" }) { name toString valueOf } }` });
+    expect(updated).toEqual({ data: { updateprotoListboard: { name: 'c', toString: ['t'], valueOf: ['v'] } } });
+  });
+
+  test.each(['toString', 'code'])('an update that omits the required list item member %s fails as for any name', async (member) => {
+    const adapter = createMemoryAdapter();
+    const runtime = createRuntime(adapter);
+    const prefix = member === 'code' ? 'ProtoRequiredCode' : 'ProtoRequiredMember';
+    const Part = new GraphQLObjectType({
+      name: `${prefix}Part`,
+      fields: {
+        label: { type: GraphQLString },
+        code: { type: new GraphQLNonNull(GraphQLString) },
+        toString: { type: new GraphQLNonNull(GraphQLString) },
+      },
+    });
+    const Gauge = new GraphQLObjectType({
+      name: `${prefix}Gauge`,
+      fields: {
+        id: { type: GraphQLID },
+        parts: { type: new GraphQLList(Part), extensions: { relation: { embedded: true } } },
+      },
+    });
+    runtime.addNoEndpointType(Part);
+    runtime.connect(null, Gauge, `${prefix}gauge`, `${prefix}gauges`);
+    const schema = runtime.createSchema();
+    const created = await graphql({
+      schema, source: `mutation { add${prefix}gauge(input: { parts: [{ label: "a", code: "c", toString: "t" }] }) { id } }`,
+    });
+    const { id } = created.data[`add${prefix}gauge`];
+    const kept = Object.entries({ label: 'b', code: 'c', toString: 't' }).filter(([name]) => name !== member);
+
+    const updated = await graphql({
+      schema,
+      source: `mutation { update${prefix}gauge(input: { id: "${id}", parts: [{ ${kept.map(([name, value]) => `${name}: "${value}"`).join(', ')} }] }) { id } }`,
+    });
+
+    expect(updated.errors).toEqual([expect.objectContaining({
+      message: `Required value ${member} is missing`,
+      extensions: expect.objectContaining({ code: 'REQUIRED_VALUE', status: 400 }),
+    })]);
+    expect(adapter.getRecords()[0].parts).toEqual([{ label: 'a', code: 'c', toString: 't' }]);
+  });
+
+  test.each([
+    ['read by id', 'ProtoRefDirect', false],
+    ['read in batches', 'ProtoRefBatched', true],
+  ])('resolves a reference named constructor only from its connectionField: %s', async (label, prefix, getByIds) => {
+    const castId = (value) => {
+      if (!/^\d+$/.test(String(value))) throw new SimfinityError('Invalid identifier', 'NOT_VALID_ID', 400);
+      return Number(value);
+    };
+    const adapter = createKeyedAdapter({ castId, withId: true, getByIds });
+    const runtime = createRuntime(adapter);
+    const types = createGaugeTypes(prefix);
+    register(runtime, types, prefix);
+    // Like a hydrated MongoDB document, it inherits `constructor` from its class.
+    class Hydrated {
+      constructor(name) {
+        this.name = name;
+      }
+    }
+    const ModeInput = new GraphQLInputObjectType({ name: `${prefix}ModeInput`, fields: { mode: { type: GraphQLString } } });
+    runtime.registerMutation(`${prefix}hydrated`, 'Returns a gauge instance', ModeInput, types.Gauge,
+      async () => new Hydrated('hydrated'));
+    const schema = runtime.createSchema();
+    adapter.seed(`${prefix}Maker`, { _id: 1, id: 1, name: 'maker' });
+    adapter.seed(`${prefix}Gauge`, { _id: 1, id: 1, name: 'linked', makerId: 1 });
+    adapter.seed(`${prefix}Gauge`, { _id: 2, id: 2, name: 'cleared', makerId: null });
+    adapter.seed(`${prefix}Gauge`, { _id: 3, id: 3, name: 'absent' });
+    const run = (source) => graphql({ schema, source, contextValue: {} });
+
+    const list = await run(`{ ${prefix}gauges { name constructor { name } } }`);
+    const byId = await run(`{ ${prefix}gauge(id: "3") { name constructor { name } } }`);
+    const hydrated = await run(`mutation { ${prefix}hydrated(input: { mode: "x" }) { name constructor { name } } }`);
+
+    expect(list).toEqual({
+      data: {
+        [`${prefix}gauges`]: [
+          { name: 'linked', constructor: { name: 'maker' } },
+          { name: 'cleared', constructor: null },
+          { name: 'absent', constructor: null },
+        ],
+      },
+    });
+    expect(byId).toEqual({ data: { [`${prefix}gauge`]: { name: 'absent', constructor: null } } });
+    expect(hydrated).toEqual({ data: { [`${prefix}hydrated`]: { name: 'hydrated', constructor: null } } });
+  });
+
+  test.each([
+    ['without an embedded value hook', 'ProtoRead', createMemoryAdapter],
+    ['with an embedded value hook', 'ProtoReadHook', () => Object.assign(createMemoryAdapter(), {
+      readEmbeddedValue: vi.fn((value) => value),
+    })],
+  ])('reads absent members as null and keeps own values, methods and class members: %s', async (label, prefix, createAdapter) => {
+    const adapter = createAdapter();
+    const runtime = createRuntime(adapter);
+    const types = createGaugeTypes(prefix);
+    register(runtime, types, prefix);
+    class Reading {
+      constructor(name) {
+        this.name = name;
+      }
+
+      toString() {
+        return `class ${this.name}`;
+      }
+    }
+    const results = {
+      absent: { id: 'a', name: 'absent', snapshot: {} },
+      value: {
+        id: 'v', name: 'value', toString: 'stored', valueOf: { name: 'meta', toString: ['x'] },
+      },
+      method: { id: 'm', name: 'method', toString() { return `own ${this.name}`; } },
+      instance: new Reading('instance'),
+      // A MongoDB nested path returns the inherited member from an own accessor.
+      accessor: {
+        id: 'n',
+        name: 'accessor',
+        valueOf: Object.defineProperty({ name: 'meta' }, 'toString', { get: () => Object.prototype.toString, enumerable: true }),
+      },
+    };
+    const ModeInput = new GraphQLInputObjectType({ name: `${prefix}ModeInput`, fields: { mode: { type: GraphQLString } } });
+    runtime.registerMutation(`${prefix}read`, 'Returns a gauge', ModeInput, types.Gauge, async ({ mode }) => results[mode]);
+    const schema = runtime.createSchema();
+    await adapter.saveRecord({ name: `${prefix}Gauge` }, { _id: '1', name: 'stored', valueOf: { name: 'meta' } });
+    const fields = 'name toString valueOf { name tags toString } snapshot { toString }';
+    const read = async (mode) => {
+      const result = await graphql({ schema, source: `mutation { ${prefix}read(input: { mode: "${mode}" }) { ${fields} } }` });
+      expect(result.errors).toBeUndefined();
+      return result.data[`${prefix}read`];
+    };
+
+    expect(await read('absent')).toEqual({
+      name: 'absent', toString: null, valueOf: null, snapshot: { toString: null },
+    });
+    expect(await read('value')).toEqual({
+      name: 'value', toString: 'stored', valueOf: { name: 'meta', tags: null, toString: ['x'] }, snapshot: null,
+    });
+    expect(await read('method')).toEqual({
+      name: 'method', toString: 'own method', valueOf: null, snapshot: null,
+    });
+    expect(await read('instance')).toEqual({
+      name: 'instance', toString: 'class instance', valueOf: null, snapshot: null,
+    });
+    expect(await read('accessor')).toEqual({
+      name: 'accessor', toString: null, valueOf: { name: 'meta', tags: null, toString: null }, snapshot: null,
+    });
+    const stored = await graphql({ schema, source: `{ ${prefix}gauges { ${fields} } }` });
+    expect(stored).toEqual({
+      data: {
+        [`${prefix}gauges`]: [{
+          name: 'stored', toString: null, valueOf: { name: 'meta', tags: null, toString: null }, snapshot: null,
+        }],
+      },
+    });
+    const generated = (type, field) => typeof type.getFields()[field].resolve === 'function';
+    expect([
+      generated(types.Gauge, 'toString'), generated(types.Meta, 'toString'), generated(types.Snapshot, 'toString'),
+      generated(types.Gauge, 'name'), generated(types.Meta, 'tags'),
+    ]).toEqual([true, true, true, false, false]);
+  });
+
+  test('installs a resolver that reads no data, so the types stay shareable', async () => {
+    const Meta = new GraphQLObjectType({ name: 'ProtoSharedMeta', fields: { toString: { type: GraphQLString } } });
+    const Note = new GraphQLObjectType({
+      name: 'ProtoSharedNote',
+      fields: {
+        id: { type: GraphQLID },
+        valueOf: { type: GraphQLString },
+        meta: { type: Meta, extensions: { relation: { embedded: true } } },
+      },
+    });
+    for (const adapter of [createMemoryAdapter(), createMemoryAdapter()]) {
+      const runtime = createRuntime(adapter);
+      runtime.addNoEndpointType(Meta);
+      runtime.connect(null, Note, 'protoSharedNote', 'protoSharedNotes');
+      const schema = runtime.createSchema();
+      await adapter.saveRecord({ name: 'ProtoSharedNote' }, { _id: '1', meta: {} });
+
+      const read = await graphql({ schema, source: '{ protoSharedNotes { valueOf meta { toString } } }' });
+
+      expect(read).toEqual({ data: { protoSharedNotes: [{ valueOf: null, meta: { toString: null } }] } });
+    }
+  });
+});

@@ -66,9 +66,12 @@ export class SimfinityError extends Error {
   getCode(): string | undefined;
   getStatus(): number | undefined;
   getTimestamp(): string;
-  /** Set on errors that wrap a driver error, such as MongoDB's TRANSACTION_RETRY_EXCEEDED. */
+  /**
+   * Set on errors that wrap a driver error, such as TRANSACTION_RETRY_EXCEEDED, and on the PostgreSQL database errors
+   * that a SQL runtime maps or reports as DATABASE_ERROR; on those PostgreSQL errors it is not enumerable.
+   */
   cause?: unknown;
-  /** Set on errors that wrap a driver error, such as MongoDB's TRANSACTION_RETRY_EXCEEDED; returns `cause`. */
+  /** Set on errors that wrap a driver error, such as TRANSACTION_RETRY_EXCEEDED, and on PostgreSQL database errors; returns `cause`. */
   getCause?(): unknown;
 }
 
