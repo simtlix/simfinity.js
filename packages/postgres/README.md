@@ -31,7 +31,7 @@ import { postgresPlugin } from '@simtlix/simfinity-postgres';
 const simfinity = createSQL({ plugin: postgresPlugin({ pool, schema: 'library' }) });
 ```
 
-Install `@simtlix/simfinity-sql@3.5.4` as a direct dependency when importing its factory. PostgreSQL 15 or later is the only supported SQL plugin. The [SQL package guide](https://github.com/simtlix/simfinity.js/tree/master/packages/sql) documents relational planning and the versioned plugin contract.
+Install `@simtlix/simfinity-sql@3.5.5` as a direct dependency when importing its factory. PostgreSQL 15 or later is the only supported SQL plugin. The [SQL package guide](https://github.com/simtlix/simfinity.js/tree/master/packages/sql) documents relational planning and the versioned plugin contract.
 
 Both factories permanently bind one pool and schema. The returned runtime supports registration, generated queries and mutations, middleware and scopes, controllers and validators, custom mutations, state machines, nested relationship writes, embedded reconstruction, and native PostgreSQL model handles. Native handles expose `findById`, `find`, `create`, `update`, and `delete`; they are not Mongoose models. `find(args, { session })` accepts the generated GraphQL list query arguments. Existing `pg.Pool` configuration and `pg.PoolClient` query interfaces remain compatible across both factories.
 
@@ -60,7 +60,7 @@ The module and every `createPostgres` instance expose the shared `auth`, `valida
 MCP integration is an independent opt-in and does not add MCP dependencies to PostgreSQL applications:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.4 @modelcontextprotocol/sdk@^1.13.0
+npm install @simtlix/simfinity-mcp@3.5.5 @modelcontextprotocol/sdk@^1.13.0
 ```
 
 ```javascript

@@ -1,6 +1,6 @@
 {
   "name": "simfinity-workspace",
-  "version": "3.5.4",
+  "version": "3.5.5",
   "private": true,
   "description": "Development and release tooling for the Simfinity packages",
   "type": "module",
@@ -35,5 +35,10 @@
     "graphql-middleware": "^6.1.35",
     "mongoose": "^8.24.2",
     "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "graphql-middleware": {
+      "@graphql-tools/utils": "^12.0.1"
+    }
   }
 }

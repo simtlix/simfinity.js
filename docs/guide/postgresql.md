@@ -13,14 +13,14 @@ Version 3.3.0 also exposes a [driver-free SQL core and PostgreSQL plugin](./sql-
 
 ## Download and install
 
-[Download the v3.5.4 starters](/releases/simfinity-3.5.4-starters.zip), extract them, and install the PostgreSQL application from npm:
+[Download the v3.5.5 starters](/releases/simfinity-3.5.5-starters.zip), extract them, and install the PostgreSQL application from npm:
 
 ```sh
-cd simfinity-3.5.4-starters/postgres
+cd simfinity-3.5.5-starters/postgres
 npm install
 ```
 
-The starter uses `createSQL` with `postgresPlugin` and installs released core, SQL and PostgreSQL packages plus GraphQL, Yoga, and `pg`; it does not install Mongoose or MCP. See [download verification and package versions](./databases#download-the-starters). Use Node.js 22 or newer for the starter. The library supports Node.js `>=18.18.0`, GraphQL 16, and PostgreSQL 15, 16, and 18.
+The starter uses `createSQL` with `postgresPlugin` and installs released core, SQL and PostgreSQL packages plus GraphQL, Yoga, and `pg`; it does not install Mongoose or MCP. See [download verification and package versions](./databases#download-the-starters). Use Node.js 22.15.0 or newer for the starter. The library supports Node.js `>=18.18.0`, GraphQL 16, and PostgreSQL 15, 16, and 18.
 
 ## Start a disposable database
 
@@ -128,7 +128,7 @@ Read the [detailed PostgreSQL storage and compatibility reference](../postgresql
 MCP is a separate package so PostgreSQL and core do not install its SDK chain. Install both the MCP package and SDK only when the application exposes tools:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.4 \
+npm install @simtlix/simfinity-mcp@3.5.5 \
   @modelcontextprotocol/sdk@^1.13.0
 ```
 

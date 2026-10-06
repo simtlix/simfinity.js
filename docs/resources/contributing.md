@@ -169,3 +169,7 @@ Open an [issue on GitHub](https://github.com/simtlix/simfinity.js/issues) with y
 - [Package on npm](https://www.npmjs.com/package/@simtlix/simfinity-js)
 - [Release history](https://github.com/simtlix/simfinity.js/releases)
 - [Apache 2.0 License](https://github.com/simtlix/simfinity.js/blob/master/LICENSE)
+
+### Development dependency security overrides
+
+The private workspace overrides `@graphql-tools/utils` under `graphql-middleware` to `^12.0.1` for [GHSA-7mx3-vvmw-hjmv](https://github.com/advisories/GHSA-7mx3-vvmw-hjmv). This affects the plain-GraphQL authorization compatibility tests only; it is not shipped as a library dependency. Keep the real middleware integration test in `tests/auth-policy-safety.test.js` when updating this override. The downloadable starters use the same patched utility range for Yoga. Remove these overrides only after the corresponding dependency trees require a patched version and the tests and audits pass.

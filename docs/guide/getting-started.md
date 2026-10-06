@@ -14,13 +14,13 @@ For transactional reference checks and restrict-delete behavior in MongoDB, opt 
 
 ## Download the starter
 
-[Download the v3.5.4 starters](/releases/simfinity-3.5.4-starters.zip) and extract them. The `mongodb` folder contains the files shown below and installs the released packages from npm. See [downloads and checksums](./databases#download-the-starters).
+[Download the v3.5.5 starters](/releases/simfinity-3.5.5-starters.zip) and extract them. The `mongodb` folder contains the files shown below and installs the released packages from npm. See [downloads and checksums](./databases#download-the-starters).
 
-For the published MongoDB release, the [original 3.0.1 starter](/simfinity-series-starter.zip) remains available; its schema and server support this page's operations. The rest of this site documents v3.5.4; see the [upgrade notes](../resources/compatibility#upgrade-to-3-5-4) before updating the archived starter.
+For the published MongoDB release, the [original 3.0.1 starter](/simfinity-series-starter.zip) remains available; its schema and server support this page's operations. The rest of this site documents v3.5.5; see the [upgrade notes](../resources/compatibility#upgrade-to-3-5-5) before updating the archived starter.
 
 | Before you begin | You will build |
 | --- | --- |
-| Node.js 22+, npm, and a transaction-capable MongoDB deployment | A GraphQL endpoint at `http://localhost:4000/graphql` |
+| Node.js 22.15.0+, npm, and a transaction-capable MongoDB deployment | A GraphQL endpoint at `http://localhost:4000/graphql` |
 | Docker for the local database recipe, or an existing replica set | A series catalog with embedded seasons and a generated MCP read tool |
 
 <DomainDiagram kind="schema" />
@@ -30,7 +30,7 @@ For the published MongoDB release, the [original 3.0.1 starter](/simfinity-serie
 Use a supported Node.js LTS release and npm. The library itself requires Node.js `>=18.18.0`.
 
 ```sh
-cd simfinity-3.5.4-starters/mongodb
+cd simfinity-3.5.5-starters/mongodb
 npm install
 ```
 
