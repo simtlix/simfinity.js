@@ -10,9 +10,14 @@ import {
   GraphQLString,
   GraphQLBoolean,
   GraphQLInt,
+  GraphQLFloat,
+  GraphQLList,
   GraphQLNonNull,
+  GraphQLID,
 } from 'graphql';
+import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
 import * as simfinity from '../packages/mongodb/src/index.js';
+import { createRuntime } from '../packages/core/src/index.js';
 
 // ---------------------------------------------------------------------------
 // Simfinity-connected schema (unique McpOpt* type names so the per-file global
@@ -172,8 +177,8 @@ describe('MCP tool-definition options (stub schemas)', () => {
     }),
   });
 
-  // A type whose only field requires an argument: the single shape where the
-  // includeId fallback is observable in the generated document.
+  // A type whose only field requires an argument: no leaf is selectable, so
+  // the generated document falls back to __typename.
   const GatedType = new GraphQLObjectType({
     name: 'McpOptGated',
     fields: () => ({
@@ -205,11 +210,8 @@ describe('MCP tool-definition options (stub schemas)', () => {
       expect(doc).not.toContain('grand');
     });
 
-    it('selectionDepth 2 with includeId false expands two nesting levels in the document', () => {
-      const { getOperation } = simfinity.generateMCPTools(nestedSchema, {
-        selectionDepth: 2,
-        includeId: false,
-      });
+    it('selectionDepth 2 expands two nesting levels in the document', () => {
+      const { getOperation } = simfinity.generateMCPTools(nestedSchema, { selectionDepth: 2 });
       const doc = getOperation('parent');
       expect(doc).toContain('child { id grand { id gname } }');
     });
@@ -222,14 +224,49 @@ describe('MCP tool-definition options (stub schemas)', () => {
       expect(childSchema.properties.grand.properties.gname).toBeDefined();
     });
 
-    it('includeId false falls back to __typename when nothing is selectable', () => {
-      const { getOperation } = simfinity.generateMCPTools(nestedSchema, { includeId: false });
+    it('falls back to __typename when no leaf is selectable (an id with required args) (guard)', () => {
+      const { getOperation, tools } = simfinity.generateMCPTools(nestedSchema);
       expect(getOperation('gated')).toContain('gated { __typename }');
+      expect(tools.find((tool) => tool.name === 'gated').outputSchema.properties.gated.properties)
+        .toEqual({ __typename: { type: 'string' } });
     });
 
-    it('includeId true must not select an id field whose required args cannot be satisfied', () => {
-      const { getOperation } = simfinity.generateMCPTools(nestedSchema);
-      expect(getOperation('gated')).toContain('gated { __typename }');
+    it('accepts the deprecated includeId without changing selections or output schemas (guard)', () => {
+      const ColorEnum = new GraphQLEnumType({ name: 'McpOptIdColor', values: { RED: {} } });
+      const Opaque = new GraphQLScalarType({ name: 'McpOptOpaqueId', serialize: (value) => value });
+      const idOf = (name, type, args) => new GraphQLObjectType({ name, fields: { id: { type, args } } });
+      const idSchema = new GraphQLSchema({
+        query: new GraphQLObjectType({
+          name: 'Query',
+          fields: {
+            enumId: { type: idOf('McpOptEnumId', ColorEnum) },
+            listId: { type: idOf('McpOptListId', new GraphQLList(GraphQLString)) },
+            opaqueId: { type: idOf('McpOptOpaqueIdHolder', Opaque) },
+            defaultedArgId: {
+              type: idOf('McpOptDefaultedArgId', GraphQLString, { upper: { type: new GraphQLNonNull(GraphQLBoolean), defaultValue: false } }),
+            },
+            parent: { type: ParentType },
+            gated: { type: GatedType },
+          },
+        }),
+      });
+      const snapshot = (options) => {
+        const { tools, getOperation } = simfinity.generateMCPTools(idSchema, options);
+        return tools.map((tool) => [getOperation(tool.name), tool.outputSchema]);
+      };
+      const base = snapshot({});
+      expect(snapshot({ includeId: true })).toEqual(base);
+      expect(snapshot({ includeId: false })).toEqual(base);
+      expect(snapshot({
+        toolOverrides: Object.fromEntries(['enumId', 'listId', 'opaqueId', 'defaultedArgId', 'parent', 'gated']
+          .map((name) => [name, { includeId: false }])),
+      })).toEqual(base);
+      const documents = base.map(([operation]) => operation).join('\n');
+      expect(documents).toContain('enumId { id }');
+      expect(documents).toContain('listId { id }');
+      expect(documents).toContain('opaqueId { id }');
+      expect(documents).toContain('defaultedArgId { id }');
+      expect(documents).toContain('gated { __typename }');
     });
   });
 
@@ -435,8 +472,14 @@ describe('MCP tool-definition options (stub schemas)', () => {
             description: 'Regenerate the report for an order.',
             resolve: () => null,
           },
-          // No description at all: the name-prefix fallback applies.
+          // No description at all: a name prefix alone never makes a CRUD tool.
+          addFallback: { type: OrderType, resolve: () => null },
           updateFallback: { type: OrderType, resolve: () => null },
+          deleteFallback: {
+            type: OrderType,
+            args: { input: { type: GraphQLString } },
+            resolve: () => null,
+          },
         },
       }),
     });
@@ -486,10 +529,82 @@ describe('MCP tool-definition options (stub schemas)', () => {
       expect(custom.annotations.destructiveHint).toBeUndefined();
     });
 
-    it('applies the name-prefix fallback only when there is no description', () => {
-      const fallback = tools.find((tool) => tool.name === 'updateFallback');
-      expect(fallback.annotations.idempotentHint).toBe(true);
-      expect(fallback.title).toBe('Update McpOptOrder');
+    it.each(['addFallback', 'updateFallback', 'deleteFallback'])('treats the description-less %s as custom', (name) => {
+      const custom = tools.find((tool) => tool.name === name);
+      expect(custom.title).toBe(name);
+      expect(custom.description).toBe(`Execute the \`${name}\` operation.`);
+      expect(custom.annotations).toEqual({ title: name, openWorldHint: false, readOnlyHint: false });
+    });
+  });
+
+  // --- custom root queries -------------------------------------------------------
+  describe('custom root queries', () => {
+    const UserType = new GraphQLObjectType({
+      name: 'McpOptUser',
+      description: 'A user.',
+      fields: () => ({
+        id: { type: GraphQLString },
+        name: { type: GraphQLString },
+      }),
+    });
+    const UserPagination = new GraphQLInputObjectType({
+      name: 'McpOptUserPagination',
+      fields: () => ({ page: { type: GraphQLInt }, size: { type: GraphQLInt } }),
+    });
+    const users = [{ id: 'u1', name: 'Me' }, { id: 'u2', name: 'Other' }];
+    const querySchema = new GraphQLSchema({
+      query: new GraphQLObjectType({
+        name: 'Query',
+        fields: {
+          currentUser: { type: UserType, resolve: () => users[0] },
+          recentUsers: { type: new GraphQLList(UserType), resolve: () => users },
+          userCount: { type: GraphQLInt, resolve: () => users.length },
+          user: {
+            type: UserType,
+            args: { id: { type: GraphQLString } },
+            resolve: (parent, args) => users.find((candidate) => candidate.id === args.id) || null,
+          },
+          pagedUsers: {
+            type: new GraphQLList(UserType),
+            args: { pagination: { type: UserPagination } },
+            resolve: () => users,
+          },
+        },
+      }),
+    });
+    let tools;
+
+    beforeAll(() => {
+      ({ tools } = simfinity.generateMCPTools(querySchema));
+    });
+
+    it('publishes a query without id or pagination as a read-only tool titled by its field', () => {
+      const current = tools.find((tool) => tool.name === 'currentUser');
+      expect(current.title).toBe('currentUser');
+      expect(current.description).toBe('Run the read-only `currentUser` query. Returns McpOptUser data. A user.');
+      expect(current.annotations).toEqual({ title: 'currentUser', openWorldHint: false, readOnlyHint: true });
+
+      const recent = tools.find((tool) => tool.name === 'recentUsers');
+      expect(recent.title).toBe('recentUsers');
+      expect(recent.description).toBe('Run the read-only `recentUsers` query. Returns McpOptUser data. A user.');
+      expect(recent.description).not.toContain('pagination');
+      expect(recent.annotations.readOnlyHint).toBe(true);
+      expect(recent.outputSchema.properties).not.toHaveProperty('totalCount');
+
+      const count = tools.find((tool) => tool.name === 'userCount');
+      expect(count.title).toBe('userCount');
+      expect(count.description).toBe('Run the read-only `userCount` query.');
+    });
+
+    it('keeps get-by-id and paginated list tools for queries with those arguments (guard)', () => {
+      const single = tools.find((tool) => tool.name === 'user');
+      expect(single.title).toBe('Get McpOptUser');
+      expect(single.description).toContain('Fetch a single McpOptUser by id');
+
+      const paged = tools.find((tool) => tool.name === 'pagedUsers');
+      expect(paged.title).toBe('List McpOptUser');
+      expect(paged.description).toContain('pagination (page/size)');
+      expect(paged.outputSchema.properties).toHaveProperty('totalCount');
     });
   });
 
@@ -550,11 +665,74 @@ describe('MCP tool-definition options (stub schemas)', () => {
       expect(eventProps.mood.enum).toEqual(['HAPPY', 'SAD', null]);
     });
 
-    it('maps Date-like scalars to string formats (incl. baseScalarType)', () => {
-      expect(eventProps.day).toMatchObject({ format: 'date' });
-      expect(eventProps.day.type).toEqual(['string', 'null']);
-      expect(eventProps.at).toMatchObject({ format: 'date-time' });
-      expect(eventProps.slot).toMatchObject({ format: 'time' });
+    const dateTimeNote = (name) => `Date/time value; its JSON form is defined by the server's ${name} scalar (commonly an ISO 8601 string).`;
+
+    it('publishes Date-like output scalars without a type or format, with a curated description (incl. baseScalarType)', () => {
+      // Their serialize decides the JSON form (ISO instant, epoch millis,
+      // 'YYYY-MM-DD'...), so a format would make SDK clients reject results.
+      expect(eventProps.day).toEqual({ description: dateTimeNote('Date') });
+      expect(eventProps.at).toEqual({ description: dateTimeNote('DateTime') });
+      expect(eventProps.slot).toEqual({ description: dateTimeNote('McpOptValidatedTime') });
+    });
+
+    it('publishes a primitive output type only for scalars that serialize through a spec scalar', async () => {
+      // A storage hint does not make serialize return the hinted type.
+      const Decimal = new GraphQLScalarType({
+        name: 'McpOptDecimal',
+        description: 'Fixed-point amount.',
+        serialize: (value) => Number(value).toFixed(2),
+        parseValue: (value) => value,
+      });
+      Decimal.baseScalarType = GraphQLFloat;
+      const noCheck = () => {};
+      const Price = simfinity.createValidatedScalar('McpOptPrice', 'A price.', Decimal, noCheck);
+      const Count = simfinity.createValidatedScalar('McpOptCount', 'A count.', GraphQLInt, noCheck);
+      const Due = simfinity.createValidatedScalar('McpOptDue', undefined, eventSchema.getType('Date'), noCheck);
+      const Amount = new GraphQLScalarType({ name: 'McpOptAmount', serialize: (value) => value });
+      // Copying a validated scalar's base by hand does not make it one.
+      Amount.baseScalarType = Count;
+      const Line = new GraphQLObjectType({
+        name: 'McpOptLine',
+        fields: {
+          amount: { type: new GraphQLNonNull(Decimal) },
+          price: { type: Price },
+          count: { type: new GraphQLNonNull(Count) },
+          due: { type: Due },
+          dues: { type: new GraphQLList(Due) },
+          hinted: { type: Amount },
+        },
+      });
+      const lineSchema = new GraphQLSchema({
+        query: new GraphQLObjectType({
+          name: 'Query',
+          fields: {
+            line: {
+              type: Line,
+              args: { amount: { type: Decimal }, price: { type: Price } },
+              resolve: () => ({
+                amount: 12.3, price: 4, count: 2, due: '2026-09-28', dues: [], hinted: 'x',
+              }),
+            },
+          },
+        }),
+      });
+      const { tools, callTool } = simfinity.generateMCPTools(lineSchema);
+      const line = tools.find((tool) => tool.name === 'line');
+      const props = line.outputSchema.properties.line.properties;
+      expect(props.amount).toEqual({ description: 'Fixed-point amount.' });
+      expect(props.price).toEqual({ description: 'A price.' });
+      expect(props.count).toEqual({ type: 'integer', description: 'A count.' });
+      expect(props.due).toEqual({ description: dateTimeNote('McpOptDue_Date') });
+      expect(props.dues).toEqual({ type: ['array', 'null'], items: { description: dateTimeNote('McpOptDue_Date') } });
+      expect(props.hinted).toEqual({});
+      // Input schemas keep following the storage hint.
+      expect(line.inputSchema.properties.amount).toEqual({ type: ['number', 'null'], description: 'Fixed-point amount.' });
+      expect(line.inputSchema.properties.price).toEqual({ type: ['number', 'null'], description: 'A price.' });
+
+      const result = await callTool('line', {});
+      expect(result.structuredContent.line).toMatchObject({ amount: '12.30', price: '4.00' });
+      const validate = new AjvJsonSchemaValidator().getValidator(line.outputSchema);
+      expect(validate(result.structuredContent)).toMatchObject({ valid: true });
     });
 
     it('accepts null at nullable input positions', () => {
@@ -677,6 +855,275 @@ describe('MCP tool-definition options (stub schemas)', () => {
       }
       expect(error).toBeDefined();
       expect(error.extensions.code).toBe('MCP_TOOL_NOT_FOUND');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Schemas generated by core runtimes over an in-memory adapter.
+// ---------------------------------------------------------------------------
+
+describe('MCP operation classification of core-generated schemas', () => {
+  const createMemoryAdapter = () => {
+    const records = new Map();
+    let nextId = 1;
+    return {
+      bind() {},
+      prepare() {},
+      createModel: (gqltype) => ({ name: gqltype.name }),
+      castId: (value) => String(value),
+      withTransaction: async (session, body) => body(session || { adapter: 'memory' }),
+      newRecord: (Model, data) => ({ ...data, _id: String(nextId++), model: Model.name }),
+      async saveRecord(Model, record) {
+        records.set(record._id, record);
+        return record;
+      },
+      toObject: (record) => ({ ...record }),
+      async getById(Model, id) { return records.get(String(id)) || null; },
+      prepareUpdate: (set, unset) => ({ set, unset }),
+      async update(Model, id, update) {
+        const current = records.get(String(id));
+        for (const key of Object.keys(update.unset)) delete current[key];
+        Object.assign(current, update.set);
+        return current;
+      },
+      async delete(Model, id) {
+        const record = records.get(String(id)) || null;
+        records.delete(String(id));
+        return record;
+      },
+      async find() { return [...records.values()]; },
+      async count() { return records.size; },
+      async aggregate() { return []; },
+      async findChildren() { return []; },
+      rows: (modelName) => [...records.values()].filter((record) => record.model === modelName),
+    };
+  };
+
+  const DRAFT = { name: 'DRAFT', value: 'DRAFT' };
+  const PUBLISHED = { name: 'PUBLISHED', value: 'PUBLISHED' };
+  const DISCARDED = { name: 'DISCARDED', value: 'DISCARDED' };
+  const ARCHIVED = { name: 'ARCHIVED', value: 'ARCHIVED' };
+
+  // A state machine whose description-less actions start with add/update/
+  // delete, plus custom mutations named like CRUD (the shapes the removed
+  // scripts/repro-mcp.mjs printed).
+  const buildDocs = () => {
+    const adapter = createMemoryAdapter();
+    const runtime = createRuntime(adapter);
+    const DocType = new GraphQLObjectType({
+      name: 'McpOptDoc',
+      fields: () => ({
+        id: { type: GraphQLID },
+        title: { type: GraphQLString },
+        state: { type: GraphQLString },
+      }),
+    });
+    const CreditsInput = new GraphQLInputObjectType({
+      name: 'McpOptCreditsInput',
+      fields: () => ({ amount: { type: GraphQLInt } }),
+    });
+    runtime.connect(null, DocType, 'mcpoptdoc', 'mcpoptdocs', null, null, {
+      initialState: DRAFT,
+      actions: {
+        deleteDraft: { from: DRAFT, to: DISCARDED },
+        updateStatus: { from: DRAFT, to: PUBLISHED },
+        addToArchive: { from: PUBLISHED, to: ARCHIVED },
+        publish: { from: DRAFT, to: PUBLISHED, description: 'Publish the doc' },
+      },
+    });
+    runtime.registerMutation('deleteExpiredDocs', undefined, null, DocType, async () => null);
+    runtime.registerMutation('updateStats', 'update', null, DocType, async () => null);
+    runtime.registerMutation('addCredits', 'add', CreditsInput, DocType, async () => null);
+    return { adapter, schema: runtime.createSchema() };
+  };
+
+  const byName = (tools, name) => tools.find((tool) => tool.name === name);
+
+  it('tags generated mutation fields with extensions.simfinityMutation', () => {
+    const { schema } = buildDocs();
+    const mutations = schema.getMutationType().getFields();
+    const marker = (name) => mutations[name].extensions.simfinityMutation;
+
+    expect(marker('addmcpoptdoc')).toEqual({ typeName: 'McpOptDoc', operation: 'save' });
+    expect(marker('updatemcpoptdoc')).toEqual({ typeName: 'McpOptDoc', operation: 'update' });
+    expect(marker('deletemcpoptdoc')).toEqual({ typeName: 'McpOptDoc', operation: 'delete' });
+    expect(marker('deleteDraft_mcpoptdoc')).toEqual({
+      typeName: 'McpOptDoc', operation: 'state_changed', action: 'deleteDraft', from: 'DRAFT', to: 'DISCARDED',
+    });
+    expect(marker('deleteExpiredDocs')).toEqual({ operation: 'custom_mutation' });
+    expect(marker('addCredits')).toEqual({ operation: 'custom_mutation' });
+    // The get-by-id query stays unmarked: core auth reads simfinityQuery.
+    expect(schema.getQueryType().getFields().mcpoptdoc.extensions.simfinityQuery).toBeUndefined();
+  });
+
+  it('publishes state-machine actions as transitions, not CRUD', async () => {
+    const { adapter, schema } = buildDocs();
+    const { tools, callTool } = simfinity.generateMCPTools(schema);
+
+    const discard = byName(tools, 'deleteDraft_mcpoptdoc');
+    expect(discard.title).toBe('deleteDraft_mcpoptdoc');
+    expect(discard.title).not.toBe(byName(tools, 'deletemcpoptdoc').title);
+    expect(discard.description).toBe('Apply the `deleteDraft` state transition to an existing McpOptDoc. '
+      + 'It is allowed only while the McpOptDoc is in state DRAFT and moves it to DISCARDED. '
+      + 'Provide `input` with the record\'s `id`; other fields in `input` are updated too. Returns the updated McpOptDoc.');
+    expect(discard.annotations).toEqual({ title: 'deleteDraft_mcpoptdoc', openWorldHint: false, readOnlyHint: false });
+
+    const status = byName(tools, 'updateStatus_mcpoptdoc');
+    expect(status.title).toBe('updateStatus_mcpoptdoc');
+    expect(status.annotations).not.toHaveProperty('idempotentHint');
+    expect(status.description).toContain('Apply the `updateStatus` state transition');
+
+    const archive = byName(tools, 'addToArchive_mcpoptdoc');
+    expect(archive.description).not.toContain('Create a new');
+    expect(archive.description).toContain('in state PUBLISHED and moves it to ARCHIVED');
+
+    const publish = byName(tools, 'publish_mcpoptdoc');
+    expect(publish.title).toBe('publish_mcpoptdoc');
+    expect(publish.description).toBe('Publish the doc');
+
+    // The description holds: the action checks the state and updates the
+    // other input fields too.
+    const created = await callTool('addmcpoptdoc', { input: { title: 'Draft' } });
+    const { id } = created.structuredContent.addmcpoptdoc;
+    const first = await callTool('deleteDraft_mcpoptdoc', { input: { id, title: 'Gone' } });
+    expect(first.isError).toBe(false);
+    expect(first.structuredContent.deleteDraft_mcpoptdoc).toMatchObject({ id, title: 'Gone', state: 'DISCARDED' });
+    expect(adapter.rows('McpOptDoc')).toHaveLength(1);
+    const again = await callTool('deleteDraft_mcpoptdoc', { input: { id } });
+    expect(again.isError).toBe(true);
+    expect(again.content[0].text).toContain('Action is not allowed from state DISCARDED');
+  });
+
+  it('classifies registered custom mutations as custom whatever their name and description', () => {
+    const { tools } = simfinity.generateMCPTools(buildDocs().schema);
+
+    for (const name of ['deleteExpiredDocs', 'updateStats', 'addCredits']) {
+      const custom = byName(tools, name);
+      expect(custom.title).toBe(name);
+      expect(custom.description).toBe(`Execute the \`${name}\` operation.`);
+      expect(custom.annotations).toEqual({ title: name, openWorldHint: false, readOnlyHint: false });
+    }
+  });
+
+  it('keeps CRUD tools and makes description-less actions custom without the simfinityMutation marker', () => {
+    // Schemas rebuilt from SDL or introspection, or built by an older core,
+    // carry no extensions.
+    const { schema } = buildDocs();
+    for (const field of Object.values(schema.getMutationType().getFields())) {
+      const { simfinityMutation, ...rest } = field.extensions;
+      expect(simfinityMutation).toBeDefined();
+      field.extensions = rest;
+    }
+    const { tools } = simfinity.generateMCPTools(schema);
+
+    expect(byName(tools, 'addmcpoptdoc').title).toBe('Create McpOptDoc');
+    expect(byName(tools, 'addmcpoptdoc').description).toContain('Create a new McpOptDoc');
+    expect(byName(tools, 'updatemcpoptdoc').title).toBe('Update McpOptDoc');
+    expect(byName(tools, 'updatemcpoptdoc').annotations.idempotentHint).toBe(true);
+    expect(byName(tools, 'deletemcpoptdoc').annotations).toMatchObject({ destructiveHint: true, idempotentHint: true });
+
+    for (const name of ['deleteDraft_mcpoptdoc', 'updateStatus_mcpoptdoc', 'addToArchive_mcpoptdoc', 'deleteExpiredDocs']) {
+      const custom = byName(tools, name);
+      expect(custom.title).toBe(name);
+      expect(custom.description).toBe(`Execute the \`${name}\` operation.`);
+      expect(custom.annotations).toEqual({ title: name, openWorldHint: false, readOnlyHint: false });
+    }
+    expect(byName(tools, 'publish_mcpoptdoc').description).toBe('Publish the doc');
+    // Residual edge: without the marker, a custom mutation described with the
+    // placeholder and named with the matching prefix still reads as CRUD.
+    expect(byName(tools, 'addCredits').title).toBe('Create McpOptDoc');
+    expect(byName(tools, 'updateStats').title).toBe('Update McpOptDoc');
+  });
+
+  describe('update idempotency', () => {
+    const buildShipments = () => {
+      const adapter = createMemoryAdapter();
+      const runtime = createRuntime(adapter);
+      const LineType = new GraphQLObjectType({
+        name: 'McpOptShipLine',
+        fields: () => ({
+          id: { type: GraphQLID },
+          sku: { type: GraphQLString },
+          shipment: { type: ShipmentType, extensions: { relation: { embedded: false, connectionField: 'shipment' } } },
+        }),
+      });
+      const ShipmentType = new GraphQLObjectType({
+        name: 'McpOptShipment',
+        fields: () => ({
+          id: { type: GraphQLID },
+          carrier: { type: GraphQLString },
+          lines: { type: new GraphQLList(LineType), extensions: { relation: { embedded: false, connectionField: 'shipment' } } },
+        }),
+      });
+      runtime.connect(null, LineType, 'mcpoptshipline', 'mcpoptshiplines');
+      runtime.connect(null, ShipmentType, 'mcpoptshipment', 'mcpoptshipments');
+      return { adapter, schema: runtime.createSchema() };
+    };
+
+    it('does not advertise a generated update as idempotent when its input can add collection items', async () => {
+      const { adapter, schema } = buildShipments();
+      const { tools, callTool } = simfinity.generateMCPTools(schema);
+      const update = byName(tools, 'updatemcpoptshipment');
+
+      const collection = Object.entries(update.inputSchema.$defs).find(([key]) => key.startsWith('OneToMany'));
+      expect(collection[1].properties).toHaveProperty('added');
+      expect(update.annotations).toEqual({
+        title: 'Update McpOptShipment', openWorldHint: false, readOnlyHint: false, idempotentHint: false,
+      });
+
+      // Why: an identical repeat inserts the `added` items again.
+      const created = await callTool('addmcpoptshipment', { input: { carrier: 'C' } });
+      const { id } = created.structuredContent.addmcpoptshipment;
+      const args = { input: { id, lines: { added: [{ sku: 'SKU-1' }] } } };
+      expect((await callTool('updatemcpoptshipment', args)).isError).toBe(false);
+      expect((await callTool('updatemcpoptshipment', args)).isError).toBe(false);
+      expect(adapter.rows('McpOptShipLine').filter((row) => row.sku === 'SKU-1')).toHaveLength(2);
+    });
+
+    it('keeps updates without collection inputs and deletes idempotent (guard)', () => {
+      const { tools } = simfinity.generateMCPTools(buildShipments().schema);
+      // The line's parent reference is an id input, which adds nothing.
+      expect(byName(tools, 'updatemcpoptshipline').annotations.idempotentHint).toBe(true);
+      expect(byName(tools, 'deletemcpoptshipment').annotations).toMatchObject({ destructiveHint: true, idempotentHint: true });
+      expect(byName(tools, 'addmcpoptshipment').annotations).toEqual({
+        title: 'Create McpOptShipment', openWorldHint: false, readOnlyHint: false,
+      });
+    });
+
+    it('finds nested added lists and stops at recursive input types', () => {
+      const ItemType = new GraphQLObjectType({ name: 'McpOptNestItem', fields: () => ({ id: { type: GraphQLString } }) });
+      const NoteInput = new GraphQLInputObjectType({ name: 'McpOptNestNote', fields: () => ({ text: { type: GraphQLString } }) });
+      const NotesInput = new GraphQLInputObjectType({
+        name: 'McpOptNestNotes',
+        fields: () => ({ added: { type: new GraphQLList(NoteInput) }, deleted: { type: new GraphQLList(GraphQLID) } }),
+      });
+      const DeepInput = new GraphQLInputObjectType({
+        name: 'McpOptNestDeep',
+        fields: () => ({ id: { type: GraphQLID }, meta: { type: new GraphQLNonNull(MetaInput) } }),
+      });
+      const MetaInput = new GraphQLInputObjectType({
+        name: 'McpOptNestMeta',
+        fields: () => ({ parent: { type: DeepInput }, notes: { type: new GraphQLList(NotesInput) } }),
+      });
+      const TreeInput = new GraphQLInputObjectType({
+        name: 'McpOptNestTree',
+        fields: () => ({ id: { type: GraphQLID }, children: { type: new GraphQLList(TreeInput) }, added: { type: GraphQLString } }),
+      });
+      const nestSchema = new GraphQLSchema({
+        query: new GraphQLObjectType({ name: 'Query', fields: { ping: { type: GraphQLString } } }),
+        mutation: new GraphQLObjectType({
+          name: 'Mutation',
+          fields: {
+            updateDeep: { type: ItemType, description: 'update', args: { input: { type: new GraphQLNonNull(DeepInput) } } },
+            // Recursive, and its `added` is a scalar, not a list of items.
+            updateTree: { type: ItemType, description: 'update', args: { input: { type: TreeInput } } },
+          },
+        }),
+      });
+      const { tools } = simfinity.generateMCPTools(nestSchema);
+      expect(byName(tools, 'updateDeep').annotations.idempotentHint).toBe(false);
+      expect(byName(tools, 'updateTree').annotations.idempotentHint).toBe(true);
     });
   });
 });

@@ -5,9 +5,11 @@ import http from 'node:http';
 import {
   GraphQLObjectType,
   GraphQLEnumType,
+  GraphQLScalarType,
   GraphQLList,
   GraphQLSchema,
   GraphQLString,
+  GraphQLFloat,
   GraphQLNonNull,
 } from 'graphql';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -170,6 +172,44 @@ describe('createMCPServer over InMemoryTransport', () => {
     await expect(client.callTool({ name: 'no_such_tool', arguments: {} }))
       .rejects.toThrow(/no_such_tool/);
   });
+
+  it('publishes closed input schemas and answers an undeclared argument with an isError result', async () => {
+    const { tools } = await client.listTools();
+    expect(tools.find((tool) => tool.name === 'item').inputSchema.additionalProperties).toBe(false);
+    expect(tools.find((tool) => tool.name === 'entries').inputSchema).toMatchObject({ properties: {}, additionalProperties: false });
+
+    // The SDK neither validates arguments client- nor server-side, so the
+    // call reaches callTool, which rejects it as a tool result.
+    const result = await client.callTool({ name: 'item', arguments: { id: '42', verbose: true } });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+    const [error] = JSON.parse(result.content[0].text).errors;
+    expect(error.extensions.code).toBe('MCP_UNKNOWN_ARGUMENT');
+    expect(error.message).toBe('Unknown argument "verbose" for tool "item". Valid arguments: id. The tool was not executed.');
+  });
+
+  it('returns an isError result when a middleware boundary catches a synchronous inner throw', async () => {
+    const guardedServer = await simfinity.createMCPServer(schema, {
+      toolMiddleware: [
+        (call, next) => next().catch((err) => ({ content: [{ type: 'text', text: `blocked: ${err.message}` }], isError: true })),
+        () => {
+          throw new Error('policy denied');
+        },
+      ],
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const guardedClient = new Client({ name: 'mcp-trans-boundary-client', version: '1.0.0' });
+    await guardedServer.connect(serverTransport);
+    await guardedClient.connect(clientTransport);
+    try {
+      const result = await guardedClient.callTool({ name: 'item', arguments: { id: '42' } });
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual([{ type: 'text', text: 'blocked: policy denied' }]);
+    } finally {
+      await guardedClient.close();
+      await guardedServer.close();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -270,8 +310,9 @@ describe('createHTTPMCPHandler over Streamable HTTP', () => {
       writeHead: vi.fn(),
       end: vi.fn(),
     };
-    // Garbage request: reading req.body inside the handler throws a TypeError,
-    // which must be routed through onError and answered with a JSON-RPC 500.
+    // Garbage request: reading req.method for the method check throws a
+    // TypeError before any server or transport exists, which must be routed
+    // through onError and answered with a JSON-RPC 500.
     await failingHandler(null, res);
 
     expect(onError).toHaveBeenCalledTimes(1);
@@ -301,5 +342,247 @@ describe('createHTTPMCPHandler over Streamable HTTP', () => {
     await failingHandler(null, res);
 
     expect(res.writeHead).toHaveBeenCalledWith(500, { 'content-type': 'application/json' });
+  });
+
+  // A POST that fails after the per-request server and transport exist: the
+  // body is read only when the request is handed to the transport.
+  const brokenPost = (error) => ({
+    method: 'POST',
+    headers: {},
+    get body() {
+      throw error;
+    },
+  });
+  const mockResponse = () => ({
+    on: vi.fn(),
+    headersSent: false,
+    writeHead: vi.fn(),
+    end: vi.fn(),
+  });
+
+  it('invokes onError once and responds 500 JSON-RPC when a POST fails after transport setup (guard)', async () => {
+    const onError = vi.fn();
+    const failingHandler = await simfinity.createHTTPMCPHandler(schema, { onError });
+    const error = new TypeError('bad body');
+    const req = brokenPost(error);
+    const res = mockResponse();
+
+    await failingHandler(req, res);
+
+    expect(res.on).toHaveBeenCalledTimes(1);
+    expect(res.on).toHaveBeenCalledWith('close', expect.any(Function));
+    expect(onError).toHaveBeenCalledTimes(1);
+    // Identity checks: a deep comparison of req would run its body getter.
+    const [reported, givenReq, givenRes] = onError.mock.calls[0];
+    expect(reported).toBe(error);
+    expect(givenReq).toBe(req);
+    expect(givenRes).toBe(res);
+    expect(res.writeHead).toHaveBeenCalledWith(500, { 'content-type': 'application/json' });
+    expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({
+      jsonrpc: '2.0',
+      error: { code: -32603, message: 'Internal server error' },
+      id: null,
+    });
+    // The registered cleanup closes the per-request transport and server.
+    expect(() => res.on.mock.calls[0][1]()).not.toThrow();
+  });
+
+  it('still responds 500 when onError throws for a POST that fails after transport setup (guard)', async () => {
+    const onError = vi.fn(async () => {
+      throw new Error('onError exploded');
+    });
+    const failingHandler = await simfinity.createHTTPMCPHandler(schema, { onError });
+    const res = mockResponse();
+
+    await failingHandler(brokenPost(new TypeError('bad body')), res);
+
+    expect(res.on).toHaveBeenCalledWith('close', expect.any(Function));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(res.writeHead).toHaveBeenCalledWith(500, { 'content-type': 'application/json' });
+    expect(JSON.parse(res.end.mock.calls[0][0]).error).toEqual({ code: -32603, message: 'Internal server error' });
+  });
+
+  // One handler on its own server, counting the responses still open per method.
+  const serve = async (handler) => {
+    const open = {};
+    const server = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (chunk) => { raw += chunk; });
+      req.on('end', () => {
+        if (raw) {
+          req.body = JSON.parse(raw);
+        }
+        open[req.method] = (open[req.method] || 0) + 1;
+        res.on('close', () => { open[req.method] -= 1; });
+        handler(req, res);
+      });
+    });
+    await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve); });
+    const close = async () => {
+      server.closeAllConnections();
+      await new Promise((resolve) => { server.close(resolve); });
+    };
+    return { url: `http://127.0.0.1:${server.address().port}/mcp`, open, close };
+  };
+
+  it.each(['GET', 'DELETE', 'PUT'])('answers %s with 405 and Allow: POST without opening a stream', async (method) => {
+    const context = vi.fn(() => ({}));
+    const onError = vi.fn();
+    const handler = await simfinity.createHTTPMCPHandler(schema, { context, onError });
+    const { url, open, close } = await serve(handler);
+    const controller = new AbortController();
+    try {
+      const response = await fetch(url, {
+        method,
+        headers: { accept: 'application/json, text/event-stream' },
+        signal: controller.signal,
+      });
+
+      expect(response.status).toBe(405);
+      expect(response.headers.get('allow')).toBe('POST');
+      expect(response.headers.get('content-type')).toBe('application/json');
+      expect(await response.json()).toEqual({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: 'Method not allowed.' },
+        id: null,
+      });
+      expect(open[method]).toBe(0);
+    } finally {
+      controller.abort();
+      await close();
+    }
+    expect(context).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('lets an SDK client connect, call a tool and close without transport errors or an idle stream', async () => {
+    const handler = await simfinity.createHTTPMCPHandler(schema, {});
+    const { url, open, close } = await serve(handler);
+    const errors = [];
+    const client = new Client({ name: 'mcp-trans-405-client', version: '1.0.0' });
+    client.onerror = (err) => { errors.push(err.message); };
+    try {
+      await client.connect(new StreamableHTTPClientTransport(new URL(url)));
+      const result = await client.callTool({ name: 'item', arguments: { id: '7' } });
+      expect(result.structuredContent).toEqual({ item: { id: '7', name: 'Widget' } });
+
+      // The client asks for a standalone stream right after initializing.
+      await new Promise((resolve) => { setTimeout(resolve, 100); });
+      expect(open).toMatchObject({ GET: 0, POST: 0 });
+      await client.close();
+      await new Promise((resolve) => { setTimeout(resolve, 50); });
+      expect(errors).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Serializer-defined scalar outputs through a validating SDK client
+// ---------------------------------------------------------------------------
+
+describe('serializer-defined scalar outputs over Streamable HTTP', () => {
+  // Identity scalars like the ones Simfinity apps write: resolvers return JS
+  // Dates, which reach the wire as ISO instants.
+  const DateScalar = new GraphQLScalarType({ name: 'Date', serialize: (value) => value, parseValue: (value) => value });
+  const TimeScalar = new GraphQLScalarType({ name: 'Time', serialize: (value) => value, parseValue: (value) => value });
+  const EpochDateTime = new GraphQLScalarType({
+    name: 'DateTime',
+    description: 'Epoch milliseconds.',
+    serialize: (value) => value.getTime(),
+  });
+  const Decimal = new GraphQLScalarType({ name: 'McpTransDecimal', serialize: (value) => Number(value).toFixed(2) });
+  Decimal.baseScalarType = GraphQLFloat;
+
+  const VisitType = new GraphQLObjectType({
+    name: 'McpTransVisit',
+    fields: () => ({
+      id: { type: new GraphQLNonNull(GraphQLString) },
+      day: { type: DateScalar },
+      slot: { type: new GraphQLNonNull(TimeScalar) },
+      stamps: { type: new GraphQLList(EpochDateTime) },
+      fee: { type: Decimal },
+    }),
+  });
+  const visit = () => ({
+    id: 'v1',
+    day: new Date('2026-09-28T00:00:00Z'),
+    slot: new Date('1970-01-01T14:30:00Z'),
+    stamps: [new Date(0)],
+    fee: 12.3,
+  });
+  const wire = {
+    id: 'v1', day: '2026-09-28T00:00:00.000Z', slot: '1970-01-01T14:30:00.000Z', stamps: [0], fee: '12.30',
+  };
+  let commits = 0;
+  const visitSchema = new GraphQLSchema({
+    query: new GraphQLObjectType({
+      name: 'Query',
+      fields: {
+        visits: { type: new GraphQLList(VisitType), args: { on: { type: DateScalar } }, resolve: () => [visit()] },
+      },
+    }),
+    mutation: new GraphQLObjectType({
+      name: 'Mutation',
+      fields: {
+        addvisit: {
+          type: VisitType,
+          resolve: () => {
+            commits += 1;
+            return visit();
+          },
+        },
+      },
+    }),
+  });
+
+  let httpServer;
+  let client;
+
+  beforeAll(async () => {
+    const handler = await simfinity.createHTTPMCPHandler(visitSchema);
+    httpServer = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (chunk) => { raw += chunk; });
+      req.on('end', () => {
+        if (raw) {
+          req.body = JSON.parse(raw);
+        }
+        handler(req, res);
+      });
+    });
+    await new Promise((resolve) => { httpServer.listen(0, '127.0.0.1', resolve); });
+    client = new Client({ name: 'mcp-trans-scalars', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${httpServer.address().port}/mcp`)));
+    // Caches the outputSchema validators the client applies to every call.
+    await client.listTools();
+  });
+
+  afterAll(async () => {
+    await client.close();
+    httpServer.closeAllConnections();
+    await new Promise((resolve) => { httpServer.close(resolve); });
+  });
+
+  it('lets the SDK client accept a committed mutation result', async () => {
+    commits = 0;
+    const result = await client.callTool({ name: 'addvisit', arguments: {} });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toEqual({ addvisit: wire });
+    expect(commits).toBe(1);
+  });
+
+  it('lets the SDK client accept a list result, keeping the input format hint', async () => {
+    const { tools } = await client.listTools();
+    const visits = tools.find((tool) => tool.name === 'visits');
+    expect(visits.inputSchema.properties.on).toEqual({ type: ['string', 'null'], format: 'date' });
+    expect(visits.outputSchema.properties.visits.items.properties.stamps)
+      .toEqual({ type: ['array', 'null'], items: { description: 'Epoch milliseconds.' } });
+
+    const result = await client.callTool({ name: 'visits', arguments: {} });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toEqual({ visits: [wire] });
   });
 });

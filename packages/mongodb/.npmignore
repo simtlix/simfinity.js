@@ -25,7 +25,6 @@ coverage/
 
 # Local utilities
 git-report.js
-repro-mcp.mjs
 vitest.config.js
 AGENTS.md
 
