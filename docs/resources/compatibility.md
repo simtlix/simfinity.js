@@ -35,9 +35,9 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22 or newer |
 
-## Upgrade notes for the next release
+## Upgrade to 3.5.7
 
-The next release fixes MCP tool results, tool definitions, argument handling, configuration checks, remote execution and the Streamable HTTP handler, and adds field markers to core that the MCP package reads. Keep `@simtlix/simfinity-mcp` and `@simtlix/simfinity-core` at the same version, as their exact internal dependency already requires. When upgrading from an earlier version, also review the [3.5.6 notes](#upgrade-to-3-5-6) below.
+Version 3.5.7 fixes MCP tool results, tool definitions, argument handling, configuration checks, remote execution and the Streamable HTTP handler, and adds field markers to core that the MCP package reads. Keep all directly installed Simfinity packages at 3.5.7, including `@simtlix/simfinity-mcp` and `@simtlix/simfinity-core`, as their exact internal dependency already requires. When upgrading from an earlier version, also review the [3.5.6 notes](#upgrade-to-3-5-6) below.
 
 ### MCP tool results
 
@@ -416,7 +416,7 @@ Keep all directly installed Simfinity packages at 3.5.0 and review these behavio
 - MongoDB uses the application's GraphQL and Mongoose peers. Install the optional MCP SDK explicitly for transports; `graphql-middleware` is no longer installed by Simfinity. See [installation](../guide/databases#install-from-npm).
 - Embedded updates enforce required fields when constructing replacement objects or list items; existing embedded objects still accept valid partial patches. SQL sessions reject statements after their callback settles, and a failed rollback discards the connection. See [mutations](../guide/mutations) and the [SQL plugin contract](../guide/sql-plugins#plugin-contract-version-1).
 
-The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.6. Historical archives and the Barber examples retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
+The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.7. Historical archives and the Barber examples retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
 
 ## Upgrade from 3.2.0
 
