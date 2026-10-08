@@ -126,11 +126,24 @@ For a connected `Serie` type:
 | Output type | Your `Serie` object type |
 | Creation input | `SerieInput` |
 | Update input | `SerieInputForUpdate` |
+| Collection operation inputs | `OneToManySerieAseasons`, `OneToManySerieUseasons`; see [generated collection input names](./relationships#generated-collection-input-names) |
 | Storage model | Mongoose model/collection or PostgreSQL table named from `Serie` |
 | Root queries | `serie`, `series`, `series_aggregate` |
 | Root mutations | `addserie`, `updateserie`, `deleteserie` |
 
 Scalar and enum fields become filters on the list query. Object and collection fields receive relation-aware inputs. State machines add their own action mutations.
+
+Interface and union fields are output-only on the default MongoDB runtime and with custom adapters:
+
+- Generated inputs leave them out, so generated mutations cannot set them. A field that is not `readOnly` logs a `Configuration issue` warning once: `Type.field has an interface or union type, so generated inputs leave it out and generated mutations cannot set it; …`.
+- A single interface or union field gets no filter argument on list, aggregate and collection queries. A list of them keeps the `QLTypeFilterExpression` argument it has always had; send it only as `null`.
+- `AND`/`OR` conditions that name such a field reject non-null values with `INVALID_FILTER_VALUE`. A `null` condition matches every record, because nothing is stored. With your own resolver the field is rejected with `FORBIDDEN_FILTER_PATH` (403).
+- Resolve these fields yourself and mark them `readOnly`.
+- A type whose generated input would have no fields still fails schema validation (`Input Object type … must define one or more fields`). One example is a collection child with only `id`, the back-reference and `readOnly` or interface/union fields.
+
+PostgreSQL and `referentialIntegrity: 'transactional'` MongoDB reject these fields with `INVALID_MODEL` (400, `Unsupported field type at Type.field`).
+
+Every schema also contains `RelationType` and `FieldExtensionsType`, which describe field extensions in introspection. An application type with either name makes `createSchema()` fail with `Schema must contain uniquely named types`. An application scalar named `JSON` is reused for [aggregation results](../reference/aggregation#input-types); any other application type named `JSON` fails the same way.
 
 A generated Mongoose model stores enum internal values with their own type: numbers when every value is a number, booleans when every value is a boolean, strings when every value is a string, and any other combination of strings, numbers, booleans and `null` as given. Enums with other internal values (objects, dates) keep string storage, so writes of those values are rejected on MongoDB. Any scalar (non-list) enum field named `state` whose values are not all strings is also stored as given, at any level and whether or not its type has a state machine, because state machines persist state names there. Embedded types can declare a field named `type`.
 

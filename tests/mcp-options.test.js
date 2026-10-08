@@ -1126,4 +1126,62 @@ describe('MCP operation classification of core-generated schemas', () => {
       expect(byName(tools, 'updateTree').annotations.idempotentHint).toBe(true);
     });
   });
+
+  describe('collection inputs that form a cycle across types', () => {
+    const buildDepartments = () => {
+      const runtime = createRuntime(createMemoryAdapter());
+      const relation = (connectionField) => ({ relation: { embedded: false, connectionField } });
+      const Department = new GraphQLObjectType({
+        name: 'McpOptCycDepartment',
+        fields: () => ({
+          id: { type: GraphQLID },
+          name: { type: GraphQLString },
+          manager: { type: Employee, extensions: relation('manager') },
+          employees: { type: new GraphQLList(new GraphQLNonNull(Employee)), extensions: relation('department') },
+        }),
+      });
+      const Employee = new GraphQLObjectType({
+        name: 'McpOptCycEmployee',
+        fields: () => ({
+          id: { type: GraphQLID },
+          name: { type: GraphQLString },
+          department: { type: Department, extensions: relation('department') },
+          managedDepartments: { type: new GraphQLList(Department), extensions: relation('manager') },
+        }),
+      });
+      runtime.connect(null, Department, 'mcpoptcycdepartment', 'mcpoptcycdepartments');
+      runtime.connect(null, Employee, 'mcpoptcycemployee', 'mcpoptcycemployees');
+      return runtime.createSchema();
+    };
+
+    it('describes nested inputs through the cycle and nullable deleted IDs', () => {
+      const { tools } = simfinity.generateMCPTools(buildDepartments());
+      const add = byName(tools, 'addmcpoptcycdepartment');
+      const defs = add.inputSchema.$defs;
+      expect(Object.keys(defs)).toEqual(expect.arrayContaining([
+        'OneToManyMcpOptCycDepartmentAemployees',
+        'McpOptCycDepartmentAMcpOptCycEmployeeInputForDepartment',
+        'OneToManyMcpOptCycEmployeeAmanagedDepartments',
+        'McpOptCycEmployeeAMcpOptCycDepartmentInputForManager',
+      ]));
+      expect(defs.McpOptCycEmployeeAMcpOptCycDepartmentInputForManager.properties.employees).toEqual({
+        anyOf: [{ $ref: '#/$defs/OneToManyMcpOptCycDepartmentAemployees' }, { type: 'null' }],
+      });
+      // `[McpOptCycEmployee!]` items, yet null IDs in `deleted` are accepted and skipped.
+      expect(defs.OneToManyMcpOptCycDepartmentAemployees.properties.deleted)
+        .toEqual({ type: ['array', 'null'], items: { type: ['string', 'null'] } });
+
+      const validate = new AjvJsonSchemaValidator().getValidator(add.inputSchema);
+      expect(validate({
+        input: {
+          name: 'D1',
+          employees: {
+            added: [{ name: 'E1', managedDepartments: { added: [{ name: 'D2', employees: { added: [{ name: 'E2' }] } }] } }],
+            deleted: ['1', null],
+          },
+        },
+      })).toMatchObject({ valid: true });
+      expect(byName(tools, 'updatemcpoptcycemployee').annotations.idempotentHint).toBe(false);
+    });
+  });
 });

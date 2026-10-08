@@ -5,20 +5,66 @@
   "type": "module",
   "main": "./src/index.js",
   "types": "./types/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "auth": [
+        "types/auth/index.d.ts"
+      ],
+      "auth/errors": [
+        "types/auth/errors.d.ts"
+      ],
+      "auth/expressions": [
+        "types/auth/expressions.d.ts"
+      ],
+      "auth/rules": [
+        "types/auth/rules.d.ts"
+      ],
+      "plugins": [
+        "types/plugins.d.ts"
+      ],
+      "scalars": [
+        "types/scalars.d.ts"
+      ],
+      "validators": [
+        "types/validators.d.ts"
+      ]
+    }
+  },
   "exports": {
     ".": {
       "types": "./types/index.d.ts",
       "default": "./src/index.js"
     },
-    "./auth": "./src/auth/index.js",
-    "./auth/errors": "./src/auth/errors.js",
-    "./auth/expressions": "./src/auth/expressions.js",
-    "./auth/rules": "./src/auth/rules.js",
+    "./auth": {
+      "types": "./types/auth/index.d.ts",
+      "default": "./src/auth/index.js"
+    },
+    "./auth/errors": {
+      "types": "./types/auth/errors.d.ts",
+      "default": "./src/auth/errors.js"
+    },
+    "./auth/expressions": {
+      "types": "./types/auth/expressions.d.ts",
+      "default": "./src/auth/expressions.js"
+    },
+    "./auth/rules": {
+      "types": "./types/auth/rules.d.ts",
+      "default": "./src/auth/rules.js"
+    },
     "./internal/object-id": "./src/auth/object-id.js",
     "./internal/relation-storage": "./src/relation-storage.js",
-    "./plugins": "./src/plugins.js",
-    "./scalars": "./src/scalars.js",
-    "./validators": "./src/validators.js"
+    "./plugins": {
+      "types": "./types/plugins.d.ts",
+      "default": "./src/plugins.js"
+    },
+    "./scalars": {
+      "types": "./types/scalars.d.ts",
+      "default": "./src/scalars.js"
+    },
+    "./validators": {
+      "types": "./types/validators.d.ts",
+      "default": "./src/validators.js"
+    }
   },
   "files": [
     "src",

@@ -43,7 +43,7 @@ fields: () => ({
 })
 ```
 
-- **Non-embedded** (`embedded: false`): single references use ObjectId on MongoDB and UUID columns with real FKs on PostgreSQL. Inputs use `IdInputType` (`{ id: String! }`); collections generate `OneToMany` inputs with `added`/`updated`/`deleted` sub-fields and resolve through the selected adapter.
+- **Non-embedded** (`embedded: false`): single references use ObjectId on MongoDB and UUID columns with real FKs on PostgreSQL. Inputs use `IdInputType` (`{ id: String! }`); collections generate `OneToMany` inputs with `added`/`updated`/`deleted` sub-fields (`deleted` is always `[ID]`; names in `simfinity-core-functions.mdc`) and resolve through the selected adapter.
 - **Embedded** (`embedded: true`): MongoDB stores nested documents inline. PostgreSQL stores reference-free values as JSONB and reference-bearing values in private owned tables with FKs. Both expose nested GraphQL inputs and parent-owned lifecycle semantics.
 - **`connectionField`**: the stored field name for a single reference. If omitted, defaults to the GraphQL field name consistently during model generation, reads, writes and nullable update clears. For referenced collections, explicitly configure the child's back-reference field: `createSchema()` throws `INVALID_MODEL` (400, `Type.field requires a child connectionField`) for a writable collection without a non-empty `connectionField` whose resolver it would generate. In default MongoDB mode and with custom adapters, one with an application resolver or `readOnly` only warns (`Configuration issue: …`) and rejects nested writes with `INVALID_MODEL` (500); PostgreSQL and transactional MongoDB reject them all. When the child has no field for the back-reference, MongoDB adds a private ObjectId field to the generated child model, including chained and self-referencing collections.
 - **Non-null wrappers**: relation objects and lists retain outer non-null requirements in create inputs; updates remove the outer wrapper. Embedded list items and referenced `added`/`updated` items preserve item nullability.
@@ -94,6 +94,10 @@ name: {
 ```
 
 Validators are executed during `materializeModel()` before saving/updating. Each validator has a `.validate(typeName, fieldName, value, session)` method. The `CREATE` array runs on add, `UPDATE` on update.
+
+- `arrayLength()` resolves `itemValidator` once, when the helper is created. It accepts a validator (a plain object or a function with `validate()`), a helper result (its `CREATE` rules run on items on both operations) or an array of them; arrays are read on each validation and skip falsy entries. A single class instance with its own `validate()` (Joi, yup) and other unusable shapes warn at creation (`Configuration issue: validators.arrayLength(…)`) and never throw there; an unusable array entry throws a `TypeError` naming the helper when a list with items is validated.
+- `dateFormat()` checks only the `YYYY-MM-DD` shape. ISO-prefixed and slashed `MM/DD/YYYY` strings must be calendar dates (`toDate`, also used by `futureDate()`); any other format string is not enforced and warns at creation.
+- Bounded validators and scalar factories treat `null` like `undefined` (no bound); bounded scalar descriptions name only the bounds that are set and leave out `NaN` bounds.
 
 ### `extensions.stateMachine` (auto-set)
 

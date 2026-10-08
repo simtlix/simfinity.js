@@ -13,6 +13,7 @@ import {
   GraphQLUnionType,
   graphql,
   printSchema,
+  validateSchema,
 } from 'graphql';
 import mongoose from 'mongoose';
 
@@ -1624,7 +1625,7 @@ describe('stored references the adapter cannot read', () => {
       { title: 'Legacy', author: null },
     ]);
     expect(format(read, callback)).toEqual([
-      { path: [`${prefix}Books`, 1, 'author'], code: 'INTERNAL_SERVER_ERROR', status: undefined },
+      { path: [`${prefix}Books`, 1, 'author'], code: 'INTERNAL_SERVER_ERROR', status: 500 },
     ]);
     const [[classified]] = callback.mock.calls;
     expect(classified).toBeInstanceOf(InternalServerError);
@@ -1899,6 +1900,216 @@ describe('referenced collection connectionField', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe('nested collection ownership', () => {
+  // Identifiers are case-insensitive, as MongoDB ObjectId hex strings and PostgreSQL UUIDs are: the
+  // adapter accepts any spelling and keeps the lowercase key.
+  const lowerCaseId = (value) => String(value).toLowerCase();
+
+  const build = (prefix, {
+    adapter = createKeyedAdapter({ castId: lowerCaseId }), childExtensions, childController,
+  } = {}) => {
+    const runtime = createRuntime(adapter);
+    const Toy = new GraphQLObjectType({
+      name: `${prefix}Toy`,
+      fields: () => ({
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        child: { type: Child, extensions: { relation: { embedded: false, connectionField: 'childId' } } },
+      }),
+    });
+    const Child = new GraphQLObjectType({
+      name: `${prefix}Child`,
+      fields: () => ({
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        parent: { type: Parent, extensions: { relation: { embedded: false, connectionField: 'parentId' } } },
+        toys: { type: new GraphQLList(Toy), extensions: { relation: { embedded: false, connectionField: 'childId' } } },
+      }),
+      extensions: childExtensions,
+    });
+    const Parent = new GraphQLObjectType({
+      name: `${prefix}Parent`,
+      fields: () => ({
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        children: { type: new GraphQLList(Child), extensions: { relation: { embedded: false, connectionField: 'parentId' } } },
+      }),
+    });
+    runtime.connect(null, Toy, `${prefix}toy`, `${prefix}toys`);
+    runtime.connect(null, Child, `${prefix}child`, `${prefix}children`, childController);
+    runtime.connect(null, Parent, `${prefix}parent`, `${prefix}parents`);
+    const schema = runtime.createSchema();
+    adapter.seed(`${prefix}Parent`, { _id: 'abc1', name: 'A' });
+    adapter.seed(`${prefix}Parent`, { _id: 'abc2', name: 'B' });
+    adapter.seed(`${prefix}Child`, { _id: 'cafe1', name: 'own', parentId: 'abc1' });
+    adapter.seed(`${prefix}Child`, { _id: 'cafe2', name: 'foreign', parentId: 'abc2' });
+    adapter.seed(`${prefix}Toy`, { _id: 'beef1', name: 'toy', childId: 'cafe1' });
+    const run = (source) => graphql({ schema, source, contextValue: {} });
+    const updateParent = (id, children) => run(`mutation {
+      update${prefix}parent(input: { id: "${id}", children: { ${children} } }) { id }
+    }`);
+    const childrenOf = async (id) => {
+      const result = await run(`{ ${prefix}parent(id: "${id}") { children { name } } }`);
+      expect(result.errors).toBeUndefined();
+      return result.data[`${prefix}parent`].children.map(({ name }) => name).sort();
+    };
+    const childRecord = (id) => adapter.getRecords(`${prefix}Child`).find(({ _id }) => _id === id);
+    return {
+      adapter, runtime, updateParent, childrenOf, childRecord,
+    };
+  };
+
+  const modelNamed = (name) => expect.objectContaining({ name });
+
+  test.each(['updated', 'deleted'])('accepts %s for its own child when the parent ID differs in case', async (operation) => {
+    const prefix = `OwnCase${operation}`;
+    const { adapter, updateParent, childRecord } = build(prefix);
+
+    const result = await updateParent('ABC1', operation === 'updated'
+      ? 'updated: [{ id: "cafe1", name: "renamed" }]'
+      : 'deleted: ["cafe1"]');
+
+    expect(result.errors).toBeUndefined();
+    if (operation === 'updated') {
+      expect(childRecord('cafe1')).toMatchObject({ name: 'renamed', parentId: 'abc1' });
+    } else {
+      expect(adapter.delete).toHaveBeenCalledWith(modelNamed(`${prefix}Child`), 'cafe1', expect.anything());
+    }
+  });
+
+  test('accepts grandchildren of an updated child whose ID differs in case', async () => {
+    const { adapter, updateParent } = build('OwnGrandchild');
+
+    const result = await updateParent('abc1', 'updated: [{ id: "CAFE1", name: "renamed", toys: { deleted: ["beef1"] } }]');
+
+    expect(result.errors).toBeUndefined();
+    expect(adapter.delete).toHaveBeenCalledWith(modelNamed('OwnGrandchildToy'), 'beef1', expect.anything());
+  });
+
+  test('links children added under a parent ID that differs in case with the stored key', async () => {
+    const { adapter, updateParent, childrenOf } = build('OwnAdded');
+
+    const result = await updateParent('ABC1', 'added: [{ name: "new" }]');
+
+    expect(result.errors).toBeUndefined();
+    const added = adapter.getRecords('OwnAddedChild').find(({ name }) => name === 'new');
+    expect(added.parentId).toBe('abc1');
+    expect(await childrenOf('abc1')).toEqual(['new', 'own']);
+  });
+
+  test('gives validators and hooks of nested children the stored parent key', async () => {
+    const seen = [];
+    const childExtensions = {
+      validations: {
+        CREATE: [{ validate: (typeName, args, modelArgs) => { seen.push(['CREATE', modelArgs.parentId]); } }],
+        UPDATE: [{ validate: (typeName, args, modelArgs) => { seen.push(['UPDATE', modelArgs.parentId]); } }],
+      },
+    };
+    const childController = {
+      onSaving: (record) => { seen.push(['onSaving', record.parentId]); },
+      onUpdating: (id, update) => { seen.push(['onUpdating', id, update.set.parentId]); },
+    };
+    const { updateParent } = build('OwnHooks', { childExtensions, childController });
+
+    const result = await updateParent('ABC1', 'added: [{ name: "new" }], updated: [{ id: "cafe1", name: "renamed" }]');
+
+    expect(result.errors).toBeUndefined();
+    expect(seen).toEqual([
+      ['CREATE', 'abc1'], ['onSaving', 'abc1'], ['UPDATE', 'abc1'], ['onUpdating', 'cafe1', 'abc1'],
+    ]);
+  });
+
+  test('uses the id of an update result that has no _id', async () => {
+    const adapter = createKeyedAdapter({ castId: lowerCaseId });
+    const storedUpdate = adapter.update;
+    adapter.update = vi.fn(async (...args) => {
+      const record = await storedUpdate(...args);
+      return record && { id: record._id };
+    });
+    const { updateParent } = build('OwnIdOnly', { adapter });
+
+    const result = await updateParent('ABC1', 'deleted: ["cafe1"]');
+
+    expect(result.errors).toBeUndefined();
+    expect(adapter.delete).toHaveBeenCalledWith(modelNamed('OwnIdOnlyChild'), 'cafe1', expect.anything());
+  });
+
+  test('keeps the requested ID for an update result without _id or id (guard)', async () => {
+    const adapter = createKeyedAdapter({ castId: lowerCaseId });
+    const storedUpdate = adapter.update;
+    adapter.update = vi.fn(async (...args) => {
+      const record = await storedUpdate(...args);
+      return record && { name: record.name };
+    });
+    const { updateParent } = build('OwnNoKey', { adapter });
+
+    const canonical = await updateParent('abc1', 'updated: [{ id: "cafe1", name: "renamed" }]');
+    const otherCase = await updateParent('ABC1', 'updated: [{ id: "cafe1", name: "again" }]');
+
+    expect(canonical.errors).toBeUndefined();
+    expect(otherCase.errors?.[0].extensions).toMatchObject({ code: 'FORBIDDEN', status: 403 });
+  });
+
+  test.each(['updated', 'deleted'])('keeps a foreign child in %s FORBIDDEN when the parent ID differs in case (guard)', async (operation) => {
+    const { adapter, updateParent, childRecord } = build(`OwnForeign${operation}`);
+
+    const result = await updateParent('ABC1', operation === 'updated'
+      ? 'updated: [{ id: "cafe2", name: "stolen" }]'
+      : 'deleted: ["cafe2"]');
+
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].extensions).toMatchObject({ code: 'FORBIDDEN', status: 403 });
+    expect(childRecord('cafe2')).toMatchObject({ name: 'foreign', parentId: 'abc2' });
+    expect(adapter.delete).not.toHaveBeenCalled();
+  });
+
+  test.each(['updated', 'deleted'])('rejects a foreign child in %s with auth.ForbiddenError', async (operation) => {
+    const prefix = `OwnDenied${operation}`;
+    const { updateParent } = build(prefix);
+    const callback = vi.fn();
+
+    const result = await updateParent('abc1', operation === 'updated'
+      ? 'updated: [{ id: "cafe2", name: "stolen" }]'
+      : 'deleted: ["cafe2"]');
+
+    const [error] = result.errors;
+    expect(error.message).toBe('Child does not belong to this parent');
+    expect(error.extensions).toMatchObject({ code: 'FORBIDDEN', status: 403 });
+    expect(error.originalError).toBeInstanceOf(auth.ForbiddenError);
+    expect(error.originalError).toBeInstanceOf(SimfinityError);
+    expect(error.originalError.name).toBe('ForbiddenError');
+    const formatted = buildErrorFormatter(callback)(error);
+    expect(callback).toHaveBeenCalledWith(error.originalError);
+    expect(JSON.parse(JSON.stringify(formatted))).toEqual({
+      message: 'Child does not belong to this parent',
+      locations: [expect.any(Object)],
+      path: [`update${prefix}parent`],
+      extensions: { code: 'FORBIDDEN', status: 403, timestamp: expect.any(String) },
+    });
+  });
+
+  test('saveObject runs no middleware for its root record and runs nested children\'s middleware with its context (guard)', async () => {
+    const { runtime } = build('OwnSaveObject');
+    const calls = [];
+    runtime.use(async ({ type, operation, context }, next) => {
+      calls.push({ operation, type: type?.gqltype?.name, context });
+      await next();
+    });
+    const context = { user: 'job' };
+
+    await runtime.saveObject('OwnSaveObjectParent', { name: 'root only' });
+    expect(calls).toEqual([]);
+    await runtime.saveObject('OwnSaveObjectParent', { name: 'no context', children: { added: [{ name: 'kid' }] } });
+    await runtime.saveObject('OwnSaveObjectParent', { name: 'context', children: { added: [{ name: 'kid' }] } }, undefined, context);
+
+    expect(calls).toEqual([
+      { operation: 'save', type: 'OwnSaveObjectChild', context: undefined },
+      { operation: 'save', type: 'OwnSaveObjectChild', context },
+    ]);
+    expect(calls[1].context).toBe(context);
   });
 });
 
@@ -2744,5 +2955,269 @@ describe('pagination count reporting', () => {
 
     expect(result.errors).toBeUndefined();
     expect(counts).toEqual([3]);
+  });
+
+  const createCountedRows = () => {
+    const adapter = createMemoryAdapter();
+    adapter.find = vi.fn(async () => [{ _id: '1' }, { _id: '2' }]);
+    adapter.count = vi.fn(async () => 2);
+    const runtime = createRuntime(adapter);
+    runtime.connect(null, createType('RuntimeCountRow'), 'countRow', 'countRows');
+    return { schema: runtime.createSchema(), adapter };
+  };
+  const countedRows = '{ countRows(pagination: { page: 1, size: 5, count: true }) { id } }';
+  const rows = { data: { countRows: [{ id: '1' }, { id: '2' }] } };
+
+  test.each([
+    ['no', undefined], ['a null', null], ['a number', 5], ['a string', 'ctx'], ['a boolean', true],
+  ])('returns the rows with %s context and skips the count query', async (label, contextValue) => {
+    const { schema, adapter } = createCountedRows();
+    const result = await graphql(contextValue === undefined
+      ? { schema, source: countedRows }
+      : { schema, source: countedRows, contextValue });
+
+    expect(result).toEqual(rows);
+    expect(adapter.find).toHaveBeenCalledTimes(1);
+    expect(adapter.count).not.toHaveBeenCalled();
+  });
+
+  test('still runs the count query for a root-value sink without a context (guard)', async () => {
+    const { schema, adapter } = createCountedRows();
+    const { rootValue, counts } = rootWithSink();
+    const result = await graphql({ schema, source: countedRows, rootValue });
+
+    expect(result).toEqual(rows);
+    expect(adapter.count).toHaveBeenCalledTimes(1);
+    expect(counts).toEqual([2]);
+  });
+
+  test.each([
+    ['a frozen', () => Object.freeze({})],
+    ['a sealed', () => Object.seal({})],
+    ['a non-extensible', () => Object.preventExtensions({})],
+    ['a read-only count in a', () => Object.defineProperty({}, 'count', { value: 0, writable: false })],
+  ])('returns the rows with %s context and warns once that the count is not reported', async (label, createContext) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { schema } = createCountedRows();
+      for (let request = 0; request < 2; request += 1) {
+        expect(await graphql({ schema, source: countedRows, contextValue: createContext() })).toEqual(rows);
+      }
+
+      expect(warn.mock.calls).toEqual([[
+        'Configuration issue: the GraphQL context does not accept a count property (it is frozen, sealed or has '
+          + 'a read-only count), so pagination counts are not reported; pass a fresh mutable context object for '
+          + 'each request.',
+      ]]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('writes the count through a context setter and runs the count query once (guard)', async () => {
+    const { schema, adapter } = createCountedRows();
+    const counts = [];
+    const contextValue = { set count(value) { counts.push(value); } };
+    const result = await graphql({ schema, source: countedRows, contextValue });
+
+    expect(result).toEqual(rows);
+    expect(adapter.count).toHaveBeenCalledTimes(1);
+    expect(counts).toEqual([2]);
+  });
+});
+
+describe('filter values built from variables', () => {
+  test('reads a variable that a list literal names but the request leaves unset as null', async () => {
+    const adapter = createMemoryAdapter();
+    const find = vi.spyOn(adapter, 'find');
+    const runtime = createRuntime(adapter);
+    const seen = [];
+    runtime.use((params, next) => {
+      if (params.operation === 'find') seen.push(params.args.year.value);
+      return next();
+    });
+    runtime.connect(null, new GraphQLObjectType({
+      name: 'RuntimeVariableItemSerie',
+      fields: { id: { type: GraphQLID }, year: { type: GraphQLInt } },
+    }), 'variableItemSerie', 'variableItemSeries');
+    const result = await graphql({
+      schema: runtime.createSchema(),
+      source: 'query($a: QLValue, $b: QLValue) { variableItemSeries(year: { operator: BTW, value: [$a, $b] }) { id } }',
+      variableValues: { b: 2020 },
+    });
+
+    expect(result).toEqual({ data: { variableItemSeries: [] } });
+    expect(seen).toEqual([[null, 2020]]);
+    expect(find.mock.calls[0][2].year).toEqual({ operator: 'BTW', value: [null, 2020] });
+  });
+});
+
+describe('interface and union fields', () => {
+  const abstractTypes = (prefix) => {
+    const Text = new GraphQLObjectType({ name: `${prefix}Text`, fields: { body: { type: GraphQLString } } });
+    const Image = new GraphQLObjectType({ name: `${prefix}Image`, fields: { url: { type: GraphQLString } } });
+    return {
+      Preview: new GraphQLUnionType({ name: `${prefix}Preview`, types: [Text, Image], resolveType: () => `${prefix}Text` }),
+      Node: new GraphQLInterfaceType({
+        name: `${prefix}Node`, fields: { body: { type: GraphQLString } }, resolveType: () => `${prefix}Text`,
+      }),
+    };
+  };
+  const fieldNames = (type) => Object.keys(type.getFields());
+  const previewWarning = (typeName, fieldName) => `Configuration issue: ${typeName}.${fieldName} has an interface or `
+    + 'union type, so generated inputs leave it out and generated mutations cannot set it; resolve it yourself, '
+    + 'and mark it readOnly to state that it is output-only.';
+
+  test.each([
+    ['Union', (t) => t.Preview, {}, false],
+    ['Interface', (t) => t.Node, {}, false],
+    ['ReadOnlyUnion', (t) => t.Preview, { readOnly: true }, false],
+    ['NonNullUnion', (t) => new GraphQLNonNull(t.Preview), {}, false],
+    ['NonNullListOfNonNullUnions', (t) => new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(t.Preview))), {}, true],
+    ['ListOfInterfaces', (t) => new GraphQLList(t.Node), {}, true],
+  ])('builds a valid schema for a collection child with a %s field and leaves it out of inputs', (shape, typeOf, extensions, isList) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const prefix = `RuntimeAbstract${shape}`;
+      const t = abstractTypes(prefix);
+      const runtime = createRuntime(createMemoryAdapter());
+      const Child = new GraphQLObjectType({
+        name: `${prefix}Child`,
+        fields: () => ({
+          id: { type: GraphQLID },
+          title: { type: GraphQLString },
+          preview: { type: typeOf(t), extensions, resolve: () => (isList ? [] : { body: 'b' }) },
+          parent: { type: Parent, extensions: { relation: { embedded: false, connectionField: 'parent' } } },
+        }),
+      });
+      const Parent = new GraphQLObjectType({
+        name: `${prefix}Parent`,
+        fields: () => ({
+          id: { type: GraphQLID },
+          children: { type: new GraphQLList(Child), extensions: { relation: { embedded: false, connectionField: 'parent' } } },
+        }),
+      });
+      runtime.connect(null, Parent, 'abstractParent', 'abstractParents');
+      runtime.connect(null, Child, 'abstractChild', 'abstractChildren');
+      const schema = runtime.createSchema();
+
+      expect(validateSchema(schema)).toEqual([]);
+      expect(fieldNames(schema.getType(`${prefix}ChildInput`))).toEqual(['title', 'parent']);
+      expect(fieldNames(schema.getType(`${prefix}ChildInputForUpdate`))).toEqual(['id', 'title', 'parent']);
+      expect(fieldNames(schema.getType(`${prefix}ParentA${prefix}ChildInputForParent`))).toEqual(['title']);
+      const query = schema.getQueryType().getFields();
+      for (const field of [query.abstractChildren, query.abstractChildren_aggregate, Parent.getFields().children]) {
+        expect(field.args.map((arg) => arg.name)).toContain('title');
+        // A list keeps the argument it has always had.
+        expect(field.args.find((arg) => arg.name === 'preview')?.type.toString())
+          .toBe(isList ? 'QLTypeFilterExpression' : undefined);
+      }
+      expect(warn.mock.calls).toEqual(extensions.readOnly ? [] : [[previewWarning(`${prefix}Child`, 'preview')]]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('leaves a writable list of a union out of inputs and warns once', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const t = abstractTypes('RuntimeAbstractList');
+      const runtime = createRuntime(createMemoryAdapter());
+      runtime.connect(null, new GraphQLObjectType({
+        name: 'RuntimeAbstractListDoc',
+        fields: { id: { type: GraphQLID }, title: { type: GraphQLString }, previews: { type: new GraphQLList(t.Preview) } },
+      }), 'abstractListDoc', 'abstractListDocs');
+      const schema = runtime.createSchema();
+      runtime.createSchema();
+
+      expect(validateSchema(schema)).toEqual([]);
+      expect(fieldNames(schema.getType('RuntimeAbstractListDocInput'))).toEqual(['title']);
+      expect(fieldNames(schema.getType('RuntimeAbstractListDocInputForUpdate'))).toEqual(['id', 'title']);
+      expect(schema.getQueryType().getFields().abstractListDocs.args.find((arg) => arg.name === 'previews').type.toString())
+        .toBe('QLTypeFilterExpression');
+      expect(warn.mock.calls).toEqual([[previewWarning('RuntimeAbstractListDoc', 'previews')]]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('builds embedded types holding lists of unions', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const t = abstractTypes('RuntimeAbstractBox');
+      const runtime = createRuntime(createMemoryAdapter());
+      const Box = new GraphQLObjectType({
+        name: 'RuntimeAbstractBoxBox',
+        fields: { label: { type: GraphQLString }, items: { type: new GraphQLList(t.Preview) } },
+      });
+      runtime.addNoEndpointType(Box);
+      runtime.connect(null, new GraphQLObjectType({
+        name: 'RuntimeAbstractBoxDoc',
+        fields: { id: { type: GraphQLID }, box: { type: Box, extensions: { relation: { embedded: true } } } },
+      }), 'abstractBoxDoc', 'abstractBoxDocs');
+      const schema = runtime.createSchema();
+
+      expect(validateSchema(schema)).toEqual([]);
+      expect(fieldNames(schema.getType('RuntimeAbstractBoxBoxInput'))).toEqual(['label']);
+      expect(warn.mock.calls).toEqual([[previewWarning('RuntimeAbstractBoxBox', 'items')]]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('keeps the argument of a readOnly list of a union, which accepts null (guard)', async () => {
+    const t = abstractTypes('RuntimeAbstractGuard');
+    const runtime = createRuntime(createMemoryAdapter());
+    runtime.connect(null, new GraphQLObjectType({
+      name: 'RuntimeAbstractGuardDoc',
+      fields: {
+        id: { type: GraphQLID },
+        title: { type: GraphQLString },
+        previews: { type: new GraphQLList(t.Preview), extensions: { readOnly: true }, resolve: () => [] },
+      },
+    }), 'abstractGuardDoc', 'abstractGuardDocs');
+    const schema = runtime.createSchema();
+
+    expect(printSchema(schema)).toContain('previews: QLTypeFilterExpression');
+    expect(await graphql({ schema, source: '{ abstractGuardDocs(previews: null) { id } }', contextValue: {} }))
+      .toEqual({ data: { abstractGuardDocs: [] } });
+  });
+
+  test.each([
+    ['PostgreSQL', () => createPostgres({ pool: { connect: vi.fn(), query: vi.fn() }, schema: 'abstract_fields' })],
+    ['transactional MongoDB', () => createRuntime(createMongoAdapter({ referentialIntegrity: 'transactional' }))],
+  ])('still rejects interface and union fields on %s (guard)', (label, createApi) => {
+    const t = abstractTypes(`RuntimeAbstract${label.replace(/\W/g, '')}`);
+    const api = createApi();
+    if (!api.initializeDatabase) api.preventCreatingCollection(true);
+    const name = `RuntimeAbstract${label.replace(/\W/g, '')}Doc`;
+    api.connect(null, new GraphQLObjectType({
+      name,
+      fields: { id: { type: GraphQLID }, preview: { type: t.Preview, extensions: { readOnly: true }, resolve: () => null } },
+    }), 'abstractRejectedDoc', 'abstractRejectedDocs');
+
+    expect(() => api.createSchema()).toThrow(`Unsupported field type at ${name}.preview`);
+  });
+});
+
+describe('an application scalar named JSON', () => {
+  test('serializes aggregation results through the reused scalar', async () => {
+    const JSONScalar = new GraphQLScalarType({ name: 'JSON', serialize: (value) => ({ wrapped: value }), parseValue: (value) => value });
+    const adapter = createMemoryAdapter();
+    adapter.aggregate = vi.fn(async () => [{ groupId: 'x', facts: { n: 2 } }]);
+    const runtime = createRuntime(adapter);
+    runtime.connect(null, new GraphQLObjectType({
+      name: 'RuntimeAppJSONSerie',
+      fields: { id: { type: GraphQLID }, name: { type: GraphQLString }, meta: { type: JSONScalar, resolve: () => 1 } },
+    }), 'appJSONSerie', 'appJSONSeries');
+    const schema = runtime.createSchema();
+    const result = await graphql({
+      schema,
+      source: '{ appJSONSeries_aggregate(aggregation: { groupId: "name", facts: [{ operation: COUNT, factName: "n", path: "id" }] }) { groupId facts } }',
+      contextValue: {},
+    });
+
+    expect(schema.getType('JSON')).toBe(JSONScalar);
+    expect(result).toEqual({ data: { appJSONSeries_aggregate: [{ groupId: { wrapped: 'x' }, facts: { wrapped: { n: 2 } } }] } });
   });
 });

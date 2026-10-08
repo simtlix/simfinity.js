@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import mongoose from 'mongoose';
-import { graphql, GraphQLEnumType, GraphQLID, GraphQLInt, GraphQLList, GraphQLObjectType, GraphQLScalarType, GraphQLSchema, GraphQLString } from 'graphql';
+import { graphql, GraphQLEnumType, GraphQLID, GraphQLInt, GraphQLList, GraphQLObjectType, GraphQLScalarType, GraphQLSchema, GraphQLString, parse, parseValue, validate } from 'graphql';
 import * as simfinity from '../packages/mongodb/src/index.js';
 import QLValue from '../packages/mongodb/src/const/QLValue.js';
 
@@ -54,6 +54,14 @@ const stateType = new GraphQLObjectType({ name: 'QueryStoredState', fields: {
   title: { type: GraphQLString }, state: { type: enumType },
 } });
 let literalSchema;
+let generatedSchema;
+let itemSchema;
+// Echoes the MongoDB match built from one filter argument, as the generated list resolvers build it.
+const echoFilter = (gqltype) => ({
+  type: GraphQLString,
+  args: { field: { type: GraphQLString }, operator: { type: GraphQLString }, value: { type: QLValue } },
+  resolve: async (parent, { field, ...filter }) => JSON.stringify(match(await simfinity.buildQuery({ [field]: filter }, gqltype))),
+});
 
 beforeAll(() => {
   simfinity.preventCreatingCollection(true);
@@ -72,7 +80,10 @@ beforeAll(() => {
   simfinity.connect(null, typedFilters, 'queryTypedValue', 'queryTypedValues');
   simfinity.connect(null, stateType, 'queryStoredState', 'queryStoredStates', null, null,
     { initialState: { name: 'ACTIVE', value: 7 }, actions: {} });
-  simfinity.createSchema();
+  generatedSchema = simfinity.createSchema();
+  itemSchema = new GraphQLSchema({ query: new GraphQLObjectType({ name: 'QueryItemLiterals', fields: {
+    book: echoFilter(bookType), typed: echoFilter(typedFilters),
+  } }) });
   literalSchema = new GraphQLSchema({ query: new GraphQLObjectType({ name: 'QueryLiteralBoundary', fields: {
     filter: { type: GraphQLString, args: { value: { type: QLValue }, operator: { type: GraphQLString } },
       resolve: async (parent, args) => JSON.stringify(await simfinity.buildQuery({ title: args }, bookType)) },
@@ -266,5 +277,79 @@ describe('query correctness', () => {
     expect((await simfinity.buildQuery({ pagination: { page: 1, size: Number.MAX_SAFE_INTEGER } }, bookType)).at(-1)).toEqual({ $limit: Number.MAX_SAFE_INTEGER });
     simfinity.configureQueryLimits({});
     await expect(simfinity.buildQuery({ pagination: { page: 1, size: 1001 } }, bookType)).rejects.toMatchObject({ extensions: { code: 'INVALID_PAGINATION' } });
+  });
+});
+
+describe('filter values with variables in list literals and enum literals', () => {
+  const run = (source, variableValues) => graphql({ schema: itemSchema, source, variableValues });
+  const declare = (variables) => Object.keys(variables).map((name) => `$${name}: QLValue`).join(', ');
+
+  it('parses variables inside a list literal and enum literals', () => {
+    expect(QLValue.parseLiteral(parseValue('[$a, 2, $b]'), { a: 1, b: 'x' })).toEqual([1, 2, 'x']);
+    // A variable the request leaves unset reads as null, as graphql-js reads list items; validation
+    // passes no variables.
+    expect(QLValue.parseLiteral(parseValue('[$a, $b]'), { b: 2 })).toEqual([null, 2]);
+    expect(QLValue.parseLiteral(parseValue('[$a]'), undefined)).toEqual([null]);
+    expect(QLValue.parseLiteral(parseValue('[$toString]'), {})).toEqual([null]);
+    expect(QLValue.parseLiteral(parseValue('ACTIVE'))).toBe('ACTIVE');
+    expect(QLValue.parseLiteral(parseValue('[ACTIVE, INACTIVE]'))).toEqual(['ACTIVE', 'INACTIVE']);
+    expect(() => QLValue.parseLiteral(parseValue('{ a: 1 }'))).toThrow('Filter values must be scalars or flat scalar lists');
+    expect(() => QLValue.parseLiteral(parseValue('[[1]]'))).toThrow('Nested filter value lists are not supported');
+    expect(() => QLValue.parseLiteral(parseValue('[[$a]]'), { a: 1 })).toThrow('Nested filter value lists are not supported');
+  });
+
+  it.each([
+    ['BTW', '[$a, $b]', { a: 'A', b: 'M' }, ['A', 'M'], { title: { $gte: 'A', $lte: 'M' } }],
+    ['IN', '[$a, $b]', { a: 'A', b: 'B' }, ['A', 'B'], { title: { $in: ['A', 'B'] } }],
+    ['IN', '["A", $b]', { b: 'B' }, ['A', 'B'], { title: { $in: ['A', 'B'] } }],
+  ])('filters %s with %s like the same list sent as one variable', async (operator, literal, variables, whole, expected) => {
+    const items = await run(`query(${declare(variables)}) { book(field: "title", operator: "${operator}", value: ${literal}) }`, variables);
+    const single = await run(`query($v: QLValue) { book(field: "title", operator: "${operator}", value: $v) }`, { v: whole });
+
+    expect(items).toEqual({ data: { book: JSON.stringify(expected) } });
+    expect(items).toEqual(single);
+  });
+
+  it('filters enum fields with enum literals like their quoted names', async () => {
+    for (const [literal, quoted, operator, expected] of [
+      ['ACTIVE', '"ACTIVE"', 'EQ', { status: 7 }],
+      ['[ACTIVE, INACTIVE]', '["ACTIVE", "INACTIVE"]', 'IN', { status: { $in: [7, 9] } }],
+    ]) {
+      const enumLiteral = await run(`{ typed(field: "status", operator: "${operator}", value: ${literal}) }`);
+
+      expect(enumLiteral).toEqual({ data: { typed: JSON.stringify(expected) } });
+      expect(enumLiteral).toEqual(await run(`{ typed(field: "status", operator: "${operator}", value: ${quoted}) }`));
+    }
+  });
+
+  it('validates list items built from variables and enum literals against generated list queries', () => {
+    const document = parse(`query($a: QLValue, $b: QLValue) {
+      correctBooks(title: { operator: BTW, value: [$a, $b] }, OR: [{ conditions: [{ field: "title", operator: IN, value: [$a, "x"] }] }]) { id }
+      queryTypedValues(status: { operator: IN, value: [ACTIVE, INACTIVE] }, AND: [{ conditions: [{ field: "status", value: ACTIVE }] }]) { status }
+    }`);
+
+    expect(validate(generatedSchema, document)).toEqual([]);
+  });
+
+  it('still rejects list items whose variables are declared with another type (guard)', () => {
+    const document = parse('query($a: String) { correctBooks(title: { operator: IN, value: [$a] }) { id } }');
+
+    expect(validate(generatedSchema, document).map((error) => error.message))
+      .toContain('Variable "$a" of type "String" used in position expecting type "QLValue".');
+  });
+
+  it.each([
+    ['a null', { a: null, b: 'M' }],
+    ['an unset', { b: 'M' }],
+    ['an object', { a: { x: 1 }, b: 'M' }],
+    ['a list', { a: ['A'], b: 'M' }],
+  ])('rejects %s variable inside a list literal with INVALID_FILTER_VALUE (guard)', async (label, variables) => {
+    const source = 'query($a: QLValue, $b: QLValue) { book(field: "title", operator: "BTW", value: [$a, $b]) }';
+    const result = await run(source, variables);
+
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].extensions.code).toBe('INVALID_FILTER_VALUE');
+    // An unset item is rejected like an explicit null one.
+    if (label === 'an unset') expect(result.errors[0].message).toBe((await run(source, { a: null, b: 'M' })).errors[0].message);
   });
 });

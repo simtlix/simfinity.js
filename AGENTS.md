@@ -61,7 +61,7 @@ npm test
 
 Use `npm run test:watch` while iterating; `npm run test:coverage` when coverage matters.
 
-- For package boundaries, dependencies, exports or declarations: `npm run test:packages` checks extracted-archive quality, isolated packed applications, strict TypeScript consumers and MongoDB deep imports/resolution aliases. Keep quality tooling in root development dependencies only.
+- For package boundaries, dependencies, exports or declarations: `npm run test:packages` checks extracted-archive quality, isolated packed applications, strict TypeScript consumers and MongoDB deep imports/resolution aliases. The core consumer also compiles every public core subpath (namespace, named, default and type imports) under NodeNext, Node16, Bundler and Node10, checking each member's exact type against the root and the export names both ways; `tests/core-subpath-types.test.js` checks the export map, `typesVersions`, declared names and re-exported types without packing; the archive quality check requires every `exports` `types` target to be in the archive. Keep quality tooling in root development dependencies only.
 - For dependency changes: `npm run test:security` audits the root lockfile including development dependencies; CI and release validation require it. Audit independent documentation/example applications separately. MongoDB requires Mongoose `^8.24.2`; retain the update-casting security regression.
 - For database behavior: run the full suite with disposable database URIs, as described in the testing rule. `npm run test:integration` covers only `tests/integration/`; additional MongoDB regression suites live directly under `tests/`.
 - For documentation: `npm run docs:install` and `npm run docs:build`.

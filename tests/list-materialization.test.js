@@ -32,6 +32,8 @@ describe('Wrapped list schema and input generation', () => {
     expect(String(create.children.type.ofType.getFields().added.type)).toContain('!]');
     expect(Parent.getFields().children.resolve).toBeTypeOf('function');
     expect(String(create.strictChildren.type.getFields().added.type)).toContain('!]');
+    // Null IDs are skipped, so `deleted` accepts them whatever the item nullability.
+    expect(String(create.strictChildren.type.getFields().deleted.type)).toBe('[ID]');
     expect(create.requiredNullableChildren.type).toBeInstanceOf(GraphQLNonNull);
     expect(String(create.requiredNullableChildren.type.ofType.getFields().added.type)).not.toContain('!]');
     expect(String(create.nullableChildren.type.getFields().added.type)).not.toContain('!]');
@@ -62,6 +64,9 @@ describe('Wrapped list schema and input generation', () => {
     expect(create.nodes.type).toBeInstanceOf(GraphQLNonNull);
     expect(update.nodes.type).not.toBeInstanceOf(GraphQLNonNull);
     expect(String(create.nodes.type.ofType.getFields().added.type)).toContain('!]');
+    expect(String(create.nodes.type.ofType.getFields().deleted.type)).toBe('[ID]');
+    // Nested items an add mutation creates accept their own children, optionally.
+    expect(String(schema.getType('AMaterialTreeInputForParent').getFields().nodes.type)).toBe('OneToManyAnodes');
     expect(Tree.getFields().nodes.resolve).toBeTypeOf('function');
   });
 });

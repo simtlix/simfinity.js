@@ -66,6 +66,8 @@ Permission maps must be plain objects or objects with a null prototype; only own
 
 All helpers below are exported by `@simtlix/simfinity-core/auth` and are also available on the selected runtime’s `auth` namespace.
 
+The subpath ships TypeScript declarations: `moduleResolution` `node16`, `nodenext` and `bundler` read them through the export map, and `node10` through `typesVersions`. Its named and default exports have the same types as the root `auth` namespace, and it re-exports `AuthRuleFunction`, `PermissionSchema` and the other authorization types. `requireRole()` and `requirePermission()` accept a string or an array of strings, which may be readonly, such as an `as const` list or a frozen array.
+
 | Helper | Behavior |
 | --- | --- |
 | `requireAuth(userPath = 'user')` | Requires a truthy user in context; a promise is not a user. |

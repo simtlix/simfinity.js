@@ -47,18 +47,37 @@ const SerieType = new GraphQLObjectType({
 
 | Helper | Rule |
 | --- | --- |
-| `stringLength(name, min, max)` | String length within the supplied bounds; required on create |
+| `stringLength(name, min, max)` | String length within the supplied bounds, where `undefined` or `null` means no bound; required on create |
 | `maxLength(name, max)` | Maximum string length |
 | `pattern(name, regex, message?)` | Match a regular expression |
 | `email()` | Basic email address format |
 | `url()` | Accepted by JavaScript's URL parser |
-| `numberRange(name, min, max)` | Number within inclusive bounds |
+| `numberRange(name, min, max)` | Number within inclusive bounds, where `undefined` or `null` means no bound |
 | `positive(name)` | Number greater than zero |
-| `arrayLength(name, maxItems, itemValidator?)` | Maximum array size, optionally validating each item |
-| `dateFormat(name, format?)` | Parseable date; optional `YYYY-MM-DD` string shape check |
-| `futureDate(name)` | Date later than the current time |
+| `arrayLength(name, maxItems, itemValidator?)` | Maximum array size, where `undefined` or `null` means no limit; item rules: a validator, a helper result or an array of them |
+| `dateFormat(name, format?)` | A date JavaScript can parse; ISO (`YYYY-MM-DD…`) and slashed `MM/DD/YYYY` strings must be real calendar dates; optional `YYYY-MM-DD` shape check |
+| `futureDate(name)` | Date later than the current time, with the same date checks as `dateFormat()` without a format |
 
-`arrayLength()`'s optional `itemValidator` is an array of validator objects with a `validate()` method. For `dateFormat()`, `YYYY-MM-DD` is the explicitly supported format check; it is not a general date-format parser.
+The helpers are also available, with TypeScript declarations, from the `@simtlix/simfinity-core/validators` subpath, which also exports the `FieldValidator`, `FieldValidations` and `ItemValidators` types; the core root exports them too.
+
+`arrayLength()`'s optional `itemValidator` is one of:
+
+- a validator object with `validate(typeName, fieldName, value, session)`, written as a plain object or a function;
+- a helper result such as `validators.maxLength('Tag', 20)`, whose `CREATE` rules run on every item of a supplied list on create and update, so `null` items fail helpers that require a value;
+- an array of them.
+
+```javascript
+tags: {
+  type: new GraphQLList(GraphQLString),
+  extensions: {
+    validations: validators.arrayLength('Tags', 10, validators.maxLength('Tag', 20)),
+  },
+},
+```
+
+An array is read each time a list is validated, and its falsy entries are skipped, so `[flag && rule]` works. Inside an array, any object with `validate()` is called, as before; an entry without `validate()` that is not a helper result makes lists with items fail with a `TypeError` that names the helper. A falsy `itemValidator` adds no item checks. A single class instance with its own `validate()`, such as a Joi or yup schema, is not called, because its signature differs. Unusable values log a `Configuration issue` warning when the helper is created; nothing throws at startup.
+
+`dateFormat()` is not a general date-format parser. Values must be dates JavaScript can parse. A string that starts with an ISO date (`YYYY-MM-DD`, alone or followed by a time), or a slashed `MM/DD/YYYY` string, must be a real calendar date, so `2024-02-31`, `2023-02-29` and `02/31/2024` fail with `<name> must be a valid date`. `format: 'YYYY-MM-DD'` also requires exactly that shape; other shapes fail with `<name> must be in format YYYY-MM-DD`, as before. Any other `format` is not checked: values only need to parse and pass the calendar checks above, and a `Configuration issue` warning naming the format is logged when the helper is created. JavaScript reads slashed dates month first, so `DD/MM/YYYY` values are not supported: on `Date` and `DateTime` fields they are stored month first or fail. Date objects and timestamps skip the string checks, and `futureDate()` applies the same date checks. Values in other layouts, such as `2024-2-31`, `Feb 31 2024` or a slashed date followed by a time, can still roll over into the next month.
 
 `pattern()` copies the regular expression when the helper is created and tests each value from its first character, so `g` and `y` flags keep no state between values, and later changes to your `RegExp` do not affect it. The pattern must be a `RegExp` or a string; other values throw `TypeError` when the helper is created. `url()` rejects invalid values without logging them.
 

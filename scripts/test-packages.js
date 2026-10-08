@@ -61,6 +61,78 @@ const adapterSource = `const adapter = {
   async findChildren() { return []; },
 };`;
 
+// The public core subpaths: their value exports, the root namespace whose members they mirror, the
+// root types they re-export, and what their default export is. The packed runtime check and the
+// TypeScript fixture both read this list, so a declaration that drifts from its module fails one
+// of them. A new subpath export needs its declaration and an entry here.
+const coreSubpaths = {
+  auth: {
+    namespace: 'auth',
+    values: [
+      'ForbiddenError', 'UnauthenticatedError', 'allow', 'anyRule', 'composeRules', 'createAuthError',
+      'createAuthMiddleware', 'createAuthPlugin', 'createFieldMiddleware', 'createRule',
+      'createRuleFromExpression', 'default', 'deny', 'evaluateExpression', 'isOwner',
+      'isPolicyExpression', 'requireAuth', 'requirePermission', 'requireRole', 'resolvePath',
+    ],
+    types: [
+      'AuthPluginOptions', 'AuthRule', 'AuthRuleFunction', 'EnvelopSchemaPlugin', 'PermissionSchema',
+      'PolicyExpression', 'TypePermissions',
+    ],
+    errorClasses: ['ForbiddenError', 'UnauthenticatedError'],
+    defaultExport: 'namespace',
+  },
+  'auth/errors': {
+    namespace: 'auth',
+    values: ['ForbiddenError', 'UnauthenticatedError', 'createAuthError', 'default'],
+    types: [],
+    errorClasses: ['ForbiddenError', 'UnauthenticatedError'],
+    defaultExport: 'pick',
+  },
+  'auth/expressions': {
+    namespace: 'auth',
+    values: ['createRuleFromExpression', 'default', 'evaluateExpression', 'isPolicyExpression'],
+    types: ['PolicyExpression'],
+    defaultExport: 'pick',
+    // Low-level helpers that only the runtime default object carries.
+    defaultExtras: '{ resolveRef(refPath: string, context: any): unknown; resolveValue(value: unknown, context: any): unknown }',
+  },
+  'auth/rules': {
+    namespace: 'auth',
+    values: [
+      'allow', 'anyRule', 'composeRules', 'createRule', 'default', 'deny', 'isOwner', 'requireAuth',
+      'requirePermission', 'requireRole', 'resolvePath',
+    ],
+    types: ['AuthRuleFunction'],
+    defaultExport: 'pick',
+  },
+  plugins: {
+    namespace: 'plugins',
+    values: ['apolloCountPlugin', 'createAuthPlugin', 'default', 'envelopCountPlugin'],
+    types: ['AuthPluginOptions', 'EnvelopSchemaPlugin', 'PermissionSchema'],
+    defaultExport: 'namespace',
+  },
+  scalars: {
+    namespace: 'scalars',
+    values: [
+      'EmailScalar', 'PositiveFloatScalar', 'PositiveIntScalar', 'URLScalar', 'createBoundedFloatScalar',
+      'createBoundedIntScalar', 'createBoundedStringScalar', 'createPatternStringScalar', 'default',
+    ],
+    types: [],
+    defaultExport: 'namespace',
+  },
+  validators: {
+    namespace: 'validators',
+    values: [
+      'arrayLength', 'dateFormat', 'default', 'email', 'futureDate', 'maxLength', 'numberRange',
+      'pattern', 'positive', 'stringLength', 'url',
+    ],
+    types: ['FieldValidations', 'FieldValidator', 'ItemValidators'],
+    defaultExport: 'namespace',
+  },
+};
+const subpathBinding = (subpath) => `${subpath.replace(/\/(\w)/g, (match, letter) => letter.toUpperCase())}Subpath`;
+const quotedUnion = (names) => names.map((name) => `'${name}'`).join(' | ');
+
 const coreSource = `import assert from 'node:assert/strict';
   import {
     InternalServerError,
@@ -113,6 +185,8 @@ const coreSource = `import assert from 'node:assert/strict';
   const unknown = buildErrorFormatter()(new Error('unknown'));
   assert(unknown.originalError instanceof InternalServerError);
   assert.equal(unknown.originalError.getCause().message, 'unknown');
+  assert.equal(unknown.originalError.getStatus(), 500);
+  assert.equal(unknown.toJSON().extensions.status, 500);
   assert.equal(JSON.stringify(unknown).includes('cause'), false);
   const invalidQuery = graphqlSync({ schema, source: '{ missing }' });
   assert.equal(buildErrorFormatter()(invalidQuery.errors[0]).toJSON().extensions.code, 'BAD_REQUEST');
@@ -127,7 +201,15 @@ const coreSource = `import assert from 'node:assert/strict';
   assert.equal(typeof auth.createAuthPlugin, 'function');
   assert.equal(typeof validators.email, 'function');
   assert.equal(scalars.EmailScalar.name, 'Email_String');
-  assert.equal(typeof plugins.envelopCountPlugin, 'function');`;
+  assert.equal(typeof plugins.envelopCountPlugin, 'function');
+  const subpaths = ${JSON.stringify(Object.fromEntries(Object.entries(coreSubpaths).map(([subpath, { values }]) => [subpath, values])))};
+  for (const [subpath, names] of Object.entries(subpaths)) {
+    const namespace = await import(\`@simtlix/simfinity-core/\${subpath}\`);
+    assert.deepEqual(Object.keys(namespace).sort(), [...names].sort(), subpath);
+  }
+  for (const [name, namespace] of Object.entries({ auth, plugins, scalars, validators })) {
+    assert.equal((await import(\`@simtlix/simfinity-core/\${name}\`)).default, namespace, name);
+  }`;
 
 const sqlSource = `import assert from 'node:assert/strict';
   import { createRequire } from 'node:module';
@@ -433,6 +515,10 @@ const scopes: TypeScopes = { find: ({ args, operation, context }) => { args.tena
 const misspelledScopes: TypeScopes = { getById: () => undefined };
 const owner: AuthRuleFunction = auth.isOwner((post: { authorId: string }) => post.authorId, (user: { id: string }) => user.id, { userPath: (ctx: { user?: unknown }) => ctx.user });
 const roleRule: AuthRuleFunction = auth.requireRole('admin', { rolePath: (user: { profile: { role: string } }) => user.profile.role });
+// Readonly role and permission arrays are accepted, as the runtime copies them.
+const roles = ['admin', 'editor'] as const;
+const readonlyRoles: AuthRuleFunction = auth.requireRole(roles);
+const frozenPermissions: AuthRuleFunction = auth.requirePermission(Object.freeze(['series:read']));
 const known: SimfinityError = new InternalServerError('known');
 const operator: GraphQLEnumType = QLOperator;
 const sort: GraphQLInputObjectType = QLSort;
@@ -441,7 +527,111 @@ const rule: AuthRuleFunction = auth.requireAuth();
 const validations: FieldValidations = validators.email();
 const scalarName: string = scalars.EmailScalar.name;
 const countPlugin = plugins.envelopCountPlugin();
-void [model, formatted, graphQLError, shape, scopes, misspelledScopes, owner, roleRule, known, operator, sort, valueName, rule, validations, scalarName, countPlugin, conditionalScopes];`;
+void [model, formatted, graphQLError, shape, scopes, misspelledScopes, owner, roleRule, known, operator, sort, valueName, rule, validations, scalarName, countPlugin, conditionalScopes];
+void [readonlyRoles, frozenPermissions];`;
+
+// The expected type of a subpath's default export.
+const subpathDefaultType = ({ namespace, values, defaultExport, defaultExtras }) => {
+  if (defaultExport === 'namespace') return `typeof ${namespace}`;
+  const picked = `Pick<typeof ${namespace}, ${quotedUnion(values.filter((name) => name !== 'default'))}>`;
+  return defaultExtras ? `${picked} & ${defaultExtras}` : picked;
+};
+
+// Every public core subpath, in the import forms the guides use: namespace, named, default and type
+// imports. Each value and type export must have exactly the type of the root member it mirrors, so a
+// declaration that drifts or degrades to \`any\` fails, and the key records fail on a missing or an
+// extra declared export.
+const coreSubpathTypes = `${Object.keys(coreSubpaths).map((subpath) => (
+  `import * as ${subpathBinding(subpath)} from '@simtlix/simfinity-core/${subpath}';`
+)).join('\n')}
+import type * as Core from '@simtlix/simfinity-core';
+import { SimfinityError, auth, plugins, scalars, validators } from '@simtlix/simfinity-core';
+import authDefault, {
+  ForbiddenError,
+  UnauthenticatedError,
+  allow,
+  createAuthPlugin,
+  requireAuth,
+  requirePermission,
+  requireRole,
+  type AuthRuleFunction,
+  type PermissionSchema,
+} from '@simtlix/simfinity-core/auth';
+import errors, { createAuthError } from '@simtlix/simfinity-core/auth/errors';
+import expressions, { createRuleFromExpression, type PolicyExpression } from '@simtlix/simfinity-core/auth/expressions';
+import rules, { isOwner } from '@simtlix/simfinity-core/auth/rules';
+import pluginsDefault, { envelopCountPlugin, type EnvelopSchemaPlugin } from '@simtlix/simfinity-core/plugins';
+import scalarsDefault, { EmailScalar, createBoundedIntScalar } from '@simtlix/simfinity-core/scalars';
+import validatorsDefault, {
+  arrayLength,
+  email,
+  maxLength,
+  numberRange,
+  type FieldValidations,
+  type ItemValidators,
+} from '@simtlix/simfinity-core/validators';
+import type { GraphQLScalarType } from 'graphql';
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+${Object.entries(coreSubpaths).map(([subpath, config]) => {
+    const binding = subpathBinding(subpath);
+    const { namespace, values, types, errorClasses = [] } = config;
+    const members = values.filter((name) => name !== 'default');
+    return [
+      `const ${binding}Keys: Record<keyof typeof ${binding}, true> = { ${values.map((name) => `${name}: true`).join(', ')} };`,
+      `const ${binding}Values: {`,
+      ...members.map((name) => `  ${name}: Equals<typeof ${binding}.${name}, typeof ${namespace}.${name}>;`),
+      `  default: Equals<typeof ${binding}.default, ${subpathDefaultType(config)}>;`,
+      `} = { ${[...members, 'default'].map((name) => `${name}: true`).join(', ')} };`,
+      `const ${binding}Types: {`,
+      ...types.map((name) => `  ${name}: Equals<${binding}.${name}, Core.${name}>;`),
+      ...errorClasses.map((name) => `  ${name}: Equals<${binding}.${name}, InstanceType<typeof auth.${name}>>;`),
+      `} = { ${[...types, ...errorClasses].map((name) => `${name}: true`).join(', ')} };`,
+    ].join('\n');
+  }).join('\n')}
+const sameAuth: typeof auth = authDefault;
+const samePlugins: typeof plugins = pluginsDefault;
+const sameScalars: typeof scalars = scalarsDefault;
+const sameValidators: typeof validators = validatorsDefault;
+const errorFactory: typeof auth.createAuthError = errors.createAuthError;
+const roleFactory: typeof auth.requireRole = rules.requireRole;
+const referenced: unknown = expressions.resolveRef('ctx.user.id', { ctx: {} });
+const permissions: PermissionSchema = { RootQueryType: { serie: requireAuth(), series: authSubpath.requireRole('editor') }, Serie: { '*': allow() } };
+const authPlugin: EnvelopSchemaPlugin = createAuthPlugin(permissions, { defaultPolicy: 'DENY' });
+const roles = ['admin', 'editor'] as const;
+const readonlyRoles: AuthRuleFunction = requireRole(roles);
+const frozenPermissions: AuthRuleFunction = requirePermission(Object.freeze(['series:read']));
+const ownerRule: AuthRuleFunction = isOwner('authorId');
+const policyRule: AuthRuleFunction = createRuleFromExpression({ eq: [{ ref: 'ctx.user.role' }, 'admin'] } satisfies PolicyExpression);
+const forbidden: ForbiddenError = new ForbiddenError('denied');
+const unauthenticated: SimfinityError = new UnauthenticatedError();
+class TenantForbidden extends ForbiddenError {}
+const caught: unknown = new TenantForbidden();
+const isForbidden: boolean = caught instanceof ForbiddenError && caught.getStatus() === 403;
+const authError: SimfinityError = createAuthError('nope', 'UNAUTHENTICATED');
+const rating: GraphQLScalarType = createBoundedIntScalar('Rating', null, 5);
+const emailName: string = EmailScalar.name;
+const validations: FieldValidations = email();
+const tagRules: ItemValidators = [maxLength('Tag', 20), null];
+const tags: FieldValidations = arrayLength('Tags', 10, tagRules);
+const range: FieldValidations = numberRange('Rating', null, 5);
+const countPlugin = envelopCountPlugin();
+// @ts-expect-error A role is a string or an array of strings.
+requireRole(42);
+// @ts-expect-error The default policy is ALLOW or DENY.
+createAuthPlugin({}, { defaultPolicy: 'MAYBE' });
+// @ts-expect-error stringLength needs a field name.
+validatorsSubpath.stringLength();
+// @ts-expect-error A bounded scalar needs a name.
+scalarsSubpath.createBoundedStringScalar();
+// @ts-expect-error A count plugin takes no options.
+pluginsSubpath.apolloCountPlugin({});
+// @ts-expect-error An owner field is a path or an extractor.
+authRulesSubpath.isOwner(42);
+// @ts-expect-error resolveRef is only a member of the default object.
+void authExpressionsSubpath.resolveRef;
+void [${Object.keys(coreSubpaths).flatMap((subpath) => ['Keys', 'Values', 'Types'].map((suffix) => `${subpathBinding(subpath)}${suffix}`)).join(', ')}];
+void [sameAuth, samePlugins, sameScalars, sameValidators, errorFactory, roleFactory, referenced, authPlugin, readonlyRoles, frozenPermissions];
+void [ownerRule, policyRule, forbidden, unauthenticated, isForbidden, authError, rating, emailName, validations, tags, range, countPlugin];`;
 
 const sqlTypes = `import {
   createSQL,
@@ -456,8 +646,10 @@ const sqlTypes = `import {
   type SQLStatement,
   type MutationLimitsOptions,
   type TypeScopes,
+  type ItemValidators,
+  validators,
 } from '@simtlix/simfinity-sql';
-import { describeModels } from '@simtlix/simfinity-core';
+import { describeModels, type ItemValidators as CoreItemValidators } from '@simtlix/simfinity-core';
 import { GraphQLID, GraphQLObjectType, GraphQLString } from 'graphql';
 type Configuration = { schema: string; token: string };
 type Client = { active: boolean };
@@ -537,7 +729,11 @@ const badPlugin: SQLPlugin<Configuration, Client, Description> = { ...plugin, ap
 const limits: MutationLimitsOptions = { maxNestedOperations: 0 };
 api.configureMutationLimits(limits);
 const scopes: TypeScopes = { aggregate: async ({ args }) => { args.AND = []; } };
-void [capability, scalar, description, badOperation, badPlugin, scopes];`;
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+const itemRules: ItemValidators = [validators.maxLength('Tag', 20), null];
+const tagRules = validators.arrayLength('Tags', 10, itemRules);
+const sameItemValidators: Equals<ItemValidators, CoreItemValidators> = true;
+void [capability, scalar, description, badOperation, badPlugin, scopes, itemRules, tagRules, sameItemValidators];`;
 
 const postgresTypes = `import { Pool, type PoolClient } from 'pg';
 import { createSQL } from '@simtlix/simfinity-sql';
@@ -561,7 +757,9 @@ import {
   type PostgresRuntime,
   type PostgresSession,
   type DatabaseQueryable,
+  type ItemValidators,
 } from '@simtlix/simfinity-postgres';
+import type { ItemValidators as CoreItemValidators } from '@simtlix/simfinity-core';
 import { GraphQLObjectType, GraphQLString } from 'graphql';
 declare const pool: Pool;
 const type = new GraphQLObjectType({ name: 'TypedPostgresBook', fields: { title: { type: GraphQLString } } });
@@ -596,7 +794,12 @@ const defaultReady: Promise<InitializationResult> = initializeDatabase({ mode: '
 configureMutationLimits({ maxNestedOperations: 100 });
 api.configureMutationLimits();
 const scopes: TypeScopes = { get_by_id: ({ args }) => { args.id = { operator: 'EQ', value: args.id?.value }; } };
-void [schema, model, ready, lowLevel, defaultSchema, defaultReady, rule, email, scalarName, countPlugin, scopes];`;
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+const itemRules: ItemValidators = [validators.maxLength('Tag', 20), null];
+const tagRules = validators.arrayLength('Tags', 10, itemRules);
+const sameItemValidators: Equals<ItemValidators, CoreItemValidators> = true;
+void [schema, model, ready, lowLevel, defaultSchema, defaultReady, rule, email, scalarName, countPlugin, scopes];
+void [itemRules, tagRules, sameItemValidators];`;
 
 const mongoTypes = `import {
   InternalServerError,
@@ -615,7 +818,9 @@ const mongoTypes = `import {
   type GeneratedMCPTools,
   type MutationLimitsOptions,
   type TypeScopes,
+  type ItemValidators,
 } from '@simtlix/simfinity-js';
+import type { ItemValidators as CoreItemValidators } from '@simtlix/simfinity-core';
 import { GraphQLObjectType, GraphQLString } from 'graphql';
 const runtime = createRuntime(createMongoAdapter());
 const protectedAdapter = createMongoAdapter({ referentialIntegrity: 'transactional' });
@@ -640,7 +845,12 @@ const limits: MutationLimitsOptions = { maxNestedOperations: 100 };
 configureMutationLimits(limits);
 runtime.configureMutationLimits();
 const scopes: TypeScopes = { find: async ({ args, context }) => { args.owner = { operator: 'EQ', value: context.user.id }; } };
-void [registrations, inputType, formatted, internal, rule, email, scalarName, countPlugin, generated, protection, ready, scopes];`;
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+const itemRules: ItemValidators = [validators.maxLength('Tag', 20), null];
+const tagRules = validators.arrayLength('Tags', 10, itemRules);
+const sameItemValidators: Equals<ItemValidators, CoreItemValidators> = true;
+void [registrations, inputType, formatted, internal, rule, email, scalarName, countPlugin, generated, protection, ready, scopes];
+void [itemRules, tagRules, sameItemValidators];`;
 
 const mcpTypes = `import mcp, {
   createHTTPMCPHandler,
@@ -736,6 +946,10 @@ const cases = [
     archives: ({ core }) => [core],
     source: coreSource,
     types: coreTypes,
+    extraTypes: { 'subpaths.ts': coreSubpathTypes },
+    // NodeNext, Node16 and Bundler read the subpath declarations from the exports map; Node10, which
+    // ignores exports, reads them from typesVersions.
+    moduleResolutions: ['NodeNext', 'Node16', 'Bundler', 'Node10'],
     forbiddenPackages: ['pg', 'mongoose', 'mongodb', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
   },
   {
@@ -813,19 +1027,27 @@ try {
     if (testCase.name === 'mongo') {
       run(process.execPath, [join(root, 'tests/fixtures/mongodb-package-resolution.js')], cwd);
     }
-    writeFileSync(join(cwd, 'check.ts'), testCase.types);
-    writeFileSync(join(cwd, 'tsconfig.json'), JSON.stringify({
-      compilerOptions: {
-        strict: true,
-        target: 'ES2022',
-        module: 'NodeNext',
-        moduleResolution: 'NodeNext',
-        noEmit: true,
-        skipLibCheck: false,
-      },
-      include: ['check.ts'],
-    }));
-    run(process.execPath, ['node_modules/typescript/bin/tsc', '--project', 'tsconfig.json'], cwd);
+    const typeFiles = { 'check.ts': testCase.types, ...testCase.extraTypes };
+    for (const [file, source] of Object.entries(typeFiles)) writeFileSync(join(cwd, file), source);
+    for (const moduleResolution of testCase.moduleResolutions || ['NodeNext']) {
+      writeFileSync(join(cwd, 'tsconfig.json'), JSON.stringify({
+        compilerOptions: {
+          strict: true,
+          target: 'ES2022',
+          module: ['NodeNext', 'Node16'].includes(moduleResolution) ? moduleResolution : 'ESNext',
+          moduleResolution,
+          noEmit: true,
+          skipLibCheck: false,
+        },
+        include: Object.keys(typeFiles),
+      }));
+      try {
+        run(process.execPath, ['node_modules/typescript/bin/tsc', '--project', 'tsconfig.json'], cwd);
+      } catch (error) {
+        error.message = `${testCase.name} (moduleResolution ${moduleResolution}): ${error.message}`;
+        throw error;
+      }
+    }
     console.log(`${testCase.name}: packed runtime and TypeScript consumption verified`);
   }
 } catch (error) {

@@ -80,7 +80,7 @@ Neither mode drops source data, alters existing columns, runs application data m
 
 `getModel(Type)` returns a `PostgresModel` with `findById`, `find`, `create`, `update`, and `delete`. Records are plain objects whose `id` and `_id` are the same UUID. Native methods do not provide Mongoose query chaining, `.lean()`, population, middleware, or aggregation pipelines. Native writes bypass GraphQL input coercion, scopes, authorization, validators, and controllers, and use storage names for reference fields.
 
-Use the runtime creation pipeline when validators, controllers, nested-write orchestration, and one shared transaction matter. A direct `saveObject()` call still bypasses GraphQL coercion, field authorization, query scope, and global middleware, so the programmatic caller must validate and authorize its own request boundary:
+Use the runtime creation pipeline when validators, controllers, nested-write orchestration, and one shared transaction matter. A direct `saveObject()` call skips GraphQL coercion, field authorization, query scope and the root record's global middleware. Nested collection children still run their type's middleware with the supplied context. So the programmatic caller must validate and authorize its own request boundary, and pass a context that its middleware accepts:
 
 ```javascript
 await simfinity.withTransaction(null, async (session) => {

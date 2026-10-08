@@ -153,10 +153,33 @@ describe('buildErrorFormatter', () => {
     const [[received]] = callback.mock.calls;
     expect(received).toBeInstanceOf(InternalServerError);
     expect(received.getCause()).toBe(databaseDown);
+    expect(received.getStatus()).toBe(500);
     const json = serialize(formatted);
     expect(Object.keys(json).sort()).toEqual(['extensions', 'locations', 'message', 'path']);
     expect(json.message).toBe(databaseDown.message);
     expect(json.extensions.code).toBe('INTERNAL_SERVER_ERROR');
+    expect(json.extensions.status).toBe(500);
+  });
+
+  test('gives InternalServerError status 500 and keeps its cause', () => {
+    const cause = new Error('connect ECONNREFUSED');
+    const error = new InternalServerError('Storage unavailable', cause);
+
+    expect(error).toBeInstanceOf(SimfinityError);
+    expect(error.extensions).toMatchObject({ code: 'INTERNAL_SERVER_ERROR', status: 500 });
+    expect(error.getCode()).toBe('INTERNAL_SERVER_ERROR');
+    expect(error.getStatus()).toBe(500);
+    expect(error.getCause()).toBe(cause);
+    expect(new InternalServerError('No cause').getStatus()).toBe(500);
+  });
+
+  test('keeps the cause as an enumerable property of the error itself (guard)', () => {
+    const cause = Object.assign(new Error('connect ECONNREFUSED'), { query: 'SELECT 1' });
+    const error = new InternalServerError('Storage unavailable', cause);
+
+    expect(Object.getOwnPropertyDescriptor(error, 'cause').enumerable).toBe(true);
+    expect(JSON.parse(JSON.stringify(error)).cause).toEqual({ query: 'SELECT 1' });
+    expect(serialize(buildErrorFormatter()(error))).not.toHaveProperty('cause');
   });
 
   test('replaces the error with the callback result and keeps its location', async () => {
@@ -427,7 +450,12 @@ describe('buildErrorFormatter', () => {
     const [[received]] = callback.mock.calls;
     expect(received).toBeInstanceOf(InternalServerError);
     expect(received.getCause()).toBeUndefined();
-    expect(serialize(formatted)).toMatchObject({ message: 'Unexpected error value', path: ['nonError'] });
+    expect(received.getStatus()).toBe(500);
+    expect(serialize(formatted)).toMatchObject({
+      message: 'Unexpected error value',
+      path: ['nonError'],
+      extensions: { code: 'INTERNAL_SERVER_ERROR', status: 500 },
+    });
     expect(JSON.stringify(formatted)).not.toContain('Plaintext-Secret');
   });
 
@@ -442,6 +470,8 @@ describe('buildErrorFormatter', () => {
     expect(known.toJSON()).toEqual({ message: 'Book not found', extensions: { ...notFound.extensions } });
     expect(unknown.originalError).toBeInstanceOf(InternalServerError);
     expect(unknown.originalError.getCause().message).toBe('plain');
+    expect(unknown.extensions.status).toBe(500);
+    expect(unknown.toJSON().extensions).toMatchObject({ code: 'INTERNAL_SERVER_ERROR', status: 500 });
   });
 
   test('does not keep non-Error values as the cause', () => {

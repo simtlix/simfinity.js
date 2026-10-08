@@ -9,6 +9,7 @@ import {
 
 import SimfinityError from './errors/simfinity.error.js';
 import InternalServerError from './errors/internal-server.error.js';
+import { ForbiddenError } from './auth/errors.js';
 import QLOperator from './const/QLOperator.js';
 import QLValue from './const/QLValue.js';
 import QLSort from './const/QLSort.js';
@@ -34,15 +35,23 @@ const countSinkOf = (value) => {
   return typeof sink === 'function' ? sink : undefined;
 };
 // The root value arrives as parent, which resolver wrappers that forward only (parent, args,
-// context) still pass on; info.rootValue is the fallback. Without a sink the count goes to
-// context.count, where Envelop/Apollo/Yoga count plugins read it.
+// context) still pass on; info.rootValue is the fallback.
+const countSinkFor = (parent, info) => countSinkOf(parent) || (info ? countSinkOf(info.rootValue) : undefined);
+// Without a sink the count goes to context.count, where Envelop/Apollo/Yoga count plugins read it.
+// With neither, such as a graphql() call without contextValue, nothing could read a count, so the
+// count query is skipped.
+const canReportCount = (parent, info, context) => countSinkFor(parent, info) !== undefined
+  || (context !== null && (typeof context === 'object' || typeof context === 'function'));
+// Returns whether the count was stored.
 const reportCount = (parent, info, context, count) => {
-  const sink = countSinkOf(parent) || (info ? countSinkOf(info.rootValue) : undefined);
+  const sink = countSinkFor(parent, info);
   if (sink) {
     sink(count);
-    return;
+    return true;
   }
-  context.count = count;
+  // Reflect.set returns false for a frozen, sealed or read-only context, where an assignment would
+  // throw after both queries ran.
+  return Reflect.set(context, 'count', count);
 };
 const applicationResolvedFields = new WeakMap();
 const markGenerated = (resolve) => {
@@ -201,6 +210,31 @@ const GraphQLJSON = new GraphQLScalarType({
   },
 });
 
+// The type called `name` that a schema built from these roots would contain, other than through
+// `skip`, following the references GraphQLSchema collects: fields, arguments, interfaces, union
+// members and input fields.
+const findSchemaType = (roots, name, skip) => {
+  const visited = new Set();
+  const pending = [...roots];
+  while (pending.length) {
+    const type = getNamedType(pending.pop());
+    if (!type || type === skip || visited.has(type)) continue;
+    visited.add(type);
+    if (type.name === name) return type;
+    if (type instanceof GraphQLUnionType) pending.push(...type.getTypes());
+    if (type instanceof GraphQLObjectType || type instanceof GraphQLInterfaceType) {
+      pending.push(...type.getInterfaces());
+      for (const field of Object.values(type.getFields())) {
+        pending.push(field.type, ...field.args.map((arg) => arg.type));
+      }
+    }
+    if (type instanceof GraphQLInputObjectType) {
+      for (const field of Object.values(type.getFields())) pending.push(field.type);
+    }
+  }
+  return null;
+};
+
 // graphql-js wraps a value thrown while resolving a field (locatedError): the wrapper has the field
 // path and repeats the thrown error's message. A thrown non-Error becomes a NonErrorThrown whose
 // message prints the value.
@@ -338,6 +372,14 @@ export const createRuntime = (adapter) => {
   const typesDict = { types: {} };
   const waitingInputType = {};
   const typesDictForUpdate = { types: {} };
+  // `added` item inputs of referenced collections by generated name, so collections that reach the
+  // same child through the same connectionField share one input type.
+  const excludedFieldInputTypes = new Map();
+  // Self-referencing collection field name -> the types whose collection inputs were built with the
+  // unqualified names OneToManyA<field> and OneToManyU<field>; type -> its self-referencing
+  // collections whose inputs are named after the type instead (see claimSelfCollectionNames).
+  const selfCollectionNameHolders = new Map();
+  const qualifiedSelfCollections = new Map();
   const registeredMutations = {};
   const middlewares = [];
 
@@ -519,13 +561,24 @@ const QLTypeAggregationExpression = new GraphQLInputObjectType({
   }),
 });
 
-const QLTypeAggregationResult = new GraphQLObjectType({
+// Aggregation results use Simfinity's JSON scalar, or the application's own scalar named JSON when
+// the schema has one, such as GraphQLJSON from graphql-scalars, so the two do not collide.
+const createAggregationResultType = (valueType) => new GraphQLObjectType({
   name: 'QLTypeAggregationResult',
   fields: () => ({
-    groupId: { type: GraphQLJSON },
-    facts: { type: GraphQLJSON },
+    groupId: { type: valueType },
+    facts: { type: valueType },
   }),
 });
+const QLTypeAggregationResult = createAggregationResultType(GraphQLJSON);
+const applicationJSONResultTypes = new WeakMap();
+const aggregationResultTypeFor = (valueType) => {
+  if (valueType === GraphQLJSON) return QLTypeAggregationResult;
+  if (!applicationJSONResultTypes.has(valueType)) {
+    applicationJSONResultTypes.set(valueType, createAggregationResultType(valueType));
+  }
+  return applicationJSONResultTypes.get(valueType);
+};
 
 const isNonNullOfType = (fieldEntryType, graphQLType) => {
   let isOfType = false;
@@ -536,6 +589,7 @@ const isNonNullOfType = (fieldEntryType, graphQLType) => {
 };
 
 const unwrapNonNull = (type) => (type instanceof GraphQLNonNull ? type.ofType : type);
+const isAbstractOutputType = (type) => type instanceof GraphQLInterfaceType || type instanceof GraphQLUnionType;
 
 const unwrapListAndNonNull = (type) => {
   let unwrapped = type;
@@ -553,59 +607,69 @@ const wrapListInputType = (itemType, listShape, preserveOuterNonNull) => {
     : listType;
 };
 
-/**
- * Creates a new GraphQLInputObjectType with a field excluded.
- * @param {string} inputNamePrefix - The prefix for the input type name.
- * @param {GraphQLInputObjectType} originalType - The original input type.
- * @param {string} fieldToExclude - The name of the field to exclude.
- * @returns {GraphQLInputObjectType} A new input type without the specified field.
- */
-const createTypeWithExcludedField = (inputNamePrefix, originalType, fieldToExclude,
-  connectionFieldName = fieldToExclude) => {
-  const originalFields = originalType.getFields();
-  const newFields = Object.fromEntries(
-    Object.entries(originalFields)
-      .filter(([fieldName]) => fieldName !== fieldToExclude)
-      .map(([fieldName, field]) => [fieldName, {
-        type: field.type,
-        description: field.description,
-        defaultValue: field.defaultValue,
-      }]),
-  );
+const capitalize = (name) => name.charAt(0).toUpperCase() + name.slice(1);
 
-  return new GraphQLInputObjectType({
-    name: `${inputNamePrefix}${originalType.name}For${connectionFieldName.charAt(0).toUpperCase() + connectionFieldName.slice(1)}`,
-    fields: newFields,
+/**
+ * The `added` item input of a referenced collection: the item type's create input without the
+ * back-reference that the parent supplies. Its fields are read from the item's create input when
+ * the schema is built, so the item's input may be built after this type, as in cycles of
+ * collections. `optionalFields` lose their outer non-null wrapper. Collections that reach the same
+ * item through the same connectionField with the same prefix share one type.
+ * @param {string} inputNamePrefix - The prefix for the input type name.
+ * @param {GraphQLObjectType} itemType - The collection's item type.
+ * @param {string} fieldToExclude - The name of the field to exclude.
+ * @param {string} [connectionFieldName] - The declared connectionField, which names the type.
+ * @param {string[]} [optionalFields] - Fields of the item's create input that become optional.
+ * @returns {GraphQLInputObjectType} An input type without the specified field.
+ */
+const createTypeWithExcludedField = (inputNamePrefix, itemType, fieldToExclude,
+  connectionFieldName = fieldToExclude, optionalFields = []) => {
+  // The item's create input is `${itemType.name}Input`, so the name is the one it always had.
+  const name = `${inputNamePrefix}${itemType.name}InputFor${capitalize(connectionFieldName)}`;
+  const shared = excludedFieldInputTypes.get(name);
+  if (shared && shared.itemType === itemType && shared.fieldToExclude === fieldToExclude
+    && shared.optionalFields.join() === optionalFields.join()) {
+    return shared.type;
+  }
+  // Any other type with this name is a new one, so a real name clash still fails as before.
+  const type = new GraphQLInputObjectType({
+    name,
+    fields: () => Object.fromEntries(
+      Object.entries(getInputType(itemType).getFields())
+        .filter(([fieldName]) => fieldName !== fieldToExclude)
+        .map(([fieldName, field]) => [fieldName, {
+          type: optionalFields.includes(fieldName) ? unwrapNonNull(field.type) : field.type,
+          description: field.description,
+          defaultValue: field.defaultValue,
+        }]),
+    ),
   });
+  if (!shared) excludedFieldInputTypes.set(name, { itemType, fieldToExclude, optionalFields, type });
+  return type;
 };
 
-const createOneToManyInputType = (inputNamePrefix, fieldEntryName,
-  inputType, updateInputType, connection, itemNonNull = false) => {
-  let inputTypeForAdd = inputType;
-
-  if (connection.declaredFieldName) {
-    inputTypeForAdd = createTypeWithExcludedField(
+// A referenced collection's operation input. The item inputs are read when the schema is built, so
+// the item type's inputs need not exist yet.
+const createOneToManyInputType = (name, inputNamePrefix, itemType, connection,
+  itemNonNull = false, optionalFields = []) => {
+  const inputTypeForAdd = connection.declaredFieldName
+    ? createTypeWithExcludedField(
       inputNamePrefix,
-      inputType,
+      itemType,
       connection.graphqlFieldName || connection.declaredFieldName,
       connection.declaredFieldName,
-    );
-  }
+      optionalFields,
+    )
+    : null;
+  const listOf = (type) => new GraphQLList(itemNonNull ? new GraphQLNonNull(type) : type);
 
   return new GraphQLInputObjectType({
-    name: `OneToMany${inputNamePrefix}${fieldEntryName}`,
+    name,
     fields: () => ({
-      added: {
-        type: new GraphQLList(itemNonNull
-          ? new GraphQLNonNull(inputTypeForAdd) : inputTypeForAdd),
-      },
-      updated: {
-        type: new GraphQLList(itemNonNull
-          ? new GraphQLNonNull(updateInputType) : updateInputType),
-      },
-      deleted: {
-        type: new GraphQLList(itemNonNull ? new GraphQLNonNull(GraphQLID) : GraphQLID),
-      },
+      added: { type: listOf(inputTypeForAdd || getInputType(itemType)) },
+      updated: { type: listOf(typesDictForUpdate.types[itemType.name].inputType) },
+      // Null IDs are skipped, so `deleted` accepts them whatever the collection's item nullability.
+      deleted: { type: new GraphQLList(GraphQLID) },
     }),
   });
 };
@@ -616,26 +680,19 @@ const graphQLListInputType = (dict, fieldEntry, fieldEntryName,
   if (!listShape) return null;
   const { itemType } = listShape;
 
-  if (itemType instanceof GraphQLObjectType
-    && requireRegisteredType(dict, itemType, fieldEntryName, ownerName).inputType) {
-    if (!fieldEntry.extensions || !fieldEntry.extensions.relation
-      || !fieldEntry.extensions.relation.embedded) {
-      const oneToMany = createOneToManyInputType(inputNamePrefix, fieldEntryName,
-        typesDict.types[itemType.name].inputType,
-        typesDictForUpdate.types[itemType.name].inputType,
-        normalizeConnectionField(itemType, connectionField),
+  if (itemType instanceof GraphQLObjectType) {
+    const registration = requireRegisteredType(dict, itemType, fieldEntryName, ownerName);
+    // A referenced collection reads its item inputs lazily, so it never waits for them.
+    if (!fieldEntry.extensions?.relation?.embedded) {
+      const oneToMany = createOneToManyInputType(`OneToMany${inputNamePrefix}${fieldEntryName}`,
+        inputNamePrefix, itemType, normalizeConnectionField(itemType, connectionField),
         listShape.itemNonNull);
       return preserveOuterNonNull && listShape.outerNonNull
         ? new GraphQLNonNull(oneToMany)
         : oneToMany;
     }
-    if (fieldEntry.extensions && fieldEntry.extensions.relation
-      && fieldEntry.extensions.relation.embedded) {
-      return wrapListInputType(
-        dict.types[itemType.name].inputType,
-        listShape,
-        preserveOuterNonNull,
-      );
+    if (registration.inputType) {
+      return wrapListInputType(registration.inputType, listShape, preserveOuterNonNull);
     }
   } else if (itemType instanceof GraphQLScalarType || itemType instanceof GraphQLEnumType) {
     return wrapListInputType(itemType, listShape, preserveOuterNonNull);
@@ -643,6 +700,38 @@ const graphQLListInputType = (dict, fieldEntry, fieldEntryName,
   return null;
 };
 
+// Writable list fields whose items are the type itself, as buildInputType selects them. Their
+// collection inputs are named OneToManyA<field> and OneToManyU<field> (see claimSelfCollectionNames).
+const selfCollectionFieldNames = (gqltype) => {
+  const hasStateMachine = !!typesDict.types[gqltype.name]?.stateMachine;
+  return Object.entries(gqltype.getFields())
+    .filter(([fieldName, field]) => !field.extensions?.readOnly
+      && !(fieldName === 'state' && hasStateMachine)
+      && getListShape(field.type)?.itemType === gqltype)
+    .map(([fieldName]) => fieldName);
+};
+
+const selfCollectionInputType = (gqltype, fieldEntryName, fieldEntry, forUpdate, selfFields) => {
+  const listShape = getListShape(fieldEntry.type);
+  const qualifier = qualifiedSelfCollections.get(gqltype)?.has(fieldEntryName) ? gqltype.name : '';
+  const kind = forUpdate ? 'U' : 'A';
+  const oneToMany = createOneToManyInputType(
+    `OneToMany${qualifier}${kind}${fieldEntryName}`,
+    kind,
+    gqltype,
+    normalizeConnectionField(gqltype, fieldEntry.extensions?.relation?.connectionField),
+    listShape.itemNonNull,
+    // Items an add mutation creates may carry their own self-referencing collections. These stay
+    // optional there, as such items had no such fields before; items added by an update keep them
+    // as the type declares them.
+    forUpdate ? [] : selfFields,
+  );
+  return !forUpdate && listShape.outerNonNull ? new GraphQLNonNull(oneToMany) : oneToMany;
+};
+
+// Builds a type's create and update inputs, or returns every field whose input cannot be built yet:
+// `{ unresolvedFields: [{ field, waitsFor }] }`, where `waitsFor` names the embedded type whose
+// inputs the field waits for, and is absent when the field can have no generated input.
 const buildInputType = (gqltype) => {
   const argTypes = gqltype.getFields();
 
@@ -650,6 +739,7 @@ const buildInputType = (gqltype) => {
   const fieldsArgForUpdate = {};
 
   const selfReferenceCollections = {};
+  const unresolvedFields = [];
 
   for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
     const fieldArg = {};
@@ -687,11 +777,19 @@ const buildInputType = (gqltype) => {
               fieldArg.type = typesDict.types[fieldEntryNameValue].inputType;
               fieldArgForUpdate.type = typesDictForUpdate.types[fieldEntryNameValue].inputType;
             } else {
-              return null;
+              unresolvedFields.push({ field: fieldEntryName, waitsFor: fieldEntryNameValue });
             }
-          } else {
+          } else if (unresolvedFields.length === 0) {
+            // Fields after one that cannot be built yet are only checked, so this logs as many times
+            // as when the build stopped at that field.
             console.warn(`Configuration issue: Field ${fieldEntryName} does not define extensions.relation`);
           }
+        } else if (isAbstractOutputType(unwrapListAndNonNull(fieldEntry.type))) {
+          // Generated inputs cannot write an interface or union value, single or in a list, so the
+          // field is output-only. readOnly fields never get here.
+          warnOnce(gqltype, `abstract:${fieldEntryName}`, `Configuration issue: ${gqltype.name}.${fieldEntryName} `
+            + 'has an interface or union type, so generated inputs leave it out and generated mutations cannot '
+            + 'set it; resolve it yourself, and mark it readOnly to state that it is output-only.');
         } else if (getListShape(fieldEntry.type)) {
           const listShape = getListShape(fieldEntry.type);
           if (listShape.itemType === gqltype) {
@@ -707,7 +805,11 @@ const buildInputType = (gqltype) => {
               fieldArg.type = listInputTypeForAdd;
               fieldArgForUpdate.type = listInputTypeForUpdate;
             } else {
-              return null;
+              // An object item here is embedded and its inputs are not built yet; any other item,
+              // such as a list, has no generated input.
+              unresolvedFields.push(listShape.itemType instanceof GraphQLObjectType
+                ? { field: fieldEntryName, waitsFor: listShape.itemType.name }
+                : { field: fieldEntryName });
             }
           }
         }
@@ -729,94 +831,165 @@ const buildInputType = (gqltype) => {
     }
   }
 
-  const inputTypeBody = {
+  if (unresolvedFields.length > 0) return { unresolvedFields };
+
+  // Self-referencing collections follow the other fields, as they always have. Their item inputs
+  // are read when the schema is built, after these input types exist.
+  const selfFields = Object.keys(selfReferenceCollections);
+  for (const [fieldEntryName, fieldEntry] of Object.entries(selfReferenceCollections)) {
+    fieldsArgs[fieldEntryName] = {
+      type: selfCollectionInputType(gqltype, fieldEntryName, fieldEntry, false, selfFields),
+      description: fieldEntry.description,
+    };
+    fieldsArgForUpdate[fieldEntryName] = {
+      type: selfCollectionInputType(gqltype, fieldEntryName, fieldEntry, true, selfFields),
+      description: fieldEntry.description,
+    };
+  }
+
+  const inputTypeForAdd = new GraphQLInputObjectType({
     name: `${gqltype.name}Input`,
     description: gqltype.description,
     fields: fieldsArgs,
-  };
-
-  const inputTypeBodyForUpdate = {
+  });
+  const inputTypeForUpdate = new GraphQLInputObjectType({
     name: `${gqltype.name}InputForUpdate`,
     description: gqltype.description,
     fields: fieldsArgForUpdate,
-  };
-
-  const inputTypeForAdd = new GraphQLInputObjectType(inputTypeBody);
-  const inputTypeForUpdate = new GraphQLInputObjectType(inputTypeBodyForUpdate);
-
-  const inputTypeForAddFields = inputTypeForAdd._fields();
-
-  Object.keys(selfReferenceCollections).forEach((fieldEntryName) => {
-    if (Object.prototype.hasOwnProperty.call(selfReferenceCollections, fieldEntryName)) {
-      const fieldEntry = selfReferenceCollections[fieldEntryName];
-      const listShape = getListShape(fieldEntry.type);
-      const oneToMany = createOneToManyInputType('A', fieldEntryName,
-        inputTypeForAdd, inputTypeForUpdate,
-        normalizeConnectionField(
-          gqltype,
-          fieldEntry.extensions?.relation?.connectionField,
-        ), listShape.itemNonNull);
-      inputTypeForAddFields[fieldEntryName] = {
-        type: listShape.outerNonNull ? new GraphQLNonNull(oneToMany) : oneToMany,
-        name: fieldEntryName,
-      };
-    }
   });
-
-  inputTypeForAdd._fields = () => inputTypeForAddFields;
-
-  const inputTypeForUpdateFields = inputTypeForUpdate._fields();
-
-  Object.keys(selfReferenceCollections).forEach((fieldEntryName) => {
-    if (Object.prototype.hasOwnProperty.call(selfReferenceCollections, fieldEntryName)) {
-      const fieldEntry = selfReferenceCollections[fieldEntryName];
-      const listShape = getListShape(fieldEntry.type);
-      inputTypeForUpdateFields[fieldEntryName] = {
-        type: createOneToManyInputType('U', fieldEntryName,
-          inputTypeForAdd, inputTypeForUpdate,
-          normalizeConnectionField(
-            gqltype,
-            fieldEntry.extensions?.relation?.connectionField,
-          ), listShape.itemNonNull),
-        name: fieldEntryName,
-      };
-    }
-  });
-
-  inputTypeForUpdate._fields = () => inputTypeForUpdateFields;
 
   return { inputTypeBody: inputTypeForAdd, inputTypeBodyForUpdate: inputTypeForUpdate };
 };
 
 const getInputType = (type) => typesDict.types[type.name].inputType;
 
-const buildPendingInputTypes = (waitingForInputType) => {
+// Registered types whose generated inputs the generated mutations of this schema can reach: the
+// included endpoint types and, through their writable fields, embedded types and the items of
+// collections.
+const typesWithReachableInputs = (includedMutationTypes) => {
+  const reached = new Set();
+  const visit = (gqltype) => {
+    if (reached.has(gqltype)) return;
+    reached.add(gqltype);
+    for (const field of Object.values(gqltype.getFields())) {
+      if (field.extensions?.readOnly) continue;
+      const listShape = getListShape(field.type);
+      const target = listShape ? listShape.itemType : unwrapNonNull(field.type);
+      // A single reference is an IdInputType, so it reaches no input of its target.
+      if (target instanceof GraphQLObjectType && typesDict.types[target.name]
+        && (listShape || field.extensions?.relation?.embedded)) {
+        visit(typesDict.types[target.name].gqltype);
+      }
+    }
+  };
+  for (const type of Object.values(typesDict.types)) {
+    if (type.endpoint && !shouldNotBeIncludedInSchema(includedMutationTypes, type.gqltype)) {
+      visit(type.gqltype);
+    }
+  }
+  return reached;
+};
+
+// A self-referencing collection's inputs are OneToManyA<field> and OneToManyU<field>. When several
+// types that the generated mutations reach have one with the same field name, the first registered
+// keeps those names and the others get OneToMany<Type>A<field> and OneToMany<Type>U<field>, as other
+// collections do. Types the mutations cannot reach keep the unqualified names, as such inputs never
+// collided. Names are fixed when a type's inputs are built, at its first schema.
+// A type is qualified only when this schema also reaches an earlier type that holds the unqualified
+// names and is still the type registered under its name, since both inputs then meet in one schema,
+// which failed with a duplicate type name before such names were qualified. Otherwise, as with a
+// type registered again under the same name or after an earlier createSchema(), it keeps the
+// unqualified names.
+const claimSelfCollectionNames = (pending, includedMutationTypes) => {
+  const reachable = typesWithReachableInputs(includedMutationTypes);
+  const meets = (type) => typesDict.types[type.name]?.gqltype === type && reachable.has(type);
+  for (const { gqltype } of Object.values(pending)) {
+    if (typesDict.types[gqltype.name].inputType) continue;
+    for (const fieldName of selfCollectionFieldNames(gqltype)) {
+      if (!selfCollectionNameHolders.has(fieldName)) selfCollectionNameHolders.set(fieldName, []);
+      const holders = selfCollectionNameHolders.get(fieldName);
+      const owner = reachable.has(gqltype) && holders.find((type) => type !== gqltype && meets(type));
+      if (!owner) {
+        if (!holders.includes(gqltype)) holders.push(gqltype);
+      } else {
+        if (!qualifiedSelfCollections.has(gqltype)) qualifiedSelfCollections.set(gqltype, new Set());
+        qualifiedSelfCollections.get(gqltype).add(fieldName);
+        warnOnce(gqltype, `selfCollectionName:${fieldName}`, `Configuration issue: ${gqltype.name}.${fieldName} `
+          + `and ${owner.name}.${fieldName} are self-referencing collections with the same name, so the inputs `
+          + `of ${gqltype.name}.${fieldName} are named OneToMany${gqltype.name}A${fieldName} and `
+          + `OneToMany${gqltype.name}U${fieldName}, while ${owner.name}.${fieldName} keeps OneToManyA${fieldName} `
+          + `and OneToManyU${fieldName}. To choose which type keeps those names, register it first, or make `
+          + 'the other type unreachable from the generated mutations.');
+      }
+    }
+  }
+};
+
+// The INPUT_TYPE_UNRESOLVED message. It names every field whose input could not be built, by type:
+// the causes (lists whose items have no generated input, and embedded fields whose types contain
+// each other) and, apart from them, fields that only wait for another listed type.
+const unresolvedInputTypesMessage = (pendingTypeNames, unresolvedByType) => {
+  // Whether the inputs of type `from` wait, through embedded fields, for those of type `to`.
+  const waitsOn = (from, to, seen = new Set()) => {
+    if (from === to) return true;
+    if (seen.has(from)) return false;
+    seen.add(from);
+    return (unresolvedByType[from] || [])
+      .some(({ waitsFor }) => waitsFor !== undefined && waitsOn(waitsFor, to, seen));
+  };
+  const lists = [];
+  const cycles = [];
+  const waiting = [];
+  for (const [typeName, fields] of Object.entries(unresolvedByType)) {
+    for (const { field, waitsFor } of fields) {
+      const name = `${typeName}.${field}`;
+      if (waitsFor === undefined) lists.push(name);
+      else if (waitsOn(waitsFor, typeName)) cycles.push(name);
+      else waiting.push(`${name} waits for ${waitsFor}`);
+    }
+  }
+  const causes = [
+    lists.length > 0 && `${lists.join(', ')} (writable lists whose items have no generated input, such as lists of lists)`,
+    cycles.length > 0 && `${cycles.join(', ')} (embedded types that contain each other)`,
+  ].filter(Boolean);
+  return `Could not build input types for: ${pendingTypeNames.join(', ')}. `
+    + 'Check for circular or misconfigured relations'
+    + (causes.length > 0
+      ? `: no input can be generated for ${causes.join(' or for ')}; mark such a field readOnly.`
+      : '.')
+    + (waiting.length > 0
+      ? ` These fields only wait for another listed type and build once it does: ${waiting.join(', ')}.`
+      : '');
+};
+
+const buildPendingInputTypes = (waitingForInputType, includedMutationTypes) => {
+  claimSelfCollectionNames(waitingForInputType, includedMutationTypes);
   let pending = waitingForInputType;
   let previousPendingCount = Object.keys(pending).length + 1;
+  // Type name -> the fields whose input could not be built in the last pass.
+  let unresolvedFields = {};
 
   while (Object.keys(pending).length > 0) {
     const currentCount = Object.keys(pending).length;
     if (currentCount >= previousPendingCount) {
-      const unresolved = Object.keys(pending).join(', ');
-      throw new SimfinityError(
-        `Could not build input types for: ${unresolved}. Check for circular or misconfigured relations.`,
-        'INPUT_TYPE_UNRESOLVED',
-        500,
-      );
+      throw new SimfinityError(unresolvedInputTypesMessage(Object.keys(pending), unresolvedFields),
+        'INPUT_TYPE_UNRESOLVED', 500);
     }
     previousPendingCount = currentCount;
 
     const stillWaiting = {};
+    unresolvedFields = {};
     for (const [key, value] of Object.entries(pending)) {
       const { gqltype } = value;
       if (typesDict.types[gqltype.name].inputType) continue;
 
       const result = buildInputType(gqltype);
-      if (result && result.inputTypeBody && result.inputTypeBodyForUpdate) {
+      if (result.inputTypeBody && result.inputTypeBodyForUpdate) {
         typesDict.types[gqltype.name].inputType = result.inputTypeBody;
         typesDictForUpdate.types[gqltype.name].inputType = result.inputTypeBodyForUpdate;
       } else {
         stillWaiting[key] = value;
+        unresolvedFields[gqltype.name] = result.unresolvedFields;
       }
     }
     pending = stillWaiting;
@@ -1070,7 +1243,11 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
   if (!result) throw new SimfinityError(`${gqltype.name} ${objectId} is not valid`, 'NOT_VALID_ID', 404);
 
   if (materializedModel.collectionFields) {
-    await iterateOnCollectionFields(materializedModel, gqltype, objectId, session, context);
+    // Children link to, and are owned through, the parent's stored key, as when a new parent is
+    // saved: the client may send a spelling of the ID that the adapter accepts but does not store,
+    // such as an uppercase ObjectId or UUID. It is the key the generated collection field reads
+    // children by (`_id`, else `id`); an adapter whose update result has neither keeps the requested ID.
+    await iterateOnCollectionFields(materializedModel, gqltype, result._id ?? result.id ?? objectId, session, context);
   }
 
   if (controller && controller.onUpdated) {
@@ -1232,7 +1409,9 @@ const executeOperation = (Model, gqltype, controller, args, operation, actionFie
   );
 };
 
-const executeItemFunction = async (gqltype, collectionField, objectId, session,
+// parentKey is the parent's stored key: children are linked to it, and an updated or deleted child
+// must already store it in its connectionField.
+const executeItemFunction = async (gqltype, collectionField, parentKey, session,
   collectionFieldsList, operationType, context) => {
   const argTypes = gqltype.getFields();
   const collectionGQLType = unwrapListAndNonNull(argTypes[collectionField].type);
@@ -1246,7 +1425,7 @@ const executeItemFunction = async (gqltype, collectionField, objectId, session,
   const type = operationType === operations.UPDATE
     ? typesDictForUpdate.types[collectionGQLType.name] : typesDict.types[collectionGQLType.name];
   const linkToParent = (item) => {
-    item[connection.storageFieldName] = objectId;
+    item[connection.storageFieldName] = parentKey;
     if (item.$unset) delete item.$unset[connection.storageFieldName];
     if (item.$set) delete item.$set[connection.storageFieldName];
   };
@@ -1262,8 +1441,8 @@ const executeItemFunction = async (gqltype, collectionField, objectId, session,
       if (!child) {
         throw new SimfinityError(`${collectionGQLType.name} ${id} is not valid`, 'NOT_VALID_ID', 404);
       }
-      if (String(child[connection.storageFieldName]) !== String(objectId)) {
-        throw new SimfinityError('Child does not belong to this parent', 'FORBIDDEN', 403);
+      if (String(child[connection.storageFieldName]) !== String(parentKey)) {
+        throw new ForbiddenError('Child does not belong to this parent');
       }
     }
 
@@ -1536,7 +1715,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
   rootQueryArgs.name = name;
   rootQueryArgs.fields = {};
 
-  buildPendingInputTypes(waitingInputType);
+  buildPendingInputTypes(waitingInputType, includedMutationTypes);
 
   for (const type of Object.values(typesDict.types)) {
     if (!shouldNotBeIncludedInSchema(includedMutationTypes, type.gqltype)) {
@@ -1671,7 +1850,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
   return new GraphQLObjectType(rootQueryArgs);
 };
 
-const buildRootQuery = (name, includedTypes) => {
+const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggregationResult) => {
   const rootQueryArgs = {};
   rootQueryArgs.name = name;
   rootQueryArgs.fields = {};
@@ -1708,7 +1887,8 @@ const buildRootQuery = (name, includedTypes) => {
             await executeScope(params);
             await applyJoinedScopes(joinedScopes, params);
             const queryArgs = params.args;
-            const wantsCount = !!(queryArgs.pagination && queryArgs.pagination.count);
+            const wantsCount = !!(queryArgs.pagination && queryArgs.pagination.count)
+              && canReportCount(parent, info, context);
 
             const dataPromise = adapter.find(type.model, type.gqltype, queryArgs, null);
             const countPromise = wantsCount
@@ -1716,8 +1896,10 @@ const buildRootQuery = (name, includedTypes) => {
               : null;
 
             const [result, resultCount] = await Promise.all([dataPromise, countPromise]);
-            if (wantsCount) {
-              reportCount(parent, info, context, resultCount);
+            if (wantsCount && !reportCount(parent, info, context, resultCount)) {
+              warnOnce(runtimeIdentity, 'count-context', 'Configuration issue: the GraphQL context does not accept '
+                + 'a count property (it is frozen, sealed or has a read-only count), so pagination counts are not '
+                + 'reported; pass a fresh mutable context object for each request.');
             }
             return result;
           },
@@ -1734,7 +1916,7 @@ const buildRootQuery = (name, includedTypes) => {
         };
 
         rootQueryArgs.fields[`${type.listEntitiesEndpointName}_aggregate`] = {
-          type: new GraphQLList(QLTypeAggregationResult),
+          type: new GraphQLList(aggregationResultType),
           args: aggregateArgsObject,
           extensions: { simfinityQuery: { typeName: type.gqltype.name, operation: 'aggregate' } },
           async resolve(parent, args, context) {
@@ -1914,17 +2096,21 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
   const objectMemberTypes = new Set();
   Object.values(typesDict.types).forEach(({ gqltype }) => installObjectMemberResolvers(gqltype, objectMemberTypes));
 
-  const query = buildRootQuery('RootQueryType', includedQueryTypes);
+  let query = buildRootQuery('RootQueryType', includedQueryTypes);
   Object.values(typesDict.types).forEach(({ gqltype }) => {
     if (gqltype && !applicationResolvedFields.has(gqltype)) {
       applicationResolvedFields.set(gqltype, listApplicationResolvedFields(gqltype));
     }
   });
+  const mutation = buildMutation('Mutation', includedMutationTypes, includedCustomMutations);
+  // An application scalar named JSON that this schema contains also types aggregation results. Any
+  // other type named JSON still collides, and GraphQLSchema reports the duplicate name.
+  const applicationJSON = findSchemaType([query, mutation], 'JSON', QLTypeAggregationResult);
+  if (applicationJSON instanceof GraphQLScalarType) {
+    query = buildRootQuery('RootQueryType', includedQueryTypes, aggregationResultTypeFor(applicationJSON));
+  }
 
-  const schema = new GraphQLSchema({
-    query,
-    mutation: buildMutation('Mutation', includedMutationTypes, includedCustomMutations),
-  });
+  const schema = new GraphQLSchema({ query, mutation });
   // Reserve reachable types whose relation fields still have no resolver, such as an unregistered
   // custom mutation result, so another runtime cannot later generate resolvers this schema executes.
   schemaTypes.forEach((type) => {
@@ -2115,27 +2301,31 @@ const createArgsForQuery = (gqltype, omit = null) => {
 
     for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
       if (fieldEntryName === omit) continue;
-      argsObject[fieldEntryName] = {};
+      let filterType = null;
 
       if (fieldEntry.type instanceof GraphQLScalarType
         || isNonNullOfType(fieldEntry.type, GraphQLScalarType)
         || fieldEntry.type instanceof GraphQLEnumType
         || isNonNullOfType(fieldEntry.type, GraphQLEnumType)) {
-        argsObject[fieldEntryName].type = QLFilter;
+        filterType = QLFilter;
       } else if (fieldEntry.type instanceof GraphQLObjectType
         || isNonNullOfType(fieldEntry.type, GraphQLObjectType)) {
-        argsObject[fieldEntryName].type = QLTypeFilterExpression;
+        filterType = QLTypeFilterExpression;
       } else if (getListShape(fieldEntry.type)) {
         const listOfType = getListShape(fieldEntry.type).itemType;
         if (listOfType instanceof GraphQLScalarType
           || isNonNullOfType(listOfType, GraphQLScalarType)
           || listOfType instanceof GraphQLEnumType
           || isNonNullOfType(listOfType, GraphQLEnumType)) {
-          argsObject[fieldEntryName].type = QLFilter;
+          filterType = QLFilter;
         } else {
-          argsObject[fieldEntryName].type = QLTypeFilterExpression;
+          // Includes lists of interfaces and unions, which have no generated filter either. Their
+          // argument has always been generated and is kept, so requests that send it as null stay valid.
+          filterType = QLTypeFilterExpression;
         }
       }
+      // A single interface or union field has no generated filter, so it gets no argument.
+      if (filterType) argsObject[fieldEntryName] = { type: filterType };
     }
 
     argsObject.pagination = {};
