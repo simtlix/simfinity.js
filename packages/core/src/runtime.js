@@ -2233,6 +2233,14 @@ const autoGenerateResolvers = (gqltype) => {
   }
 };
 
+// A replaced registration builds fresh inputs. Its cached collection projections may already
+// contain fields from the previous input graph; keep those alive only in earlier schemas.
+const invalidateCollectionInputs = (gqltype) => {
+  for (const [name, cached] of excludedFieldInputTypes) {
+    if (cached.itemType.name === gqltype.name) excludedFieldInputTypes.delete(name);
+  }
+};
+
 const connect = (model, gqltype, simpleEntityEndpointName,
   listEntitiesEndpointName, controller, onModelCreated, stateMachine) => {
   const registration = {
@@ -2249,6 +2257,7 @@ const connect = (model, gqltype, simpleEntityEndpointName,
   validateScope(gqltype);
   if (adapter.validateRegistration) adapter.validateRegistration(registration);
 
+  invalidateCollectionInputs(gqltype);
   waitingInputType[gqltype.name] = {
     model,
     gqltype,
@@ -2278,6 +2287,7 @@ const addNoEndpointType = (gqltype) => {
   validateScope(gqltype);
   if (adapter.validateRegistration) adapter.validateRegistration(registration);
 
+  invalidateCollectionInputs(gqltype);
   waitingInputType[gqltype.name] = { gqltype };
   typesDict.types[gqltype.name] = registration;
   typesDictForUpdate.types[gqltype.name] = { ...typesDict.types[gqltype.name] };

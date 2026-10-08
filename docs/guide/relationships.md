@@ -238,6 +238,8 @@ A type registered after a `createSchema()` call gets its inputs from the next `c
 - A type registered after a `createSchema()` call whose next schema does not reach the type that has the names, for example because of its mutation allowlist.
 - A type that has the names and is registered again under the same name with a new type object, for example when an application reloads its types on one runtime: the earlier object no longer counts.
 
+Core and MongoDB also allow re-registering the same self-referencing type object. Its next schema gets fresh collection inputs; previously built schemas retain their input types.
+
 The names are decided when the types' inputs are first built, so a later change to the model can move them. Making an earlier-registered type reachable, by registering it with `connect()` instead of `addNoEndpointType()`, by adding a collection that leads to it, or by widening the mutation allowlist of the first `createSchema()`, gives it the unqualified names and renames the inputs of the type that had them. Clients that declare variables of those input types must then use the new names. Register the type that should keep the names first, or keep the other type unreachable.
 
 Two cases still fail at startup with `Schema must contain uniquely named types but contains multiple types named "OneToManyAchildren"`:

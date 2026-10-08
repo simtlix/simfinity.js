@@ -4,7 +4,7 @@ import {
   afterEach, describe, expect, test, vi,
 } from 'vitest';
 import {
-  GraphQLFloat, GraphQLID, GraphQLInt, GraphQLList, GraphQLNonNull, GraphQLObjectType, GraphQLString,
+  GraphQLFloat, GraphQLID, GraphQLInt, GraphQLList, GraphQLNonNull, GraphQLObjectType, GraphQLSchema, GraphQLString,
   graphql, parse, validate, validateSchema,
 } from 'graphql';
 import mongoose from 'mongoose';
@@ -437,6 +437,55 @@ describe.each(['core', 'mongodb'])('self-referencing collections registered afte
   const prefix = { core: 'Cil', mongodb: 'Ciml' }[backend];
   const selfCollectionWarnings = (warn) => warn.mock.calls.map(([message]) => String(message))
     .filter((message) => message.includes('self-referencing'));
+
+  test('rebuilds collection inputs when the same type object is registered again', () => {
+    const runtime = backends[backend]();
+    const [Category] = track(treeType(`${prefix}SameObjectCategory`));
+    const schemas = [];
+    for (let build = 0; build < 3; build += 1) {
+      const model = build ? runtime.getModel(Category) : null;
+      runtime.connect(model, Category, endpoint(Category), `${endpoint(Category)}s`);
+      schemas.push(runtime.createSchema());
+    }
+    for (const schema of schemas) {
+      expect(validateSchema(new GraphQLSchema(schema.toConfig()))).toEqual([]);
+      expect(isValid(schema, `mutation { add${endpoint(Category)}(input: { name: "root",
+        children: { added: [{ name: "child", children: { added: [{ name: "grandchild" }] } }] }
+      }) { id } }`)).toEqual([]);
+    }
+  });
+
+  test('rebuilds shared collection inputs when a type without endpoints is registered again', () => {
+    const runtime = backends[backend]();
+    const Category = new GraphQLObjectType({
+      name: `${prefix}SameObjectHidden`,
+      fields: () => ({
+        id: { type: GraphQLID }, name: { type: GraphQLString },
+        parent: { type: Category, extensions: ref() },
+        children: { type: new GraphQLList(Category), extensions: ref('parent') },
+        subnodes: { type: new GraphQLList(Category), extensions: ref('parent') },
+      }),
+    });
+    track(Category);
+    const schemas = [];
+    for (let build = 0; build < 3; build += 1) {
+      const [Root] = track(new GraphQLObjectType({
+        name: `${prefix}HiddenRoot${build}`,
+        fields: {
+          id: { type: GraphQLID },
+          outline: { type: Category, extensions: { relation: { embedded: true } } },
+        },
+      }));
+      if (mongoose.models[Category.name]) mongoose.deleteModel(Category.name);
+      runtime.addNoEndpointType(Category);
+      connectAll(runtime, [Root]);
+      schemas.push(runtime.createSchema(undefined, [Root]));
+    }
+    for (const schema of schemas) {
+      expect(validateSchema(new GraphQLSchema(schema.toConfig()))).toEqual([]);
+      expect(addedItem(schema, 'OneToManyAchildren')).toBe(addedItem(schema, 'OneToManyAsubnodes'));
+    }
+  });
 
   test('keeps the unqualified names for a type registered again under the same name', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
