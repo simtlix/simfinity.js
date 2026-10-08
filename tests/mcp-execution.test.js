@@ -919,6 +919,109 @@ describe('MCP callTool remote execution', () => {
       anySpy.mockRestore();
     }
   });
+
+  // Node.js 19 and 20.0–20.2, inside the engines range, have no AbortSignal.any.
+  describe('without AbortSignal.any', () => {
+    let anyDescriptor;
+    let timeoutSpy;
+
+    beforeEach(() => {
+      anyDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, 'any');
+      delete AbortSignal.any;
+      timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    });
+
+    afterEach(() => {
+      timeoutSpy.mockRestore();
+      Object.defineProperty(AbortSignal, 'any', anyDescriptor);
+    });
+
+    const timeoutSignals = () => timeoutSpy.mock.results.map(({ value }) => value);
+
+    it('sends a call that has both a caller signal and timeoutMs', async () => {
+      const data = { item: { id: '9', name: 'Remote' } };
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data }));
+      const { signal } = new AbortController();
+
+      const response = await remoteTools({ timeoutMs: 1000 }).callTool('item', { id: '9' }, { signal });
+
+      expect(response.isError).toBe(false);
+      expect(response.structuredContent).toEqual(data);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const sent = fetchMock.mock.calls[0][1].signal;
+      expect(sent).toBeInstanceOf(AbortSignal);
+      expect(sent).not.toBe(signal);
+      expect(sent.aborted).toBe(false);
+    });
+
+    it('aborts the request with the caller reason, without retrying', async () => {
+      stubAbortAwareFetch();
+      const controller = new AbortController();
+
+      const pending = remoteTools({ timeoutMs: 60000, retry: { attempts: 2, backoffMs: 1 } })
+        .callTool('item', { id: '9' }, { signal: controller.signal });
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1), { interval: 5 });
+      controller.abort('stop');
+
+      await expect(pending).rejects.toBe('stop');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0][1].signal.reason).toBe('stop');
+      expect(getEventListeners(timeoutSignals()[0], 'abort')).toHaveLength(0);
+    });
+
+    it('rejects with the reason of a caller signal that aborted after the cancellation check', async () => {
+      stubAbortAwareFetch();
+      const controller = new AbortController();
+      // The caller aborts after callTool checked the signal, while timeoutMs
+      // is read, so it is already aborted when the signals are combined.
+      const execution = {
+        mode: 'remote',
+        endpoint: ENDPOINT,
+        get timeoutMs() {
+          controller.abort('gone');
+          return 1000;
+        },
+      };
+      const { callTool } = simfinity.generateMCPTools(stubSchema, { execution });
+
+      await expect(callTool('item', { id: '9' }, { signal: controller.signal })).rejects.toBe('gone');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0][1].signal.aborted).toBe(true);
+      expect(fetchMock.mock.calls[0][1].signal.reason).toBe('gone');
+    });
+
+    it('fails the attempt with MCP_REMOTE_REQUEST_FAILED when timeoutMs elapses', async () => {
+      stubAbortAwareFetch();
+      const { signal } = new AbortController();
+
+      const response = await remoteTools({ timeoutMs: 30 }).callTool('item', { id: '9' }, { signal });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('MCP_REMOTE_REQUEST_FAILED');
+      expect(fetchMock.mock.calls[0][1].signal.reason).toBe(timeoutSignals()[0].reason);
+      expect(getEventListeners(signal, 'abort')).toHaveLength(0);
+    });
+
+    it('leaves no abort listener on a long-lived caller signal or the timeouts (guard)', async () => {
+      const { signal } = new AbortController();
+      const { callTool } = remoteTools({ timeoutMs: 60000, retry: { attempts: 1, backoffMs: 1 } });
+
+      for (let i = 0; i < 20; i += 1) {
+        fetchMock
+          .mockResolvedValueOnce(httpError(503))
+          .mockResolvedValueOnce(jsonResponse({ data: { item: null } }));
+        expect((await callTool('item', { id: '9' }, { signal })).isError).toBe(false);
+      }
+
+      expect(fetchMock).toHaveBeenCalledTimes(40);
+      expect(getEventListeners(signal, 'abort')).toHaveLength(0);
+      expect(timeoutSignals()).toHaveLength(40);
+      for (const timeout of timeoutSignals()) {
+        expect(getEventListeners(timeout, 'abort')).toHaveLength(0);
+      }
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

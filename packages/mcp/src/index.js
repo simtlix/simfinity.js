@@ -798,15 +798,44 @@ const isIncluded = ({
   return true;
 };
 
+const noop = () => {};
+
 /**
- * Combine abort signals into one. AbortSignal.any exists on every supported
- * runtime (Node.js >= 18.17; the package requires 18.18).
+ * Combine abort signals into one; call `release` once the request settles.
+ * AbortSignal.any is missing on Node.js 19 and 20.0–20.2, which the engines
+ * range includes, so listeners stand in for it there. `release` removes them,
+ * so a long-lived caller signal keeps none, and they remove themselves when a
+ * signal aborts.
  * @param {Array<AbortSignal|undefined>} signals
- * @returns {AbortSignal|undefined}
+ * @returns {{ signal: AbortSignal|undefined, release: () => void }}
  */
 const combineAbortSignals = (signals) => {
   const list = signals.filter(Boolean);
-  return list.length <= 1 ? list[0] : AbortSignal.any(list);
+  if (list.length <= 1) {
+    return { signal: list[0], release: noop };
+  }
+  if (typeof AbortSignal.any === 'function') {
+    return { signal: AbortSignal.any(list), release: noop };
+  }
+  const controller = new AbortController();
+  const aborted = list.find((signal) => signal.aborted);
+  if (aborted) {
+    controller.abort(aborted.reason);
+    return { signal: controller.signal, release: noop };
+  }
+  const listeners = [];
+  const release = () => {
+    listeners.forEach(([signal, listener]) => signal.removeEventListener('abort', listener));
+  };
+  list.forEach((signal) => {
+    const listener = () => {
+      release();
+      controller.abort(signal.reason);
+    };
+    listeners.push([signal, listener]);
+    signal.addEventListener('abort', listener, { once: true });
+  });
+  return { signal: controller.signal, release };
 };
 
 /**
@@ -1050,7 +1079,7 @@ const executeRemote = async (query, variables, execution, { signal, canRetry } =
       // Outside the try on purpose: a cancellation rejects like an aborted fetch.
       await sleep(backoffMs * (attempt - 1), signal);
     }
-    const requestSignal = combineAbortSignals([
+    const { signal: requestSignal, release } = combineAbortSignals([
       signal,
       timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
     ]);
@@ -1110,6 +1139,8 @@ const executeRemote = async (query, variables, execution, { signal, canRetry } =
         `GraphQL endpoint request failed: ${endpointProblem || (err && err.message ? err.message : err)}`,
         'MCP_REMOTE_REQUEST_FAILED',
       );
+    } finally {
+      release();
     }
   }
   return lastFailure;
