@@ -53,4 +53,24 @@ describe('packed package quality gate', () => {
   test.each(['main', 'types'])('rejects a %s declaration pointing outside the archive', (field) => {
     expect(() => checkPackageQuality(fixture((manifest) => { manifest[field] = '../package.json'; }))).toThrow();
   });
+
+  const withSubpath = (types) => (manifest, root) => {
+    writeFileSync(join(root, 'src/extra.js'), 'export const extra = true;\n');
+    writeFileSync(join(root, 'types/extra.d.ts'), 'export declare const extra: boolean;\n');
+    manifest.exports['./extra'] = { types, default: './src/extra.js' };
+  };
+
+  test('accepts subpath exports whose declarations are in the archive', () => {
+    expect(() => checkPackageQuality(fixture(withSubpath('./types/extra.d.ts')))).not.toThrow();
+  });
+
+  test('rejects a subpath types condition naming a file missing from the archive', () => {
+    expect(() => checkPackageQuality(fixture(withSubpath('./types/missing.d.ts')))).toThrow(/missing\.d\.ts|ENOENT/);
+  });
+
+  test('rejects a nested types condition pointing outside the archive', () => {
+    expect(() => checkPackageQuality(fixture((manifest) => {
+      manifest.exports['./extra'] = { node: { types: '../package.json', default: './src/index.js' } };
+    }))).toThrow(/outside archive/);
+  });
 });

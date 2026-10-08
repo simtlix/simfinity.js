@@ -1,11 +1,11 @@
 ---
 title: PostgreSQL storage reference
-description: PostgreSQL types, generated foreign keys, embedded storage, schema validation, native APIs, and compatibility boundaries in Simfinity 3.5.7.
+description: PostgreSQL types, generated foreign keys, embedded storage, schema validation, native APIs, and compatibility boundaries in Simfinity 3.5.8.
 ---
 
 # PostgreSQL support
 
-Simfinity 3.5.7 provides PostgreSQL schema generation and GraphQL execution through the shared core and SQL runtime. PostgreSQL is the first [SQL plugin](guide/sql-plugins.md); its existing facade and generated 3.2.0 physical schema remain compatible. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.5.7 is available from npm; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
+Simfinity 3.5.8 provides PostgreSQL schema generation and GraphQL execution through the shared core and SQL runtime. PostgreSQL is the first [SQL plugin](guide/sql-plugins.md); its existing facade and generated 3.2.0 physical schema remain compatible. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.5.8 is available from npm; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
 
 Start with the canonical [PostgreSQL quick start](guide/postgresql.md) for a complete Yoga server, initialization choice, controller/session example, and pool shutdown. This page is the detailed storage and compatibility reference.
 
@@ -13,7 +13,7 @@ The intended backend choice is permanent application configuration. There is no 
 
 ## Packages and local setup
 
-Use the [v3.5.7 starters](guide/databases.md#download-the-starters) and run `npm install` in the `postgres` folder. For library development, `npm ci` at the repository root installs the workspaces. Packages are distributed together:
+Use the [v3.5.8 starters](guide/databases.md#download-the-starters) and run `npm install` in the `postgres` folder. For library development, `npm ci` at the repository root installs the workspaces. Packages are distributed together:
 
 | Package | Current exports and dependencies |
 | --- | --- |
@@ -23,7 +23,7 @@ Use the [v3.5.7 starters](guide/databases.md#download-the-starters) and run `npm
 | `@simtlix/simfinity-postgres` | `postgresPlugin`, `createPostgres`, default-module runtime facade, schema description/DDL/initialization, shared scalar factory and errors. Depends on SQL, core and `pg`; GraphQL peer. No MongoDB, Mongoose or MCP dependency. |
 | `@simtlix/simfinity-mcp` | Optional database-independent tool generation and transports. Depends on core; the MCP SDK is an optional peer. |
 
-All five packages are versioned together at version `3.5.7` with exact internal dependencies. The verified package set includes standalone consumer checks for SQL as well as both facades, covering MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; the starter requires Node.js 22.15.0+. PostgreSQL 15, 16, and 18 are covered by the release verification.
+All five packages are versioned together at version `3.5.8` with exact internal dependencies. The verified package set includes standalone consumer checks for SQL as well as both facades, covering MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; the starter requires Node.js 22.15.0+. PostgreSQL 15, 16, and 18 are covered by the release verification.
 
 ## Executable example
 
@@ -95,7 +95,7 @@ Filters support EQ, NE, LT, LTE, GT, GTE, BTW, IN, NIN and literal case-sensitiv
 
 `configureQueryLimits({ maxPageSize: 500 })` configures the shared process-wide list maximum (default 1000). Calling it without options restores the default. Unpaged lists return at most `Math.min(100, maxPageSize)` rows. Explicit page/size and calculated skip must be safe integers, with page >= 1 and size between 1 and the maximum; invalid input raises `INVALID_PAGINATION`. Unpaged aggregates stay unbounded. Sort/filter paths must end at a declared scalar or enum. Filter lists cannot contain null elements, and EQ/NE take scalar values rather than whole arrays. The process-wide `configureMutationLimits({ maxNestedOperations })` caps nested `added`/`updated`/`deleted` entries per generated mutation before its transaction starts; it is unlimited by default.
 
-Nested collection mutations run child middleware (`{ input }` for save/update, `{ id }` for delete). Child update/delete IDs are checked for existing parent ownership after middleware, inside the transaction. Malformed child IDs raise `NOT_VALID_ID` (400), missing children raise `NOT_VALID_ID` (404), and foreign-parent children raise `FORBIDDEN`. Pre-write hooks cannot change the required parent connection. These checks do not replace application write permissions or turn query scopes into write authorization.
+Nested collection mutations run child middleware (`{ input }` for save/update, `{ id }` for delete). Child update/delete IDs are checked for existing parent ownership after middleware, inside the transaction, against the parent's stored UUID, so an uppercase parent UUID owns its children. Malformed child IDs raise `NOT_VALID_ID` (400), missing children raise `NOT_VALID_ID` (404), and foreign-parent children raise `ForbiddenError` (`FORBIDDEN`, 403). Pre-write hooks cannot change the required parent connection. These checks do not replace application write permissions or turn query scopes into write authorization.
 
 Aggregation returns `{ groupId, facts }`; SUM/AVG/COUNT use JavaScript numbers and COUNT counts contributing joined rows. Scalar-list leaves can be filtered and sorted through nested embedded lists, in JSONB and owned reference-bearing trees. Group projections preserve array order, duplicates, ragged shapes and explicit-null leaves while excluding absent child fields and null parent items. Arrays such as `[]`, `[null]`, `[[]]`, `[[null]]`, `[[1,2]]` and `[[1],[2]]` remain distinct group keys.
 
@@ -171,7 +171,7 @@ Scalar/reference `unique` fields inside embedded trees and declared unique nativ
 
 PostgreSQL supports uniqueness for all its mapped native scalar types (String, enum, Int, Float, Boolean, UUID ID and DateTime), scalar lists, and single references, including within embedded trees. The Mongo generator currently creates `unique` indexes only for scalar string/enum/numeric mappings, including nested scalar fields; scalar-list field flags, Boolean, ID and DateTime flags remain ignored there. Differential tests use explicitly created Mongo array indexes when comparing PostgreSQL's declared scalar-list uniqueness. Both native writers default omitted lists to `[]`, including lists inside omitted singular inline parents; direct SQL does not apply these application defaults.
 
-All entity-reference FKs use `ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY IMMEDIATE`. Only private ownership links use `ON DELETE CASCADE`. Removing an assignment does not delete either linked entity. All tables/primary keys are created before FKs, allowing self/cyclic references; callers can explicitly defer constraints within their own transaction to insert a valid cycle.
+All entity-reference FKs use `ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY IMMEDIATE`. Only private ownership links use `ON DELETE CASCADE`. Removing an assignment does not delete either linked entity. All tables/primary keys are created before FKs, allowing self/cyclic references and cycles of referenced collections; callers can explicitly defer constraints within their own transaction to insert a valid cycle.
 
 Unsupported shapes fail before DDL generation: reciprocal lists representing implicit many-to-many, non-embedded collections inside embedded objects, embedded cycles, conflicting aliases/targets, unknown custom scalar storage, enum values that collide after conversion to text, nested lists, and whole embedded-object uniqueness.
 

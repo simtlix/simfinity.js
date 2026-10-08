@@ -8,11 +8,20 @@ const require = createRequire(import.meta.url);
 // The pinned checker exposes its library, but not its executable, via exports.
 const packageCheckBin = resolve(dirname(require.resolve('@skypack/package-check')), '../index.bin.js');
 
+/** The `types` condition targets of an `exports` field, at any nesting depth, except `*` patterns. */
+const exportedDeclarations = (entry) => {
+  if (!entry || typeof entry !== 'object') return [];
+  return Object.entries(entry).flatMap(([key, value]) => {
+    if (key !== 'types' || typeof value !== 'string') return exportedDeclarations(value);
+    return value.includes('*') ? [] : [value];
+  });
+};
+
 /** Validate an extracted npm archive, including the files its metadata names. */
 export const checkPackageQuality = (directory) => {
   const root = resolve(directory);
   const manifest = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
-  for (const file of ['README.md', 'LICENSE', manifest.main, manifest.types]) {
+  for (const file of ['README.md', 'LICENSE', manifest.main, manifest.types, ...exportedDeclarations(manifest.exports)]) {
     assert(typeof file === 'string' && file.length > 0, `${manifest.name}: missing entry point`);
     const target = resolve(root, file);
     const path = relative(root, target);

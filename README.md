@@ -108,7 +108,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.7
+npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.8
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies. Keep them within the ranges above so your application and Simfinity share a single Mongoose and GraphQL instance; npm reports an out-of-range version as a peer conflict. The MCP transports need the optional peer `@modelcontextprotocol/sdk@^1.31.0`, which is not installed automatically, and `graphql-middleware` is not a Simfinity dependency.
@@ -138,7 +138,7 @@ All publishable libraries live under `packages/`:
 | `packages/postgres` | `@simtlix/simfinity-postgres` |
 | `packages/mcp` | `@simtlix/simfinity-mcp` |
 
-The repository root is a private npm workspace for shared tests, documentation and release tooling. MongoDB retains its existing package name, public API and deep imports such as `@simtlix/simfinity-js/src/auth/rules.js`. Run development commands from the root; pack MongoDB with `npm pack --workspace @simtlix/simfinity-js` or use the release scripts to pack all five libraries. Pushing a release tag (`vX.Y.Z`) or publishing a GitHub release automatically publishes all five packages with GitHub Actions, attaches verified archives to the release, and deploys the stable documentation. Version changes and merges to `master` do not publish; the tag must match the aligned package versions and point to source already merged into `master`. See the [release and OIDC setup guide](docs/resources/contributing.md#release-a-new-version).
+The repository root is a private npm workspace for shared tests, documentation and release tooling. MongoDB retains its existing package name, public API and deep imports such as `@simtlix/simfinity-js/src/auth/rules.js`. These legacy `src/` deep imports have no TypeScript declarations: in TypeScript, import `auth`, `plugins`, `scalars` and `validators` from the package root. The typed `@simtlix/simfinity-core` subpaths, such as `@simtlix/simfinity-core/auth`, need `@simtlix/simfinity-core` as a direct dependency pinned to the facade's exact version. Run development commands from the root; pack MongoDB with `npm pack --workspace @simtlix/simfinity-js` or use the release scripts to pack all five libraries. Pushing a release tag (`vX.Y.Z`) or publishing a GitHub release automatically publishes all five packages with GitHub Actions, attaches verified archives to the release, and deploys the stable documentation. Version changes and merges to `master` do not publish; the tag must match the aligned package versions and point to source already merged into `master`. See the [release and OIDC setup guide](docs/resources/contributing.md#release-a-new-version).
 
 The [shared development and publication contract](docs/resources/contributing.md#development-and-publication-contract) applies to contributors and coding agents: when a task includes publication, completion requires the GitHub tag and published release, verified packages in both registries, and the applicable documentation deployment. This rule is tracked in `AGENTS.md` and the always-applied Cursor workflow rule.
 
@@ -152,7 +152,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.7 @modelcontextprotocol/sdk@^1.31.0
+npm install @simtlix/simfinity-mcp@3.5.8 @modelcontextprotocol/sdk@^1.31.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
@@ -314,7 +314,7 @@ Creation inputs retain required scalar, enum, embedded-object, and list fields. 
 | `[String!]` | `[String!]` | `[String!]` |
 | `[String!]!` | `[String!]!` | `[String!]` |
 
-The same wrapper handling applies to enum lists, supported custom scalar lists, and embedded lists (using their nested input types). Referenced collections keep the `added` / `updated` / `deleted` input object: a required collection requires that object on create, and non-null object items make `added` and `updated` items non-null. Nullable collection-operation items are ignored. Use `deleted` to delete children.
+The same wrapper handling applies to enum lists, supported custom scalar lists, and embedded lists (using their nested input types). Referenced collections keep the `added` / `updated` / `deleted` input object: a required collection requires that object on create, and non-null object items make `added` and `updated` items non-null. Nullable collection-operation items are ignored. Use `deleted` to delete children. Collections can form trees and cycles across types, and nested inputs follow them at any depth; `deleted` is `[ID]` whatever the item nullability, and null IDs are ignored. See [generated collection input names](docs/guide/relationships.md#generated-collection-input-names).
 
 Empty strings, `false`, `0`, and empty arrays are persisted after validators accept them. Omitting an update field leaves its value unchanged. Explicit `null` clears a nullable scalar, embedded field, or single-object reference; references clear the actual stored `connectionField`, or the GraphQL field name when no override is configured. Multiple nullable fields can be cleared in one update. An explicit `null` for an originally non-null field leaves its stored value unchanged; use an update validator to reject that input if needed. Inside an embedded object patch, an explicit `null` clears a nullable member the same way, but the member is stored as `null` (a list member as `[]`) instead of being removed; see [update selected fields](docs/guide/mutations.md#update-selected-fields).
 
@@ -322,7 +322,7 @@ Empty strings, `false`, `0`, and empty arrays are persisted after validators acc
 
 Every relationship or embedded `terms` entry is combined with AND, including repeated paths such as `age GTE 18` and `age LTE 30`. These conditions remain ANDed with top-level logical groups and scope filters. Filter and list-sort paths must resolve to declared scalar or enum fields. Client filter, sort and aggregation paths cannot name a field with `extensions.queryable: false` or an application-defined `resolve` unless it sets `extensions.queryable: true`; such paths fail with `FORBIDDEN_FILTER_PATH` (403). This covers masking resolvers, relationship fields with a manual resolver, and a custom `id` resolver. When upgrading, remove manual relationship resolvers that only load the related record, because Simfinity generates them, or set `queryable: true` on fields whose resolver returns the stored value. Paths through scoped relationships apply the target's scope, as described under [Query Scope](#-query-scope), and the authorization plugin checks field rules for every path segment. Root and relationship `id` paths refer to the stored `_id`. Inside an embedded object, `id` is the declared `id` member, except for entity types embedded as lists and supplied subdocument schemas without an `id` path, which use the subdocument `_id`; see [IDs in paths](docs/guide/queries.md#ids-in-paths). Comparisons use the connected Mongoose model's schema, so supplied string or numeric ID models retain their identifier representation.
 
-Filter values must use the field's JSON scalar type. `IN` and `NIN` require flat lists, `BTW` requires exactly two non-null bounds, and `LIKE` requires a string search fragment. Literal objects, nested lists, null list elements, invalid operators, unknown paths, and malformed groups are rejected with a structured 400 error instead of being ignored. Explicit `null` remains supported by `EQ` and `NE`. Enum names or declared internal enum values are converted to the stored representation; state-machine `state` filters preserve stored state names. Date filters convert valid date values without mutating the query input. Validated string scalars support partial `LIKE` searches, and range filters use their base scalar type rather than the field's create/update validation constraints.
+Filter values must use the field's JSON scalar type. `IN` and `NIN` require flat lists, `BTW` requires exactly two non-null bounds, and `LIKE` requires a string search fragment. Literal objects, nested lists, null list elements, invalid operators, unknown paths, and malformed groups are rejected with a structured 400 error instead of being ignored. Explicit `null` remains supported by `EQ` and `NE`. List items may be operation variables, as in `value: [$from, $to]`. Declare them as `QLValue` (or `QLValue!`): GraphQL rejects other declared types, such as `Int` or `String`, in that position. A list item whose variable the request leaves unset reads as `null`, as GraphQL reads list arguments, so it is rejected like an explicit null element. Enum literals such as `value: ACTIVE` or `value: [ACTIVE, INACTIVE]` are read as the enum names, like `"ACTIVE"`. Enum names or declared internal enum values are converted to the stored representation; state-machine `state` filters preserve stored state names. Date filters convert valid date values without mutating the query input. Validated string scalars support partial `LIKE` searches, and range filters use their base scalar type rather than the field's create/update validation constraints.
 
 Query with powerful filtering options:
 
@@ -1059,7 +1059,7 @@ mutation {
 }
 ```
 
-For non-embedded collections, each `added`, `updated`, or `deleted` child runs the target type's global middleware with the request context. The operation and argument shapes match root mutations: `save`/`update` receive `{ input }`, and `delete` receives `{ id }`. Updated and deleted children must already belong to the current parent in the transaction; a missing child raises `NOT_VALID_ID`, and a different parent raises `FORBIDDEN`. Nested updates cannot move a child between parents. A rejection aborts the parent mutation and its child changes. To cap how many `added`, `updated` and `deleted` entries one mutation may carry across all nesting levels, call `simfinity.configureMutationLimits({ maxNestedOperations })` at startup; see [limit nested collection operations](docs/guide/mutations.md#limit-nested-collection-operations).
+For non-embedded collections, each `added`, `updated`, or `deleted` child runs the target type's global middleware with the request context (for a programmatic `saveObject()` call, the `context` passed to it, possibly `undefined`). The operation and argument shapes match root mutations: `save`/`update` receive `{ input }`, and `delete` receives `{ id }`. Updated and deleted children must already belong to the current parent in the transaction; a missing child raises `NOT_VALID_ID`, and a different parent raises `ForbiddenError` (`FORBIDDEN`). Ownership compares the stored link with the parent's stored identifier, so any accepted spelling of the parent ID works. Nested updates cannot move a child between parents. A rejection aborts the parent mutation and its child changes. To cap how many `added`, `updated` and `deleted` entries one mutation may carry across all nesting levels, call `simfinity.configureMutationLimits({ maxNestedOperations })` at startup; see [limit nested collection operations](docs/guide/mutations.md#limit-nested-collection-operations).
 
 ## ✅ Validations
 
@@ -1113,22 +1113,22 @@ const PersonType = new GraphQLObjectType({
 #### Available Validators
 
 **String Validators:**
-- `validators.stringLength(name, min, max)` - Validates string length with min/max bounds (required for CREATE)
+- `validators.stringLength(name, min, max)` - Validates string length with min/max bounds (required for CREATE; omit a bound with `undefined` or `null`)
 - `validators.maxLength(name, max)` - Validates maximum string length
 - `validators.pattern(name, regex, message)` - Validates against a regex pattern (each value is tested from its first character, whatever the `g`/`y` flags; a pattern that is not a `RegExp` or a string throws `TypeError`)
 - `validators.email()` - Validates email format
 - `validators.url()` - Validates URL format
 
 **Number Validators:**
-- `validators.numberRange(name, min, max)` - Validates number range
+- `validators.numberRange(name, min, max)` - Validates number range (omit a bound with `undefined` or `null`)
 - `validators.positive(name)` - Ensures number is positive
 
 **Array Validators:**
-- `validators.arrayLength(name, maxItems, itemValidator)` - Validates array length and optionally each item
+- `validators.arrayLength(name, maxItems, itemValidator)` - Validates array length and optionally each item; `itemValidator` is a validator, a helper result such as `validators.maxLength('Tag', 20)`, or an array of them
 
 **Date Validators:**
-- `validators.dateFormat(name, format)` - Validates date format
-- `validators.futureDate(name)` - Ensures date is in the future
+- `validators.dateFormat(name, format)` - Validates a date that JavaScript can parse; ISO (`YYYY-MM-DD…`) and slashed `MM/DD/YYYY` strings must be real calendar dates, and with `'YYYY-MM-DD'` it also checks that shape (other formats are not checked and log a warning)
+- `validators.futureDate(name)` - Ensures date is in the future, with the same date checks as `dateFormat` without a format
 
 #### Validator Features
 
@@ -1323,9 +1323,9 @@ const PersonType = new GraphQLObjectType({
 ```
 
 **Available Factory Functions:**
-- `scalars.createBoundedStringScalar(name, min, max)` - String with length bounds
-- `scalars.createBoundedIntScalar(name, min, max)` - Integer with range validation
-- `scalars.createBoundedFloatScalar(name, min, max)` - Float with range validation
+- `scalars.createBoundedStringScalar(name, min, max)` - String with length bounds (omit a bound with `undefined` or `null`)
+- `scalars.createBoundedIntScalar(name, min, max)` - Integer with range validation (omit a bound with `undefined` or `null`)
+- `scalars.createBoundedFloatScalar(name, min, max)` - Float with range validation (omit a bound with `undefined` or `null`)
 - `scalars.createPatternStringScalar(name, pattern, message)` - String with regex pattern validation (same pattern rules as `validators.pattern`)
 
 #### Creating Custom Scalars Manually
@@ -1408,8 +1408,8 @@ To normalize errors in your GraphQL server, pass `simfinity.buildErrorFormatter(
 
 - A `SimfinityError` keeps its code and status.
 - A request `GraphQLError`, such as a syntax, validation or variable error, keeps its message and extensions, including the `http` status Yoga adds. So does a `GraphQLError` raised while resolving a field, but only when it has its own string `extensions.code` or a `SimfinityError` cause. Its code is its own `extensions.code`, or `BAD_REQUEST`, and its status is its `extensions.status`, or 500 for `INTERNAL_SERVER_ERROR` and 400 otherwise; a `SimfinityError` cause, such as one thrown by a custom scalar, supplies them instead. Input rejected by Simfinity's validated scalars, such as an invalid `EmailScalar` value, is therefore `BAD_REQUEST` (400), and the hidden `originalError` of an application `GraphQLError` is never exposed. A code the server already set is kept, such as Yoga's `GRAPHQL_PARSE_FAILED` or Apollo Server's `BAD_USER_INPUT`.
-- Any other `GraphQLError` raised while resolving a field, such as one a resolver threw without a code or one graphql-js raised because it could not serialize or type-check the resolved value, becomes an `InternalServerError` that keeps the message and the error as its cause. Some graphql-js messages print the resolved value.
-- Any other `Error` becomes an `InternalServerError` that keeps the message and the error as its cause; a non-Error value becomes `Unexpected error value` with no cause. Under Yoga, whose executor turns a thrown non-Error value into an `Error` with the value's text, that text becomes the `InternalServerError` message instead.
+- Any other `GraphQLError` raised while resolving a field, such as one a resolver threw without a code or one graphql-js raised because it could not serialize or type-check the resolved value, becomes an `InternalServerError` (`INTERNAL_SERVER_ERROR`, status 500) that keeps the message and the error as its cause. Some graphql-js messages print the resolved value.
+- Any other `Error` becomes an `InternalServerError` (`INTERNAL_SERVER_ERROR`, status 500) that keeps the message and the error as its cause; a non-Error value becomes `Unexpected error value` with no cause. Under Yoga, whose executor turns a thrown non-Error value into an `Error` with the value's text, that text becomes the `InternalServerError` message instead.
 
 A GraphQL error without `path` is treated as a request error, including a scalar literal validation error that wraps another error with the same message. For subscriptions, mark unexpected source-stream failures with `InternalServerError` before the server wraps them: those wrappers can be indistinguishable from request errors. For a GraphQL error without a path, the formatter keeps an explicit internal cause for masking.
 
@@ -1644,7 +1644,7 @@ const adminOnlyController = {
 };
 ```
 
-**Note**: When using `saveObject` programmatically (outside of GraphQL), the `context` parameter is optional and may be `undefined`. Always check for context existence before accessing its properties.
+**Note**: When using `saveObject` programmatically (outside of GraphQL), the `context` parameter is optional and may be `undefined`. Always check for context existence before accessing its properties. Inside a hook, pass the hook's `context` to `saveObject()` so that controllers and the middleware of nested collection children see the request context.
 
 ## 🔒 Query Scope
 
@@ -3072,6 +3072,8 @@ type QLTypeAggregationResult {
 }
 ```
 
+If your schema already has a scalar named `JSON`, such as `GraphQLJSON` from graphql-scalars or graphql-type-json, `groupId` and `facts` use that scalar, and its `serialize` formats the results. Otherwise Simfinity adds its own `JSON` scalar. The reused scalar must serialize any JSON value: `groupId` may be a string, a number or `null`, not only an object, so a JSONObject-style scalar would turn aggregation results into field errors. Any other application type named `JSON` still conflicts.
+
 ### Quick Examples
 
 #### Simple Group By
@@ -3703,7 +3705,7 @@ query {
 - **count**: Optional boolean - if `true`, returns total count of matching records
 
 #### Getting Total Count:
-When `count: true` is specified, the total count is available in the response extensions. You need to configure a plugin to expose it. Simfinity.js provides utility plugins for both Apollo Server and Envelop:
+When `count: true` is specified, the total count is available in the response extensions. The list resolver places it on the GraphQL context (a context object is required; without one the rows are returned and the count query is skipped). You need to configure a plugin to expose it. Simfinity.js provides utility plugins for both Apollo Server and Envelop:
 
 ```javascript
 const simfinity = require('@simtlix/simfinity-js');
@@ -4122,7 +4124,7 @@ const server = new ApolloServer({
 ### How to Use
 
 1. **Import the Plugin**: Use `simfinity.plugins.envelopCountPlugin()` or `simfinity.plugins.apolloCountPlugin()` depending on your GraphQL server.
-2. **Configure Context**: Ensure that your context includes the count value when executing queries (Simfinity.js automatically sets `context.count` when `count: true` is specified in pagination, unless the root value supplies a count sink, as the MCP tools do).
+2. **Configure Context**: Ensure that your context includes the count value when executing queries (Simfinity.js automatically sets `context.count` when `count: true` is specified in pagination, unless the root value supplies a count sink, as the MCP tools do). A context object is required; without one the rows are returned and the count query is skipped. A frozen, sealed or read-only context receives no count and logs one `Configuration issue` warning, so pass a fresh mutable context object for each request.
 3. **Access Count**: The count will be available in the `extensions` field of the GraphQL response.
 
 ### Example Response
@@ -4385,14 +4387,14 @@ Programmatically save an object through the creation pipeline, including validat
 - `typeName` (string): The name of the GraphQL type
 - `args` (object): The data to save
 - `session` (MongooseSession, optional): Caller-owned session with an active transaction, from the same MongoDB client as the registered model
-- `context` (object, optional): GraphQL context object (includes request info, user data, etc.)
+- `context` (object, optional): GraphQL context object (includes request info, user data, etc.); controller hooks and the middleware of nested collection children receive this value, so pass the hook's or request's context
 
 **Returns:**
 - `Promise<object>`: The saved object
 
 Without a session, `saveObject()` starts a transaction on the registered model's connection, commits the parent and nested writes together, and awaits session cleanup. The same bounded transaction and commit retries described above apply. This requires a transaction-capable MongoDB deployment, such as a replica set.
 
-With a session, it participates in the caller's active transaction. The caller owns commit, retry and cleanup. In default Mongo mode it also owns abort; with transactional reference integrity, a constraint violation or guarded-write error aborts even a supplied transaction to prevent committing an invalid write. That mode requires snapshot read concern and majority write concern. An inactive supplied session is rejected with `ACTIVE_TRANSACTION_REQUIRED` (400) before writes. Pass the provided session when calling from a controller or custom mutation so the writes share its transaction. Direct calls bypass GraphQL input coercion, field authorization, and global middleware.
+With a session, it participates in the caller's active transaction. The caller owns commit, retry and cleanup. In default Mongo mode it also owns abort; with transactional reference integrity, a constraint violation or guarded-write error aborts even a supplied transaction to prevent committing an invalid write. That mode requires snapshot read concern and majority write concern. An inactive supplied session is rejected with `ACTIVE_TRANSACTION_REQUIRED` (400) before writes. Pass the provided session when calling from a controller or custom mutation so the writes share its transaction. Calling `saveObject()` directly skips GraphQL input coercion, field authorization and the global middleware of the root record. Nested non-embedded collection children (`added`, `updated`, `deleted`) still run their target type's global middleware, controllers and ownership checks, with the `context` you pass, which is `undefined` when omitted. Without a session, a rejection rolls back the whole workflow; with a supplied session the error reaches the caller, who owns the abort in default MongoDB mode. Validate and authorize programmatic callers accordingly.
 
 **Example:**
 
@@ -4402,14 +4404,14 @@ const newBook = await simfinity.saveObject('Book', {
   author: 'Author Name'
 }, session, context);
 
-// Without context (context will be undefined in controller hooks)
+// Without context (context will be undefined in controller hooks and in the middleware of nested collection children)
 const newBook = await simfinity.saveObject('Book', {
   title: 'New Book',
   author: 'Author Name'
 }, session);
 ```
 
-**Note**: When `context` is not provided, it will be `undefined` in controller hooks. This is acceptable for programmatic usage where context may not be available.
+**Note**: When `context` is not provided, it is `undefined` in controller hooks and in the middleware that nested collection children run. This is acceptable for programmatic usage where context may not be available.
 
 ### `createSchema(includedQueryTypes?, includedMutationTypes?, includedCustomMutations?)`
 

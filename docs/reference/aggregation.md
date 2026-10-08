@@ -74,6 +74,8 @@ type QLTypeAggregationResult {
 }
 ```
 
+If your schema already has a scalar named `JSON`, such as `GraphQLJSON` from graphql-scalars or graphql-type-json, `groupId` and `facts` use that scalar, and its `serialize` formats the results. Otherwise Simfinity adds its own `JSON` scalar. The reused scalar must serialize any JSON value: `groupId` may be a string, a number or `null`, not only an object. A JSONObject-style scalar would turn aggregation results into field errors. Any other application type named `JSON` still makes `createSchema()` fail with `Schema must contain uniquely named types`.
+
 | Operation | Calculation |
 | --- | --- |
 | `COUNT` | Adds one per pipeline row in the group. The required `path` does not make this a count of non-null values. |

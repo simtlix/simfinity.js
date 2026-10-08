@@ -5,7 +5,7 @@ description: Integrate authorization and pagination counts with GraphQL Yoga, En
 
 # Plugins
 
-The shared `plugins` export from `@simtlix/simfinity-core`, also exposed as `simfinity.plugins` by either runtime, contains `createAuthPlugin`, `envelopCountPlugin`, and `apolloCountPlugin`.
+The shared `plugins` export from `@simtlix/simfinity-core`, also exposed as `simfinity.plugins` by either runtime, contains `createAuthPlugin`, `envelopCountPlugin`, and `apolloCountPlugin`. They are also available, with TypeScript declarations, from the `@simtlix/simfinity-core/plugins` subpath.
 
 SQL database plugins have a separate storage contract. See [SQL core and plugins](/guide/sql-plugins) for `createSQL`, `postgresPlugin` and engine capabilities. They are selected at runtime construction; the helpers below integrate the generated GraphQL schema with a server.
 
@@ -76,7 +76,9 @@ Configure a fresh request context in your Apollo HTTP integration. The plugin wr
 ## Count behavior
 
 - Request both `page` and `size`; they are required fields of `QLPagination`.
-- A fresh mutable context is required because the generated resolver writes `context.count`. It does so unless the root value supplies a count sink, as MCP tools do.
+- A fresh mutable context is required because the generated resolver writes `context.count` on the request's context object. It does so unless the root value supplies a count sink, as MCP tools do.
+- A counted list without a context object, for example `graphql()` without `contextValue`, returns its rows and skips the count query.
+- A frozen, sealed or read-only context receives no count, and the runtime logs one `Configuration issue` warning. Use a fresh mutable context per request.
 - Both HTTP count plugins currently include a count only when it is truthy. A result count of zero is omitted from response extensions.
 - A request context stores one count value. Do not use multiple counted list fields in one operation when you need a distinct total for each field.
 - Aggregation queries do not compute a pagination count.

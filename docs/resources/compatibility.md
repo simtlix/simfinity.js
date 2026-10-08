@@ -35,6 +35,110 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22 or newer |
 
+## Upgrade to 3.5.8
+
+Version 3.5.8 fixes generated collection inputs, nested collection ownership, error metadata, filter values, interface and union fields, aggregation results, pagination counts, field validators, bounded scalars and the TypeScript declarations of the core subpaths. Keep all directly installed Simfinity packages at 3.5.8. When upgrading from an earlier version, also review the [3.5.7 notes](#upgrade-to-3-5-7) below.
+
+### Collection inputs
+
+- Two types with a self-referencing collection of the same name, such as `Category.children` and `Comment.children`, no longer make `createSchema()` fail with `Schema must contain uniquely named types but contains multiple types named "OneToManyAchildren"`. Among the types that the generated mutations of the first `createSchema()` reach, the first registered keeps `OneToManyAchildren` and `OneToManyUchildren`. The others are named after their type, for example `OneToManyCommentAchildren` and `OneToManyCommentUchildren`, as other collections are, and a `Configuration issue:` warning names both types. A type registered after a `createSchema()` call is named after its type only when the next `createSchema()` also reaches a type that has the unqualified names and that one is still the type object registered under its name, a case that failed with the same duplicate-name error before. Otherwise it keeps the unqualified names, as before, with no warning: for example a type registered after a schema whose types it never meets, or a type that has the unqualified names and is registered again under the same name with the same or a new type object. Earlier schemas remain valid. Making an earlier-registered type reachable, with `connect()` instead of `addNoEndpointType()`, a new collection that leads to it or a wider mutation allowlist, moves the unqualified names to it and renames the other type's inputs, so register the type that should keep them first. Two cases still fail as before: a second such type that only a `registerMutation()` input reaches, and a later `createSchema()` that reaches two such types whose inputs earlier calls built with the unqualified names, for example after a narrower first allowlist. See [self-referencing collections with the same name](../guide/relationships#self-referencing-collections-with-the-same-name).
+- Collections that reach the same child through the same `connectionField`, such as `Serie.episodes` and `Serie.featured`, now share one `added` item input instead of failing on a duplicate `SerieAEpisodeInputForSerie` name. Both fields read the same children, unless one has its own resolver.
+- Items that an add mutation creates through a self-referencing collection (`A<Type>InputFor<ConnectionField>`) now accept the item's own self-referencing collections as optional fields, so one create can build a tree more than one level deep, as updates already could. Items that an update adds (`U<Type>InputFor<ConnectionField>`) keep a required self-referencing collection required.
+- `createSchema()` now builds models whose writable referenced collections form a cycle across types, such as `Department.employees` (to `Employee`) and `Employee.managedDepartments` (to `Department`). Previously it threw `INPUT_TYPE_UNRESOLVED` (`Could not build input types for: …`) on MongoDB and PostgreSQL, and the only workaround was marking one collection `readOnly`; remove that `readOnly` to get nested writes. Nested inputs follow the cycle at any depth; `configureMutationLimits({ maxNestedOperations })` caps the entries one mutation may carry.
+- `INPUT_TYPE_UNRESOLVED` still reports writable lists of lists and embedded types that contain each other, with the same code and status, and its message still starts with `Could not build input types for: …`. The message now names every field of the listed types whose input cannot be generated, and lists apart the fields that only wait for another listed type, which build once that type does, for example `… no input can be generated for Sheet.rows, Sheet.cols, Meta.cells (writable lists whose items have no generated input, such as lists of lists); mark such a field readOnly. These fields only wait for another listed type and build once it does: Sheet.meta waits for Meta.` A type that also has a list or embedded field of an unregistered type can now fail with `UNREGISTERED_RELATION_TARGET` for that field first. Lists of interface or union types no longer raise it; see [interface and union fields](#interface-and-union-fields).
+- The `deleted` list of referenced collection inputs is `[ID]` again for collections with non-null items such as `[Book!]`, as documented and as in 3.1. Versions 3.2.0 to 3.5.7 generated `[ID!]`, which rejected `[ID]` variables and null entries. Variables declared `[ID!]` keep working, null entries are ignored, and generated MCP tool schemas describe `deleted` items as string or null.
+- Schemas that built before keep every generated type name. Schema snapshots also show descriptions on self-referencing collection input fields, the new optional fields on `A<Type>InputFor<ConnectionField>`, and `deleted: [ID]`. These changes are additive and do not break clients. Code generated from the schema that reads `deleted` now receives nullable entries. The input schemas of generated MCP add and update tools change the same way: `A<Type>InputFor<ConnectionField>` gains the optional self-referencing collection fields, self-referencing collection properties gain their field descriptions, and `deleted` items become nullable, so hosts that pin MCP tool definitions may report them as changed.
+
+See [generated collection input names](../guide/relationships#generated-collection-input-names).
+
+### Nested collection writes
+
+- Nested `updated` and `deleted` children are now checked against the parent's stored identifier, the `_id`, else `id`, of the record the update returns, instead of the ID as the client sent it. An update whose parent ID uses a spelling the backend accepts but does not store, such as an uppercase MongoDB ObjectId or an uppercase PostgreSQL UUID, no longer fails with `FORBIDDEN` (`Child does not belong to this parent`) for the parent's own children; the same update without nested items already succeeded. The same applies to grandchildren under a nested `updated` child whose ID is sent in another case. Children of another parent are still rejected.
+- `added` and `updated` children are now linked with the stored identifier. With generated models, and on PostgreSQL, the stored link does not change, because the backend already cast it. On MongoDB, a supplied child model whose connection path does not cast to the parent's key, such as a `String` path for an ObjectId parent, used to store the ID as the client spelled it, so those children were missing from `parent.children`. They are now linked canonically.
+- Children already stored with another spelling of the parent ID, for example written by 3.5.7 through an uppercase parent ID, are not listed under the parent, and can no longer be updated or deleted through the parent with that spelling: that now fails with `FORBIDDEN`. There is no automatic migration. Normalize such links once, adapting the field name and ID format to your model, for example for ObjectId links stored as strings:
+
+  ```javascript
+  await Child.collection.updateMany(
+    { parent_id: { $regex: '[A-F]' } },
+    [{ $set: { parent_id: { $toLower: '$parent_id' } } }],
+  );
+  ```
+
+  Or fix them with direct model writes. `tests/integration/runtime-v31.test.js` runs this command against MongoDB.
+- Type validators (the type's `extensions.validations`) and the `onUpdating` hook of nested children under an updated parent now receive the parent link as the stored identifier: an ObjectId on MongoDB, the lowercase UUID on PostgreSQL. Before, they received the ID string the client sent.
+- The `onSaving` hook of a child added under an updated parent receives the new record. On PostgreSQL its link is now the lowercase UUID instead of the client's string. On MongoDB the record is a Mongoose document whose link is cast to the child's path type: with generated models it is an ObjectId, as before; with a supplied `String` path it is now the parent's lowercase hex string instead of the client's spelling.
+- Children of a newly created parent already received these values.
+- Custom adapters: the runtime uses the `_id`, else `id`, of the record that `adapter.update()` returns, and falls back to the requested ID when neither is present.
+
+See [update a collection](../guide/relationships#update-a-collection).
+
+### Errors
+
+- The nested collection ownership denial (`Child does not belong to this parent`) is now an `auth.ForbiddenError`. Its message, `FORBIDDEN` code and 403 status are unchanged, and it is still a `SimfinityError`, but its `name` is now `ForbiddenError` instead of `Error`. Error-formatter callbacks and audit hooks that check `instanceof auth.ForbiddenError` now receive these denials too, including any message masking they apply to `ForbiddenError`.
+- `InternalServerError` now has status 500, through `getStatus()` and `extensions.status`. Where `extensions` had no `status` key before, it now includes `"status": 500`: errors that `buildErrorFormatter` wraps as unexpected, the `Type.field stores an invalid identifier` reference error, `InternalServerError`s your own code throws or returns from the formatter callback, and the same errors inside MCP tool results. This matches the 500 that `buildErrorFormatter` already gave a `GraphQLError` with the `INTERNAL_SERVER_ERROR` code, and PostgreSQL's `DATABASE_ERROR`.
+- A `GraphQLError` whose `SimfinityError` cause is an `InternalServerError` now reports 500 even when it has its own integer `extensions.status`, because the cause's status wins, as its code already did.
+- The HTTP status of responses does not change: Simfinity does not set it, and GraphQL Yoga and Apollo Server read `extensions.http`, not `extensions.status`. Code that recognized unexpected errors by a missing `extensions.status` should check `extensions.code === 'INTERNAL_SERVER_ERROR'` or `error instanceof InternalServerError` instead.
+
+See [errors](../reference/errors#internalservererror).
+
+### Filter values
+
+- Filter values (`QLValue`) now accept operation variables inside list literals, for example `year: { operator: BTW, value: [$from, $to] }` with `$from: QLValue, $to: QLValue`, and enum literals such as `status: { value: ACTIVE }` or `{ operator: IN, value: [ACTIVE, INACTIVE] }`, which are read as the enum names. Previously these documents failed validation with `Filter values must be scalars or flat scalar lists`. Declare item variables as `QLValue`: GraphQL rejects other declared types, such as `Int`, in that position.
+- An item variable the request leaves unset reads as `null`, as GraphQL reads list arguments, and is rejected like an explicit null element. Items that a variable sets to `null`, an object or a list are rejected with `INVALID_FILTER_VALUE`, as whole-list variables are. On MongoDB the message is, for example, `BTW does not accept null elements`; on PostgreSQL it is `Filter lists require non-null scalar elements`.
+- On a field that is not an enum, an enum literal is read as its name string, so `name: { value: A }` matches the text `A`.
+
+See [operators](../guide/queries#operators).
+
+### Interface and union fields
+
+- On the default MongoDB runtime and with custom adapters, entity fields of an interface or union type no longer make the generated schema invalid. Previously a single such field gave list, aggregate and collection queries an argument without a type, so every operation failed validation, and a writable list of them, also inside embedded types, made `createSchema()` throw `INPUT_TYPE_UNRESOLVED`.
+- These fields are now output-only. Generated inputs leave them out, and a field that is not `readOnly` logs one `Configuration issue` warning. Such fields that already built, such as a single union field in an embedded type, now log it too.
+- A single such field has no filter argument. A list keeps its existing `QLTypeFilterExpression` argument; send it only as `null`. `AND`/`OR` conditions that name such a field are unchanged: non-null values are rejected with `INVALID_FILTER_VALUE`, a `null` condition matches every record because nothing is stored, and a field with your own resolver is rejected with `FORBIDDEN_FILTER_PATH` (403).
+- Resolve these fields with your own resolver and mark them `readOnly`.
+- A type whose generated input would have no fields, such as a collection child with only `id`, the back-reference and such fields, still fails schema validation.
+- PostgreSQL and `referentialIntegrity: 'transactional'` still reject these fields with `INVALID_MODEL`.
+
+See [what gets generated](../guide/schema#what-gets-generated).
+
+### Application scalars named JSON
+
+- An application scalar named `JSON`, such as `GraphQLJSON` from graphql-scalars or graphql-type-json, no longer makes `createSchema()` throw `Schema must contain uniquely named types but contains multiple types named "JSON"`.
+- When the schema contains such a scalar, through an entity field, a custom mutation input or result, or any type they reach, `QLTypeAggregationResult.groupId` and `facts` use it, and its `serialize` formats aggregation results. It must serialize strings, numbers and `null` as well as objects.
+- Schemas without one keep Simfinity's own `JSON` scalar unchanged.
+- A type named `JSON` that is not a scalar still conflicts, as do application types named `RelationType` or `FieldExtensionsType`, which every schema contains.
+
+See [aggregation input types](../reference/aggregation#input-types).
+
+### Counted lists without a context object
+
+- A list query with `pagination: { count: true }` no longer fails with `Cannot set properties of undefined (setting 'count')` when the request has no context object, for example `graphql()` without `contextValue`. It returns the rows and skips the count query, since nothing could read the count.
+- A frozen, sealed or read-only context gets the rows, no count, and one `Configuration issue` warning per runtime, instead of an error. Count plugins still need a fresh mutable context per request.
+
+See [count behavior](../reference/plugins#count-behavior).
+
+### Field validators and bounded scalars
+
+- `validators.arrayLength()` validates items when `itemValidator` is a single validator (a plain object or a function with `validate()`) or a helper result such as `validators.maxLength('Tag', 20)`, and expands helper results inside an array. Earlier versions skipped item validation for those shapes without an error, so creates and updates whose items break the rule were stored; they now fail with `VALIDATION_ERROR`. Stored data is not checked.
+- A helper result applies its `CREATE` rules to every item on create and update, like the documented `validators.maxLength('Tag', 20).CREATE`, so `null` items fail helpers that require a value. Lists sent with an array of helper results used to fail with an internal `validator.validate is not a function` error; they are now validated. Falsy array entries are skipped.
+- Other values, including a single class instance such as a Joi or yup schema, are still ignored, and an array entry that is not a validator still makes lists with items fail, now with a `TypeError` that names the helper. Both log a `Configuration issue` warning when the helper is created.
+- `validators.dateFormat()` and `validators.futureDate()` reject impossible calendar dates in strings that start with an ISO date, such as `2024-02-31`, `2023-02-29` or `2024-04-31T10:00:00Z`, and in slashed `MM/DD/YYYY` strings such as `02/31/2024`, with `<name> must be a valid date`. Earlier versions stored them because JavaScript rolls them into the next month; on a `Date` or `DateTime` field the stored date was the next month's. With `'YYYY-MM-DD'`, values in other shapes keep the `must be in format` message.
+- Format strings other than `'YYYY-MM-DD'` are still not enforced, and now log a warning when the helper is created; values under them get the same calendar checks as values without a format. Stored values are not checked or changed, but an update that sends one back fails.
+- A `null` bound means no bound, as `undefined` does, in `stringLength`, `maxLength`, `numberRange`, `arrayLength` and the `createBounded*Scalar` factories. Earlier versions compared values with 0 and rejected them with messages such as `must be at most null characters`. If you passed `null` where you need 0, pass 0. Reads of stored values that only a `null` bound excluded no longer fail with a field error.
+- Bounded scalars with one bound or none are described by the bounds they have, such as `A string with at most 120 characters`, `An integer of at least 0` or `A float`, instead of `between undefined and 120`. A `NaN` bound is left out of the description. The descriptions appear in SDL, introspection and MCP tool definitions, so schema snapshots change, and hosts that pin MCP tool definitions may report them as changed. Scalars with both bounds and every GraphQL name are unchanged.
+
+See [available helpers](../guide/validation#available-helpers) and [scalar factories](../reference/scalars#scalar-factories).
+
+### TypeScript declarations for core subpaths
+
+- `@simtlix/simfinity-core/auth`, `/auth/errors`, `/auth/expressions`, `/auth/rules`, `/plugins`, `/scalars` and `/validators` now ship TypeScript declarations, through a `types` condition in their export entries (`moduleResolution` `node16`, `nodenext`, `bundler`) and a `typesVersions` map (`node10`). Previously, under `node16`, `nodenext` and `bundler`, these imports failed with TS7016 in strict projects and were typed as `any` in non-strict ones; under `node10` they failed with TS2307 whatever the `strict` setting. Their named and default exports have the same types as the root `auth`, `plugins`, `scalars` and `validators` namespaces, and they re-export related types such as `AuthRuleFunction`, `PermissionSchema`, `FieldValidations` and `ItemValidators`. The JavaScript modules and the files Node resolves are unchanged.
+- `requireRole()` and `requirePermission()` also accept readonly arrays, such as an `as const` list or a frozen array, in the root declarations and the subpaths. The declarations of `stringLength`, `maxLength`, `numberRange`, `arrayLength` and the `createBounded*Scalar` factories accept `null` bounds, and `arrayLength`'s `itemValidator` accepts the new `ItemValidators` type, which the core root, the `/validators` subpath and the `@simtlix/simfinity-js`, `@simtlix/simfinity-postgres` and `@simtlix/simfinity-sql` type entries export.
+- Code that compiled only because these imports were `any`, in non-strict builds under `node16`, `nodenext` or `bundler`, can now report errors for calls the declarations do not allow. For example, a `defaultPolicy` held in a `string` variable must be narrowed to `'ALLOW' | 'DENY'` (use a literal or `as const`). Remove any shorthand `declare module '@simtlix/simfinity-core/...'` shim added for TS7016 or TS2307: it keeps taking precedence over the shipped declarations, so the import stays `any`.
+- The `internal/*` subpaths are not public API and stay undeclared, as do MongoDB's legacy `@simtlix/simfinity-js/src/...` deep imports. In TypeScript, import `auth`, `plugins`, `scalars` and `validators` from the package root. Importing the core subpaths in an application that installs a facade needs `@simtlix/simfinity-core` as a direct dependency pinned to the facade's exact version.
+
+### Documentation
+
+- The `saveObject()` documentation now says that a direct call skips the global middleware of the root record only. Nested non-embedded collection children still run their type's global middleware, controllers and ownership checks, with the `context` passed to `saveObject()`, which is `undefined` when omitted, as they have since 3.1. Pass the hook's or request's context when you call it from a controller or custom mutation. See [saveObject](../reference/api#saveobject).
+
 ## Upgrade to 3.5.7
 
 Version 3.5.7 fixes MCP tool results, tool definitions, argument handling, configuration checks, remote execution and the Streamable HTTP handler, and adds field markers to core that the MCP package reads. Keep all directly installed Simfinity packages at 3.5.7, including `@simtlix/simfinity-mcp` and `@simtlix/simfinity-core`, as their exact internal dependency already requires. When upgrading from an earlier version, also review the [3.5.6 notes](#upgrade-to-3-5-6) below.
@@ -416,7 +520,7 @@ Keep all directly installed Simfinity packages at 3.5.0 and review these behavio
 - MongoDB uses the application's GraphQL and Mongoose peers. Install the optional MCP SDK explicitly for transports; `graphql-middleware` is no longer installed by Simfinity. See [installation](../guide/databases#install-from-npm).
 - Embedded updates enforce required fields when constructing replacement objects or list items; existing embedded objects still accept valid partial patches. SQL sessions reject statements after their callback settles, and a failed rollback discards the connection. See [mutations](../guide/mutations) and the [SQL plugin contract](../guide/sql-plugins#plugin-contract-version-1).
 
-The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.7. Historical archives and the Barber examples retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
+The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.8. Historical archives and the Barber examples retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
 
 ## Upgrade from 3.2.0
 

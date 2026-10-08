@@ -29,12 +29,14 @@ The email scalar checks format; it does not verify a mailbox. The URL scalar doe
 
 | Factory | Result |
 | --- | --- |
-| `createBoundedStringScalar(name, min, max)` | String with inclusive length bounds. |
-| `createBoundedIntScalar(name, min, max)` | GraphQL integer with inclusive numeric bounds. |
-| `createBoundedFloatScalar(name, min, max)` | GraphQL float with inclusive numeric bounds. |
+| `createBoundedStringScalar(name, min, max)` | String with inclusive length bounds; either bound can be omitted. |
+| `createBoundedIntScalar(name, min, max)` | GraphQL integer with inclusive numeric bounds; either bound can be omitted. |
+| `createBoundedFloatScalar(name, min, max)` | GraphQL float with inclusive numeric bounds; either bound can be omitted. |
 | `createPatternStringScalar(name, pattern, message)` | String matching a `RegExp` or regex string. |
 
-Pass `undefined` for a bound you do not need. Reuse a single scalar instance for each GraphQL name instead of creating different instances with the same name.
+Pass `undefined` or `null` for a bound you do not need. The scalar's description then names only the bounds you set, such as `A string with at most 120 characters`, `An integer of at least 0` or `A float`. With both bounds it reads `A string with length between 2 and 120 characters`, `An integer between 0 and 120` or `A float between 0 and 10`. A `NaN` bound is ignored, both in checks and in the description. Reuse a single scalar instance for each GraphQL name instead of creating different instances with the same name.
+
+The `scalars` namespace is also available, with TypeScript declarations, from the `@simtlix/simfinity-core/scalars` subpath.
 
 `createPatternStringScalar` copies the pattern when the scalar is created and tests every value from its first character. A `g` flag has no effect between values, a `y` flag anchors each match at the start of the value, and later changes to your `RegExp` object, including its `lastIndex`, do not affect the scalar. The pattern must be a `RegExp` or a string; any other value throws `TypeError` when the scalar is created.
 

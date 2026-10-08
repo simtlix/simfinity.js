@@ -134,7 +134,7 @@ simfinity.connect(null, SeasonType, 'season', 'seasons');
 const schema = simfinity.createSchema();
 ```
 
-The `fields: () => ({ ... })` functions defer access to the types, allowing both sides of the relationship to reference each other.
+The `fields: () => ({ ... })` functions defer access to the types, allowing both sides of the relationship to reference each other. Writable collections can also form cycles across types, such as `Department.employees` and `Employee.managedDepartments`; nested inputs follow them at any depth. See [generated collection input names](#generated-collection-input-names).
 
 `connectionField` has two related roles: on `Season.serie`, it is the ObjectId or UUID storage field in a season; on `Serie.seasons`, it identifies the child's back-reference. Use the matching field name on both sides, as in this example, so nested creation and collection queries share the same link.
 
@@ -146,7 +146,7 @@ For a single-object reference, omitting `connectionField` uses the GraphQL field
 
 The `added` input for a referenced collection omits its parent connection field. Simfinity fills in the newly created parent's ID:
 
-Required collection fields retain a required operation object on create and become optional on update. If the collection has non-null object items, its `added` and `updated` lists also require non-null items. Nullable operation items are ignored; use `deleted` with child IDs to remove records.
+Required collection fields retain a required operation object on create and become optional on update. If the collection has non-null object items, its `added` and `updated` lists also require non-null items. `deleted` is `[ID]` whatever the item nullability. Nullable operation items and null IDs are ignored; use `deleted` with child IDs to remove records.
 
 ```graphql
 mutation {
@@ -181,6 +181,71 @@ mutation AddSeason($serieId: String!) {
 ```
 
 The generated reference wrapper is `IdInputType`, whose `id` field is `String!`. Root entity IDs and update IDs use the GraphQL `ID` scalar; use the variable type required by the position you are filling. A malformed `id`, such as one that is not an ObjectId on MongoDB, fails with `NOT_VALID_ID` (400) and nothing is stored.
+
+## Generated collection input names
+
+Each writable referenced collection gets one operation input in the type's creation input and one in its update input. For `Serie.seasons`, linked through `serie`:
+
+| Part | In `SerieInput` | In `SerieInputForUpdate` |
+| --- | --- | --- |
+| Operation input | `OneToManySerieAseasons` | `OneToManySerieUseasons` |
+| `added` items | `SerieASeasonInputForSerie` | `SerieUSeasonInputForSerie` |
+| `updated` items | `SeasonInputForUpdate` | `SeasonInputForUpdate` |
+| `deleted` | `[ID]` | `[ID]` |
+
+In general the operation inputs are `OneToMany<Type>A<field>` and `OneToMany<Type>U<field>`. An `added` item, `<Type>A<Item>InputFor<ConnectionField>` or `<Type>U<Item>InputFor<ConnectionField>`, is the item's creation input without the back-reference, which the parent supplies. `deleted` is `[ID]` whatever the item nullability, and null IDs are ignored. A collection without `connectionField`, which builds only with its own resolver or as `readOnly` in default MongoDB mode and with custom adapters, uses the item's `<Item>Input` for `added` items.
+
+Collections that reach the same child through the same `connectionField`, such as `Serie.episodes` and `Serie.featured`, share one `added` item input. They also read the same children: both fields return every episode linked to the serie, unless one of them has its own resolver.
+
+Nested inputs follow trees and cycles of collections at any depth, such as `Department.employees` and `Employee.managedDepartments`, where an employee added to a department can add the departments it manages. To cap how many entries one mutation may carry, set `configureMutationLimits({ maxNestedOperations })`; see [limit nested collection operations](./mutations#limit-nested-collection-operations).
+
+### Self-referencing collections
+
+A collection whose items are its own type, such as `Category.children` linked through `parent`, is named without the type: `OneToManyAchildren` and `OneToManyUchildren`. Its `added` items are `ACategoryInputForParent` and `UCategoryInputForParent`.
+
+Items that an add mutation creates (`A<Type>InputFor<ConnectionField>`) accept the item's own self-referencing collections as optional fields, even when the field is non-null, so one create can build a tree at any depth:
+
+```graphql
+mutation {
+  addcategory(input: {
+    name: "Books"
+    children: {
+      added: [
+        { name: "Fiction", children: { added: [{ name: "Science fiction" }] } }
+      ]
+    }
+  }) {
+    id
+    children { name children { name } }
+  }
+}
+```
+
+Items that an update adds (`U<Type>InputFor<ConnectionField>`) keep the declared requiredness: when the collection field is non-null, each of them needs its operation object, for example `children: {}`.
+
+### Self-referencing collections with the same name
+
+When several types have a self-referencing collection with the same name, such as `Category.children` and `Comment.children`, only one of the types that a schema reaches keeps `OneToManyA<field>` and `OneToManyU<field>`. A type is reached when it has generated mutations in that schema, or when a writable list or embedded field of a reached type leads to it. In the first `createSchema()`, the first registered reached type keeps the names. The other reached types are named after their type, `OneToMany<Type>A<field>` and `OneToMany<Type>U<field>`, as other collections are, and startup logs a warning that names both types:
+
+```text
+Configuration issue: Comment.children and Category.children are self-referencing collections with the same name, so the inputs of Comment.children are named OneToManyCommentAchildren and OneToManyCommentUchildren, while Category.children keeps OneToManyAchildren and OneToManyUchildren. To choose which type keeps those names, register it first, or make the other type unreachable from the generated mutations.
+```
+
+Types that no generated mutation reaches, such as one registered with `addNoEndpointType()` that no collection or embedded field leads to, keep the unqualified names, because their inputs never meet in one schema.
+
+A type registered after a `createSchema()` call gets its inputs from the next `createSchema()`; PostgreSQL rejects such registrations with `SCHEMA_ALREADY_CREATED`. It is named after its type, with the warning, only when the next schema also reaches a type that has the unqualified names and that one is still the type object registered under its name. Otherwise it keeps the unqualified names, with no warning, and becomes one of the types that have them. For example:
+
+- A type registered after a `createSchema()` call whose next schema does not reach the type that has the names, for example because of its mutation allowlist.
+- A type that has the names and is registered again under the same name with a new type object, for example when an application reloads its types on one runtime: the earlier object no longer counts.
+
+Core and MongoDB also allow re-registering the same self-referencing type object. Its next schema gets fresh collection inputs; previously built schemas retain their input types.
+
+The names are decided when the types' inputs are first built, so a later change to the model can move them. Making an earlier-registered type reachable, by registering it with `connect()` instead of `addNoEndpointType()`, by adding a collection that leads to it, or by widening the mutation allowlist of the first `createSchema()`, gives it the unqualified names and renames the inputs of the type that had them. Clients that declare variables of those input types must then use the new names. Register the type that should keep the names first, or keep the other type unreachable.
+
+Two cases still fail at startup with `Schema must contain uniquely named types but contains multiple types named "OneToManyAchildren"`:
+
+- A second type with a same-named self-referencing collection that only a `registerMutation()` input reaches, for example through `getInputType(Comment)` in the input's `fields` function. Rename one of the fields, or make the type reachable from generated mutations, for example by registering it with `connect()`.
+- A later `createSchema()` call that reaches two such types whose inputs earlier calls built with the unqualified names: after a first call with a narrower mutation allowlist, or after a type registered later was built by a call that did not reach the other. Build the widest schema first, register every type before it, or rename one of the fields.
 
 ## Query related records
 
@@ -226,9 +291,9 @@ mutation EditSeasons($serieId: ID!, $seasonId: ID!, $removedId: ID!) {
 }
 ```
 
-`added` creates records, `updated` changes records by ID, and `deleted` deletes child records. These changes share the parent mutation's transaction. To cap the number of entries one mutation may carry across all nesting levels, set `configureMutationLimits({ maxNestedOperations })`; see [limit nested collection operations](./mutations#limit-nested-collection-operations). Each child runs global middleware for the target type with the same request context and root argument shape: `save` and `update` receive `{ input }`; `delete` receives `{ id }`.
+`added` creates records, `updated` changes records by ID, and `deleted` deletes child records. These changes share the parent mutation's transaction. To cap the number of entries one mutation may carry across all nesting levels, set `configureMutationLimits({ maxNestedOperations })`; see [limit nested collection operations](./mutations#limit-nested-collection-operations). Each child runs global middleware for the target type with the same request context (for a programmatic `saveObject()` call, the `context` passed to it, possibly `undefined`) and root argument shape: `save` and `update` receive `{ input }`; `delete` receives `{ id }`.
 
-After middleware, updated and deleted children are read in the transaction and must already belong to the current parent. A malformed child ID raises `NOT_VALID_ID` (400), a missing child raises `NOT_VALID_ID` (404), and a child owned by another parent raises `FORBIDDEN` (403). Nested updates do not reparent foreign children. The required parent link is retained after child pre-write hooks, including ordinary field assignments and `$set`/`$unset` updates. A rejection aborts all changes in the parent mutation.
+After middleware, updated and deleted children are read in the transaction and must already belong to the current parent. Ownership compares the child's stored parent link with the parent's stored identifier. So any spelling of the parent ID that the backend accepts, such as an uppercase ObjectId or UUID, owns its children, and new or updated children are linked with the stored identifier. A malformed child ID raises `NOT_VALID_ID` (400), a missing child raises `NOT_VALID_ID` (404), and a child owned by another parent raises `ForbiddenError` (`FORBIDDEN`, 403). Nested updates do not reparent foreign children. The required parent link is retained after child pre-write hooks, including ordinary field assignments and `$set`/`$unset` updates. A rejection aborts all changes in the parent mutation.
 
 Parent ownership does not replace application permissions. Use child operation middleware or [controller checks](./controllers) to authorize writes; query scope is a read restriction. Root mutation permissions in the [authorization plugin](./authorization) do not automatically authorize nested child mutation inputs.
 

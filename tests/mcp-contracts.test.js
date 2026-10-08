@@ -256,6 +256,18 @@ describe('MCP GraphQL input contracts', () => {
     expect((await callTool('echo', { email: 'a@example.com' })).structuredContent).toEqual({ echo: 'a@example.com' });
   });
 
+  it('publishes one-sided bounded scalar descriptions without undefined bounds', () => {
+    const Title = scalars.createBoundedStringScalar('McpContractTitle', undefined, 120);
+    const Score = scalars.createBoundedIntScalar('McpContractScore', null, 100);
+    const schema = makeSchema({
+      echo: { type: Title, args: { title: { type: Title }, score: { type: Score } }, resolve: (parent, args) => args.title },
+    });
+    const { tools } = generateMCPTools(schema);
+    expect(tools[0].inputSchema.properties.title).toEqual({ type: ['string', 'null'], description: 'A string with at most 120 characters' });
+    expect(tools[0].inputSchema.properties.score).toEqual({ type: ['integer', 'null'], description: 'An integer of at most 100' });
+    expect(tools[0].outputSchema.properties.echo).toEqual({ type: ['string', 'null'], description: 'A string with at most 120 characters' });
+  });
+
   it('stops at a cyclic baseScalarType chain', () => {
     const first = new GraphQLScalarType({ name: 'McpContractCycleA', serialize: (value) => value });
     const second = new GraphQLScalarType({ name: 'McpContractCycleB', serialize: (value) => value });

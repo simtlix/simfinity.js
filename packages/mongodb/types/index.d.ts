@@ -36,6 +36,7 @@ export type {
   EnvelopSchemaPlugin,
   FieldValidations,
   FieldValidator,
+  ItemValidators,
   MutationLimitsOptions,
   PermissionSchema,
   PolicyExpression,

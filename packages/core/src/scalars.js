@@ -67,26 +67,56 @@ export const PositiveFloatScalar = createValidatedScalar(
   },
 );
 
+// A null or omitted bound means no bound (#97). Other values keep JavaScript's comparison, so numeric strings work.
+const hasBound = (bound) => bound !== undefined && bound !== null;
+
+// The published description names only the bounds that are set. A NaN bound, which no comparison applies, is left out
+// too. With both bounds the text is the same as in earlier versions.
+const describeBounds = (min, max, texts) => {
+  const described = (bound) => hasBound(bound) && !(typeof bound === 'number' && Number.isNaN(bound));
+  if (described(min) && described(max)) return texts.between;
+  if (described(min)) return texts.atLeast;
+  if (described(max)) return texts.atMost;
+  return texts.unbounded;
+};
+
+const checkNumberBounds = (min, max) => (value) => {
+  if (typeof value !== 'number' || isNaN(value)) {
+    throw new Error('Value must be a number');
+  }
+  if (hasBound(min) && value < min) {
+    throw new Error(`Value must be at least ${min}`);
+  }
+  if (hasBound(max) && value > max) {
+    throw new Error(`Value must be at most ${max}`);
+  }
+};
+
 /**
  * Factory function to create a bounded string scalar
  * @param {string} name - Name for the scalar
- * @param {number} min - Minimum length
- * @param {number} max - Maximum length
+ * @param {number|null} [min] - Minimum length; null or undefined means no minimum
+ * @param {number|null} [max] - Maximum length; null or undefined means no maximum
  * @returns {GraphQLScalarType} A scalar type with length validation
  */
 export const createBoundedStringScalar = (name, min, max) => {
   return createValidatedScalar(
     name,
-    `A string with length between ${min} and ${max} characters`,
+    describeBounds(min, max, {
+      between: `A string with length between ${min} and ${max} characters`,
+      atLeast: `A string with at least ${min} characters`,
+      atMost: `A string with at most ${max} characters`,
+      unbounded: 'A string',
+    }),
     GraphQLString,
     (value) => {
       if (typeof value !== 'string') {
         throw new Error('Value must be a string');
       }
-      if (min !== undefined && value.length < min) {
+      if (hasBound(min) && value.length < min) {
         throw new Error(`String must be at least ${min} characters`);
       }
-      if (max !== undefined && value.length > max) {
+      if (hasBound(max) && value.length > max) {
         throw new Error(`String must be at most ${max} characters`);
       }
     },
@@ -96,52 +126,42 @@ export const createBoundedStringScalar = (name, min, max) => {
 /**
  * Factory function to create a bounded integer scalar
  * @param {string} name - Name for the scalar
- * @param {number} min - Minimum value
- * @param {number} max - Maximum value
+ * @param {number|null} [min] - Minimum value; null or undefined means no minimum
+ * @param {number|null} [max] - Maximum value; null or undefined means no maximum
  * @returns {GraphQLScalarType} A scalar type with range validation
  */
 export const createBoundedIntScalar = (name, min, max) => {
   return createValidatedScalar(
     name,
-    `An integer between ${min} and ${max}`,
+    describeBounds(min, max, {
+      between: `An integer between ${min} and ${max}`,
+      atLeast: `An integer of at least ${min}`,
+      atMost: `An integer of at most ${max}`,
+      unbounded: 'An integer',
+    }),
     GraphQLInt,
-    (value) => {
-      if (typeof value !== 'number' || isNaN(value)) {
-        throw new Error('Value must be a number');
-      }
-      if (min !== undefined && value < min) {
-        throw new Error(`Value must be at least ${min}`);
-      }
-      if (max !== undefined && value > max) {
-        throw new Error(`Value must be at most ${max}`);
-      }
-    },
+    checkNumberBounds(min, max),
   );
 };
 
 /**
  * Factory function to create a bounded float scalar
  * @param {string} name - Name for the scalar
- * @param {number} min - Minimum value
- * @param {number} max - Maximum value
+ * @param {number|null} [min] - Minimum value; null or undefined means no minimum
+ * @param {number|null} [max] - Maximum value; null or undefined means no maximum
  * @returns {GraphQLScalarType} A scalar type with range validation
  */
 export const createBoundedFloatScalar = (name, min, max) => {
   return createValidatedScalar(
     name,
-    `A float between ${min} and ${max}`,
+    describeBounds(min, max, {
+      between: `A float between ${min} and ${max}`,
+      atLeast: `A float of at least ${min}`,
+      atMost: `A float of at most ${max}`,
+      unbounded: 'A float',
+    }),
     GraphQLFloat,
-    (value) => {
-      if (typeof value !== 'number' || isNaN(value)) {
-        throw new Error('Value must be a number');
-      }
-      if (min !== undefined && value < min) {
-        throw new Error(`Value must be at least ${min}`);
-      }
-      if (max !== undefined && value > max) {
-        throw new Error(`Value must be at most ${max}`);
-      }
-    },
+    checkNumberBounds(min, max),
   );
 };
 

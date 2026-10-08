@@ -50,6 +50,8 @@ Owned transactions use snapshot reads and majority commits. Supplied sessions ne
 
 The source now lives in `packages/mongodb` in the monorepo. Its public npm name remains `@simtlix/simfinity-js`; existing imports, including paths under `@simtlix/simfinity-js/src/`, retain their layout. Shared helpers, error identities and MCP compatibility exports are preserved. Internal Simfinity dependencies use the same exact release version.
 
+The legacy `src/` deep imports have no TypeScript declarations. In TypeScript, import `auth`, `plugins`, `scalars` and `validators` from the package root. Importing the typed `@simtlix/simfinity-core` subpaths, such as `@simtlix/simfinity-core/auth`, instead needs `@simtlix/simfinity-core` as a direct dependency pinned to this package's exact version.
+
 For tooling that locates the package, use `require.resolve('@simtlix/simfinity-js/package.json')` or the package root without a trailing slash. Directory specifiers ending in `/` were not valid ESM imports and are not supported by the export map, including in `require.resolve`; use explicit filenames such as `src/auth/index.js`.
 
 - [MongoDB quick start](https://simtlix.github.io/simfinity.js/guide/getting-started.html)

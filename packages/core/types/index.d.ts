@@ -75,6 +75,13 @@ export class SimfinityError extends Error {
   getCause?(): unknown;
 }
 
+/**
+ * An unexpected failure: code `INTERNAL_SERVER_ERROR` and status 500 (`getStatus()` and
+ * `extensions.status`). `cause` keeps the original error. The cause is never included in GraphQL
+ * responses, or in the errors that `buildErrorFormatter` returns when they are serialized. It is an
+ * enumerable own property of this error, so `JSON.stringify(error)`, or a logger that copies
+ * enumerable properties, includes it.
+ */
 export class InternalServerError extends SimfinityError {
   constructor(message: string, cause?: unknown);
   cause?: unknown;
@@ -105,6 +112,8 @@ export class InternalServerError extends SimfinityError {
  * - any other `Error` becomes `InternalServerError` with that error as its cause;
  * - a non-Error value becomes `InternalServerError('Unexpected error value')` with no cause. Servers
  *   whose executor first turns it into an `Error`, such as Yoga, pass the value's text instead.
+ *
+ * Every `InternalServerError` has code `INTERNAL_SERVER_ERROR` and status 500.
  *
  * `callback` receives the classified error; check `error instanceof InternalServerError` to mask
  * unexpected errors. A returned error replaces it, and a returned `GraphQLError` is returned
@@ -326,10 +335,20 @@ export interface FieldValidations {
   update: FieldValidator[];
 }
 
-/** Built-in field validator factories. */
+/**
+ * What `validators.arrayLength()` runs on each item: a validator, a helper result such as
+ * `validators.maxLength('Tag', 20)`, whose `CREATE` rules run on every item on create and update,
+ * or an array of them. Falsy array entries are skipped, so `[flag && rule]` works.
+ */
+export type ItemValidators =
+  | FieldValidator
+  | FieldValidations
+  | ReadonlyArray<FieldValidator | FieldValidations | null | undefined | false | '' | 0>;
+
+/** Built-in field validator factories. A `null` or omitted bound means no bound. */
 export const validators: {
-  stringLength(name: string, min?: number, max?: number): FieldValidations;
-  maxLength(name: string, max: number): FieldValidations;
+  stringLength(name: string, min?: number | null, max?: number | null): FieldValidations;
+  maxLength(name: string, max: number | null): FieldValidations;
   /**
    * Copies the pattern when the helper is created and tests each value from its first character,
    * so `g` and `y` keep no state between values. Throws `TypeError` unless the pattern is a
@@ -338,10 +357,25 @@ export const validators: {
   pattern(name: string, regex: RegExp | string, message?: string): FieldValidations;
   email(): FieldValidations;
   url(): FieldValidations;
-  numberRange(name: string, min?: number, max?: number): FieldValidations;
+  numberRange(name: string, min?: number | null, max?: number | null): FieldValidations;
   positive(name: string): FieldValidations;
-  arrayLength(name: string, maxItems?: number, itemValidator?: FieldValidator[]): FieldValidations;
+  /**
+   * A falsy `itemValidator` adds no item checks. A single validator runs when it is a plain object or a
+   * function; a class instance with its own `validate()`, such as a Joi or yup schema, is ignored with a
+   * warning. Other unusable values log a `Configuration issue` warning when the helper is created.
+   */
+  arrayLength(
+    name: string,
+    maxItems?: number | null,
+    itemValidator?: FieldValidator | FieldValidator[] | FieldValidations | ItemValidators | null | undefined | false | '' | 0,
+  ): FieldValidations;
+  /**
+   * Values must be dates JavaScript can parse. Strings that start with an ISO date (`YYYY-MM-DD`), and
+   * slashed `MM/DD/YYYY` strings, must be real calendar dates, so `2024-02-31` and `02/31/2024` fail.
+   * Only the `'YYYY-MM-DD'` format is checked; any other format logs a warning when the helper is created.
+   */
   dateFormat(name: string, format?: string): FieldValidations;
+  /** Same date checks as `dateFormat()` without a format, plus the date must be in the future. */
   futureDate(name: string): FieldValidations;
 };
 
@@ -355,9 +389,12 @@ export const scalars: {
   URLScalar: GraphQLScalarType;
   PositiveIntScalar: GraphQLScalarType;
   PositiveFloatScalar: GraphQLScalarType;
-  createBoundedStringScalar(name: string, min?: number, max?: number): GraphQLScalarType;
-  createBoundedIntScalar(name: string, min?: number, max?: number): GraphQLScalarType;
-  createBoundedFloatScalar(name: string, min?: number, max?: number): GraphQLScalarType;
+  /** A `null` or omitted bound means no bound; the description names only the bounds that are set. */
+  createBoundedStringScalar(name: string, min?: number | null, max?: number | null): GraphQLScalarType;
+  /** A `null` or omitted bound means no bound; the description names only the bounds that are set. */
+  createBoundedIntScalar(name: string, min?: number | null, max?: number | null): GraphQLScalarType;
+  /** A `null` or omitted bound means no bound; the description names only the bounds that are set. */
+  createBoundedFloatScalar(name: string, min?: number | null, max?: number | null): GraphQLScalarType;
   /** Same pattern rules as `validators.pattern`: a private copy, tested from the first character. */
   createPatternStringScalar(name: string, pattern: RegExp | string, message?: string): GraphQLScalarType;
 };
@@ -429,14 +466,20 @@ export const auth: {
    * thenable denies with TypeError.
    */
   requireAuth(userPath?: string | ((ctx: any) => unknown)): AuthRuleFunction;
-  /** Required roles must be nonempty strings; invalid configuration throws TypeError. */
+  /**
+   * Required roles must be nonempty strings; invalid configuration throws TypeError. The array,
+   * which may be readonly, is copied when the rule is created.
+   */
   requireRole(
-    role: string | string[],
+    role: string | readonly string[],
     options?: { userPath?: string | ((ctx: any) => unknown); rolePath?: string | ((user: any) => unknown) },
   ): AuthRuleFunction;
-  /** Exact array membership; only a standalone '*' claim grants all permissions. */
+  /**
+   * Exact array membership; only a standalone '*' claim grants all permissions. The array of
+   * required permissions, which may be readonly, is copied when the rule is created.
+   */
   requirePermission(
-    permission: string | string[],
+    permission: string | readonly string[],
     options?: { userPath?: string | ((ctx: any) => unknown); permissionsPath?: string | ((user: any) => unknown) },
   ): AuthRuleFunction;
   /** Requires at least one rule function; throws TypeError otherwise. */

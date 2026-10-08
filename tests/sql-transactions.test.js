@@ -409,7 +409,8 @@ describe('SQL runtime error propagation', () => {
       '{payments(pagination:{page:1,size:1,count:true}){id}}',
       '{payments_aggregate(aggregation:{groupId:"title",facts:[{operation:COUNT,path:"id",factName:"n"}]}){groupId}}',
     ]) {
-      const result = await graphql({ schema, source });
+      // A counted list query runs its count statement only when the context can receive the count.
+      const result = await graphql({ schema, source, contextValue: {} });
       expect(result.errors).toHaveLength(1);
       expectMasked(result.errors[0], failure);
     }

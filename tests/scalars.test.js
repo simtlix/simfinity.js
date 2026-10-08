@@ -2,10 +2,11 @@ import {
   describe, test, expect, beforeAll,
 } from 'vitest';
 import {
-  GraphQLObjectType, GraphQLID, Kind,
+  GraphQLObjectType, GraphQLID, GraphQLSchema, GraphQLString, Kind, graphql, printSchema,
 } from 'graphql';
 import { scalars } from '../packages/mongodb/src/index.js';
 import * as simfinity from '../packages/mongodb/src/index.js';
+import { graphqlArgsToJSONSchema } from '../packages/mcp/src/index.js';
 
 // The original email pattern; only ever run on short strings here.
 const referenceEmailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -251,6 +252,60 @@ describe('Scalar Factory Functions', () => {
 
     test.each([[{ test: () => true }], [123], [null]])('rejects the unsupported pattern %j at creation', (unsupported) => {
       expect(() => scalars.createPatternStringScalar('BadPattern', unsupported)).toThrow(TypeError);
+    });
+  });
+
+  describe('null and omitted bounds', () => {
+    test('null bounds are unbounded in bounded scalars', () => {
+      expect(scalars.createBoundedIntScalar('NullMinDelta', null, 100).parseValue(-5)).toBe(-5);
+      expect(scalars.createBoundedFloatScalar('NullMinTemp', null, 50).parseValue(-3.5)).toBe(-3.5);
+      expect(scalars.createBoundedStringScalar('NullMaxNote', 1, null).parseValue('abc')).toBe('abc');
+      expect(scalars.createBoundedIntScalar('NullMaxQty', 0, null).parseLiteral({ kind: Kind.INT, value: '7' })).toBe(7);
+      expect(() => scalars.createBoundedIntScalar('NullMinCap', null, 100).parseValue(101)).toThrow('Value must be at most 100');
+      expect(() => scalars.createBoundedStringScalar('NullMaxCode', 2, null).parseValue('a')).toThrow('String must be at least 2 characters');
+    });
+
+    test('stored values that only a null bound excluded now read without a field error', () => {
+      expect(scalars.createBoundedIntScalar('StoredDelta', null, 100).serialize(-5)).toBe(-5);
+      expect(scalars.createBoundedFloatScalar('StoredTemp', null, 50).serialize(-3.5)).toBe(-3.5);
+      expect(scalars.createBoundedStringScalar('StoredBio', 0, null).serialize('Hello there')).toBe('Hello there');
+      expect(() => scalars.createBoundedIntScalar('StoredCap', null, 100).serialize(101)).toThrow('Value must be at most 100');
+    });
+
+    test.each([
+      ['createBoundedStringScalar', 2, 100, 'A string with length between 2 and 100 characters'],
+      ['createBoundedStringScalar', undefined, 120, 'A string with at most 120 characters'],
+      ['createBoundedStringScalar', 5, null, 'A string with at least 5 characters'],
+      ['createBoundedStringScalar', undefined, undefined, 'A string'],
+      ['createBoundedStringScalar', NaN, 5, 'A string with at most 5 characters'],
+      ['createBoundedIntScalar', 0, 120, 'An integer between 0 and 120'],
+      ['createBoundedIntScalar', 0, undefined, 'An integer of at least 0'],
+      ['createBoundedIntScalar', null, 100, 'An integer of at most 100'],
+      ['createBoundedIntScalar', null, null, 'An integer'],
+      ['createBoundedFloatScalar', 0, 10, 'A float between 0 and 10'],
+      ['createBoundedFloatScalar', undefined, 10, 'A float of at most 10'],
+      ['createBoundedFloatScalar', 1.5, NaN, 'A float of at least 1.5'],
+      ['createBoundedFloatScalar', null, null, 'A float'],
+    ])('%s(%s, %s) is described as %j', (factory, min, max, description) => {
+      const scalar = scalars[factory](`Described${factory}${min}${max}`.replace(/[^A-Za-z0-9_]/g, '_'), min, max);
+      expect(scalar.description).toBe(description);
+    });
+
+    test('published SDL, introspection and MCP schemas carry no undefined bound, and the validated-scalar marker stays', async () => {
+      const Title = scalars.createBoundedStringScalar('OneSidedTitle', undefined, 120);
+      expect(Title[Symbol.for('simfinity.validatedScalarBase')]).toBe(GraphQLString);
+      expect(Title.baseScalarType).toBe(GraphQLString);
+      const Thing = new GraphQLObjectType({ name: 'OneSidedThing', fields: { id: { type: GraphQLID }, title: { type: Title } } });
+      const schema = new GraphQLSchema({
+        query: new GraphQLObjectType({ name: 'Query', fields: { thing: { type: Thing, args: { title: { type: Title } } } } }),
+      });
+      const sdl = printSchema(schema);
+      expect(sdl).toContain('"""A string with at most 120 characters"""');
+      expect(sdl).not.toMatch(/undefined|null and|and null/);
+      const result = await graphql({ schema, source: '{ __type(name: "OneSidedTitle_String") { description } }' });
+      expect(result.data.__type.description).toBe('A string with at most 120 characters');
+      expect(graphqlArgsToJSONSchema(schema.getQueryType().getFields().thing).properties.title.description)
+        .toBe('A string with at most 120 characters');
     });
   });
 

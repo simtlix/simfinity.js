@@ -13,10 +13,10 @@ Version 3.3.0 also exposes a [driver-free SQL core and PostgreSQL plugin](./sql-
 
 ## Download and install
 
-[Download the v3.5.7 starters](/releases/simfinity-3.5.7-starters.zip), extract them, and install the PostgreSQL application from npm:
+[Download the v3.5.8 starters](/releases/simfinity-3.5.8-starters.zip), extract them, and install the PostgreSQL application from npm:
 
 ```sh
-cd simfinity-3.5.7-starters/postgres
+cd simfinity-3.5.8-starters/postgres
 npm install
 ```
 
@@ -80,7 +80,7 @@ Neither mode drops source data, alters existing columns, runs application data m
 
 `getModel(Type)` returns a `PostgresModel` with `findById`, `find`, `create`, `update`, and `delete`. Records are plain objects whose `id` and `_id` are the same UUID. Native methods do not provide Mongoose query chaining, `.lean()`, population, middleware, or aggregation pipelines. Native writes bypass GraphQL input coercion, scopes, authorization, validators, and controllers, and use storage names for reference fields.
 
-Use the runtime creation pipeline when validators, controllers, nested-write orchestration, and one shared transaction matter. A direct `saveObject()` call still bypasses GraphQL coercion, field authorization, query scope, and global middleware, so the programmatic caller must validate and authorize its own request boundary:
+Use the runtime creation pipeline when validators, controllers, nested-write orchestration, and one shared transaction matter. A direct `saveObject()` call skips GraphQL coercion, field authorization, query scope and the root record's global middleware. Nested collection children still run their type's middleware with the supplied context. So the programmatic caller must validate and authorize its own request boundary, and pass a context that its middleware accepts:
 
 ```javascript
 await simfinity.withTransaction(null, async (session) => {
@@ -132,7 +132,7 @@ Read the [detailed PostgreSQL storage and compatibility reference](../postgresql
 MCP is a separate package so PostgreSQL and core do not install its SDK chain. Install both the MCP package and SDK only when the application exposes tools:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.7 \
+npm install @simtlix/simfinity-mcp@3.5.8 \
   @modelcontextprotocol/sdk@^1.31.0
 ```
 

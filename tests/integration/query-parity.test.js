@@ -112,6 +112,28 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL GraphQL parity', 
     await assertParity(`{parityItems(${filter},sort:{terms:[{field:"key",order:ASC}]}){key}}`);
   });
 
+  it.each([
+    ['number:{operator:BTW,value:[$a,$b]}', { a: 2, b: 4 }, 'number:{operator:BTW,value:[2,4]}'],
+    ['number:{operator:IN,value:[$a,4]}', { a: 1 }, 'number:{operator:IN,value:[1,4]}'],
+    ['OR:[{conditions:[{field:"number",operator:IN,value:[$a,$b]}]}]', { a: 1, b: 3 }, 'OR:[{conditions:[{field:"number",operator:IN,value:[1,3]}]}]'],
+    ['kind:{value:TWO}', {}, 'kind:{value:"TWO"}'],
+    ['kind:{operator:IN,value:[ONE,TWO]}', {}, 'kind:{operator:IN,value:["ONE","TWO"]}'],
+  ])('matches filter %s like its literal form', async (filter, variables, literal) => {
+    const declared = Object.keys(variables).map((name) => `$${name}:QLValue`).join(',');
+    const sort = 'sort:{terms:[{field:"key",order:ASC}]}';
+    const data = await assertParity(`query${declared ? `(${declared})` : ''}{parityItems(${filter},${sort}){key}}`, variables);
+
+    expect(data.parityItems.length).toBeGreaterThan(0);
+    expect(data).toEqual(await assertParity(`{parityItems(${literal},${sort}){key}}`));
+  });
+
+  it('rejects a variable that a list literal names but the request leaves unset on both backends (guard)', async () => {
+    for (const backend of backends) {
+      const result = await execute(backend, 'query($a:QLValue,$b:QLValue){parityItems(number:{operator:BTW,value:[$a,$b]}){key}}', { b: 4 });
+      expect(result.errors?.[0].extensions.code).toBe('INVALID_FILTER_VALUE');
+    }
+  });
+
   it.each(['tags:{value:["x","y"]}', 'tags:{operator:NIN,value:[null,"x"]}'])('rejects invalid v3.1 filter %s on both backends', async (filter) => {
     for (const backend of backends) {
       const result = await execute(backend, `{parityItems(${filter}){key}}`);

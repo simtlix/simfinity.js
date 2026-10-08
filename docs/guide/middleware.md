@@ -58,7 +58,7 @@ simfinity.use(async (params, next) => {
 | --- | --- |
 | `args` | GraphQL arguments: for example, `args.input` for add/update or `args.id` for delete. |
 | `operation` | One of the operation values below. |
-| `context` | The GraphQL request context. |
+| `context` | The GraphQL request context. For nested collection children of a programmatic `saveObject()` call, the `context` passed to `saveObject()`, which is `undefined` when omitted; guard with `context?.`. |
 | `type` | Registered type metadata for generated entity operations; absent for custom mutations. |
 | `entry` | Custom mutation name when `operation` is `custom_mutation`. |
 | `actionName`, `actionField` | State-machine action name and configuration for `state_changed`. |
@@ -68,9 +68,9 @@ simfinity.use(async (params, next) => {
 | `find` | List query or generated non-embedded collection relation. |
 | `get_by_id` | Single-record query or generated non-embedded single relation with a reference. |
 | `aggregate` | Aggregation query. |
-| `save` | Generated add mutation or nested `added` child. |
-| `update` | Generated update mutation or nested `updated` child. |
-| `delete` | Generated delete mutation or nested `deleted` child. |
+| `save` | Generated add mutation or nested `added` child (including children of a `saveObject()` call). |
+| `update` | Generated update mutation or nested `updated` child (including children of a `saveObject()` call). |
+| `delete` | Generated delete mutation or nested `deleted` child (including children of a `saveObject()` call). |
 | `state_changed` | Generated state-machine action. |
 | `custom_mutation` | Registered custom mutation. |
 
@@ -89,4 +89,4 @@ simfinity.use(async ({ operation, args }, next) => {
 
 Prefer mutating the existing `args` object. Generated list queries (including their total count), aggregations and collection-relationship reads pass the `params.args` object left after the middleware chain to the query scope and the database adapter, so `find` and `aggregate` middleware may also replace it. Mutations, nested collection writes and `get_by_id` reads keep the resolver's own reference, so replacing `params.args` there has no effect. Client filter, sort and aggregation paths are checked before middleware runs, and paths that middleware adds are trusted; see [path restrictions](/guide/queries#path-restrictions).
 
-For record visibility, prefer the type's [query scope](/guide/query-scope). Generated relationship reads and nested collection writes invoke middleware with the target type, the same request context, and root-compatible argument shapes. Existing custom resolvers and direct programmatic data access remain responsible for invoking their own checks. Review middleware that assumes a request only invokes it for its root operation.
+For record visibility, prefer the type's [query scope](/guide/query-scope). Generated relationship reads and nested collection writes invoke middleware with the target type, the same request context (for a programmatic `saveObject()` call, the `context` passed to it, possibly `undefined`), and root-compatible argument shapes. Existing custom resolvers and direct programmatic data access remain responsible for invoking their own checks. Review middleware that assumes a request only invokes it for its root operation.

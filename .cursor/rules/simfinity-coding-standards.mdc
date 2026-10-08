@@ -48,7 +48,8 @@ throw new SimfinityError('Resource not found', 'NOT_FOUND', 404);
 - Named exports for public API functions.
 - Core and the MongoDB/PostgreSQL facades use namespace or named imports, with no default facade export. MCP and helper submodules retain their existing default objects; preserve each package's established exports.
 - Re-export shared `validators`, `scalars`, `plugins` and `auth` helpers through both database facades. MongoDB also preserves MCP exports and legacy deep-import shims.
-- Keep implementations in their owning package and import other packages through their declared exports. Core and SQL must not depend on drivers or MCP; PostgreSQL depends on SQL, core and `pg`. Keep physical SQL/types, error classification and connection operations inside the engine plugin; shared SQL must not import PostgreSQL. Keep matching declarations in `packages/*/types/` current.
+- Keep implementations in their owning package and import other packages through their declared exports. Core and SQL must not depend on drivers or MCP; PostgreSQL depends on SQL, core and `pg`. Keep physical SQL/types, error classification and connection operations inside the engine plugin; shared SQL must not import PostgreSQL. Keep matching declarations in `packages/*/types/` current, including core's per-subpath files (`types/auth/*.d.ts`, `types/plugins.d.ts`, `types/scalars.d.ts`, `types/validators.d.ts`), which take each member from `types/index.d.ts` via `typeof`.
+- Every public core subpath export entry lists `types` first and has a matching `typesVersions` entry; `./internal/*` subpaths stay undeclared. A new runtime export on a subpath needs its declaration and an entry in `coreSubpaths` in `scripts/test-packages.js`. A new root type tied to a subpath's helpers goes in that subpath's `export type` list, in `coreSubpaths[...].types` and in `tests/core-subpath-types.test.js`.
 
 ## Function Naming
 
