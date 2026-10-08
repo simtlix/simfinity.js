@@ -3,6 +3,11 @@ import { GraphQLScalarType, GraphQLString, GraphQLInt, GraphQLFloat, GraphQLBool
 // The base each validated scalar delegates parsing to. A base exists before its scalar, so these links cannot cycle.
 const validatedBases = new WeakMap();
 
+// The same link as a non-enumerable property, so MCP (packages/mcp/src/index.js, VALIDATED_SCALAR_BASE) can tell a
+// validated scalar, whose output is its base's, from a hand-set `baseScalarType` storage hint, whose own `serialize`
+// decides the output. Not exported; Symbol.for gives both packages the same key.
+const VALIDATED_SCALAR_BASE = Symbol.for('simfinity.validatedScalarBase');
+
 // Follow validated-scalar chains to the scalar that defines the literal syntax. Any other scalar is the root, even
 // with a hand-set `baseScalarType` storage hint, because its own parseLiteral decides which literals it takes.
 const findRootScalar = (scalarType) => {
@@ -68,5 +73,6 @@ export function createValidatedScalar(name, description, baseScalarType, validat
 
   scalar.baseScalarType = baseScalarType;
   validatedBases.set(scalar, baseScalarType);
+  Object.defineProperty(scalar, VALIDATED_SCALAR_BASE, { value: baseScalarType });
   return scalar;
 }

@@ -2671,3 +2671,78 @@ describe('fields named like Object.prototype members', () => {
     }
   });
 });
+
+describe('pagination count reporting', () => {
+  // simfinity-mcp passes a function under this key of the root value to collect counts.
+  const COUNT_SINK = Symbol.for('simfinity.countSink');
+  const source = '{ countReports(pagination: { page: 1, size: 5, count: true }) { id } }';
+
+  const createCountSchema = (wrap) => {
+    const adapter = createMemoryAdapter();
+    adapter.count = async () => 3;
+    const runtime = createRuntime(adapter);
+    runtime.connect(null, createType('RuntimeCountReport'), 'countReport', 'countReports');
+    const schema = runtime.createSchema();
+    if (wrap) {
+      const field = schema.getQueryType().getFields().countReports;
+      field.resolve = wrap(field.resolve);
+    }
+    return schema;
+  };
+  const rootWithSink = () => {
+    const counts = [];
+    const rootValue = Object.create(null);
+    rootValue[COUNT_SINK] = (count) => { counts.push(count); };
+    return { rootValue, counts };
+  };
+
+  test('marks generated find fields as reporting counts through a sink', () => {
+    const fields = createCountSchema().getQueryType().getFields();
+
+    expect(fields.countReports.extensions.simfinityQuery).toEqual({
+      typeName: 'RuntimeCountReport', operation: 'find', countSink: true,
+    });
+    expect(fields.countReports_aggregate.extensions.simfinityQuery.countSink).toBeUndefined();
+  });
+
+  test('writes context.count when the root value has no sink (guard)', async () => {
+    const schema = createCountSchema();
+    for (const rootValue of [undefined, {}, { [COUNT_SINK]: 'not a function' }]) {
+      const contextValue = {};
+      const result = await graphql({ schema, source, contextValue, rootValue });
+
+      expect(result.errors).toBeUndefined();
+      expect(contextValue).toEqual({ count: 3 });
+    }
+  });
+
+  test('reports to a root-value sink and leaves the context untouched', async () => {
+    const schema = createCountSchema();
+    const { rootValue, counts } = rootWithSink();
+    const contextValue = Object.freeze({});
+    const result = await graphql({ schema, source, contextValue, rootValue });
+
+    expect(result.errors).toBeUndefined();
+    expect(counts).toEqual([3]);
+  });
+
+  test('finds the sink through a wrapper that forwards only parent, args and context', async () => {
+    const schema = createCountSchema((resolve) => (parent, args, context) => resolve(parent, args, context));
+    const { rootValue, counts } = rootWithSink();
+    const contextValue = Object.freeze({});
+    const result = await graphql({ schema, source, contextValue, rootValue });
+
+    expect(result.errors).toBeUndefined();
+    expect(counts).toEqual([3]);
+  });
+
+  test('falls back to info.rootValue when a wrapper replaces the parent', async () => {
+    const schema = createCountSchema((resolve) => (parent, args, context, info) => resolve(undefined, args, context, info));
+    const { rootValue, counts } = rootWithSink();
+    const contextValue = Object.freeze({});
+    const result = await graphql({ schema, source, contextValue, rootValue });
+
+    expect(result.errors).toBeUndefined();
+    expect(counts).toEqual([3]);
+  });
+});

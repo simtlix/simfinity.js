@@ -13,10 +13,10 @@ Version 3.3.0 also exposes a [driver-free SQL core and PostgreSQL plugin](./sql-
 
 ## Download and install
 
-[Download the v3.5.6 starters](/releases/simfinity-3.5.6-starters.zip), extract them, and install the PostgreSQL application from npm:
+[Download the v3.5.7 starters](/releases/simfinity-3.5.7-starters.zip), extract them, and install the PostgreSQL application from npm:
 
 ```sh
-cd simfinity-3.5.6-starters/postgres
+cd simfinity-3.5.7-starters/postgres
 npm install
 ```
 
@@ -132,7 +132,7 @@ Read the [detailed PostgreSQL storage and compatibility reference](../postgresql
 MCP is a separate package so PostgreSQL and core do not install its SDK chain. Install both the MCP package and SDK only when the application exposes tools:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.6 \
+npm install @simtlix/simfinity-mcp@3.5.7 \
   @modelcontextprotocol/sdk@^1.31.0
 ```
 

@@ -24,6 +24,26 @@ import './introspection.js';
 // created is application code, such as a masking resolver, recorded once per type so later
 // in-place wrapping (for example by the auth plugin) does not change the snapshot.
 const generatedResolvers = new WeakSet();
+// A caller that runs one operation per call, such as simfinity-mcp, can collect the pagination
+// count through the root value instead of the shared context: a function stored under this key
+// receives the count. The key is not exported; simfinity-mcp defines the same Symbol.for key.
+const COUNT_SINK = Symbol.for('simfinity.countSink');
+const countSinkOf = (value) => {
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return undefined;
+  const sink = value[COUNT_SINK];
+  return typeof sink === 'function' ? sink : undefined;
+};
+// The root value arrives as parent, which resolver wrappers that forward only (parent, args,
+// context) still pass on; info.rootValue is the fallback. Without a sink the count goes to
+// context.count, where Envelop/Apollo/Yoga count plugins read it.
+const reportCount = (parent, info, context, count) => {
+  const sink = countSinkOf(parent) || (info ? countSinkOf(info.rootValue) : undefined);
+  if (sink) {
+    sink(count);
+    return;
+  }
+  context.count = count;
+};
 const applicationResolvedFields = new WeakMap();
 const markGenerated = (resolve) => {
   generatedResolvers.add(resolve);
@@ -1508,6 +1528,9 @@ const resolveById = async (type, args, context, requiredId) => {
   return results[0] || null;
 };
 
+// Every generated mutation field carries extensions.simfinityMutation with its operation (and, for
+// a state-machine action, the action and its from/to states), so tools such as the MCP package can
+// classify it without guessing from its name. Extensions do not appear in SDL or introspection.
 const buildMutation = (name, includedMutationTypes, includedCustomMutations) => {
   const rootQueryArgs = {};
   rootQueryArgs.name = name;
@@ -1524,6 +1547,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
           type: type.gqltype,
           description: 'add',
           args: argsObject,
+          extensions: { simfinityMutation: { typeName: type.gqltype.name, operation: operations.SAVE } },
           async resolve(parent, args, context) {
             const params = {
               type,
@@ -1541,6 +1565,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
           type: type.gqltype,
           description: 'delete',
           args: { id: { type: new GraphQLNonNull(GraphQLID) } },
+          extensions: { simfinityMutation: { typeName: type.gqltype.name, operation: operations.DELETE } },
           async resolve(parent, args, context) {
             const params = {
               type,
@@ -1566,6 +1591,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
           type: type.gqltype,
           description: 'update',
           args: argsObject,
+          extensions: { simfinityMutation: { typeName: type.gqltype.name, operation: operations.UPDATE } },
           async resolve(parent, args, context) {
             const params = {
               type,
@@ -1586,6 +1612,15 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
                 type: type.gqltype,
                 description: actionField.description,
                 args: argsObject,
+                extensions: {
+                  simfinityMutation: {
+                    typeName: type.gqltype.name,
+                    operation: operations.STATE_CHANGED,
+                    action: actionName,
+                    from: actionField.from && actionField.from.name,
+                    to: actionField.to && actionField.to.name,
+                  },
+                },
                 async resolve(parent, args, context) {
                   const params = {
                     type,
@@ -1617,6 +1652,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
         type: registeredMutation.outputModel,
         description: registeredMutation.description,
         args: argsObject,
+        extensions: { simfinityMutation: { operation: operations.CUSTOM_MUTATION } },
         async resolve(parent, args, context) {
           const params = {
             args,
@@ -1657,8 +1693,10 @@ const buildRootQuery = (name, includedTypes) => {
         rootQueryArgs.fields[type.listEntitiesEndpointName] = {
           type: new GraphQLList(type.gqltype),
           args: argsObject,
-          extensions: { simfinityQuery: { typeName: type.gqltype.name, operation: 'find' } },
-          async resolve(parent, args, context) {
+          // countSink: this resolver reports pagination counts through reportCount, so a caller
+          // that supplies a root-value sink can pass its context unchanged.
+          extensions: { simfinityQuery: { typeName: type.gqltype.name, operation: 'find', countSink: true } },
+          async resolve(parent, args, context, info) {
             const joinedScopes = inspectClientPaths(type.gqltype, args, 'find');
             const params = {
               type,
@@ -1679,7 +1717,7 @@ const buildRootQuery = (name, includedTypes) => {
 
             const [result, resultCount] = await Promise.all([dataPromise, countPromise]);
             if (wantsCount) {
-              context.count = resultCount;
+              reportCount(parent, info, context, resultCount);
             }
             return result;
           },

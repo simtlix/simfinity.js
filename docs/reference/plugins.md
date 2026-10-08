@@ -76,12 +76,12 @@ Configure a fresh request context in your Apollo HTTP integration. The plugin wr
 ## Count behavior
 
 - Request both `page` and `size`; they are required fields of `QLPagination`.
-- A fresh mutable context is required because the generated resolver writes `context.count`.
+- A fresh mutable context is required because the generated resolver writes `context.count`. It does so unless the root value supplies a count sink, as MCP tools do.
 - Both HTTP count plugins currently include a count only when it is truthy. A result count of zero is omitted from response extensions.
 - A request context stores one count value. Do not use multiple counted list fields in one operation when you need a distinct total for each field.
 - Aggregation queries do not compute a pagination count.
 
-In-process [MCP calls](/reference/mcp#results-and-errors) capture list counts separately, preserve zero, and expose them as `_meta.count`.
+In-process [MCP calls](/reference/mcp#counted-lists) of generated list tools collect list counts through a per-call root-value sink, so they pass your context unchanged and need no fresh mutable context. They preserve zero and return the total as `totalCount` next to the results and as `_meta.count`. Remote MCP calls read `extensions.count` from these plugins, so a remote count of zero reaches them as no count.
 
 ## Integration boundaries
 

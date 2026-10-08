@@ -94,6 +94,8 @@ Lifecycle hooks run inside the generated operation's transaction flow, before co
 
 Inspect `isError`, `structuredContent`, and the text content of the returned tool result. Check the tool's published name, `inputSchema`, inclusion filters, and limits. With remote execution, also check the target endpoint and authentication headers.
 
+`MCP_UNKNOWN_ARGUMENT` means the call carried an argument the tool does not declare, often a misspelled filter; nothing ran, and the message lists the valid arguments. A tool middleware that reads its own custom argument must delete it from `call.args` before calling `next()`. `MCP_INVALID_LIMITS` and `MCP_INVALID_EXECUTION_CONFIG` at startup name the setting to fix. A GET request to the HTTP MCP endpoint gets 405 by design; mount the handler with `app.all`.
+
 The SDK is needed for MCP transports. Tool definition generation itself can be used without starting an MCP server. See the [MCP guide](../guide/mcp) and [MCP reference](../reference/mcp).
 
 ## Still need help?

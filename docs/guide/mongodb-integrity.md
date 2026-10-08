@@ -5,7 +5,7 @@ description: Opt into transactional reference checks and restrict-delete behavio
 
 # MongoDB reference integrity
 
-Available from **Simfinity 3.4.0**. Install `@simtlix/simfinity-js@3.5.6` and keep any directly installed Simfinity packages at the same version.
+Available from **Simfinity 3.4.0**. Install `@simtlix/simfinity-js@3.5.7` and keep any directly installed Simfinity packages at the same version.
 
 MongoDB applications can opt into transactional reference integrity when creating their adapter. The setting is fixed for that runtime. Queries, mutation inputs, scopes, authorization and MCP schemas keep their existing shape.
 

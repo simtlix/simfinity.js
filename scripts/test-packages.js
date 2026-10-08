@@ -646,8 +646,13 @@ const mcpTypes = `import mcp, {
   createHTTPMCPHandler,
   createMCPServer,
   generateMCPTools,
+  startStdioMCPServer,
   type GeneratedMCPTools,
+  type HTTPMCPHandlerOptions,
+  type MCPExecutionOptions,
+  type MCPLimits,
   type MCPServer,
+  type MCPServerOptions,
 } from '@simtlix/simfinity-mcp';
 import { plugins } from '@simtlix/simfinity-core';
 import { GraphQLObjectType, GraphQLSchema, GraphQLString } from 'graphql';
@@ -681,7 +686,49 @@ const sameGenerator: typeof generateMCPTools = mcp.generateMCPTools;
 const singleMiddleware: GeneratedMCPTools = generateMCPTools(schema, { toolMiddleware: (call, next) => next() });
 const optionalPlugins: GeneratedMCPTools = generateMCPTools(schema, { schemaPlugins: [{ async onSchemaChange() {} }, false, null, undefined] });
 const handler = createHTTPMCPHandler(schema, { toolMiddleware: [(call, next) => next()] });
-void [generated, server, sameGenerator, singleMiddleware, optionalPlugins, handler, sharedPlugins, memberPlugins];`;
+// The factories accept wider remote headers, timeouts and limits than the option interfaces declare.
+const endpoint = 'https://api.example.com/graphql';
+const headerForms: GeneratedMCPTools[] = [
+  generateMCPTools(schema, { execution: { mode: 'remote', endpoint, headers: new Headers({ authorization: 'Bearer t' }) } }),
+  generateMCPTools(schema, { execution: { mode: 'remote', endpoint, headers: new Map([['authorization', 'Bearer t']]) } }),
+  generateMCPTools(schema, { execution: { mode: 'remote', endpoint, headers: [['authorization', 'Bearer t']] as const } }),
+  generateMCPTools(schema, { execution: { mode: 'remote', endpoint, headers: null, timeoutMs: false } }),
+];
+const fromEnvironment: GeneratedMCPTools = generateMCPTools(schema, {
+  execution: { mode: 'remote', endpoint, timeoutMs: '5000' },
+  limits: { maxPageSize: '100', maxResultBytes: 65536n, defaultPagination: false },
+});
+const stdio: Promise<MCPServer> = startStdioMCPServer(schema, { limits: { maxResultBytes: '1048576.5', maxPageSize: null } });
+const fallible = createHTTPMCPHandler(schema, { limits: false, execution: { mode: 'remote', endpoint, timeoutMs: 10n } });
+const unlimited = createMCPServer(schema, { limits: null, execution: null });
+// @ts-expect-error A bare string is not a header map.
+generateMCPTools(schema, { execution: { mode: 'remote', endpoint, headers: 'Bearer t' } });
+// @ts-expect-error A promise would send no credentials.
+generateMCPTools(schema, { execution: { mode: 'remote', endpoint, headers: Promise.resolve({ authorization: 'Bearer t' }) } });
+// @ts-expect-error A generator would be used up by the first request.
+generateMCPTools(schema, { execution: { mode: 'remote', endpoint, headers: (function* pairs() { yield ['authorization', 'Bearer t'] as const; }()) } });
+// Reading options back keeps the narrow 3.5.6 shapes, and they are still accepted as input.
+declare const serverOptions: MCPServerOptions;
+const execution: MCPExecutionOptions | null | undefined = serverOptions.execution;
+if (execution && execution.mode === 'remote') {
+  const authorization: string | undefined = execution.headers?.authorization;
+  execution.headers!.authorization = 'Bearer rotated';
+  const timeoutMs: number | undefined = execution.timeoutMs;
+  void [authorization, timeoutMs];
+}
+const maxPageSize: number | undefined = serverOptions.limits?.maxPageSize;
+const maxResultBytes: number | undefined = serverOptions.limits?.maxResultBytes;
+const defaultSize: number | undefined = serverOptions.limits?.defaultPagination?.size;
+const typedLimits: MCPLimits = { maxPageSize: 100, defaultPagination: { page: 1, size: 20 } };
+declare const httpOptions: HTTPMCPHandlerOptions;
+const readBack = [
+  generateMCPTools(schema, serverOptions),
+  createMCPServer(schema, serverOptions),
+  createHTTPMCPHandler(schema, httpOptions),
+  generateMCPTools(schema, { limits: typedLimits }),
+];
+void [generated, server, sameGenerator, singleMiddleware, optionalPlugins, handler, sharedPlugins, memberPlugins];
+void [headerForms, fromEnvironment, stdio, fallible, unlimited, maxPageSize, maxResultBytes, defaultSize, readBack];`;
 
 const cases = [
   {

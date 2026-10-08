@@ -205,7 +205,7 @@ simfinity.configureQueryLimits({ maxPageSize: 500 });
 
 The configured maximum may be any positive safe integer. Unpaged lists use `Math.min(100, maxPageSize)`; unpaged aggregates remain unbounded. Both pagination values and the computed skip must be safe integers, with `page >= 1` and `1 <= size <= maxPageSize`. Invalid pagination throws `INVALID_PAGINATION` (400); invalid configuration throws `INVALID_QUERY_LIMITS` (400). `configureQueryLimits()` restores the default maximum. This is an intentional limit on previously unrestricted explicit page sizes; configure a larger maximum when your application requires it.
 
-When `count: true`, the list resolver calculates the matching count before pagination and places it on the GraphQL context. Add the count plugin to expose it in the response:
+When `count: true`, the list resolver calculates the matching count before pagination and places it on the GraphQL context. [MCP tools](/reference/mcp#counted-lists) collect it through the root value instead and return it as `totalCount`. Add the count plugin to expose it in a GraphQL response:
 
 ```javascript
 const yoga = createYoga({
