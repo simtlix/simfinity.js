@@ -5,7 +5,7 @@ description: Create, update, and delete records, understand transaction boundari
 
 # Mutations
 
-Simfinity generates creation, update, and deletion mutations for every connected type. It materializes GraphQL inputs, runs validation and controller hooks, and persists each operation in the selected backend's transaction.
+Simfinity generates creation, update, and deletion mutations for every connected type. A type without writable fields gets no creation mutation, and, when its `id` is missing or `readOnly`, no update mutation or state machine actions either; see [what gets generated](./schema#what-gets-generated). Simfinity materializes GraphQL inputs, runs validation and controller hooks, and persists each operation in the selected backend's transaction.
 
 Examples use the selected runtime from [database setup](./databases#runtime-setup-for-shared-examples). After `createSchema()`, PostgreSQL also requires awaited storage initialization before operations are served.
 
@@ -64,7 +64,17 @@ Generated update inputs remove the outer non-null wrapper so you can omit requir
 Embedded objects merge supplied fields with their stored value; supplied embedded arrays replace the array. The merge is shallow, so a nested embedded object in the patch replaces the stored nested object. Inside an embedded object patch, an explicit `null` clears a nullable member: a scalar, enum, nested embedded object or single reference is stored as `null`, a reference under its `connectionField` or field name, and a list member is stored as an empty list. Unlike a top-level `null`, which removes the stored field, a cleared member stays in the stored embedded object with a `null` value; GraphQL filters treat `null` and a missing value the same. An explicit `null` for a non-null member keeps the stored value, as at the top level. Each resulting embedded value must still contain every required (non-null) member of its embedded type, including required references and the nested embedded values the patch supplies; otherwise the update fails with `REQUIRED_VALUE` (400) and nothing is stored. Stored nested values that the patch keeps are not checked again. The embedded `id` and `readOnly` members are not checked, and omitted list members of the written embedded values are stored as empty lists on both backends. This check runs before the controller's `onUpdating` hook, so the hook cannot supply a missing required embedded member. The parent update executes before referenced collection operations, which share the parent mutation's session. `onUpdated` then receives the updated backend record (a Mongoose document on MongoDB or a plain PostgreSQL record).
 
 ::: info MongoDB embedded objects in hydrated documents
-On MongoDB, a nested embedded object cleared with `null` reads as `null` from mutation responses, by-ID reads, reference reads and lists. The Mongoose document that `onUpdated` receives still exposes an object at that path; call `record.toObject()` to read the stored `null`. An optional embedded object that is absent from the stored document, because it was never written or a top-level `null` removed it, can still read as an object built from its defaults in mutation responses and by-ID reads, so a required member of it fails with a non-null GraphQL error there. List queries return `null` for it.
+On MongoDB, a nested embedded object cleared with `null` reads as `null` from mutation responses, by-ID reads, reference reads and lists. The Mongoose document that `onUpdated` receives still exposes an object at that path; call `record.toObject()` to read the stored `null`.
+
+An optional embedded object that holds no data, because it was never written, a top-level `null` removed it, or a create omitted it and Mongoose stored only its list defaults (such as `{ phones: [] }`), reads as `null` on every read path, whatever the selection, when a required member would read as `null`. An `id` member, `readOnly` members, interface and union members, members with your own resolver and referenced collections do not count as missing, and a required list that holds `[]` is present, so an object that a generated create or update wrote reads back as written. An absent object whose type has no required member that counts still reads as an object of nulls in by-ID reads, reference reads and update responses, and as `null` in lists and create responses.
+
+One exception: Mongoose minimizes empty objects when it saves a new document, so a create that writes an empty object for a required embedded member, such as `main: { geo: {}, tags: [] }`, stores that member as absent. An object that holds nothing else then reads as `null`, like an omitted one: in the create response and in list reads, and also in by-ID reads, reference reads and update responses when the model declares the member as a single nested subdocument, as generated models do for an embedded member named `type`. When the member is a nested path, as generated models declare every other embedded member, those reads still return the object, because Mongoose renders the absent nested path as `{}`. A generated update stores `geo: {}` and reads back as written. PostgreSQL rejects such a create with `REQUIRED_VALUE`.
+
+Mongoose defaults count as data only on members of the GraphQL type: a default on a nested path that the type does not declare, such as an internal `source` field, does not keep an object that holds nothing else from reading as `null`.
+
+Simfinity decides this from the stored data and never runs a schema getter or virtual of your model to do so: getters run only for the members a query selects, as before. An object whose type has no required member that counts is not read at all. A stored `_id` counts as the object's `id`, so an embedded object whose only stored data is its `_id`, such as a subdocument of an entity type, holds data. A subdocument schema without `_id: false` gives a stored subdocument that has no `_id`, such as `{}`, a new one each time Mongoose hydrates the document, so by-ID reads, reference reads and update responses keep such an object when its type declares `id`. A Mongoose map is read by its stored entries.
+
+When your schema declares a getter, a virtual other than Mongoose's automatic `id`, an alias or a subdocument method on a member anywhere inside the object, including its subdocuments, the items of its lists and the values of its maps, the stored data does not show what the object renders: a getter default, a virtual, a method (GraphQL calls one named like a member) or an alias (which stores the value under its own path) may supply a required member. By-ID reads, reference reads and update responses then keep the object as stored and render it as before, running only the getters of the members a query selects. List reads and create responses return the stored data, which no getter, virtual or alias renders, so there such an object that holds no data and misses a required member reads as `null`; give the member your own resolver or mark it `readOnly` if it must count as present. Generated models declare no getters, virtuals, methods or aliases. If reading the stored data fails, the object is returned unchanged.
 :::
 
 ## Delete a record
@@ -158,6 +168,32 @@ mutation {
 }
 ```
 
-`saveObject()` owns a transaction when no session is supplied. Pass the supplied active session when using it inside a registered mutation: it shares that transaction without starting, committing, aborting, retrying, or ending it. MongoDB rejects an inactive native Mongoose session with `ACTIVE_TRANSACTION_REQUIRED` (400). PostgreSQL rejects an inactive or foreign Simfinity session with `INVALID_SESSION`. Direct Mongoose or PostgreSQL Model calls must also use the matching session and do not automatically run Simfinity validators, hooks, or authorization rules.
+`saveObject()` owns a transaction when no session is supplied. Pass the supplied active session when using it inside a registered mutation: it shares that transaction without starting, committing, aborting, retrying, or ending it. On MongoDB the session must come from the MongoDB client of the model that `saveObject()` writes; see [which connection the session uses](#which-connection-the-session-uses-on-mongodb). MongoDB rejects an inactive native Mongoose session with `ACTIVE_TRANSACTION_REQUIRED` (400). PostgreSQL rejects an inactive or foreign Simfinity session with `INVALID_SESSION`. Direct Mongoose or PostgreSQL Model calls must also use the matching session and do not automatically run Simfinity validators, hooks, or authorization rules.
+
+### Which connection the session uses on MongoDB
+
+A MongoDB session belongs to one MongoDB client, and `saveObject()` and native model calls that use it must write models of that client. Generated mutations and `saveObject()` without a session use the connection of the type's model. A custom mutation names no model, so in the default `referentialIntegrity: 'off'` mode its session uses the default Mongoose connection, `mongoose.connection`. The exception is an unused default connection: one that was never opened and on which no model is compiled, neither one of yours nor one that Simfinity generates, also counting models compiled on its `useDb()` descendants at any depth, such as `mongoose.connection.useDb('tenant').useDb('audit')`, which share its client. When, in addition, every registered model uses one MongoDB client, such as the models of one `mongoose.createConnection()` connection and its `useDb()` connections, the session uses that client. With `referentialIntegrity: 'transactional'`, it uses the first protected model's connection. A direct `adapter.withTransaction(null, callback)` call on an off-mode adapter bound to a runtime follows the same rule; an unbound adapter keeps `mongoose.connection`.
+
+An application that opens the default connection after it starts serving keeps it for requests that arrive first only when a model is compiled on it or on one of its `useDb()` descendants; such requests wait for the connection. Simfinity does not see connections created with `useDb(name, { noListener: true })`, nor their `useDb()` descendants, nor native writes such as `mongoose.connection.collection(…)`, which compile no model. Without such a model, a request that arrives before `mongoose.connect()` gets a session from the registered models' client, and a callback that writes default-connection collections with it fails with `ClientSession must be from the same MongoClient`. Compile a model on the default connection, or open it before serving.
+
+When the default connection is in use and the custom mutation writes models of another client, `saveObject()` with the supplied session fails with `ClientSession must be from the same MongoClient`. In the default mode only, open a transaction on the model's connection inside the callback:
+
+```javascript
+simfinity.registerMutation(
+  'importbook',
+  'Import a book whose model uses another connection.',
+  ImportBookInput,
+  BookType,
+  async (input, session, context) => {
+    let book;
+    await BookModel.db.transaction(async (bookSession) => {
+      book = await simfinity.saveObject('Book', input, bookSession, context);
+    });
+    return book;
+  },
+);
+```
+
+Every write that must be atomic has to happen inside that transaction. It commits on its own, independently of the custom mutation's transaction, so work done after it commits is not rolled back when the custom mutation fails later. Calling `saveObject()` without a session also works, but each call is then atomic only by itself.
 
 Continue with [validation](./validation) to reject invalid data and [authorization](./authorization) to control who can perform an operation.

@@ -13,6 +13,9 @@ export { default as QLValue } from './const/QLValue.js';
 export { configureQueryLimits, paginationStages } from './query-limits.js';
 export { configureMutationLimits } from './mutation-limits.js';
 export { default as auth } from './auth/index.js';
+// The same classes as auth.UnauthenticatedError and auth.ForbiddenError; types/index.d.ts has
+// always declared them as root exports.
+export { UnauthenticatedError, ForbiddenError } from './auth/errors.js';
 export { default as plugins } from './plugins.js';
 export { default as scalars } from './scalars.js';
 export { default as validators } from './validators.js';

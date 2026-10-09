@@ -87,7 +87,17 @@ const assertEmbeddedFieldName = (gqlType, fieldEntryName) => {
   }
 };
 
-const generateSchemaDefinition = (gqlType, nested = false) => {
+// An embedded field whose type is the type being generated, or a type that embeds it on this path,
+// would nest without end. The path starts at the type whose model is generated. Sibling and nested
+// fields may still embed the same type.
+const assertNoEmbeddedCycle = (gqlType, entryType, ancestors, fieldPath) => {
+  if (entryType === gqlType) {
+    throw new SimfinityError('A type cannot have a field of its same type and embedded', 'INVALID_MODEL', 400);
+  }
+  if (ancestors.includes(entryType)) throw new SimfinityError(`Embedded cycle at ${fieldPath}`, 'INVALID_MODEL', 400);
+};
+
+const generateSchemaDefinition = (gqlType, nested = false, ancestors = [], path = gqlType.name) => {
   const argTypes = gqlType.getFields();
   const schemaArg = {};
 
@@ -111,10 +121,9 @@ const generateSchemaDefinition = (gqlType, nested = false) => {
         } else {
           assertEmbeddedFieldName(gqlType, fieldEntryName);
           const entryType = unwrapNonNull(type);
-          if (entryType === gqlType) {
-            throw new Error('A type cannot have a field of its same type and embedded');
-          }
-          const definition = generateSchemaDefinition(entryType, true);
+          const fieldPath = `${path}.${fieldEntryName}`;
+          assertNoEmbeddedCycle(gqlType, entryType, ancestors, fieldPath);
+          const definition = generateSchemaDefinition(entryType, true, [...ancestors, gqlType], fieldPath);
           // A nested object under a `type` key can only be a subdocument; like other embedded objects, it has no _id.
           schemaArg[fieldEntryName] = nested && fieldEntryName === 'type'
             ? new mongoose.Schema(definition, { _id: false })
@@ -126,10 +135,9 @@ const generateSchemaDefinition = (gqlType, nested = false) => {
       if (fieldEntry.extensions && fieldEntry.extensions.relation) {
         if (fieldEntry.extensions.relation.embedded) {
           assertEmbeddedFieldName(gqlType, fieldEntryName);
-          if (itemType === gqlType) {
-            throw new Error('A type cannot have a field of its same type and embedded');
-          }
-          schemaArg[fieldEntryName] = [generateSchemaDefinition(itemType, true)];
+          const fieldPath = `${path}.${fieldEntryName}`;
+          assertNoEmbeddedCycle(gqlType, itemType, ancestors, fieldPath);
+          schemaArg[fieldEntryName] = [generateSchemaDefinition(itemType, true, [...ancestors, gqlType], fieldPath)];
         }
       } else if (listItemMatchesScalar(type, GraphQLID)) {
         schemaArg[fieldEntryName] = [mongoose.Schema.Types.ObjectId];

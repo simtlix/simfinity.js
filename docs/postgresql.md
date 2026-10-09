@@ -1,11 +1,11 @@
 ---
 title: PostgreSQL storage reference
-description: PostgreSQL types, generated foreign keys, embedded storage, schema validation, native APIs, and compatibility boundaries in Simfinity 3.5.8.
+description: PostgreSQL types, generated foreign keys, embedded storage, schema validation, native APIs, and compatibility boundaries in Simfinity 3.5.9.
 ---
 
 # PostgreSQL support
 
-Simfinity 3.5.8 provides PostgreSQL schema generation and GraphQL execution through the shared core and SQL runtime. PostgreSQL is the first [SQL plugin](guide/sql-plugins.md); its existing facade and generated 3.2.0 physical schema remain compatible. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.5.8 is available from npm; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
+Simfinity 3.5.9 provides PostgreSQL schema generation and GraphQL execution through the shared core and SQL runtime. PostgreSQL is the first [SQL plugin](guide/sql-plugins.md); its existing facade and generated 3.2.0 physical schema remain compatible. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.5.9 is available from npm; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
 
 Start with the canonical [PostgreSQL quick start](guide/postgresql.md) for a complete Yoga server, initialization choice, controller/session example, and pool shutdown. This page is the detailed storage and compatibility reference.
 
@@ -13,7 +13,7 @@ The intended backend choice is permanent application configuration. There is no 
 
 ## Packages and local setup
 
-Use the [v3.5.8 starters](guide/databases.md#download-the-starters) and run `npm install` in the `postgres` folder. For library development, `npm ci` at the repository root installs the workspaces. Packages are distributed together:
+Use the [v3.5.9 starters](guide/databases.md#download-the-starters) and run `npm install` in the `postgres` folder. For library development, `npm ci` at the repository root installs the workspaces. Packages are distributed together:
 
 | Package | Current exports and dependencies |
 | --- | --- |
@@ -23,7 +23,7 @@ Use the [v3.5.8 starters](guide/databases.md#download-the-starters) and run `npm
 | `@simtlix/simfinity-postgres` | `postgresPlugin`, `createPostgres`, default-module runtime facade, schema description/DDL/initialization, shared scalar factory and errors. Depends on SQL, core and `pg`; GraphQL peer. No MongoDB, Mongoose or MCP dependency. |
 | `@simtlix/simfinity-mcp` | Optional database-independent tool generation and transports. Depends on core; the MCP SDK is an optional peer. |
 
-All five packages are versioned together at version `3.5.8` with exact internal dependencies. The verified package set includes standalone consumer checks for SQL as well as both facades, covering MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; the starter requires Node.js 22.15.0+. PostgreSQL 15, 16, and 18 are covered by the release verification.
+All five packages are versioned together at version `3.5.9` with exact internal dependencies. The verified package set includes standalone consumer checks for SQL as well as both facades, covering MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; the starter requires Node.js 22.15.0+. PostgreSQL 15, 16, and 18 are covered by the release verification.
 
 ## Executable example
 
@@ -159,7 +159,7 @@ Index field names resolve to stored scalar/reference columns. `extensions.indexe
 
 Private owned tables use `__id`, `__owner_id`, and, for arrays, `__position`. An owner/position unique index preserves distinct positions while allowing repeated referenced entities. Nullable object-array items have `__item_present`; required fields are checked when an item is present. Parent `__<field>_state` columns distinguish `missing`, `null`, and `present`, including empty arrays. Deferred constraint triggers enforce final-state consistency, including direct SQL INSERT/UPDATE/DELETE: missing/null markers have no rows, present singular values have exactly one row, lists have consecutive positions from zero, and null items have no hidden payload or children. Empty required lists remain valid. Use a transaction when writing parent markers and children separately. Immediate triggers update a private owner-version row to serialize concurrent child edits; REPEATABLE READ transactions may receive a serialization failure and must retry the whole transaction. Embedded object updates preserve the existing shallow merge, while embedded lists are replaced, including when restored after clearing.
 
-Native writes preserve explicit null embedded fields and null list items. Omitted inline objects materialize descendant list defaults; scalar-only empty inline objects minimize away, while empty objects inside embedded lists remain items. The generated GraphQL create materializer omits null object fields before these defaults apply. A stricter PostgreSQL consequence is that an optional inline parent with defaulted descendant lists and a required scalar becomes present: creation must supply that required scalar. GraphQL create's explicit `null` also gets omitted and does not suppress the defaults; native `create` can store an explicit null parent. Required database constraints are retained.
+Native writes preserve explicit null embedded fields and null list items. Omitted inline objects materialize descendant list defaults; scalar-only empty inline objects minimize away, while empty objects inside embedded lists remain items. The generated GraphQL create materializer omits null object fields before these defaults apply. A stricter PostgreSQL consequence is that an optional inline parent with defaulted descendant lists and a required scalar becomes present: creation must supply that required scalar. MongoDB instead stores the defaulted parent without the required scalar and reads it as `null`. GraphQL create's explicit `null` also gets omitted and does not suppress the defaults; native `create` can store an explicit null parent. Required database constraints are retained.
 
 Owned scalar/reference/JSONB columns and root JSONB columns carry a private `__field__<field>__present` boolean (long names are shortened deterministically) (listed as `presenceColumn` in the column description). A non-null column is present regardless of its marker; SQL NULL with marker false is absent, and SQL NULL with marker true is explicit null. Native writes maintain markers automatically. Direct SQL consumers can set the marker to true when storing explicit null, or set both the value to NULL and marker to false to remove a field. Null owned items cannot carry true field markers. These markers preserve missing-versus-null projection semantics without changing the GraphQL schema.
 

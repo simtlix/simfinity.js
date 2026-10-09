@@ -108,7 +108,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.8
+npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.5.9
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies. Keep them within the ranges above so your application and Simfinity share a single Mongoose and GraphQL instance; npm reports an out-of-range version as a peer conflict. The MCP transports need the optional peer `@modelcontextprotocol/sdk@^1.31.0`, which is not installed automatically, and `graphql-middleware` is not a Simfinity dependency.
@@ -138,7 +138,7 @@ All publishable libraries live under `packages/`:
 | `packages/postgres` | `@simtlix/simfinity-postgres` |
 | `packages/mcp` | `@simtlix/simfinity-mcp` |
 
-The repository root is a private npm workspace for shared tests, documentation and release tooling. MongoDB retains its existing package name, public API and deep imports such as `@simtlix/simfinity-js/src/auth/rules.js`. These legacy `src/` deep imports have no TypeScript declarations: in TypeScript, import `auth`, `plugins`, `scalars` and `validators` from the package root. The typed `@simtlix/simfinity-core` subpaths, such as `@simtlix/simfinity-core/auth`, need `@simtlix/simfinity-core` as a direct dependency pinned to the facade's exact version. Run development commands from the root; pack MongoDB with `npm pack --workspace @simtlix/simfinity-js` or use the release scripts to pack all five libraries. Pushing a release tag (`vX.Y.Z`) or publishing a GitHub release automatically publishes all five packages with GitHub Actions, attaches verified archives to the release, and deploys the stable documentation. Version changes and merges to `master` do not publish; the tag must match the aligned package versions and point to source already merged into `master`. See the [release and OIDC setup guide](docs/resources/contributing.md#release-a-new-version).
+The repository root is a private npm workspace for shared tests, documentation and release tooling. MongoDB retains its existing package name, public API and deep imports such as `@simtlix/simfinity-js/src/auth/rules.js`. Its legacy `src/` modules that re-export public API (`src/index.js`, `src/auth/index.js`, `src/auth/errors.js`, `src/auth/expressions.js`, `src/auth/rules.js`, `src/plugins.js`, `src/scalars.js`, `src/validators.js`, `src/mcp.js`, `src/const/*.js`, `src/errors/*.js`, and their extensionless aliases) ship TypeScript declarations with the types of the package root and the matching `@simtlix/simfinity-core` subpaths; `src/mongo/*` is internal and undeclared. New code should still import `auth`, `plugins`, `scalars` and `validators` from the package root. The typed `@simtlix/simfinity-core` subpaths, such as `@simtlix/simfinity-core/auth`, need `@simtlix/simfinity-core` as a direct dependency pinned to the facade's exact version. Run development commands from the root; pack MongoDB with `npm pack --workspace @simtlix/simfinity-js` or use the release scripts to pack all five libraries. Pushing a release tag (`vX.Y.Z`) or publishing a GitHub release automatically publishes all five packages with GitHub Actions, attaches verified archives to the release, and deploys the stable documentation. Version changes and merges to `master` do not publish; the tag must match the aligned package versions and point to source already merged into `master`. See the [release and OIDC setup guide](docs/resources/contributing.md#release-a-new-version).
 
 The [shared development and publication contract](docs/resources/contributing.md#development-and-publication-contract) applies to contributors and coding agents: when a task includes publication, completion requires the GitHub tag and published release, verified packages in both registries, and the applicable documentation deployment. This rule is tracked in `AGENTS.md` and the always-applied Cursor workflow rule.
 
@@ -152,7 +152,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.8 @modelcontextprotocol/sdk@^1.31.0
+npm install @simtlix/simfinity-mcp@3.5.9 @modelcontextprotocol/sdk@^1.31.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
@@ -247,7 +247,7 @@ const schema = simfinity.createSchema(
 
 Importing Simfinity initializes its global `__Field.extensions` introspection field safely whether GraphQL's fields have already been materialized or a schema already exists. Repeated module evaluation with the same GraphQL peer reuses the existing extension field and metadata types. Application field metadata is preserved.
 
-The extension remains shared by every schema using that GraphQL peer; Simfinity's type and middleware registries belong to each runtime instance. A `GraphQLObjectType` belongs to the first runtime whose schema generates its relation resolvers, or reaches it while one of its non-embedded relation fields has no resolver, such as an unregistered custom mutation result. Registering it in another runtime, reaching it from another runtime's schema, or copying its relation fields with `toConfig()` after that runtime generated them, throws `TYPE_BOUND_TO_OTHER_RUNTIME`. Give each runtime its own type objects, for example from a factory function. Types without non-embedded relation fields, and types whose relations all have your own resolvers, can be shared; see [types belong to one runtime](docs/guide/schema.md#types-belong-to-one-runtime). Schemas constructed after import include `FieldExtensionsType` and `RelationType` in their type maps. Earlier schemas keep their original type maps: ordinary operations and direct metadata selections work, but named fragments on the new metadata types require a schema constructed after import.
+The extension remains shared by every schema using that GraphQL peer; Simfinity's type and middleware registries belong to each runtime instance. A `GraphQLObjectType` belongs to the first runtime whose schema generates its relation resolvers, or reaches it while one of its non-embedded relation fields has no resolver, such as an unregistered custom mutation result. Registering it in another runtime, reaching it from another runtime's schema, or copying its relation fields with `toConfig()` after that runtime generated them, throws `TYPE_BOUND_TO_OTHER_RUNTIME`. Give each runtime its own type objects, for example from a factory function. Types without non-embedded relation fields, and types whose relations all have your own resolvers, can be shared; see [types belong to one runtime](docs/guide/schema.md#types-belong-to-one-runtime). Schemas constructed after import include `FieldExtensionsType` and `RelationType` in their type maps, or their fallback names `SimfinityFieldExtensionsType` and `SimfinityRelationType` once an application type with one of those names was in the process's first Simfinity schema; see [what gets generated](docs/guide/schema.md#what-gets-generated). Earlier schemas keep their original type maps: ordinary operations and direct metadata selections work, but named fragments on the new metadata types require a schema constructed after import.
 
 Schema-cloning tools remain unsupported. In a process that has imported Simfinity, `buildClientSchema()` on a post-import schema's introspection result can also fail with duplicate metadata type names. Use Envelop plugins and in-place resolver wrapping; see the [introspection metadata reference](docs/reference/extensions.md).
 
@@ -304,6 +304,8 @@ Simfinity automatically generates mutations for each connected type:
 // - updateBook(input: BookInputForUpdate): Book  
 // - deleteBook(id: ID): Book
 ```
+
+A type without writable fields gets no add mutation, and, when its `id` is missing or `readOnly`, no update mutation or state machine actions either; Simfinity logs a `Configuration issue` warning. See [what gets generated](docs/guide/schema.md#what-gets-generated).
 
 Creation inputs retain required scalar, enum, embedded-object, and list fields. Update inputs remove the outer non-null wrapper so fields can be omitted; the entity `id` remains required for `GraphQLID` and `GraphQLID!`. Other ID fields remain optional on update. List item nullability is preserved:
 
@@ -962,6 +964,8 @@ publisher: {
   }
 }
 ```
+
+Embedded types cannot contain each other, directly or through other embedded types: `createSchema()` throws `INVALID_MODEL` (`Embedded cycle at …`), even when a field of the cycle is `readOnly`, whenever Simfinity generates a model whose embedded fields reach the cycle, and always with `referentialIntegrity: 'transactional'`. In the default mode, a cycle that only supplied models reach is not checked, as before. Use a reference for recursive structures. An optional embedded object that holds no data reads as `null` when a required member would read as `null`, not counting `id`, `readOnly`, interface and union members, members with your own resolver and referenced collections; see [MongoDB embedded objects in hydrated documents](docs/guide/mutations.md#update-selected-fields).
 
 ### Querying Relationships
 
@@ -2682,6 +2686,8 @@ const BookModel = mongoose.model('Book', BookSchema);
 simfinity.connect(BookModel, BookType, 'book', 'books');
 ```
 
+A supplied model may also use another connection, such as one from `mongoose.createConnection()`. Generated mutations and `saveObject()` use the model's connection. In the default `referentialIntegrity: 'off'` mode, custom mutations use the default Mongoose connection unless it is unused, never opened and without compiled models, also on its `useDb()` descendants, and every registered model shares one MongoDB client; with transactional reference integrity they use the first protected model's connection. See [which connection the session uses](docs/guide/mutations.md#which-connection-the-session-uses-on-mongodb).
+
 ### Programmatic Data Access
 
 Access data programmatically outside of GraphQL:
@@ -4370,7 +4376,7 @@ Retrieves the input type for mutations associated with a GraphQL type.
 - `type` (GraphQLObjectType): The GraphQL type object
 
 **Returns:**
-- `GraphQLInputObjectType`: The input type for mutations
+- `GraphQLInputObjectType`: The input type for mutations. It has no fields for a type without writable fields, which gets no generated add mutation; give a registered mutation that creates such records no input or one of its own.
 
 **Example:**
 
@@ -4394,7 +4400,7 @@ Programmatically save an object through the creation pipeline, including validat
 
 Without a session, `saveObject()` starts a transaction on the registered model's connection, commits the parent and nested writes together, and awaits session cleanup. The same bounded transaction and commit retries described above apply. This requires a transaction-capable MongoDB deployment, such as a replica set.
 
-With a session, it participates in the caller's active transaction. The caller owns commit, retry and cleanup. In default Mongo mode it also owns abort; with transactional reference integrity, a constraint violation or guarded-write error aborts even a supplied transaction to prevent committing an invalid write. That mode requires snapshot read concern and majority write concern. An inactive supplied session is rejected with `ACTIVE_TRANSACTION_REQUIRED` (400) before writes. Pass the provided session when calling from a controller or custom mutation so the writes share its transaction. Calling `saveObject()` directly skips GraphQL input coercion, field authorization and the global middleware of the root record. Nested non-embedded collection children (`added`, `updated`, `deleted`) still run their target type's global middleware, controllers and ownership checks, with the `context` you pass, which is `undefined` when omitted. Without a session, a rejection rolls back the whole workflow; with a supplied session the error reaches the caller, who owns the abort in default MongoDB mode. Validate and authorize programmatic callers accordingly.
+With a session, it participates in the caller's active transaction. The caller owns commit, retry and cleanup. In default Mongo mode it also owns abort; with transactional reference integrity, a constraint violation or guarded-write error aborts even a supplied transaction to prevent committing an invalid write. That mode requires snapshot read concern and majority write concern. An inactive supplied session is rejected with `ACTIVE_TRANSACTION_REQUIRED` (400) before writes. Pass the provided session when calling from a controller or custom mutation so the writes share its transaction; a custom mutation's session can belong to another MongoDB client than the model's, see [which connection the session uses](docs/guide/mutations.md#which-connection-the-session-uses-on-mongodb). Calling `saveObject()` directly skips GraphQL input coercion, field authorization and the global middleware of the root record. Nested non-embedded collection children (`added`, `updated`, `deleted`) still run their target type's global middleware, controllers and ownership checks, with the `context` you pass, which is `undefined` when omitted. Without a session, a rejection rolls back the whole workflow; with a supplied session the error reaches the caller, who owns the abort in default MongoDB mode. Validate and authorize programmatic callers accordingly.
 
 **Example:**
 

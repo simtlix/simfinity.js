@@ -305,3 +305,122 @@ describe('fields named like Object.prototype members', () => {
     });
   });
 });
+
+describe('embedded cycles', () => {
+  const embedded = (type, { list = false, readOnly = false } = {}) => ({
+    type: list ? new GraphQLList(type) : type,
+    extensions: { relation: { embedded: true }, ...(readOnly ? { readOnly: true } : {}) },
+  });
+  // A.b embeds B and B.a embeds A, as objects or lists; `readOnly` marks B.a.
+  const createPair = (prefix, options = {}) => {
+    createdModels.push(new RegExp(`^${prefix}`));
+    const A = new GraphQLObjectType({
+      name: `${prefix}A`,
+      fields: () => ({ id: { type: GraphQLID }, b: embedded(B, { list: options.list }) }),
+    });
+    const B = new GraphQLObjectType({
+      name: `${prefix}B`,
+      fields: () => ({ label: { type: GraphQLString }, a: embedded(A, options) }),
+    });
+    return { A, B };
+  };
+  const invalidModel = (message) => expect.objectContaining({
+    message, extensions: expect.objectContaining({ code: 'INVALID_MODEL', status: 400 }),
+  });
+  // Which type the reported path starts at depends on which model is generated first.
+  const embeddedCycle = invalidModel(expect.stringMatching(/^Embedded cycle at /));
+
+  const registrations = {
+    'the entity first': (runtime, { A, B }) => {
+      runtime.connect(null, A, `${A.name}a`, `${A.name}as`);
+      runtime.addNoEndpointType(B);
+    },
+    'embedded types first': (runtime, { A, B }) => {
+      runtime.addNoEndpointType(B);
+      runtime.connect(null, A, `${A.name}a`, `${A.name}as`);
+    },
+    'a supplied model': (runtime, { A, B }) => {
+      runtime.addNoEndpointType(B);
+      runtime.connect(mongoose.model(A.name, new mongoose.Schema({ b: { label: String } })), A, `${A.name}a`, `${A.name}as`);
+    },
+    'an unregistered embedded type': (runtime, { A }) => {
+      runtime.connect(null, A, `${A.name}a`, `${A.name}as`);
+    },
+  };
+  const cases = Object.keys(registrations).flatMap((registration) => [
+    [registration, 'objects', 'off', { list: false }],
+    [registration, 'lists', 'off', { list: true }],
+    [registration, 'objects with a readOnly link', 'off', { list: false, readOnly: true }],
+    [registration, 'lists with a readOnly link', 'off', { list: true, readOnly: true }],
+  ]).concat([
+    ['embedded types first', 'objects', 'transactional', { list: false }],
+    ['embedded types first', 'lists', 'transactional', { list: true }],
+  ]);
+
+  let built = 0;
+  test.each(cases)('rejects, with %s, embedded %s that contain each other (%s integrity)', (registration, label, referentialIntegrity, options) => {
+    built += 1;
+    const prefix = `ModelCycle${built}_`;
+    const types = createPair(prefix, options);
+    const runtime = createRuntime(createMongoAdapter({ referentialIntegrity }));
+    runtime.preventCreatingCollection(true);
+    registrations[registration](runtime, types);
+
+    expect(() => runtime.createSchema()).toThrow(embeddedCycle);
+    // No model is generated for either type.
+    expect(mongoose.modelNames().filter((name) => name.startsWith(prefix)))
+      .toEqual(registration === 'a supplied model' ? [types.A.name] : []);
+  });
+
+  test('rejects a cycle that does not pass through the root type', () => {
+    const prefix = 'ModelCycleBelow_';
+    createdModels.push(new RegExp(`^${prefix}`));
+    const C = new GraphQLObjectType({ name: `${prefix}C`, fields: () => ({ x: { type: GraphQLString }, b: embedded(B) }) });
+    const B = new GraphQLObjectType({ name: `${prefix}B`, fields: () => ({ y: { type: GraphQLString }, c: embedded(C) }) });
+    const Root = new GraphQLObjectType({ name: `${prefix}Root`, fields: () => ({ id: { type: GraphQLID }, b: embedded(B) }) });
+    const runtime = createRuntime(createMongoAdapter());
+    runtime.preventCreatingCollection(true);
+    runtime.connect(null, Root, `${prefix}root`, `${prefix}roots`);
+    runtime.addNoEndpointType(B);
+    runtime.addNoEndpointType(C);
+
+    expect(() => runtime.createSchema()).toThrow(embeddedCycle);
+    expect(() => createMongoModel(Root, null, { createCollection: false }))
+      .toThrow(invalidModel(`Embedded cycle at ${Root.name}.b.c.b`));
+  });
+
+  test('createMongoModel rejects an indirect embedded cycle with the path from its type', () => {
+    const { A, B } = createPair('ModelCycleDirectCall_', { list: true });
+
+    expect(() => createMongoModel(A, null, { createCollection: false })).toThrow(invalidModel(`Embedded cycle at ${A.name}.b.a`));
+    expect(() => createMongoModel(B, null, { createCollection: false })).toThrow(invalidModel(`Embedded cycle at ${B.name}.a.b`));
+  });
+
+  test.each([['an object', false], ['a list', true]])('keeps the message for a type that embeds itself as %s, now with INVALID_MODEL', (label, list) => {
+    const prefix = `ModelSelfEmbed${list ? 'List' : 'Object'}_`;
+    createdModels.push(new RegExp(`^${prefix}`));
+    const Self = new GraphQLObjectType({ name: `${prefix}Self`, fields: () => ({ id: { type: GraphQLID }, self: embedded(Self, { list }) }) });
+
+    expect(() => createMongoModel(Self, null, { createCollection: false }))
+      .toThrow(invalidModel('A type cannot have a field of its same type and embedded'));
+  });
+
+  test('builds a type that embeds the same type in sibling and nested fields', () => {
+    const prefix = 'ModelEmbeddedDag_';
+    createdModels.push(new RegExp(`^${prefix}`));
+    const Geo = new GraphQLObjectType({ name: `${prefix}Geo`, fields: { lat: { type: GraphQLFloat } } });
+    const Address = new GraphQLObjectType({ name: `${prefix}Address`, fields: { street: { type: GraphQLString }, geo: embedded(Geo) } });
+    const Root = new GraphQLObjectType({
+      name: `${prefix}Root`,
+      fields: {
+        id: { type: GraphQLID }, home: embedded(Address), work: embedded(Address, { list: true }), geo: embedded(Geo),
+      },
+    });
+
+    const model = createMongoModel(Root, null, { createCollection: false });
+
+    expect(model.schema.path('home.geo.lat').instance).toBe('Number');
+    expect(model.schema.path('geo.lat').instance).toBe('Number');
+    expect(model.schema.path('work').schema.path('geo.lat').instance).toBe('Number');
+  });
+});

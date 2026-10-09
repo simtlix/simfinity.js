@@ -2437,6 +2437,8 @@ describe('embedded value hook', () => {
       sync: { id: 'sync', main },
       async: { id: 'async', async main() { return { street: `${this.id}-street` }; } },
       asyncCleared: { id: 'asyncCleared', main: async () => cleared },
+      // Holds no data and misses the required `pin`, so it reads as null once it settles.
+      asyncEmpty: { id: 'asyncEmpty', main: async () => ({ geo: {} }) },
     };
     const ModeInput = new GraphQLInputObjectType({ name: 'HookMethodInput', fields: { mode: { type: GraphQLString } } });
     runtime.registerMutation('hookMethodShop', 'Returns a shop with embedded methods', ModeInput, types.Shop,
@@ -2448,7 +2450,9 @@ describe('embedded value hook', () => {
       contextValue: { tenant: 't1' },
     });
 
-    const [sync, asynchronous, asyncCleared] = await Promise.all(['sync', 'async', 'asyncCleared'].map(run));
+    const [sync, asynchronous, asyncCleared, asyncEmpty] = await Promise.all(
+      ['sync', 'async', 'asyncCleared', 'asyncEmpty'].map(run),
+    );
 
     expect(sync).toEqual({ data: { hookMethodShop: { id: 'sync', main: { street: 'sync-street', geo: null } } } });
     expect(received).toEqual([{ receiver: 'sync', context: 't1' }]);
@@ -2456,6 +2460,7 @@ describe('embedded value hook', () => {
       data: { hookMethodShop: { id: 'async', main: { street: 'async-street', geo: null } } },
     });
     expect(asyncCleared).toEqual({ data: { hookMethodShop: { id: 'asyncCleared', main: null } } });
+    expect(asyncEmpty).toEqual({ data: { hookMethodShop: { id: 'asyncEmpty', main: null } } });
     // The hook reads the value the method settles to, never the method or its promise.
     for (const [value] of adapter.readEmbeddedValue.mock.calls) {
       expect(typeof value === 'function' || value instanceof Promise).toBe(false);
@@ -2493,6 +2498,501 @@ describe('embedded value hook', () => {
 
     expect(types.Shop.getFields().main.resolve).toBeUndefined();
     expect(types.Address.getFields().geo.resolve).toBeUndefined();
+  });
+
+  describe('objects that hold no data', () => {
+    const embedded = (type, extensions = {}) => ({ type, extensions: { relation: { embedded: true }, ...extensions } });
+    const createNoDataTypes = (prefix) => {
+      const Geo = new GraphQLObjectType({
+        name: `${prefix}Geo`,
+        fields: { lat: { type: new GraphQLNonNull(GraphQLInt) }, aliases: { type: new GraphQLList(GraphQLString) } },
+      });
+      const Address = new GraphQLObjectType({
+        name: `${prefix}Address`,
+        fields: {
+          street: { type: new GraphQLNonNull(GraphQLString) },
+          city: { type: GraphQLString },
+          phones: { type: new GraphQLList(GraphQLString) },
+          geo: embedded(Geo),
+        },
+      });
+      // Its only required member is inside a required nested object.
+      const Spot = new GraphQLObjectType({
+        name: `${prefix}Spot`,
+        fields: { name: { type: GraphQLString }, geo: embedded(new GraphQLNonNull(Geo)) },
+      });
+      const Note = new GraphQLObjectType({ name: `${prefix}Note`, fields: { text: { type: GraphQLString } } });
+      const Tagged = new GraphQLObjectType({
+        name: `${prefix}Tagged`,
+        fields: { tags: { type: new GraphQLNonNull(new GraphQLList(GraphQLString)) } },
+      });
+      const Labeled = new GraphQLObjectType({
+        name: `${prefix}Labeled`,
+        fields: {
+          label: { type: new GraphQLNonNull(GraphQLString), resolve: (parent) => parent.label ?? 'computed' },
+        },
+      });
+      // Generated inputs accept neither readOnly members nor `id`.
+      const Stamped = new GraphQLObjectType({
+        name: `${prefix}Stamped`,
+        fields: {
+          code: { type: new GraphQLNonNull(GraphQLString), extensions: { readOnly: true } },
+          tags: { type: new GraphQLList(GraphQLString) },
+        },
+      });
+      const Keyed = new GraphQLObjectType({
+        name: `${prefix}Keyed`,
+        fields: { id: { type: new GraphQLNonNull(GraphQLID) }, tags: { type: new GraphQLList(GraphQLString) } },
+      });
+      const Shop = new GraphQLObjectType({
+        name: `${prefix}Shop`,
+        fields: {
+          id: { type: GraphQLID },
+          name: { type: GraphQLString },
+          main: embedded(Address),
+          spot: embedded(Spot),
+          note: embedded(Note),
+          tagged: embedded(Tagged),
+          labeled: embedded(Labeled),
+          stamped: embedded(Stamped),
+          keyed: embedded(Keyed),
+        },
+      });
+      return {
+        embeddedTypes: [Geo, Address, Spot, Note, Tagged, Labeled, Stamped, Keyed], Shop,
+      };
+    };
+    const setup = async (adapter, endpoint, records = [], types = createNoDataTypes(endpoint)) => {
+      const runtime = createRuntime(adapter);
+      for (const type of types.entities ?? []) runtime.connect(null, type, type.name, `${type.name}s`);
+      for (const type of types.embeddedTypes) runtime.addNoEndpointType(type);
+      runtime.connect(null, types.Shop, endpoint, `${endpoint}s`);
+      const schema = runtime.createSchema();
+      for (const record of records) await adapter.saveRecord({ name: endpoint }, record);
+      const list = (selection) => graphql({ schema, source: `{ ${endpoint}s { id ${selection} } }` });
+      const byId = (id, selection) => graphql({ schema, source: `{ ${endpoint}(id: "${id}") { id ${selection} } }` });
+      return {
+        schema, types, list, byId,
+      };
+    };
+    const readBoth = async ({ list, byId }, selection) => {
+      const listed = await list(selection);
+      const single = await Promise.all(listed.data[Object.keys(listed.data)[0]].map(({ id }) => byId(id, selection)));
+      return [listed, ...single];
+    };
+
+    test('reads one that misses a required member as null on list and by-ID reads', async () => {
+      const fixture = await setup(createHookAdapter(), 'noDataRead', [
+        // Only list defaults, as MongoDB hydrates an absent or omitted object.
+        { _id: '1', main: { phones: [], geo: { aliases: [] } } },
+        { _id: '2', main: {} },
+        // The nested object holds only list defaults; its parent holds data.
+        { _id: '3', main: { street: 'M', phones: [], geo: { aliases: [] } } },
+        // The required member is inside a required nested object.
+        { _id: '4', spot: { geo: { aliases: [] } } },
+        { _id: '5', spot: { geo: { lat: 1 } } },
+      ]);
+
+      const results = await readBoth(fixture, 'main { street city geo { lat } } spot { name geo { lat } }');
+
+      for (const result of results) expect(result.errors).toBeUndefined();
+      const expected = [
+        { id: '1', main: null, spot: null },
+        { id: '2', main: null, spot: null },
+        { id: '3', main: { street: 'M', city: null, geo: null }, spot: null },
+        { id: '4', main: null, spot: null },
+        { id: '5', main: null, spot: { name: null, geo: { lat: 1 } } },
+      ];
+      expect(results[0].data.noDataReads).toEqual(expected);
+      expect(results.slice(1).map(({ data }) => data.noDataRead)).toEqual(expected);
+    });
+
+    test('reads one that misses a required member as null whatever the selection', async () => {
+      const fixture = await setup(createHookAdapter(), 'noDataSelection', [
+        { _id: '1', main: { phones: [], geo: { aliases: [] } } },
+      ]);
+
+      // Deliberate: a selection without the required member reads null too, not an object of nulls.
+      const results = await readBoth(fixture, 'main { city } spot { name }');
+
+      expect(results.map(({ errors }) => errors)).toEqual([undefined, undefined]);
+      expect(results[0].data.noDataSelections).toEqual([{ id: '1', main: null, spot: null }]);
+      expect(results[1].data.noDataSelection).toEqual({ id: '1', main: null, spot: null });
+    });
+
+    test('keeps objects that hold data, need no member, hold a required empty list or compute a required member', async () => {
+      const fixture = await setup(createHookAdapter(), 'noDataKept', [{
+        _id: '1',
+        main: { city: 'C', phones: [] },
+        note: {},
+        tagged: { tags: [] },
+        labeled: {},
+        // Required members that generated inputs do not accept are the application's.
+        stamped: { tags: [] },
+        keyed: { tags: [] },
+      }]);
+
+      const results = await readBoth(
+        fixture,
+        'main { city } note { text } tagged { tags } labeled { label } stamped { tags } keyed { tags }',
+      );
+
+      const expected = {
+        id: '1',
+        main: { city: 'C' },
+        note: { text: null },
+        tagged: { tags: [] },
+        labeled: { label: 'computed' },
+        stamped: { tags: [] },
+        keyed: { tags: [] },
+      };
+      expect(results.map(({ errors }) => errors)).toEqual([undefined, undefined]);
+      expect(results[0].data.noDataKepts).toEqual([expected]);
+      expect(results[1].data.noDataKept).toEqual(expected);
+    });
+
+    test('reads back as written an object whose only required members are readOnly or id', async () => {
+      const fixture = await setup(createHookAdapter(), 'noDataWritten');
+
+      const added = await graphql({
+        schema: fixture.schema,
+        source: 'mutation { addnoDataWritten(input: { name: "n", stamped: { tags: [] }, keyed: { tags: [] } }) { id stamped { tags } keyed { tags } } }',
+      });
+      const listed = await fixture.list('stamped { tags } keyed { tags }');
+
+      expect(added.errors).toBeUndefined();
+      const { id } = added.data.addnoDataWritten;
+      expect(added.data.addnoDataWritten).toEqual({ id, stamped: { tags: [] }, keyed: { tags: [] } });
+      expect(listed).toEqual({ data: { noDataWrittens: [{ id, stamped: { tags: [] }, keyed: { tags: [] } }] } });
+    });
+
+    test('keeps one whose only required member is a referenced collection, which the object does not store', async () => {
+      const Item = new GraphQLObjectType({
+        name: 'NoDataBoxItem',
+        fields: { id: { type: GraphQLID }, name: { type: GraphQLString }, box: { type: GraphQLString } },
+      });
+      const Box = new GraphQLObjectType({
+        name: 'NoDataBoxBox',
+        fields: {
+          label: { type: GraphQLString },
+          items: {
+            type: new GraphQLNonNull(new GraphQLList(Item)),
+            extensions: { relation: { embedded: false, connectionField: 'box' } },
+          },
+        },
+      });
+      const Shop = new GraphQLObjectType({
+        name: 'NoDataBoxShop',
+        fields: { id: { type: GraphQLID }, name: { type: GraphQLString }, main: embedded(Box) },
+      });
+      const fixture = await setup(createHookAdapter(), 'noDataBox', [{ _id: '1', main: {} }], {
+        entities: [Item], embeddedTypes: [Box], Shop,
+      });
+
+      const results = await readBoth(fixture, 'main { label items { id } }');
+
+      expect(results).toEqual([
+        { data: { noDataBoxs: [{ id: '1', main: { label: null, items: [] } }] } },
+        { data: { noDataBox: { id: '1', main: { label: null, items: [] } } } },
+      ]);
+    });
+
+    test('does not count required interface or union members, which generated inputs leave out', async () => {
+      const Shape = new GraphQLInterfaceType({ name: 'NoDataAbstractShape', fields: { area: { type: GraphQLInt } } });
+      const Circle = new GraphQLObjectType({
+        name: 'NoDataAbstractCircle', interfaces: [Shape], fields: { area: { type: GraphQLInt } },
+      });
+      const Either = new GraphQLUnionType({ name: 'NoDataAbstractEither', types: [Circle] });
+      const Drawing = new GraphQLObjectType({
+        name: 'NoDataAbstractDrawing',
+        fields: {
+          shape: { type: new GraphQLNonNull(Shape) },
+          shapes: { type: new GraphQLNonNull(new GraphQLList(Shape)) },
+          either: { type: new GraphQLNonNull(Either) },
+          tags: { type: new GraphQLList(GraphQLString) },
+        },
+      });
+      const Shop = new GraphQLObjectType({
+        name: 'NoDataAbstractShop',
+        fields: { id: { type: GraphQLID }, name: { type: GraphQLString }, main: embedded(Drawing) },
+      });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      let fixture;
+      try {
+        fixture = await setup(createHookAdapter(), 'noDataAbstract', [], { embeddedTypes: [Drawing], Shop });
+        expect(warn.mock.calls.map(([message]) => message)).toEqual(['shape', 'shapes', 'either'].map((field) => (
+          expect.stringContaining(`NoDataAbstractDrawing.${field} has an interface or union type, so generated inputs leave it out`))));
+      } finally {
+        warn.mockRestore();
+      }
+
+      const added = await graphql({
+        schema: fixture.schema,
+        source: 'mutation { addnoDataAbstract(input: { name: "n", main: { tags: [] } }) { id main { tags } } }',
+      });
+      expect(added.errors).toBeUndefined();
+      const { id } = added.data.addnoDataAbstract;
+      const results = await readBoth(fixture, 'main { tags }');
+
+      // As before the rule: they are the application's to resolve, and selecting one still fails.
+      expect(added.data.addnoDataAbstract).toEqual({ id, main: { tags: [] } });
+      expect(results).toEqual([
+        { data: { noDataAbstracts: [{ id, main: { tags: [] } }] } },
+        { data: { noDataAbstract: { id, main: { tags: [] } } } },
+      ]);
+    });
+
+    test('keeps promise-valued members as data', async () => {
+      const fixture = await setup(createHookAdapter(), 'noDataPromise', [
+        { _id: '1', main: { get geo() { return Promise.resolve({ lat: 1 }); } } },
+        { _id: '2', main: { get street() { return Promise.resolve('S'); } } },
+      ]);
+
+      const result = await fixture.list('main { street geo { lat } }');
+      const geoOnly = await fixture.list('main { geo { lat } }');
+
+      // The first one misses `street`, as it does without the rule.
+      expect(result.errors.map(({ message, path }) => [message, path])).toEqual([
+        ['Cannot return null for non-nullable field noDataPromiseAddress.street.', ['noDataPromises', 0, 'main', 'street']],
+      ]);
+      expect(result.data.noDataPromises).toEqual([{ id: '1', main: null }, { id: '2', main: { street: 'S', geo: null } }]);
+      expect(geoOnly).toEqual({
+        data: { noDataPromises: [{ id: '1', main: { geo: { lat: 1 } } }, { id: '2', main: { geo: null } }] },
+      });
+    });
+
+    test('reads data-less objects of types it shares with a hook runtime as null, in runtimes without the hook too', async () => {
+      const types = createNoDataTypes('noDataShared');
+      await setup(createHookAdapter(), 'noDataShared', [], types);
+      // The resolvers live on the shared type objects, so a hook-less runtime, such as PostgreSQL, reads through them.
+      const other = await setup(createMemoryAdapter(), 'noDataShared', [
+        { _id: '1', main: { phones: [], geo: { aliases: [] } } },
+      ], types);
+
+      const city = await other.list('main { city }');
+      const street = await other.list('main { street }');
+
+      expect(city).toEqual({ data: { noDataShareds: [{ id: '1', main: null }] } });
+      expect(street).toEqual({ data: { noDataShareds: [{ id: '1', main: null }] } });
+    });
+
+    test('leaves runtimes that never share their types with a hook runtime on graphql default reads', async () => {
+      const fixture = await setup(createMemoryAdapter(), 'noDataNoHook', [{ _id: '1', main: { phones: [] } }]);
+
+      const result = await fixture.list('main { street }');
+
+      expect(result.errors.map(({ message }) => message))
+        .toEqual(['Cannot return null for non-nullable field noDataNoHookAddress.street.']);
+      expect(result.data.noDataNoHooks).toEqual([{ id: '1', main: null }]);
+    });
+
+    test('keeps a read-only embedded value that contains itself', async () => {
+      const Node = new GraphQLObjectType({
+        name: 'NoDataSelfNode',
+        fields: () => ({
+          label: { type: new GraphQLNonNull(GraphQLString) },
+          self: embedded(Node, { readOnly: true }),
+        }),
+      });
+      const Root = new GraphQLObjectType({
+        name: 'NoDataSelfRoot',
+        fields: { id: { type: GraphQLID }, name: { type: GraphQLString }, node: embedded(Node, { readOnly: true }) },
+      });
+      const adapter = createHookAdapter();
+      const runtime = createRuntime(adapter);
+      runtime.addNoEndpointType(Node);
+      runtime.connect(null, Root, 'noDataSelfRoot', 'noDataSelfRoots');
+      const schema = runtime.createSchema();
+      const node = {};
+      node.self = node;
+      await adapter.saveRecord({ name: 'NoDataSelfRoot' }, { _id: '1', node });
+
+      const result = await graphql({ schema, source: '{ noDataSelfRoots { node { self { self { label } } } } }' });
+
+      // It holds data, so it renders as without the rule; reading it does not overflow the stack.
+      expect(result.data).toEqual({ noDataSelfRoots: [{ node: { self: { self: null } } }] });
+      expect(result.errors.map(({ message }) => message))
+        .toEqual(['Cannot return null for non-nullable field NoDataSelfNode.label.']);
+    });
+
+    describe('reading stored members', () => {
+      // `secret` comes first, so a rule that read members through their getters would reach it first.
+      const createGetterTypes = (prefix) => {
+        const Details = new GraphQLObjectType({
+          name: `${prefix}Details`, fields: { secret: { type: GraphQLString }, visible: { type: GraphQLString } },
+        });
+        const Secured = new GraphQLObjectType({
+          name: `${prefix}Secured`,
+          fields: {
+            secret: { type: GraphQLString }, code: { type: new GraphQLNonNull(GraphQLString) }, visible: { type: GraphQLString },
+          },
+        });
+        const Shop = new GraphQLObjectType({
+          name: `${prefix}Shop`,
+          fields: {
+            id: { type: GraphQLID }, name: { type: GraphQLString }, details: embedded(Details), secured: embedded(Secured),
+          },
+        });
+        return { embeddedTypes: [Details, Secured], Shop };
+      };
+      const secretReads = [];
+      const withSecret = (data) => Object.defineProperty({ ...data }, 'secret', {
+        enumerable: true,
+        get() {
+          secretReads.push(data);
+          throw new Error('secret getter');
+        },
+      });
+
+      test('returns objects of a type without a required member that counts untouched, reading no member', async () => {
+        secretReads.length = 0;
+        const fixture = await setup(createHookAdapter(), 'noDataUntouched', [
+          { _id: '1', details: withSecret({ visible: 'ok' }) },
+          { _id: '2', details: withSecret({}) },
+        ], createGetterTypes('NoDataUntouched'));
+
+        const results = await readBoth(fixture, 'details { visible }');
+
+        const expected = [{ id: '1', details: { visible: 'ok' } }, { id: '2', details: { visible: null } }];
+        expect(results).toEqual([
+          { data: { noDataUntoucheds: expected } },
+          ...expected.map((row) => ({ data: { noDataUntouched: row } })),
+        ]);
+        expect(secretReads).toEqual([]);
+      });
+
+      test('never calls an accessor of a type with a required member that counts, which is present', async () => {
+        secretReads.length = 0;
+        const fixture = await setup(createHookAdapter(), 'noDataAccessor', [
+          { _id: '1', secured: withSecret({ code: 'c' }) },
+          // The accessor is present, so the object holds data and renders as before the rule.
+          { _id: '2', secured: withSecret({}) },
+          { _id: '3', secured: {} },
+        ], createGetterTypes('NoDataAccessor'));
+
+        const results = await readBoth(fixture, 'secured { visible }');
+
+        const expected = [
+          { id: '1', secured: { visible: null } },
+          { id: '2', secured: { visible: null } },
+          { id: '3', secured: null },
+        ];
+        expect(results).toEqual([
+          { data: { noDataAccessors: expected } },
+          ...expected.map((row) => ({ data: { noDataAccessor: row } })),
+        ]);
+        expect(secretReads).toEqual([]);
+      });
+
+      // A hydrated record that renders its members through getters, as MongoDB documents do.
+      class Hydrated {
+        constructor(stored) {
+          Object.defineProperty(this, 'stored', { value: stored });
+        }
+
+        toObject() {
+          return { ...this.stored };
+        }
+
+        get secret() {
+          secretReads.push(this.stored);
+          throw new Error('secret getter');
+        }
+
+        get code() {
+          return this.stored.code;
+        }
+
+        get visible() {
+          return this.stored.visible;
+        }
+      }
+
+      test('reads hydrated records through the adapter rawEmbeddedValue hook, and keeps those it does not convert', async () => {
+        secretReads.length = 0;
+        const securedStored = [{ code: 'c', visible: 'v' }, { visible: 'v' }, {}];
+        const records = () => securedStored.map((stored, index) => ({
+          _id: String(index + 1), details: new Hydrated({}), secured: new Hydrated(stored),
+        }));
+        const converting = Object.assign(createHookAdapter(), {
+          rawEmbeddedValue: vi.fn((value) => (value instanceof Hydrated ? value.stored : value)),
+        });
+        const converted = await setup(converting, 'noDataRaw', records(), createGetterTypes('NoDataRaw'));
+        const kept = await setup(createHookAdapter(), 'noDataKeptRecord', records(), createGetterTypes('NoDataKeptRecord'));
+
+        const convertedResult = await converted.list('details { visible } secured { visible }');
+        const keptResult = await kept.list('secured { visible }');
+
+        // Only the stored data counts; `visible` holds data, so only the third misses `code` with no data.
+        expect(convertedResult).toEqual({
+          data: {
+            noDataRaws: [
+              { id: '1', details: { visible: null }, secured: { visible: 'v' } },
+              { id: '2', details: { visible: null }, secured: { visible: 'v' } },
+              { id: '3', details: { visible: null }, secured: null },
+            ],
+          },
+        });
+        // Details has no required member that counts, so the hook never receives its values.
+        expect(converting.rawEmbeddedValue.mock.calls.map(([value]) => value.stored)).toEqual(securedStored);
+        // Without the hook, a record that is not a plain object counts as data and renders as before the rule.
+        expect(keptResult).toEqual({
+          data: {
+            noDataKeptRecords: [
+              { id: '1', secured: { visible: 'v' } }, { id: '2', secured: { visible: 'v' } }, { id: '3', secured: { visible: null } },
+            ],
+          },
+        });
+        expect(secretReads).toEqual([]);
+      });
+
+      test('returns the value when reading its stored members throws', async () => {
+        const failing = Object.assign(createHookAdapter(), {
+          rawEmbeddedValue: vi.fn(() => {
+            throw new Error('raw read');
+          }),
+        });
+        const fixture = await setup(failing, 'noDataFailing', [{ _id: '1', secured: {} }], createGetterTypes('NoDataFailing'));
+
+        const result = await fixture.list('secured { visible }');
+
+        // Without the error, the object would hold no data and read as null.
+        expect(result).toEqual({ data: { noDataFailings: [{ id: '1', secured: { visible: null } }] } });
+        expect(failing.rawEmbeddedValue).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    test('counts a stored `_id` as the `id` that the object holds', async () => {
+      // Part is an entity, so its generated resolver reads `_id`; Mongoose's id virtual renders a
+      // hydrated subdocument's `_id` as `id` whatever its type, so Keyed counts it too.
+      const Part = new GraphQLObjectType({
+        name: 'NoDataIdentityPart', fields: { id: { type: GraphQLID }, name: { type: new GraphQLNonNull(GraphQLString) } },
+      });
+      const Keyed = new GraphQLObjectType({
+        name: 'NoDataIdentityKeyed', fields: { id: { type: GraphQLID }, name: { type: new GraphQLNonNull(GraphQLString) } },
+      });
+      const Shop = new GraphQLObjectType({
+        name: 'NoDataIdentityShop',
+        fields: {
+          id: { type: GraphQLID }, name: { type: GraphQLString }, part: embedded(Part), keyed: embedded(Keyed),
+        },
+      });
+      const fixture = await setup(createHookAdapter(), 'noDataIdentity', [
+        { _id: '1', part: { _id: 'p1' }, keyed: { _id: 'k1' } },
+        { _id: '2', part: {}, keyed: {} },
+      ], { entities: [Part], embeddedTypes: [Keyed], Shop });
+
+      const results = await readBoth(fixture, 'part { id } keyed { id }');
+
+      const expected = [
+        { id: '1', part: { id: 'p1' }, keyed: { id: null } },
+        { id: '2', part: null, keyed: null },
+      ];
+      expect(results).toEqual([
+        { data: { noDataIdentitys: expected } },
+        ...expected.map((row) => ({ data: { noDataIdentity: row } })),
+      ]);
+    });
   });
 });
 
