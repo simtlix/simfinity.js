@@ -130,6 +130,8 @@ Use Node.js 24 for host development and install each app with its own `npm ci`. 
 
 The [Barber workflow](https://github.com/simtlix/simfinity.js/blob/master/.github/workflows/barber.yml) runs independently from library CI. It validates backend units, frontend checks, HTTP/MCP behavior, and browser flows against both databases. Both backends check real transactions, derived domain values, and dataset loading/deletion; PostgreSQL adds storage, foreign-key, and frontend-query checks. Root library lint and Vitest discovery exclude example applications.
 
+Each application also runs `npm run test:security` against its complete lockfile, including development tools. Use the committed lockfiles with `npm ci`: the backends require GraphQL Yoga `^5.24.4` and include patched transitive dependencies. See the [dependency validation notes](https://github.com/simtlix/simfinity.js/blob/master/examples/barber/README.md#validate-changes) before updating them.
+
 Each backend's `index.yoga.js` logs every GraphQL error through `buildErrorFormatter`, one entry of the `errors` list that Envelop's `useErrorHandler` receives at a time, as the [error reference](../reference/errors#connect-it-to-your-server) describes. Logging does not change responses.
 
 The repository runbooks contain environment options, commands, and source provenance:

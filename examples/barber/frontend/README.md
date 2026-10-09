@@ -161,7 +161,11 @@ npm run build
 npm run start          # production server on 4401; use -- -p 4501 for PostgreSQL
 ```
 
-`typecheck` generates Next.js route types before strict TypeScript checking. Vitest's unit project runs the class-merge, business-hours, booking-slot and booking-error helper tests. Storybook configuration, browser tests, and all component stories remain available via `npm run build-storybook` and `npx vitest run --project storybook` (requires a Playwright browser).
+`typecheck` generates Next.js route types before strict TypeScript checking. `test:unit` first checks the real Next.js lint rule against default and globbed application roots, then runs Vitest's class-merge, business-hours, booking-slot and booking-error helper tests. Storybook configuration, browser tests, and all component stories remain available via `npm run build-storybook` and `npx vitest run --project storybook` (requires a Playwright browser).
+
+The lockfile resolves `sharp` 0.35.5 and `source-map-js` 1.2.2 for their security fixes. Next.js 16, React 19 and the existing ESLint rules are retained. `@next/eslint-plugin-next@16.1.7` depends on `fast-glob`, whose `micromatch` dependency pulls in the unpatched `braces` stack-exhaustion vulnerability. A temporary override replaces **only that plugin version's** `fast-glob` with the registry package `tinyglobby@0.2.15`. The plugin uses only `globSync(pattern, { onlyDirectories: true })` to discover application roots; this is not a general replacement for the fast-glob API.
+
+This app leaves `settings.next.rootDir` unset, so the plugin uses ESLint's current working directory without globbing. Tests also cover wildcard, brace and array root patterns. **Do not add literal directory paths to `settings.next.rootDir` while this override is in place:** tinyglobby expands literal directories recursively, unlike fast-glob. Use an explicit glob if custom roots are needed, and recheck this workaround when changing the plugin version. Remove the override once its upstream dependency chain has a supported fix.
 
 With the selected full stack running:
 

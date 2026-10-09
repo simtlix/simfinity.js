@@ -155,7 +155,9 @@ npm run test:security --prefix examples/barber/postgres
 npm run test:security --prefix examples/barber/frontend
 ```
 
-Use Node.js 24 and the committed lockfiles. The MongoDB example requires Mongoose `^8.24.2`; both backends require Multer `^2.3.0`; Vitest and its browser/coverage packages require `^4.1.11`; the frontend requires Next.js `^16.3.8`. These minima exclude the reviewed vulnerable direct versions. The backends consume the exact released Simfinity 3.5.9 packages, whose MCP integration requires the `@modelcontextprotocol/sdk` peer at `^1.31.0`; both backend lockfiles resolve 1.32.1.
+Use Node.js 24 and the committed lockfiles. The MongoDB example requires Mongoose `^8.24.2`; both backends require Multer `^2.3.0` and GraphQL Yoga `^5.24.4`; Vitest and its browser/coverage packages require `^4.1.11`; the frontend requires Next.js `^16.3.8`. These minima exclude the reviewed vulnerable direct versions. The backends consume the exact released Simfinity 3.5.9 packages, whose MCP integration requires the `@modelcontextprotocol/sdk` peer at `^1.31.0`; both backend lockfiles resolve 1.32.1.
+
+The backend lockfiles also include the security fixes in `@graphql-tools/utils` 12.0.3, `@fastify/busboy` 3.2.2, `proxy-addr` 2.0.8 and `source-map-js` 1.2.2. The frontend uses patched `sharp` 0.35.5 and `source-map-js` 1.2.2, plus a temporary dependency override for Next.js linting described in its [security notes](frontend/README.md#verification). Preserve these fixes when refreshing dependencies and run all three application audits before merging.
 
 The upgrade from 3.3.0 left database selection, seeding, the generated PostgreSQL schema and GraphQL responses unchanged. Each backend's `index.yoga.js` changed in two places:
 
