@@ -1,6 +1,6 @@
 # Barber PostgreSQL backend
 
-An independent, private application using the released `@simtlix/simfinity-postgres`, `@simtlix/simfinity-core`, and `@simtlix/simfinity-mcp` packages at exactly **3.3.0**. It uses Express, GraphQL Yoga, and `pg`, with no MongoDB or Mongoose runtime dependency. PostgreSQL delegates relational planning and runtime orchestration to `@simtlix/simfinity-sql`. This app retains the compatible PostgreSQL facade; the [SQL plugin guide](https://simtlix.github.io/simfinity.js/guide/sql-plugins.html) shows explicit plugin composition. It is outside the library workspaces and installs from npm without vendor archives.
+An independent, private application using the released `@simtlix/simfinity-postgres`, `@simtlix/simfinity-core`, and `@simtlix/simfinity-mcp` packages at exactly **3.5.9**. It uses Express, GraphQL Yoga, and `pg`, with no MongoDB or Mongoose runtime dependency. PostgreSQL delegates relational planning and runtime orchestration to `@simtlix/simfinity-sql`. This app retains the compatible PostgreSQL facade; the [SQL plugin guide](https://simtlix.github.io/simfinity.js/guide/sql-plugins.html) shows explicit plugin composition. It is outside the library workspaces and installs from npm without vendor archives.
 
 Use the [Barber quick start](../README.md) to run the complete Docker stack with the shared frontend.
 
@@ -89,7 +89,7 @@ const [user] = await UserModel.find(
 
 Native methods do not provide Mongoose chaining or MongoDB aggregation pipelines. They bypass the GraphQL application boundary, so keep native writes inside an authorized workflow. Scopes, controllers, relationships, and state machines express the same domain as the MongoDB example; adapter-specific operations remain separate.
 
-`types/booking.schedule.js` holds the [booking rules](../README.md#booking-rules) shared by the booking controller and the `bookingAvailability` mutation in `types/customMutations.js`. Both read bookings through the native model, outside the client booking scope. Before its overlap query, the controller runs `UPDATE … SET id = id` on the professional row, or on the shop row and all its professionals for a booking without one, through the active session. A concurrent REPEATABLE READ transaction for that schedule waits and then fails with a serialization error; Simfinity retries it, up to five times, with a fresh snapshot that sees the committed booking. The controller reports that error as `BOOKING_SCHEDULE_BUSY` and keeps its SQLSTATE, so Simfinity still retries it and returns `BOOKING_SCHEDULE_BUSY`, as the MongoDB API does, if every retry fails. Each retry round lets about one waiting booking through, so a large burst of simultaneous bookings for one professional can exhaust the retries.
+`types/booking.schedule.js` holds the [booking rules](../README.md#booking-rules) shared by the booking controller and the `bookingAvailability` mutation in `types/customMutations.js`. Both read bookings through the native model, outside the client booking scope. Before its overlap query, the controller runs `UPDATE … SET id = id` on the professional row, or on the shop row and all its professionals for a booking without one, through the active session. A concurrent REPEATABLE READ transaction for that schedule waits and then fails with a serialization error; Simfinity retries it, up to five times and each after a short random backoff, with a fresh snapshot that sees the committed booking. The controller reports that error as `BOOKING_SCHEDULE_BUSY` and keeps its SQLSTATE, so Simfinity still retries it and returns `BOOKING_SCHEDULE_BUSY`, as the MongoDB API does, if every retry fails. Each retry round lets about one waiting booking through, so a large burst of simultaneous bookings for one professional can exhaust the retries.
 
 ## Inspect generated schema artifacts
 
@@ -109,7 +109,7 @@ The export initializes or validates the configured app schema before reading its
 
 ## MCP
 
-The HTTP endpoint is `http://localhost:4500/mcp`. Configure Streamable HTTP in an MCP client and send `Authorization: Bearer <accessToken>` for signed-in operations. It uses the same JWT context, authorization plugin, and query scopes as GraphQL.
+The HTTP endpoint is `http://localhost:4500/mcp`. Configure Streamable HTTP in an MCP client and send `Authorization: Bearer <accessToken>` for signed-in operations. It uses the same JWT context, authorization plugin, and query scopes as GraphQL. The endpoint serves POST; other methods, such as the GET a client sends to open an event stream, receive `405 Method Not Allowed`, which tells the client that the server sends no separate stream.
 
 For a separate stdio process against the same database, use matching JWT secrets and a raw access token:
 

@@ -2,7 +2,7 @@
 
 Run the same barbershop booking app with either MongoDB or PostgreSQL. Both backends demonstrate generated GraphQL operations, relationships, query scopes, JWT authorization, controllers, state machines, and MCP tools. A shared Next.js frontend provides customer booking, an owner dashboard, and administration screens.
 
-These are independent, private npm applications in the Simfinity monorepo. They install released Simfinity runtime packages at exactly **3.3.0** from npm, with their own manifests and lockfiles. They are outside the `packages/*` workspaces and are not published with the libraries.
+These are independent, private npm applications in the Simfinity monorepo, each with its own manifest and lockfile. Both backends install released Simfinity runtime packages at exactly **3.5.9** from npm; the frontend uses the published GraphQL client. They are outside the `packages/*` workspaces and are not published with the libraries.
 
 ## Start with Docker
 
@@ -67,7 +67,7 @@ Both APIs check a confirmed booking when it is created and when an update change
 
 Each booking line must reference exactly one service or bundle, and a `durationMinutes` sent with it must be a whole, non-negative number; otherwise the API rejects the create or line update with `INVALID_BOOKING_LINE`. The API then derives line durations from the referenced services and bundles instead of the request, and always stores `endTime` as the start time plus those durations (`24:00` for a booking that ends at midnight): an `endTime` sent to `addbooking` or `updatebooking` is ignored, so it can neither shorten nor stretch the held time. Only a MongoDB line whose reference no longer resolves keeps its captured duration, because MongoDB accepts dangling references. The API also stores `startTime` as zero-padded 24-hour `HH:mm` (`9:00` becomes `09:00`). Rejections use the codes `BOOKING_SLOT_UNAVAILABLE`, `BOOKING_OUTSIDE_HOURS`, `BOOKING_OUTSIDE_ADVANCE_WINDOW`, `INVALID_BOOKING_TIME`, `INVALID_BOOKING_LINE` and `INVALID_BOOKING_PROFESSIONAL`, plus `INVALID_BOOKING_BARBERSHOP` for a booking nested in a barbershop mutation that names another shop. Concurrent bookings for the same schedule are serialized inside the database transaction; when retries run out, both APIs return `BOOKING_SCHEDULE_BUSY` and the client can try again. See the backend READMEs. Existing bookings are not revalidated or migrated; when one is checked again, a negative line duration stored by an earlier version counts as zero.
 
-Clients cannot read other clients' bookings, so the booking page asks `bookingAvailability` for taken times. It requires a signed-in user and returns only the start time, end time and professional ID of confirmed bookings for an approved shop and date, in clock order; `professionalId` narrows it to the ranges that block that professional. `excludeBookingId` leaves out one booking when the signed-in user is its client; other bookings are never left out. A malformed `barbershopId` or `excludeBookingId` returns `NOT_VALID_ID` from both APIs. When the API rejects the chosen time, the page explains why, reloads the taken times and returns to the time step. Simfinity 3.3.0 registers custom mutations but not custom queries, so this read-only operation is a mutation. It is also an MCP tool.
+Clients cannot read other clients' bookings, so the booking page asks `bookingAvailability` for taken times. It requires a signed-in user and returns only the start time, end time and professional ID of confirmed bookings for an approved shop and date, in clock order; `professionalId` narrows it to the ranges that block that professional. `excludeBookingId` leaves out one booking when the signed-in user is its client; other bookings are never left out. A malformed `barbershopId` or `excludeBookingId` returns `NOT_VALID_ID` from both APIs. When the API rejects the chosen time, the page explains why, reloads the taken times and returns to the time step. Simfinity 3.5.9 registers custom mutations but not custom queries, so this read-only operation is a mutation. It is also an MCP tool.
 
 ```graphql
 mutation BusyTimes {
@@ -107,7 +107,7 @@ The shared frontend treats IDs as opaque strings. Relationship metadata, role sc
 
 Start reading either backend at `application.js`, then inspect `types/`, `auth/`, and `database.js`. Entity files register GraphQL types; adjacent `.scopes.js`, `.controller.js`, and `.stateMachine.js` files hold behavior. The domain includes users, shops, categories, services, bundles, professionals, bookings, reviews, favorites, and notifications.
 
-Both APIs also expose `/mcp`. HTTP requests use the same bearer JWT context as GraphQL. The `mcp:stdio` command provides a separate transport bound to the `MCP_BEARER` environment variable; see the backend READMEs.
+Both APIs also expose `/mcp`. HTTP requests use the same bearer JWT context as GraphQL. The endpoint serves `POST`; other methods, such as the `GET` an MCP client sends to open an event stream, receive `405` with `Allow: POST`. The `mcp:stdio` command provides a separate transport bound to the `MCP_BEARER` environment variable; see the backend READMEs.
 
 ## Validate changes
 
@@ -141,7 +141,7 @@ Run these two commands from the repository root. The matrix creates its own synt
 
 The scopes preserve caller filters and intersect them with server restrictions. For example, selecting one shop still returns only that shop when the owner can access several; a booking OR filter remains combined with the owner's access rule. A requested user ID outside the scope returns null or an empty list.
 
-**Reference integrity differs:** PostgreSQL FKs reject an embedded reference to a nonexistent service and roll back the mutation. The MongoDB example uses the default integrity mode and can store that reference and resolve it to null on reads; Mongoose references are not foreign keys. The matrix checks this difference explicitly. Simfinity 3.4.0 adds an opt-in [transactional Mongo integrity adapter](../../docs/guide/mongodb-integrity.md); these examples remain pinned to 3.3.0 and keep their existing defaults.
+**Reference integrity differs:** PostgreSQL FKs reject an embedded reference to a nonexistent service and roll back the mutation. The MongoDB example uses the default integrity mode and can store that reference and resolve it to null on reads; Mongoose references are not foreign keys. The matrix checks this difference explicitly. Since 3.4.0, Simfinity offers an opt-in [transactional Mongo integrity adapter](../../docs/guide/mongodb-integrity.md); the MongoDB example does not enable it, so the matrix expects the dangling reference on 3.5.9 too.
 
 These tests exercise login, scopes, booking rules and availability, and MCP against a real backend and create test records. Both backends also have real-database checks for transactions, derived domain values, and dataset loading/deletion. PostgreSQL adds storage, foreign-key, and frontend-query checks; see the backend READMEs. The frontend has its own unit, type, build, and browser checks.
 
@@ -155,7 +155,14 @@ npm run test:security --prefix examples/barber/postgres
 npm run test:security --prefix examples/barber/frontend
 ```
 
-Use Node.js 24 and the committed lockfiles. The MongoDB example requires Mongoose `^8.24.2`; both backends require Multer `^2.3.0`; Vitest and its browser/coverage packages require `^4.1.11`; the frontend requires Next.js `^16.3.8`. These minima exclude the reviewed vulnerable direct versions. Applications still consume the exact released Simfinity 3.3.0 packages; database selection, seeding and API behavior remain unchanged.
+Use Node.js 24 and the committed lockfiles. The MongoDB example requires Mongoose `^8.24.2`; both backends require Multer `^2.3.0` and GraphQL Yoga `^5.24.4`; Vitest and its browser/coverage packages require `^4.1.11`; the frontend requires Next.js `^16.3.8`. These minima exclude the reviewed vulnerable direct versions. The backends consume the exact released Simfinity 3.5.9 packages, whose MCP integration requires the `@modelcontextprotocol/sdk` peer at `^1.31.0`; both backend lockfiles resolve 1.32.1.
+
+The backend lockfiles also include the security fixes in `@graphql-tools/utils` 12.0.3, `@fastify/busboy` 3.2.2, `proxy-addr` 2.0.8 and `source-map-js` 1.2.2. The frontend uses patched `sharp` 0.35.5 and `source-map-js` 1.2.2, plus a temporary dependency override for Next.js linting described in its [security notes](frontend/README.md#verification). Preserve these fixes when refreshing dependencies and run all three application audits before merging.
+
+The upgrade from 3.3.0 left database selection, seeding, the generated PostgreSQL schema and GraphQL responses unchanged. Each backend's `index.yoga.js` changed in two places:
+
+- Envelop's `useErrorHandler` passes `{ errors, context, phase }`, not an error, so the server logs each entry of `errors` through `buildErrorFormatter(console.error)` instead of passing the formatter to `useErrorHandler`. Given that object, the formatter now logs only `Unexpected error value`, without the errors; see [error formatting](../../docs/resources/compatibility.md#error-formatting). Each logged error now shows its own message and code.
+- `/mcp` is mounted with `app.all`, so the handler answers methods other than `POST` with `405` and `Allow: POST`; with `app.post`, Express returned `404`, which MCP clients report as a transport error. See the [MCP Streamable HTTP handler](../../docs/resources/compatibility.md#mcp-streamable-http-handler) notes.
 
 ## Stop or reset one stack
 
