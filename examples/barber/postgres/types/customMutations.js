@@ -1,4 +1,4 @@
-// Business-logic operations that cannot be expressed as CRUD + scopes. Simfinity 3.3.0 can
+// Business-logic operations that cannot be expressed as CRUD + scopes. Simfinity 3.5.9 can
 // register custom mutations but not custom queries, so read-only operations use mutations too.
 import * as graphql from 'graphql';
 import * as simfinity from '@simtlix/simfinity-postgres';

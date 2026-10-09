@@ -632,7 +632,7 @@ Keep all directly installed Simfinity packages at 3.5.0 and review these behavio
 - MongoDB uses the application's GraphQL and Mongoose peers. Install the optional MCP SDK explicitly for transports; `graphql-middleware` is no longer installed by Simfinity. See [installation](../guide/databases#install-from-npm).
 - Embedded updates enforce required fields when constructing replacement objects or list items; existing embedded objects still accept valid partial patches. SQL sessions reject statements after their callback settles, and a failed rollback discards the connection. See [mutations](../guide/mutations) and the [SQL plugin contract](../guide/sql-plugins#plugin-contract-version-1).
 
-The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.9. Historical archives and the Barber examples retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
+The current [downloadable starters](../guide/databases#download-the-starters) use 3.5.9. The [Barber examples](./barber) state their own exact package pin, and historical archives retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
 
 ## Upgrade from 3.2.0
 

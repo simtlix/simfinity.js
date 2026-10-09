@@ -147,7 +147,8 @@ export async function lockBookingSchedule(barbershopId, professionalId, session)
     }
   } catch (error) {
     if (!error?.errorLabels?.includes('TransientTransactionError')) throw error;
-    // The runtime retries at once; a short random pause spreads concurrent retries apart.
+    // The runtime waits its own short random backoff before retrying; this extra pause spreads
+    // concurrent retries further apart.
     await new Promise((resolve) => { setTimeout(resolve, 20 + Math.random() * 80); });
     // Keep the label so the runtime still retries; only its final attempt reaches the client.
     const busy = new simfinity.SimfinityError('Another booking for this schedule is being saved; try again', 'BOOKING_SCHEDULE_BUSY', 409);

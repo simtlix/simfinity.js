@@ -15,6 +15,8 @@ import uploadRouter from './routes/upload.js';
 await initializeApplication();
 
 const useCountPlugin = simfinity.plugins.envelopCountPlugin;
+// Classifies each GraphQL error and logs it; responses are not changed.
+const logError = simfinity.buildErrorFormatter(console.error);
 
 const app = express();
 app.use(cors());
@@ -30,7 +32,8 @@ const yoga = createYoga({
   schema,
   context: ({ request }) => buildUserContext(request.headers.get('authorization')),
   plugins: [
-    useErrorHandler(simfinity.buildErrorFormatter(console.error)),
+    // useErrorHandler passes { errors, context, phase }, not an error, so format each error.
+    useErrorHandler(({ errors }) => { errors.forEach((error) => logError(error)); }),
     useCountPlugin(),
     authPlugin,
   ],
@@ -61,7 +64,9 @@ const mcpHandler = await simfinity.createHTTPMCPHandler(schema, {
   // shared schema is wrapped exactly once (the plugin wraps each field once).
   schemaPlugins: [authPlugin],
 });
-app.post('/mcp', express.json(), mcpHandler);
+// Mount on every method: the handler serves POST and answers other methods with 405 and `Allow: POST`,
+// which MCP clients expect when they try to open a GET event stream.
+app.all('/mcp', express.json(), mcpHandler);
 
 const PORT = process.env.PORT || 4400;
 const server = app.listen(PORT, () => {

@@ -1,6 +1,6 @@
 # Barber MongoDB backend
 
-An independent, private application using `@simtlix/simfinity-js@3.3.0`, Mongoose, Express, and GraphQL Yoga. It installs released packages from npm and is outside the monorepo's library workspaces. Use the [Barber quick start](../README.md) to run the complete Docker stack with the shared frontend.
+An independent, private application using `@simtlix/simfinity-js@3.5.9`, Mongoose, Express, and GraphQL Yoga. It installs released packages from npm and is outside the monorepo's library workspaces. Use the [Barber quick start](../README.md) to run the complete Docker stack with the shared frontend.
 
 ## Host development
 
@@ -82,13 +82,13 @@ Integration checks use the configured `MONGO` deployment and create and remove t
 | `auth/` | JWT request context, permission gates, and ownership checks. |
 | `dataset/`, `scripts/` | Synthetic fixtures and local operational commands. |
 
-`types/booking.schedule.js` holds the [booking rules](../README.md#booking-rules) shared by the booking controller and the `bookingAvailability` mutation in `types/customMutations.js`. Both read bookings with native Mongoose queries, outside the client booking scope. Before its overlap query, the controller increments a hidden `_bookingScheduleLock` counter on the professional document, or on the shop and all its professionals for a booking without one, in the same transaction. A concurrent booking for that schedule then hits a write conflict; Simfinity retries it with a fresh snapshot that sees the committed booking. Simfinity retries at once, up to five times, so the controller first waits 20–100 ms at random to spread concurrent retries apart. If every retry conflicts, the API returns `BOOKING_SCHEDULE_BUSY`.
+`types/booking.schedule.js` holds the [booking rules](../README.md#booking-rules) shared by the booking controller and the `bookingAvailability` mutation in `types/customMutations.js`. Both read bookings with native Mongoose queries, outside the client booking scope. Before its overlap query, the controller increments a hidden `_bookingScheduleLock` counter on the professional document, or on the shop and all its professionals for a booking without one, in the same transaction. A concurrent booking for that schedule then hits a write conflict; Simfinity retries it with a fresh snapshot that sees the committed booking. Simfinity retries up to five times, each after a short random backoff, and the controller first waits another 20–100 ms at random to spread concurrent retries further apart. If every retry conflicts, the API returns `BOOKING_SCHEDULE_BUSY`.
 
 MongoDB ObjectIds are exposed as GraphQL `ID`. Shared frontend code treats them as opaque strings. The PostgreSQL example expresses the same domain with UUID identities and separate native database code; see [the comparison](../README.md#what-to-compare).
 
 ## MCP
 
-The HTTP server exposes generated tools at `http://localhost:4400/mcp`. Configure an MCP client for Streamable HTTP and send `Authorization: Bearer <accessToken>` for signed-in operations. Tool execution uses the GraphQL authentication context, permissions, and scopes.
+The HTTP server exposes generated tools at `http://localhost:4400/mcp`. Configure an MCP client for Streamable HTTP and send `Authorization: Bearer <accessToken>` for signed-in operations. Tool execution uses the GraphQL authentication context, permissions, and scopes. The endpoint serves `POST` only; other methods, such as a client's `GET` for an event stream, receive `405` with `Allow: POST`.
 
 For stdio, run a separate process against the same database with matching JWT secrets:
 

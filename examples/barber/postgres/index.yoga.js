@@ -27,11 +27,15 @@ const graphqlLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Logs each request error as Simfinity classifies it. useErrorHandler is only a logging hook: it
+// receives { errors } and does not change responses, so pass it each error, not the formatter.
+const logError = simfinity.buildErrorFormatter(console.error);
+
 const yoga = createYoga({
   schema,
   context: ({ request }) => buildUserContext(request.headers.get('authorization')),
   plugins: [
-    useErrorHandler(simfinity.buildErrorFormatter(console.error)),
+    useErrorHandler(({ errors }) => { errors.forEach((error) => logError(error)); }),
     useCountPlugin(),
     authPlugin,
   ],
@@ -62,7 +66,8 @@ const mcpHandler = await createHTTPMCPHandler(schema, {
   // shared schema is wrapped exactly once (the plugin wraps each field once).
   schemaPlugins: [authPlugin],
 });
-app.post('/mcp', express.json(), mcpHandler);
+// The handler answers every method other than POST with 405, which Streamable HTTP clients expect.
+app.all('/mcp', express.json(), mcpHandler);
 
 const PORT = process.env.PORT || 4500;
 const server = app.listen(PORT, () => {

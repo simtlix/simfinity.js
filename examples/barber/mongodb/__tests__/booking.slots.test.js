@@ -195,7 +195,7 @@ describe('booking schedule serialization', () => {
     const error = await create({ startTime: '14:00' }).catch((caught) => caught);
     expect(error.extensions.code).toBe('BOOKING_SCHEDULE_BUSY');
     expect(error.errorLabels).toContain('TransientTransactionError');
-    // A short random pause before the runtime's immediate retry spreads concurrent attempts apart.
+    // A short random pause before the runtime's retry spreads concurrent attempts apart.
     expect(performance.now() - started).toBeGreaterThanOrEqual(19);
   });
 });

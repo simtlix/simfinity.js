@@ -171,16 +171,24 @@ try {
   assert.equal((await mcp.callTool('updateuser', { input: { id: client.user.id, role: 'PLATFORM_ADMIN' } })).isError, true);
   const app = express();
   const handler = await createHTTPMCPHandler(schema, { schemaPlugins: [authPlugin], context: (req) => buildUserContext(req.headers.authorization), selectionDepth: 0 });
-  app.post('/mcp', express.json(), handler);
+  app.all('/mcp', express.json(), handler);
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
-  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.address().port}/mcp`), { requestInit: { headers: { authorization: `Bearer ${client.accessToken}` } } });
+  const mcpUrl = new URL(`http://127.0.0.1:${server.address().port}/mcp`);
+  const transport = new StreamableHTTPClientTransport(mcpUrl, { requestInit: { headers: { authorization: `Bearer ${client.accessToken}` } } });
   const mcpClient = new Client({ name: 'barber-integration', version: '1.0.0' });
+  const transportErrors = [];
+  mcpClient.onerror = (error) => transportErrors.push(error.message);
   try {
     await mcpClient.connect(transport);
     assert.ok((await mcpClient.listTools()).tools.length > 50);
     assert.ok(!(await mcpClient.callTool({ name: 'barbershops', arguments: {} })).isError);
     assert.equal((await mcpClient.callTool({ name: 'updateuser', arguments: { input: { id: client.user.id, role: 'PLATFORM_ADMIN' } } })).isError, true);
+    // Clients open an optional event stream with GET; 405 tells them the server offers none.
+    const stream = await fetch(mcpUrl, { headers: { accept: 'text/event-stream' } });
+    await stream.arrayBuffer();
+    assert.equal(stream.status, 405);
+    assert.deepEqual(transportErrors, []);
   } finally {
     await mcpClient.close();
     await new Promise((resolve) => server.close(resolve));

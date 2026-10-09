@@ -7,7 +7,7 @@ description: Run a booking app with independent MongoDB and PostgreSQL backends,
 
 The [Barber examples](https://github.com/simtlix/simfinity.js/tree/master/examples/barber) put Simfinity's generated API into a booking application. Run either database backend with the same Next.js frontend, then explore customer booking, the owner dashboard, and shop administration.
 
-Both apps consume released Simfinity runtime packages at exactly **3.3.0** from npm. Each backend and the shared frontend have independent manifests and lockfiles outside the library workspaces. The examples have a dedicated validation workflow and are not npm libraries.
+Both backends consume released Simfinity runtime packages at exactly **3.5.9** from npm. Each backend and the shared frontend have independent manifests and lockfiles outside the library workspaces. The examples have a dedicated validation workflow and are not npm libraries.
 
 For a smaller starting point, use the [MongoDB quick start](/guide/getting-started) or [PostgreSQL quick start](/guide/postgresql).
 
@@ -105,13 +105,13 @@ Provide the access token as an `Authorization: Bearer …` header in GraphiQL an
 
 Both backends provide `npm run test:query-mutations` for a running disposable GraphQL API. The shared matrix checks filters and nested AND/OR groups, filtered aggregates, relation joins, scopes and nested mutations with rollback. CI runs the same expected results against both databases. See the [test commands and data boundaries](https://github.com/simtlix/simfinity.js/blob/master/examples/barber/README.md#validate-changes).
 
-Scopes intersect caller filters with access restrictions. PostgreSQL additionally enforces foreign keys; this MongoDB example keeps the default integrity mode and can store a nonexistent referenced ID and resolve it to null. The matrix records this integrity difference explicitly. Simfinity 3.4.0 adds optional [transactional Mongo reference integrity](../guide/mongodb-integrity), while these examples remain on 3.3.0.
+Scopes intersect caller filters with access restrictions. PostgreSQL additionally enforces foreign keys; this MongoDB example keeps the default integrity mode and can store a nonexistent referenced ID and resolve it to null. The matrix records this integrity difference explicitly. Since 3.4.0, Simfinity offers optional [transactional Mongo reference integrity](../guide/mongodb-integrity); the MongoDB example does not enable it.
 
 ## What the code demonstrates
 
 GraphQL types describe shops, services, bundles, professionals, bookings, reviews, favorites, and notifications. Relationship metadata connects them; generated operations support the frontend's reads and writes. Controllers enforce domain checks and derive values such as booking totals. State machines implement shop approval and booking transitions.
 
-Query scopes and JWT permission rules apply according to the current user. HTTP MCP calls use the same bearer-token context as GraphQL, and each backend also provides `npm run mcp:stdio` for an MCP process with a configured user context.
+Query scopes and JWT permission rules apply according to the current user. HTTP MCP calls use the same bearer-token context as GraphQL, and each backend also provides `npm run mcp:stdio` for an MCP process with a configured user context. Both backends mount the HTTP handler for every method, as the [MCP guide](../guide/mcp) recommends: it serves `POST` and answers other methods, such as a client's event-stream `GET`, with `405`.
 
 | Concern | MongoDB implementation | PostgreSQL implementation |
 | --- | --- | --- |
@@ -129,6 +129,8 @@ To inspect the PostgreSQL schema, run `npm run schema:export` from `examples/bar
 Use Node.js 24 for host development and install each app with its own `npm ci`. Backend `.env.example` files configure host database connections and API ports. The frontend uses `.env.local`; its `NEXT_PUBLIC_GRAPHQL_URL` must be browser-reachable and is embedded at build time.
 
 The [Barber workflow](https://github.com/simtlix/simfinity.js/blob/master/.github/workflows/barber.yml) runs independently from library CI. It validates backend units, frontend checks, HTTP/MCP behavior, and browser flows against both databases. Both backends check real transactions, derived domain values, and dataset loading/deletion; PostgreSQL adds storage, foreign-key, and frontend-query checks. Root library lint and Vitest discovery exclude example applications.
+
+Each backend's `index.yoga.js` logs every GraphQL error through `buildErrorFormatter`, one entry of the `errors` list that Envelop's `useErrorHandler` receives at a time, as the [error reference](../reference/errors#connect-it-to-your-server) describes. Logging does not change responses.
 
 The repository runbooks contain environment options, commands, and source provenance:
 

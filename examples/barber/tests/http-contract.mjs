@@ -208,6 +208,14 @@ try {
   assert.ok(!catalogTool.isError, JSON.stringify(catalogTool));
   const forbiddenTool = await rpc('tools/call', { name: 'updateuser', arguments: { input: { id: client.user.id, role: 'PLATFORM_ADMIN' } } });
   assert.equal(forbiddenTool.isError, true);
+  // The stateless endpoint serves POST only; a client's event-stream GET gets 405, not a 404 page.
+  const streamAttempt = await fetch(`${origin}/mcp`, {
+    method: 'GET', headers: { accept: 'text/event-stream', authorization: `Bearer ${client.accessToken}` },
+    signal: AbortSignal.timeout(30_000),
+  });
+  assert.equal(streamAttempt.status, 405, `MCP GET: HTTP ${streamAttempt.status}`);
+  assert.equal(streamAttempt.headers.get('allow'), 'POST');
+  await streamAttempt.body?.cancel();
   console.log(`HTTP contract passed: ${checks} operations plus scopes, embedded relations, booking state, availability and MCP assertions.`);
 } finally {
   for (const [name, id] of [
