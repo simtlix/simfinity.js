@@ -53,6 +53,61 @@ const batchesFindOne = (Model) => hasNoFindHooks(Model.schema?.s?.hooks)
 // `useDb()` connections share their parent's MongoClient, and a session belongs to a client.
 const clientOf = (connection) => connection.getClient?.() || connection;
 
+// Whether a schema lets Mongoose render a member inside an embedded object from something other
+// than its stored value: a getter on a path, a virtual, an alias or, on a subdocument, a method
+// (GraphQL's default resolver calls one named like a member), at any depth (nested paths,
+// subdocuments, document arrays, map values). Core cannot tell such an object's data without
+// running them, so rawEmbeddedValue leaves it unconverted and core keeps it. Read from schema
+// metadata only. The `id` virtual that Mongoose adds to a schema with an `_id` renders that `_id`,
+// which core reads itself, so it does not count; one the application declares does: it has another
+// getter, or the schema disables the automatic one.
+const isAutomaticIdVirtual = (schema, name, virtual) => name === 'id' && virtual?.getters?.length === 1
+  && schema.options?.id !== false && schema.paths._id !== undefined && schema.paths.id === undefined;
+const schemaTypeComputes = (schemaType, seen) => {
+  if (!(schemaType instanceof mongoose.SchemaType) || seen.has(schemaType)) return false;
+  seen.add(schemaType);
+  if (schemaType.getters?.length > 0) return true;
+  // schemaComputes is defined below: schemas and their paths contain each other.
+  if (schemaType.schema && schemaComputes(schemaType.schema, '', seen)) return true;
+  // Map values, array items and document array elements.
+  return [schemaType.$__schemaType, schemaType.$embeddedSchemaType, schemaType.caster]
+    .some((inner) => schemaTypeComputes(inner, seen));
+};
+// `prefix` is a nested path of the schema; '' is the whole schema, as a subdocument's own.
+const schemaComputes = (schema, prefix, seen) => {
+  if (prefix === '') {
+    if (seen.has(schema)) return false;
+    seen.add(schema);
+    // Nested paths get no schema methods; a subdocument's own schema can.
+    if (Object.keys(schema.methods ?? {}).length > 0) return true;
+  }
+  const inside = (path) => prefix === '' || path.startsWith(`${prefix}.`);
+  return Object.entries(schema.paths ?? {}).some(([path, schemaType]) => inside(path) && schemaTypeComputes(schemaType, seen))
+    || Object.entries(schema.virtuals ?? {}).some(([name, virtual]) => inside(name)
+      && !(prefix === '' && isAutomaticIdVirtual(schema, name, virtual)))
+    // An alias stores its value under another path, and may be declared outside a nested path.
+    || Object.entries(schema.aliases ?? {}).some(([alias, path]) => inside(alias) || inside(path));
+};
+// Schemas do not change once their models are compiled, so each answer is computed once.
+const computesCache = new WeakMap();
+const cachedComputes = (key, prefix, compute) => {
+  let byPrefix = computesCache.get(key);
+  if (!byPrefix) {
+    byPrefix = new Map();
+    computesCache.set(key, byPrefix);
+  }
+  if (!byPrefix.has(prefix)) byPrefix.set(prefix, compute());
+  return byPrefix.get(prefix);
+};
+const declaresComputedMembers = (schema, prefix) => cachedComputes(schema, prefix, () => schemaComputes(schema, prefix, new Set()));
+const declaresComputedValues = (schemaType) => cachedComputes(schemaType, '', () => schemaTypeComputes(schemaType, new Set()));
+// A hydrated nested path is cached by its full path in its document's internal getters cache, which
+// it shares; '' (the whole schema) if it is not found there.
+const nestedPathOf = (nested) => {
+  const cache = nested.$__?.getters;
+  return (cache && Object.keys(cache).find((path) => cache[path] === nested)) ?? '';
+};
+
 export const createMongoAdapter = (options) => {
   const integrity = createMongoIntegrity(options);
   let queries;
@@ -66,15 +121,28 @@ export const createMongoAdapter = (options) => {
   // - any model compiled on it, generated or the application's, registered or not, means the
   //   application opens it, maybe after the request arrived, and the callback may write that
   //   model with the session, which must then come from the default connection's client. The
-  //   same holds for a model compiled on one of its useDb() connections, which share its client.
-  //   Only those in its otherDbs are seen: useDb(name, { noListener: true }) leaves a connection
-  //   out of it, and native collection writes (mongoose.connection.collection()) compile no model;
+  //   same holds for a model compiled on any useDb() descendant of it, such as
+  //   mongoose.connection.useDb('tenant').useDb('audit'), which shares its client. A connection's
+  //   otherDbs lists its direct useDb() children, not theirs, so the walk follows otherDbs at any
+  //   depth.
+  //   useDb(name, { noListener: true }) leaves a connection out of its parent's otherDbs, so neither
+  //   it nor its descendants are seen, and native collection writes
+  //   (mongoose.connection.collection()) compile no model;
   // - registered models on several clients have no single client to choose.
   // Once the default connection has a client, nothing changes.
   const hasModels = (connection) => Object.keys(connection.models).length > 0;
+  // A child's otherDbs also lists its parent, so the walk visits each connection once, cycles
+  // included: a Set iteration also visits the entries added while it runs.
+  const defaultClientHasModels = () => {
+    const seen = new Set([mongoose.connection]);
+    for (const connection of seen) {
+      if (hasModels(connection)) return true;
+      for (const other of connection.otherDbs) seen.add(other);
+    }
+    return false;
+  };
   const sessionModel = () => {
-    if (mongoose.connection.getClient() || hasModels(mongoose.connection)
-      || mongoose.connection.otherDbs.some(hasModels)) return undefined;
+    if (mongoose.connection.getClient() || defaultClientHasModels()) return undefined;
     let found;
     for (const { model } of getRegistrations()) {
       const connection = model?.db;
@@ -156,14 +224,38 @@ export const createMongoAdapter = (options) => {
     },
     // A hydrated document renders a singular embedded path as an object even when the stored value
     // is an explicit null. Only that stored null reads as null; an absent value keeps Mongoose's
-    // materialized object; core then reads it as null when it holds no data and misses a required
-    // member (runtime.js readEmbeddedObject).
+    // materialized object; core then reads it as null when its stored members (rawEmbeddedValue)
+    // hold no data and miss a required member (runtime.js readEmbeddedObject).
     readEmbeddedValue(value) {
       // The nested accessor's toJSON is called without a receiver on purpose. It reads the schema's
       // toJSON virtuals option from `this` (guarded by `this &&`), and with that option set a stored
       // null renders as `{}`. Without a receiver it reads the raw path value of its own document.
       return value?.$__isNested === true && typeof value.toJSON === 'function' && value.toJSON.call(null) === null
         ? null : value;
+    },
+    // The stored data of a hydrated embedded value, which core reads to tell whether it holds data
+    // without running schema getters or virtuals: a nested path's raw value (its toJSON without a
+    // receiver, as above), a subdocument's _doc or a Mongoose map's entries. The first two hold an
+    // absent nested path as {}, as Mongoose renders it, and keep subdocuments and maps hydrated,
+    // which core passes back here. A subdocument's automatic `id` virtual is not in _doc; core reads
+    // `_id` for `id`. A value whose schema declares a getter, a virtual, an alias or a subdocument
+    // method on a member at any depth inside it (declaresComputedMembers) is returned unchanged, so core counts it as data
+    // and keeps it, as 3.5.8 rendered it; no getter runs. Generated models declare none. Any other
+    // value is returned unchanged too.
+    rawEmbeddedValue(value) {
+      if (value?.$__isNested === true) {
+        // A schema from another Mongoose copy cannot be inspected; keep the value as 3.5.8 did.
+        if (typeof value.toJSON !== 'function' || !(value.$__schema instanceof mongoose.Schema)
+          || declaresComputedMembers(value.$__schema, nestedPathOf(value))) return value;
+        return value.toJSON.call(null);
+      }
+      // Iterating a map reads its stored values; its get() would run the value getters.
+      if (value instanceof mongoose.Types.Map) {
+        return declaresComputedValues(value.$__schemaType) ? value : Object.fromEntries(value);
+      }
+      if (!(value instanceof mongoose.Document) || !value._doc) return value;
+      const schema = value.$__schema ?? value.schema;
+      return !schema || declaresComputedMembers(schema, '') ? value : value._doc;
     },
     getById(Model, id, session, { projection, plain, requiredId } = {}) {
       integrity.assertReady();

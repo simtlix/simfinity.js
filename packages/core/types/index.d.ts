@@ -297,14 +297,29 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * their types, so a runtime that reaches a shared type may read through another runtime's hook.
    * Simfinity then reads as null an object that holds no data when a non-null member would read as
    * null, whatever the selection. These members do not count: `id`, readOnly members, interface and
-   * union members, members with their own resolver and referenced collections. Runtimes that share
-   * the type read through the same resolver, with or without the hook. On MongoDB, a create that
-   * writes an empty object for a required embedded member stores it as absent (Mongoose minimizes
-   * it), so an object that holds nothing else reads as null too, except in by-ID and reference reads
-   * and update responses where the member is a nested path, as generated models declare every
-   * embedded member except one named `type`.
+   * union members, members with their own resolver and referenced collections. An object whose type
+   * has no member that counts is returned untouched. Otherwise Simfinity reads the stored members
+   * (see `rawEmbeddedValue`), never calling a getter, and counts a stored `_id` as `id`; an error
+   * while reading them returns the object unchanged. Runtimes that share the type read through the
+   * same resolver, with or without the hook. On MongoDB, a create that writes an empty object for a
+   * required embedded member stores it as absent (Mongoose minimizes it), so an object that holds
+   * nothing else reads as null too, except in by-ID and reference reads and update responses where
+   * the member is a nested path, as generated models declare every embedded member except one named
+   * `type`.
    */
   readEmbeddedValue?(value: any): any;
+  /**
+   * Optional, used with `readEmbeddedValue`. Returns the stored data of a hydrated embedded value
+   * as a plain object, without running getters or virtuals, such as a document's raw data; returns
+   * any other value unchanged. Return a hydrated value unchanged when its stored data does not show
+   * what it renders, such as one whose schema supplies members through getters, virtuals, methods
+   * or aliases: a value that is not a plain object counts as data, so Simfinity keeps it as it is.
+   * Simfinity calls it on the embedded objects it checks for data, including those it finds inside
+   * the returned data, and reads only own data properties of the result; a null or undefined result
+   * has no members. Without it, a plain object is read as it is, an accessor property counts as
+   * present without being called, and a value that is not a plain object counts as data.
+   */
+  rawEmbeddedValue?(value: any): any;
   getById(model: Model, id: any, session?: Session | null, options?: { projection?: Record<string, number>; plain?: boolean; lock?: boolean; requiredId?: any; context?: any }): any;
   /** Optional batch read: the records found for `ids`, in getById shape and any order. After a failure, the runtime reads each ID with getById. */
   getByIds?(model: Model, ids: any[], options?: { context?: any }): any;

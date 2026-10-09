@@ -2814,6 +2814,185 @@ describe('embedded value hook', () => {
       expect(result.errors.map(({ message }) => message))
         .toEqual(['Cannot return null for non-nullable field NoDataSelfNode.label.']);
     });
+
+    describe('reading stored members', () => {
+      // `secret` comes first, so a rule that read members through their getters would reach it first.
+      const createGetterTypes = (prefix) => {
+        const Details = new GraphQLObjectType({
+          name: `${prefix}Details`, fields: { secret: { type: GraphQLString }, visible: { type: GraphQLString } },
+        });
+        const Secured = new GraphQLObjectType({
+          name: `${prefix}Secured`,
+          fields: {
+            secret: { type: GraphQLString }, code: { type: new GraphQLNonNull(GraphQLString) }, visible: { type: GraphQLString },
+          },
+        });
+        const Shop = new GraphQLObjectType({
+          name: `${prefix}Shop`,
+          fields: {
+            id: { type: GraphQLID }, name: { type: GraphQLString }, details: embedded(Details), secured: embedded(Secured),
+          },
+        });
+        return { embeddedTypes: [Details, Secured], Shop };
+      };
+      const secretReads = [];
+      const withSecret = (data) => Object.defineProperty({ ...data }, 'secret', {
+        enumerable: true,
+        get() {
+          secretReads.push(data);
+          throw new Error('secret getter');
+        },
+      });
+
+      test('returns objects of a type without a required member that counts untouched, reading no member', async () => {
+        secretReads.length = 0;
+        const fixture = await setup(createHookAdapter(), 'noDataUntouched', [
+          { _id: '1', details: withSecret({ visible: 'ok' }) },
+          { _id: '2', details: withSecret({}) },
+        ], createGetterTypes('NoDataUntouched'));
+
+        const results = await readBoth(fixture, 'details { visible }');
+
+        const expected = [{ id: '1', details: { visible: 'ok' } }, { id: '2', details: { visible: null } }];
+        expect(results).toEqual([
+          { data: { noDataUntoucheds: expected } },
+          ...expected.map((row) => ({ data: { noDataUntouched: row } })),
+        ]);
+        expect(secretReads).toEqual([]);
+      });
+
+      test('never calls an accessor of a type with a required member that counts, which is present', async () => {
+        secretReads.length = 0;
+        const fixture = await setup(createHookAdapter(), 'noDataAccessor', [
+          { _id: '1', secured: withSecret({ code: 'c' }) },
+          // The accessor is present, so the object holds data and renders as before the rule.
+          { _id: '2', secured: withSecret({}) },
+          { _id: '3', secured: {} },
+        ], createGetterTypes('NoDataAccessor'));
+
+        const results = await readBoth(fixture, 'secured { visible }');
+
+        const expected = [
+          { id: '1', secured: { visible: null } },
+          { id: '2', secured: { visible: null } },
+          { id: '3', secured: null },
+        ];
+        expect(results).toEqual([
+          { data: { noDataAccessors: expected } },
+          ...expected.map((row) => ({ data: { noDataAccessor: row } })),
+        ]);
+        expect(secretReads).toEqual([]);
+      });
+
+      // A hydrated record that renders its members through getters, as MongoDB documents do.
+      class Hydrated {
+        constructor(stored) {
+          Object.defineProperty(this, 'stored', { value: stored });
+        }
+
+        toObject() {
+          return { ...this.stored };
+        }
+
+        get secret() {
+          secretReads.push(this.stored);
+          throw new Error('secret getter');
+        }
+
+        get code() {
+          return this.stored.code;
+        }
+
+        get visible() {
+          return this.stored.visible;
+        }
+      }
+
+      test('reads hydrated records through the adapter rawEmbeddedValue hook, and keeps those it does not convert', async () => {
+        secretReads.length = 0;
+        const securedStored = [{ code: 'c', visible: 'v' }, { visible: 'v' }, {}];
+        const records = () => securedStored.map((stored, index) => ({
+          _id: String(index + 1), details: new Hydrated({}), secured: new Hydrated(stored),
+        }));
+        const converting = Object.assign(createHookAdapter(), {
+          rawEmbeddedValue: vi.fn((value) => (value instanceof Hydrated ? value.stored : value)),
+        });
+        const converted = await setup(converting, 'noDataRaw', records(), createGetterTypes('NoDataRaw'));
+        const kept = await setup(createHookAdapter(), 'noDataKeptRecord', records(), createGetterTypes('NoDataKeptRecord'));
+
+        const convertedResult = await converted.list('details { visible } secured { visible }');
+        const keptResult = await kept.list('secured { visible }');
+
+        // Only the stored data counts; `visible` holds data, so only the third misses `code` with no data.
+        expect(convertedResult).toEqual({
+          data: {
+            noDataRaws: [
+              { id: '1', details: { visible: null }, secured: { visible: 'v' } },
+              { id: '2', details: { visible: null }, secured: { visible: 'v' } },
+              { id: '3', details: { visible: null }, secured: null },
+            ],
+          },
+        });
+        // Details has no required member that counts, so the hook never receives its values.
+        expect(converting.rawEmbeddedValue.mock.calls.map(([value]) => value.stored)).toEqual(securedStored);
+        // Without the hook, a record that is not a plain object counts as data and renders as before the rule.
+        expect(keptResult).toEqual({
+          data: {
+            noDataKeptRecords: [
+              { id: '1', secured: { visible: 'v' } }, { id: '2', secured: { visible: 'v' } }, { id: '3', secured: { visible: null } },
+            ],
+          },
+        });
+        expect(secretReads).toEqual([]);
+      });
+
+      test('returns the value when reading its stored members throws', async () => {
+        const failing = Object.assign(createHookAdapter(), {
+          rawEmbeddedValue: vi.fn(() => {
+            throw new Error('raw read');
+          }),
+        });
+        const fixture = await setup(failing, 'noDataFailing', [{ _id: '1', secured: {} }], createGetterTypes('NoDataFailing'));
+
+        const result = await fixture.list('secured { visible }');
+
+        // Without the error, the object would hold no data and read as null.
+        expect(result).toEqual({ data: { noDataFailings: [{ id: '1', secured: { visible: null } }] } });
+        expect(failing.rawEmbeddedValue).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    test('counts a stored `_id` as the `id` that the object holds', async () => {
+      // Part is an entity, so its generated resolver reads `_id`; Mongoose's id virtual renders a
+      // hydrated subdocument's `_id` as `id` whatever its type, so Keyed counts it too.
+      const Part = new GraphQLObjectType({
+        name: 'NoDataIdentityPart', fields: { id: { type: GraphQLID }, name: { type: new GraphQLNonNull(GraphQLString) } },
+      });
+      const Keyed = new GraphQLObjectType({
+        name: 'NoDataIdentityKeyed', fields: { id: { type: GraphQLID }, name: { type: new GraphQLNonNull(GraphQLString) } },
+      });
+      const Shop = new GraphQLObjectType({
+        name: 'NoDataIdentityShop',
+        fields: {
+          id: { type: GraphQLID }, name: { type: GraphQLString }, part: embedded(Part), keyed: embedded(Keyed),
+        },
+      });
+      const fixture = await setup(createHookAdapter(), 'noDataIdentity', [
+        { _id: '1', part: { _id: 'p1' }, keyed: { _id: 'k1' } },
+        { _id: '2', part: {}, keyed: {} },
+      ], { entities: [Part], embeddedTypes: [Keyed], Shop });
+
+      const results = await readBoth(fixture, 'part { id } keyed { id }');
+
+      const expected = [
+        { id: '1', part: { id: 'p1' }, keyed: { id: null } },
+        { id: '2', part: null, keyed: null },
+      ];
+      expect(results).toEqual([
+        { data: { noDataIdentitys: expected } },
+        ...expected.map((row) => ({ data: { noDataIdentity: row } })),
+      ]);
+    });
   });
 });
 

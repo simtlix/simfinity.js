@@ -61,7 +61,7 @@ simfinity.createSchema()
        +-- adapter.createModel()      // Mongoose models or PostgreSQL handles
        +-- installIdResolver()        // entity `id` -> `_id ?? id`
        +-- autoGenerateResolvers()    // wire relationship resolvers
-       +-- installEmbeddedValueResolvers() // only when adapter.readEmbeddedValue exists; readEmbeddedField also nulls data-less objects that miss a required member (readEmbeddedObject)
+       +-- installEmbeddedValueResolvers() // only when adapter.readEmbeddedValue exists; readEmbeddedField also nulls data-less objects that miss a required member (readEmbeddedObject, which reads stored members through adapter.rawEmbeddedValue, never getters; MongoDB returns hydrated values whose schema declares getters, virtuals, aliases or subdocument methods inside them unchanged, so they are kept)
        +-- buildRootQuery()           // list, single-entity, aggregate queries
        +-- buildMutation()            // resolve pending inputs and build mutations
        |

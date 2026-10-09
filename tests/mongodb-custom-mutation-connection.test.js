@@ -66,6 +66,13 @@ describe('MongoDB custom mutation sessions (off mode)', () => {
   let defaultModels;
   const useDbChildren = [];
 
+  // A useDb connection of `parent`, dropped after the test.
+  const useDb = (parent, name) => {
+    const child = parent.useDb(name);
+    useDbChildren.push({ parent, child });
+    return child;
+  };
+
   beforeEach(() => {
     defaultModels = new Set(mongoose.modelNames());
     vi.spyOn(mongoose, 'startSession').mockImplementation(async () => fakeSession('default'));
@@ -73,12 +80,12 @@ describe('MongoDB custom mutation sessions (off mode)', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
-    // Models compiled on the default connection, or on its useDb connections, would keep it for
-    // every later test.
+    // Models compiled on the default connection, or on its useDb descendants, would keep it for
+    // every later test. Drop the deepest children first.
     for (const name of mongoose.modelNames()) if (!defaultModels.has(name)) mongoose.deleteModel(name);
-    for (const child of useDbChildren.splice(0)) {
+    for (const { parent, child } of useDbChildren.splice(0).reverse()) {
       for (const name of child.modelNames()) child.deleteModel(name);
-      mongoose.connection.otherDbs.splice(mongoose.connection.otherDbs.indexOf(child), 1);
+      parent.removeDb(child.name);
     }
   });
 
@@ -192,10 +199,28 @@ describe('MongoDB custom mutation sessions (off mode)', () => {
   test('keeps the default connection while an application model is compiled on one of its useDb connections', async () => {
     neverOpened();
     // A useDb connection shares the default connection's client, so the application opens it too.
-    const child = mongoose.connection.useDb(`custom_conn_audit_${counter}`);
-    useDbChildren.push(child);
+    const child = useDb(mongoose.connection, `custom_conn_audit_${counter}`);
     child.model(`CustomConnChildAudit${counter}`, new mongoose.Schema({ msg: String }));
     expect(mongoose.connection.modelNames()).not.toContain(`CustomConnChildAudit${counter}`);
+    const app = stubConnection('app');
+    const { run, received } = setup(onConnection(app));
+
+    expect((await run()).errors).toBeUndefined();
+    expect(received).toEqual(['default']);
+    expect(app.startSession).not.toHaveBeenCalled();
+  });
+
+  test('keeps the default connection while an application model is compiled on a nested useDb connection of it', async () => {
+    neverOpened();
+    // useDb() of a useDb connection shares the same client. Mongoose lists the nested connection
+    // only in its parent's otherDbs, and each child lists its parent there too.
+    const tenant = useDb(mongoose.connection, `custom_conn_tenant_${counter}`);
+    const audit = useDb(tenant, `custom_conn_nested_audit_${counter}`);
+    audit.model(`CustomConnNestedAudit${counter}`, new mongoose.Schema({ msg: String }));
+    expect(mongoose.connection.otherDbs).toContain(tenant);
+    expect(mongoose.connection.otherDbs).not.toContain(audit);
+    expect(tenant.otherDbs).toEqual([mongoose.connection, audit]);
+    expect(tenant.modelNames()).toEqual([]);
     const app = stubConnection('app');
     const { run, received } = setup(onConnection(app));
 

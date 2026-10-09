@@ -2686,7 +2686,7 @@ const BookModel = mongoose.model('Book', BookSchema);
 simfinity.connect(BookModel, BookType, 'book', 'books');
 ```
 
-A supplied model may also use another connection, such as one from `mongoose.createConnection()`. Generated mutations and `saveObject()` use the model's connection. In the default `referentialIntegrity: 'off'` mode, custom mutations use the default Mongoose connection unless it is unused, never opened and without compiled models, also on its `useDb()` connections, and every registered model shares one MongoDB client; with transactional reference integrity they use the first protected model's connection. See [which connection the session uses](docs/guide/mutations.md#which-connection-the-session-uses-on-mongodb).
+A supplied model may also use another connection, such as one from `mongoose.createConnection()`. Generated mutations and `saveObject()` use the model's connection. In the default `referentialIntegrity: 'off'` mode, custom mutations use the default Mongoose connection unless it is unused, never opened and without compiled models, also on its `useDb()` descendants, and every registered model shares one MongoDB client; with transactional reference integrity they use the first protected model's connection. See [which connection the session uses](docs/guide/mutations.md#which-connection-the-session-uses-on-mongodb).
 
 ### Programmatic Data Access
 

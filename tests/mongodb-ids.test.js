@@ -365,5 +365,311 @@ describe('MongoDB embedded null hydration', () => {
         data: { hydrated: [{ main: null }, { main: null }, { main: { phones: [] } }, { main: { phones: ['1'] } }] },
       });
     });
+
+    const embedded = (type) => ({ type, extensions: { relation: { embedded: true } } });
+    // Reads hydrated documents, as reads by ID return, and plain values, as list reads return.
+    const readHydratedAndPlain = (Model, Type, stored, selection) => graphql({
+      schema: new GraphQLSchema({
+        query: new GraphQLObjectType({
+          name: `${Type.name}Query`,
+          fields: {
+            hydrated: { type: new GraphQLList(Type), resolve: () => stored.map((value) => Model.hydrate(value)) },
+            plain: { type: new GraphQLList(Type), resolve: () => stored },
+          },
+        }),
+      }),
+      source: `{ hydrated { ${selection} } plain { ${selection} } }`,
+    });
+
+    test('never runs schema getters of members, and keeps hydrated objects whose schema declares one', async () => {
+      const getterCalls = [];
+      const secret = {
+        type: String,
+        get(value) {
+          getterCalls.push(value);
+          throw new Error('secret getter');
+        },
+      };
+      // `secret` comes first, so a rule that read members through their getters would reach it first.
+      const Details = new GraphQLObjectType({
+        name: 'MongoIdsAbsentGetterDetails', fields: { secret: { type: GraphQLString }, visible: { type: GraphQLString } },
+      });
+      const Secured = new GraphQLObjectType({
+        name: 'MongoIdsAbsentGetterSecured',
+        fields: {
+          secret: { type: GraphQLString }, code: { type: new GraphQLNonNull(GraphQLString) }, visible: { type: GraphQLString },
+        },
+      });
+      const Shop = new GraphQLObjectType({
+        name: 'MongoIdsAbsentGetterShop',
+        fields: {
+          id: { type: GraphQLID },
+          name: { type: GraphQLString },
+          details: embedded(Details),
+          secured: embedded(Secured),
+          sub: embedded(Secured),
+        },
+      });
+      // `secured` is a nested path, `sub` a single nested subdocument.
+      const Model = mongoose.model('MongoIdsAbsentGetterShop', new mongoose.Schema({
+        name: String,
+        details: { secret, visible: String },
+        secured: { secret, code: String, visible: String },
+        sub: new mongoose.Schema({ secret, code: String, visible: String }, { _id: false }),
+      }));
+      const runtime = createRuntime(createMongoAdapter());
+      runtime.preventCreatingCollection(true);
+      runtime.addNoEndpointType(Details);
+      runtime.addNoEndpointType(Secured);
+      runtime.connect(Model, Shop, 'mongoIdsAbsentGetterShop', 'mongoIdsAbsentGetterShops');
+      runtime.createSchema();
+      const stored = [
+        {
+          details: { visible: 'ok', secret: 's' }, secured: { code: 'c', secret: 's' }, sub: { code: 'c', secret: 's' },
+        },
+        { details: {}, secured: { secret: 's' }, sub: { secret: 's' } },
+        { details: {}, secured: {}, sub: {} },
+      ];
+
+      const result = await readHydratedAndPlain(Model, Shop, stored, 'details { visible } secured { visible } sub { visible }');
+
+      // Details has no required member, so it is never read. Secured declares a getter, so hydrated
+      // objects are kept unread, as 3.5.8 rendered them; plain ones are read from their data, where
+      // `secret` holds data. Only the last one holds no data and misses `code`.
+      const expected = [
+        { details: { visible: 'ok' }, secured: { visible: null }, sub: { visible: null } },
+        { details: { visible: null }, secured: { visible: null }, sub: { visible: null } },
+      ];
+      expect(result).toEqual({
+        data: {
+          hydrated: [...expected, { details: { visible: null }, secured: { visible: null }, sub: { visible: null } }],
+          plain: [...expected, { details: { visible: null }, secured: null, sub: null }],
+        },
+      });
+      expect(getterCalls).toEqual([]);
+    });
+
+    test('reads the stored `_id` of a subdocument as the `id` it holds', async () => {
+      const Part = new GraphQLObjectType({
+        name: 'MongoIdsAbsentPart', fields: { id: { type: GraphQLID }, name: { type: new GraphQLNonNull(GraphQLString) } },
+      });
+      const Root = new GraphQLObjectType({
+        name: 'MongoIdsAbsentRoot', fields: { id: { type: GraphQLID }, name: { type: GraphQLString }, part: embedded(Part) },
+      });
+      const Model = mongoose.model('MongoIdsAbsentRoot', new mongoose.Schema({
+        name: String, part: new mongoose.Schema({ name: String }),
+      }));
+      const runtime = createRuntime(createMongoAdapter());
+      runtime.preventCreatingCollection(true);
+      // An entity also embedded in Root, so its generated resolver reads `id` from `_id`.
+      runtime.connect(null, Part, 'mongoIdsAbsentPart', 'mongoIdsAbsentParts');
+      runtime.connect(Model, Root, 'mongoIdsAbsentRoot', 'mongoIdsAbsentRoots');
+      runtime.createSchema();
+      const partId = new mongoose.Types.ObjectId();
+
+      const result = await readHydratedAndPlain(Model, Root, [{ part: { _id: partId } }], 'part { id }');
+
+      const expected = [{ part: { id: partId.toHexString() } }];
+      expect(result).toEqual({ data: { hydrated: expected, plain: expected } });
+    });
+
+    test('keeps hydrated objects whose required member a getter, a virtual, a method or an alias supplies, as 3.5.8 did', async () => {
+      const calls = [];
+      const track = (name, value) => {
+        calls.push(name);
+        return value;
+      };
+      const codeByGetter = { type: String, get: (value) => track('getter', value ?? 'default') };
+      const Coded = new GraphQLObjectType({
+        name: 'MongoIdsAbsentCoded', fields: { code: { type: new GraphQLNonNull(GraphQLString) }, other: { type: GraphQLString } },
+      });
+      const members = ['getter', 'getterSub', 'virtual', 'virtualSub', 'methodSub', 'alias', 'aliasSub', 'aliasOutside'];
+      const Root = new GraphQLObjectType({
+        name: 'MongoIdsAbsentCodedRoot',
+        fields: { id: { type: GraphQLID }, ...Object.fromEntries(members.map((member) => [member, embedded(Coded)])) },
+      });
+      const virtualSub = new mongoose.Schema({ other: String }, { _id: false });
+      virtualSub.virtual('code').get(() => track('virtual', 'virtual'));
+      // GraphQL's default resolver calls a subdocument method named like a member.
+      const methodSub = new mongoose.Schema({ other: String }, { _id: false });
+      methodSub.methods.code = () => track('method', 'method');
+      // Nested paths and single nested subdocuments of each kind.
+      const schema = new mongoose.Schema({
+        getter: { code: codeByGetter, other: String },
+        getterSub: new mongoose.Schema({ code: codeByGetter, other: String }, { _id: false }),
+        virtual: { other: String },
+        virtualSub,
+        methodSub,
+        // An alias stores its value under its own path, `c`, which the GraphQL type does not declare.
+        alias: { c: { type: String, alias: 'alias.code' }, other: String },
+        aliasSub: new mongoose.Schema({ c: { type: String, alias: 'code' }, other: String }, { _id: false }),
+        // One declared outside the nested path where it stores its value.
+        aliasOutside: { c: { type: String, alias: 'outsideCode' }, other: String },
+      });
+      schema.virtual('virtual.code').get(() => track('virtual', 'virtual'));
+      const Model = mongoose.model('MongoIdsAbsentCodedRoot', schema);
+      const runtime = createRuntime(createMongoAdapter());
+      runtime.preventCreatingCollection(true);
+      runtime.addNoEndpointType(Coded);
+      runtime.connect(Model, Root, 'mongoIdsAbsentCodedRoot', 'mongoIdsAbsentCodedRoots');
+      runtime.createSchema();
+      const stored = [{
+        getter: {}, getterSub: {}, virtual: {}, virtualSub: {}, methodSub: {}, alias: { c: 'a' }, aliasSub: { c: 'b' }, aliasOutside: { c: 'o' },
+      }];
+      const nulls = (names) => Object.fromEntries(names.map((member) => [member, null]));
+
+      // `aliasOutside` renders no `code`.
+      const coded = members.slice(0, -1);
+      const withCode = await readHydratedAndPlain(Model, Root, stored, coded.map((member) => `${member} { code }`).join(' '));
+      const readCalls = calls.splice(0);
+      const withoutCode = await readHydratedAndPlain(Model, Root, stored, members.map((member) => `${member} { other }`).join(' '));
+
+      expect(withCode).toEqual({
+        data: {
+          hydrated: [{
+            getter: { code: 'default' },
+            getterSub: { code: 'default' },
+            virtual: { code: 'virtual' },
+            virtualSub: { code: 'virtual' },
+            methodSub: { code: 'method' },
+            alias: { code: 'a' },
+            aliasSub: { code: 'b' },
+          }],
+          // Plain values, as list reads return, render no getter, virtual or alias: they hold no data.
+          plain: [nulls(coded)],
+        },
+      });
+      // Only the selected members ran theirs.
+      expect(readCalls.sort()).toEqual(['getter', 'getter', 'method', 'virtual', 'virtual']);
+      expect(withoutCode).toEqual({
+        data: {
+          hydrated: [Object.fromEntries(members.map((member) => [member, { other: null }]))],
+          plain: [nulls(members)],
+        },
+      });
+      expect(calls).toEqual([]);
+    });
+
+    test('looks for getters, virtuals and aliases at any depth of an embedded object', async () => {
+      const calls = [];
+      const Item = new GraphQLObjectType({ name: 'MongoIdsAbsentDeepItem', fields: { x: { type: GraphQLString } } });
+      const Inner = new GraphQLObjectType({ name: 'MongoIdsAbsentDeepInner', fields: { y: { type: GraphQLString } } });
+      const Holder = new GraphQLObjectType({
+        name: 'MongoIdsAbsentDeepHolder',
+        fields: {
+          code: { type: new GraphQLNonNull(GraphQLString) },
+          items: { type: new GraphQLList(Item), extensions: { relation: { embedded: true } } },
+          inner: embedded(Inner),
+        },
+      });
+      const Root = new GraphQLObjectType({
+        name: 'MongoIdsAbsentDeepRoot',
+        fields: {
+          id: { type: GraphQLID },
+          inItems: embedded(Holder),
+          inSub: embedded(Holder),
+          inScalars: embedded(Holder),
+          plainHolder: embedded(Holder),
+        },
+      });
+      const item = (x) => new mongoose.Schema({ x }, { _id: false });
+      const inner = (withVirtual) => {
+        const innerSchema = new mongoose.Schema({ y: String }, { _id: false });
+        if (withVirtual) innerSchema.virtual('z').get(() => calls.push('virtual'));
+        return innerSchema;
+      };
+      const Model = mongoose.model('MongoIdsAbsentDeepRoot', new mongoose.Schema({
+        // A getter in the items of a document array, a virtual of a subdocument, and a getter of the
+        // items of a scalar list that the GraphQL type does not declare.
+        inItems: { code: String, items: [item({ type: String, get: (value) => calls.push('getter') && value })], inner: inner(false) },
+        inSub: { code: String, items: [item(String)], inner: inner(true) },
+        inScalars: {
+          code: String, items: [item(String)], inner: inner(false), tags: [{ type: String, get: (value) => calls.push('getter') && value }],
+        },
+        plainHolder: { code: String, items: [item(String)], inner: inner(false) },
+      }));
+      const runtime = createRuntime(createMongoAdapter());
+      runtime.preventCreatingCollection(true);
+      for (const type of [Item, Inner, Holder]) runtime.addNoEndpointType(type);
+      runtime.connect(Model, Root, 'mongoIdsAbsentDeepRoot', 'mongoIdsAbsentDeepRoots');
+      runtime.createSchema();
+      const members = ['inItems', 'inSub', 'inScalars', 'plainHolder'];
+      const stored = [Object.fromEntries(members.map((member) => [member, {}]))];
+
+      const result = await readHydratedAndPlain(Model, Root, stored, members.map((member) => `${member} { items { x } inner { y } }`).join(' '));
+
+      const kept = { items: [], inner: null };
+      expect(result).toEqual({
+        data: {
+          hydrated: [{
+            inItems: kept, inSub: kept, inScalars: kept, plainHolder: null,
+          }],
+          plain: [Object.fromEntries(members.map((member) => [member, null]))],
+        },
+      });
+      expect(calls).toEqual([]);
+    });
+
+    test('reads a Mongoose map by its stored entries, so hydrated and plain reads agree', async () => {
+      const calls = [];
+      const Meta = new GraphQLObjectType({
+        name: 'MongoIdsAbsentMeta', fields: { code: { type: new GraphQLNonNull(GraphQLString) }, other: { type: GraphQLString } },
+      });
+      const Root = new GraphQLObjectType({
+        name: 'MongoIdsAbsentMetaRoot', fields: { id: { type: GraphQLID }, meta: embedded(Meta), metaGetter: embedded(Meta) },
+      });
+      const Model = mongoose.model('MongoIdsAbsentMetaRoot', new mongoose.Schema({
+        meta: { type: Map, of: String },
+        metaGetter: { type: Map, of: { type: String, get: (value) => calls.push(value) && value } },
+      }));
+      const runtime = createRuntime(createMongoAdapter());
+      runtime.preventCreatingCollection(true);
+      runtime.addNoEndpointType(Meta);
+      runtime.connect(Model, Root, 'mongoIdsAbsentMetaRoot', 'mongoIdsAbsentMetaRoots');
+      runtime.createSchema();
+      const stored = [{ meta: {}, metaGetter: {} }, { meta: { other: 'x' }, metaGetter: { other: 'y' } }];
+
+      const result = await readHydratedAndPlain(Model, Root, stored, 'meta { other } metaGetter { other }');
+
+      // An empty map holds no data and misses `code`. A map whose values have a getter is kept on
+      // hydrated reads, and a hydrated map renders no entry as a member, both as on 3.5.8.
+      expect(result).toEqual({
+        data: {
+          hydrated: [{ meta: null, metaGetter: { other: null } }, { meta: { other: null }, metaGetter: { other: null } }],
+          plain: [{ meta: null, metaGetter: null }, { meta: { other: 'x' }, metaGetter: { other: 'y' } }],
+        },
+      });
+      expect(calls).toEqual([]);
+    });
+
+    test('reads objects of generated models, which declare no getter, virtual or alias, by their stored data', async () => {
+      const Item = new GraphQLObjectType({ name: 'MongoIdsAbsentGenItem', fields: { x: { type: GraphQLString } } });
+      const Kind = new GraphQLObjectType({ name: 'MongoIdsAbsentGenKind', fields: { name: { type: GraphQLString } } });
+      const Address = new GraphQLObjectType({
+        name: 'MongoIdsAbsentGenAddress',
+        fields: {
+          street: { type: new GraphQLNonNull(GraphQLString) },
+          // Mongoose gives the items of an embedded list an `_id` and its automatic `id` virtual.
+          items: { type: new GraphQLList(Item), extensions: { relation: { embedded: true } } },
+          // A single nested subdocument.
+          type: embedded(Kind),
+        },
+      });
+      const Shop = new GraphQLObjectType({
+        name: 'MongoIdsAbsentGenShop', fields: { id: { type: GraphQLID }, main: embedded(Address) },
+      });
+      const runtime = createRuntime(createMongoAdapter());
+      runtime.preventCreatingCollection(true);
+      for (const type of [Item, Kind, Address]) runtime.addNoEndpointType(type);
+      runtime.connect(null, Shop, 'mongoIdsAbsentGenShop', 'mongoIdsAbsentGenShops');
+      runtime.createSchema();
+      const Model = runtime.getModel(Shop);
+      const stored = [{}, { main: { items: [] } }, { main: { items: [], type: {} } }, { main: { street: 'M', items: [{ x: '1' }] } }];
+
+      const result = await readHydratedAndPlain(Model, Shop, stored, 'main { items { x } type { name } }');
+
+      const expected = [{ main: null }, { main: null }, { main: null }, { main: { items: [{ x: '1' }], type: null } }];
+      expect(result).toEqual({ data: { hydrated: expected, plain: expected } });
+    });
   });
 });

@@ -55,7 +55,7 @@ export interface MongoAdapterOptions {
 /**
  * In the default 'off' mode, withTransaction(null, callback) without a model, as custom mutations
  * call it, opens its session on the default mongoose.connection, unless that connection has no
- * client, no model is compiled on it or on its useDb() connections, and every model of the bound
+ * client, no model is compiled on it or on its useDb() descendants, and every model of the bound
  * runtime's registrations uses one MongoDB client: then it opens it on that client. A supplied
  * session or model is used as is. In transactional mode it uses the first protected model's
  * connection.
@@ -70,6 +70,14 @@ export interface MongoAdapter extends DatabaseAdapter {
   castId(value: any): any;
   /** Returns null for a hydrated nested path whose stored value is an explicit null; otherwise the value. */
   readEmbeddedValue(value: any): any;
+  /**
+   * Returns the raw stored data of a hydrated nested path or subdocument, or a Mongoose map's
+   * entries as a plain object, without running schema getters or virtuals. Returns the value
+   * unchanged when its schema declares a getter, a virtual other than Mongoose's automatic `id`, an
+   * alias or a subdocument method on a member at any depth inside it, so Simfinity keeps the object
+   * as stored, and for any other value.
+   */
+  rawEmbeddedValue(value: any): any;
   /** After connecting MongoDB and createSchema(), await the transaction capability and existing-reference audit. */
   initialize(): Promise<void>;
 }

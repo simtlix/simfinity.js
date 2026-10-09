@@ -2153,56 +2153,101 @@ const installIdResolver = (gqltype) => {
   if (idField && !idField.resolve) idField.resolve = markGenerated((parent) => parent._id ?? parent.id);
 };
 
-// An embedded object whose members are read here: a plain object, or a hydrated record, which
+// A rendered embedded value that may hold no data: a plain object, or a hydrated record, which
 // converts itself with toObject() (MongoDB documents and their nested paths do). Promises, arrays,
-// functions and other objects, such as dates or identifiers, are values, never read into.
+// functions and other objects, such as dates or identifiers, are values.
 const isRecordObject = (value) => {
   if (value === null || typeof value !== 'object' || Array.isArray(value) || isThenable(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null || typeof value.toObject === 'function';
 };
-// A referenced collection stores nothing in the object; every other member is stored under its
-// storage name.
+const isPlainObject = (value) => {
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+};
+
+// The members an embedded value stores. The rule below reads them instead of the value, so no getter
+// or virtual of the application runs, whatever the selection. An adapter that hydrates records
+// returns their stored data through rawEmbeddedValue (MongoDB: a nested path's raw value, a
+// subdocument's _doc); an absent stored value has no members. A plain object is read as it is.
+// Returns null for anything else, such as a record the adapter does not convert, which counts as data.
+const storedMembersOf = (value) => {
+  if (!isRecordObject(value)) return null;
+  const stored = typeof adapter.rawEmbeddedValue === 'function' ? adapter.rawEmbeddedValue(value) : value;
+  if (stored === null || stored === undefined) return {};
+  return typeof stored === 'object' && !Array.isArray(stored) && !isThenable(stored) && isPlainObject(stored)
+    ? stored : null;
+};
+
+// A stored member: an own data property, read without calling accessors. An accessor is present,
+// whatever it would return.
+const PRESENT = Symbol('present');
+const ownStoredValue = (stored, key) => {
+  const descriptor = Object.getOwnPropertyDescriptor(stored, key);
+  if (!descriptor) return undefined;
+  if (!('value' in descriptor)) return PRESENT;
+  return isObjectMember(key, descriptor.value) ? undefined : descriptor.value;
+};
+// A referenced collection stores nothing in the object. `id` reads the stored identity, `_id` before
+// `id`, as the generated entity resolver (installIdResolver) and Mongoose's id virtual do. Every other
+// member is stored under its storage name.
 const isReferencedCollection = (member) => {
   const relation = member.extensions?.relation;
   return Boolean(relation && !relation.embedded && getListShape(member.type));
 };
-const storedMemberValue = (value, memberName, member) => (
-  isReferencedCollection(member) ? undefined : ownValue(value, getFieldStorageName(memberName, member))
-);
+const storedMemberValue = (stored, memberName, member) => {
+  if (isReferencedCollection(member)) return undefined;
+  const identity = memberName === 'id' ? ownStoredValue(stored, '_id') : undefined;
+  return identity ?? ownStoredValue(stored, getFieldStorageName(memberName, member));
+};
 
-// Whether an embedded object holds no data: every member is null or undefined, an empty list, or a
-// singular embedded object that holds no data. Any other value, a promise included, is data. An
-// object that contains itself, which only a custom result can, holds data.
-const holdsNoData = (value, type, ancestors = []) => !ancestors.includes(value)
+// Whether stored members hold no data: every member is null or undefined, an empty list, or a
+// singular embedded object that holds no data. Any other value, a promise or an accessor included,
+// is data. An object that contains itself, which only a custom result can, holds data.
+const holdsNoData = (stored, type, ancestors = []) => !ancestors.includes(stored)
   && Object.entries(type.getFields()).every(([memberName, member]) => {
-    const stored = storedMemberValue(value, memberName, member);
-    if (stored === null || stored === undefined) return true;
-    if (Array.isArray(stored)) return stored.length === 0;
+    const value = storedMemberValue(stored, memberName, member);
+    if (value === null || value === undefined) return true;
+    if (Array.isArray(value)) return value.length === 0;
     const memberType = unwrapNonNull(member.type);
-    return member.extensions?.relation?.embedded === true && memberType instanceof GraphQLObjectType
-      && isRecordObject(stored) && holdsNoData(stored, memberType, [...ancestors, value]);
+    if (member.extensions?.relation?.embedded !== true || !(memberType instanceof GraphQLObjectType)) return false;
+    const nested = storedMembersOf(value);
+    return nested !== null && holdsNoData(nested, memberType, [...ancestors, stored]);
   });
 
-// Whether rendering such an object fails: a non-null member is null or undefined, or is a singular
-// embedded object that misses one of its own. Only members that generated inputs accept count. As on
-// writes (completeEmbeddedValue), `id` and readOnly members do not; nor do interface and union
-// members, which buildInputType leaves out; nor do referenced collections or members with an
-// application resolver, which may compute a value. A promise counts as present.
-const missesRequiredMember = (value, type) => Object.entries(type.getFields()).some(([memberName, member]) => {
-  if (!(member.type instanceof GraphQLNonNull) || isReferencedCollection(member)) return false;
-  if (memberName === 'id' || member.extensions?.readOnly || hasApplicationResolver(type, memberName)) return false;
-  if (isAbstractOutputType(unwrapListAndNonNull(member.type))) return false;
-  const stored = storedMemberValue(value, memberName, member);
-  if (stored === null || stored === undefined) return true;
-  return member.extensions?.relation?.embedded === true && member.type.ofType instanceof GraphQLObjectType
-    && isRecordObject(stored) && missesRequiredMember(stored, member.type.ofType);
+// The members that count: non-null members that generated inputs accept. As on writes
+// (completeEmbeddedValue), `id` and readOnly members do not; nor do interface and union members,
+// which buildInputType leaves out; nor do referenced collections or members with an application
+// resolver, which may compute a value.
+const countsAsRequired = (type, memberName, member) => member.type instanceof GraphQLNonNull
+  && !isReferencedCollection(member) && memberName !== 'id' && !member.extensions?.readOnly
+  && !isAbstractOutputType(unwrapListAndNonNull(member.type)) && !hasApplicationResolver(type, memberName);
+const hasRequiredMember = (type) => Object.entries(type.getFields())
+  .some(([memberName, member]) => countsAsRequired(type, memberName, member));
+
+// Whether rendering such an object fails: a member that counts is null or undefined, or is a singular
+// embedded object that misses one of its own. A promise or an accessor counts as present.
+const missesRequiredMember = (stored, type) => Object.entries(type.getFields()).some(([memberName, member]) => {
+  if (!countsAsRequired(type, memberName, member)) return false;
+  const value = storedMemberValue(stored, memberName, member);
+  if (value === null || value === undefined) return true;
+  if (member.extensions?.relation?.embedded !== true || !(member.type.ofType instanceof GraphQLObjectType)) return false;
+  const nested = storedMembersOf(value);
+  return nested !== null && missesRequiredMember(nested, member.type.ofType);
 });
 
-const readEmbeddedObject = (value, type) => (
-  type instanceof GraphQLObjectType && isRecordObject(value) && holdsNoData(value, type)
-    && missesRequiredMember(value, type) ? null : value
-);
+// A type without a member that counts never reads as null, so its values are returned untouched,
+// with no member read. Reading stored members never changes the result otherwise: a value whose
+// members cannot be read, because an adapter hook or a property read throws, is returned as it is.
+const readEmbeddedObject = (value, type) => {
+  if (!(type instanceof GraphQLObjectType) || !hasRequiredMember(type)) return value;
+  try {
+    const stored = storedMembersOf(value);
+    return stored !== null && holdsNoData(stored, type) && missesRequiredMember(stored, type) ? null : value;
+  } catch {
+    return value;
+  }
+};
 
 // An adapter that hydrates stored records may render an explicitly null singular embedded object as
 // an object (MongoDB nested paths do); readEmbeddedValue returns null for it. Nullable singular
@@ -2215,8 +2260,9 @@ const readEmbeddedObject = (value, type) => (
 // Such an adapter may also render an absent object, or store an omitted one, as an object that holds
 // nothing but its list defaults (MongoDB nested paths do). An object that holds no data and misses a
 // required member (see missesRequiredMember) cannot be rendered, so it reads as null, as an absent
-// object does on other read paths, whatever the selection. The rule depends only on the value and
-// its type, so runtimes that share the type, with or without the hook, read the same. An object a
+// object does on other read paths, whatever the selection. The rule reads the stored members
+// (storedMembersOf), never running a getter or virtual, and depends only on the value and its type,
+// so runtimes that share the type, with or without the hook, read the same. An object a
 // generated create or update writes does not read as null, since those writes require the members
 // counted, with one exception: Mongoose minimizes empty objects when it saves a new document, so a
 // create that writes an empty object for a required embedded member (`geo: {}`) stores that member

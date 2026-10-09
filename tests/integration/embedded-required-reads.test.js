@@ -281,3 +281,290 @@ describe.skipIf(!mongoUri)('MongoDB reads of embedded objects whose data the rea
     expect(await readAll(endpoint, added.id, 'main', 'tags', updated)).toEqual([{ tags: [] }, { tags: [] }, { tags: [] }]);
   });
 });
+
+// The read rule reads stored data: it runs no schema getter of a supplied model, and counts the `_id`
+// of a subdocument as the `id` it holds. The records are existing ones, written natively.
+describe.skipIf(!mongoUri)('MongoDB reads of supplied-model embedded objects by their stored data', () => {
+  const namespace = `datastored_${randomUUID().replaceAll('-', '')}`;
+  const getterCalls = [];
+  const models = {};
+  let schema;
+
+  const run = (source) => graphql({ schema, source, contextValue: {} });
+  // The by-ID and list reads of the same record, with no errors.
+  const readBoth = async (endpoint, id, selection) => {
+    const byId = await run(`{ ${endpoint}(id: "${id}") { ${selection} } }`);
+    const list = await run(`{ ${endpoint}s { id ${selection} } }`);
+    expect([byId.errors, list.errors]).toEqual([undefined, undefined]);
+    const { id: listedId, ...listed } = list.data[`${endpoint}s`].find((row) => row.id === id);
+    expect(listedId).toBe(id);
+    return [byId.data[endpoint], listed];
+  };
+
+  beforeAll(async () => {
+    await mongoose.connect(mongoUri, { dbName: namespace });
+    const secret = {
+      type: String,
+      get(value) {
+        getterCalls.push(value);
+        throw new Error('secret getter');
+      },
+    };
+    // `secret` comes first, so a rule that read members through their getters would reach it first.
+    const Details = new GraphQLObjectType({
+      name: 'DataStoredDetails', fields: { secret: { type: GraphQLString }, visible: { type: GraphQLString } },
+    });
+    const Secured = new GraphQLObjectType({
+      name: 'DataStoredSecured',
+      fields: {
+        secret: { type: GraphQLString }, code: { type: new GraphQLNonNull(GraphQLString) }, visible: { type: GraphQLString },
+      },
+    });
+    const Shop = new GraphQLObjectType({
+      name: 'DataStoredShop',
+      fields: {
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        details: embedded(Details),
+        secured: embedded(Secured),
+        sub: embedded(Secured),
+      },
+    });
+    // `secured` is a nested path, `sub` a single nested subdocument.
+    models.Shop = mongoose.model('DataStoredShop', new mongoose.Schema({
+      name: String,
+      details: { secret, visible: String },
+      secured: { secret, code: String, visible: String },
+      sub: new mongoose.Schema({ secret, code: String, visible: String }, { _id: false }),
+    }), 'DataStoredShop');
+    // An entity that a supplied model also embeds as a subdocument with its own `_id`.
+    const Part = new GraphQLObjectType({
+      name: 'DataStoredPart', fields: { id: { type: GraphQLID }, name: { type: new GraphQLNonNull(GraphQLString) } },
+    });
+    const Root = new GraphQLObjectType({
+      name: 'DataStoredRoot', fields: { id: { type: GraphQLID }, name: { type: GraphQLString }, part: embedded(Part) },
+    });
+    models.Root = mongoose.model('DataStoredRoot', new mongoose.Schema({
+      name: String, part: new mongoose.Schema({ name: String }),
+    }), 'DataStoredRoot');
+
+    const runtime = createRuntime(createMongoAdapter());
+    runtime.preventCreatingCollection(true);
+    runtime.addNoEndpointType(Details);
+    runtime.addNoEndpointType(Secured);
+    runtime.connect(models.Shop, Shop, 'dataStoredShop', 'dataStoredShops');
+    runtime.connect(null, Part, 'dataStoredPart', 'dataStoredParts');
+    runtime.connect(models.Root, Root, 'dataStoredRoot', 'dataStoredRoots');
+    schema = runtime.createSchema();
+    for (const { model } of runtime.getRegistrations()) if (model) await model.createCollection();
+  }, 30000);
+
+  afterAll(async () => {
+    if (mongoose.connection.readyState) {
+      await mongoose.connection.db.dropDatabase();
+      await mongoose.disconnect();
+    }
+    mongoose.deleteModel(/^DataStored/);
+  });
+
+  test('reads an object whose type has no required member that counts without running getters of unselected members', async () => {
+    getterCalls.length = 0;
+    const { insertedId } = await models.Shop.collection.insertOne({ name: 's', details: { visible: 'ok', secret: 's' } });
+    const id = insertedId.toHexString();
+
+    const reads = await readBoth('dataStoredShop', id, 'details { visible }');
+    const updated = await run(`mutation { updatedataStoredShop(input: { id: "${id}", name: "u" }) { details { visible } } }`);
+
+    expect(reads).toEqual([{ details: { visible: 'ok' } }, { details: { visible: 'ok' } }]);
+    expect(updated).toEqual({ data: { updatedataStoredShop: { details: { visible: 'ok' } } } });
+    expect(getterCalls).toEqual([]);
+  });
+
+  test('reads an object whose type has a required member that counts without running getters, keeping hydrated ones whose schema declares one', async () => {
+    getterCalls.length = 0;
+    const { insertedIds } = await models.Shop.collection.insertMany([
+      { name: 'kept', secured: { code: 'c', secret: 's' }, sub: { code: 'c', secret: 's' } },
+      { name: 'empty', secured: {}, sub: {} },
+    ]);
+    const [kept, empty] = [insertedIds[0], insertedIds[1]].map((id) => id.toHexString());
+
+    const keptReads = await readBoth('dataStoredShop', kept, 'secured { visible } sub { visible }');
+    const emptyReads = await readBoth('dataStoredShop', empty, 'secured { visible } sub { visible }');
+
+    const keptRead = { secured: { visible: null }, sub: { visible: null } };
+    expect(keptReads).toEqual([keptRead, keptRead]);
+    // They hold no data and miss `code`. Their schema declares a getter, so by-ID reads keep them
+    // unread, as 3.5.8 did; list reads, which return the stored data, read them as null (#157).
+    expect(emptyReads).toEqual([keptRead, { secured: null, sub: null }]);
+    expect(getterCalls).toEqual([]);
+  });
+
+  test('keeps an embedded entity whose only stored data is its `_id`', async () => {
+    const partId = new mongoose.Types.ObjectId();
+    const { insertedId } = await models.Root.collection.insertOne({ name: 'r', part: { _id: partId } });
+
+    const reads = await readBoth('dataStoredRoot', insertedId.toHexString(), 'part { id }');
+
+    // The generated resolver of the entity reads `_id`, on list and by-ID reads alike.
+    const expected = { part: { id: partId.toHexString() } };
+    expect(reads).toEqual([expected, expected]);
+  });
+});
+
+// Objects of supplied models whose required member a getter, a virtual or an alias renders: reads of
+// hydrated documents (by ID, through a reference and in update responses) keep them unread, as 3.5.8
+// rendered them, and run no getter of an unselected member. Maps and generated models are read by
+// their stored data on every read path. The records are existing ones, written natively.
+describe.skipIf(!mongoUri)('MongoDB reads of supplied-model embedded objects that the schema renders', () => {
+  const namespace = `datarendered_${randomUUID().replaceAll('-', '')}`;
+  const calls = [];
+  const members = ['getter', 'getterSub', 'virtual', 'virtualSub', 'alias', 'aliasSub'];
+  const models = {};
+  let schema;
+  let runtime;
+
+  const run = async (source) => {
+    const result = await graphql({ schema, source, contextValue: {} });
+    expect(result.errors).toBeUndefined();
+    return result.data;
+  };
+  // The by-ID, reference, update-response and list reads of the same record.
+  const readAll = async (id, selection) => {
+    const { insertedId: linkId } = await models.Link.collection.insertOne({ name: 'l', rootId: new mongoose.Types.ObjectId(id) });
+    const byId = await run(`{ dataRenderedRoot(id: "${id}") { ${selection} } }`);
+    const reference = await run(`{ dataRenderedLink(id: "${linkId.toHexString()}") { root { ${selection} } } }`);
+    const updated = await run(`mutation { updatedataRenderedRoot(input: { id: "${id}", name: "u" }) { ${selection} } }`);
+    const list = await run(`{ dataRenderedRoots { id ${selection} } }`);
+    const { id: listedId, ...listed } = list.dataRenderedRoots.find((row) => row.id === id);
+    expect(listedId).toBe(id);
+    return [byId.dataRenderedRoot, reference.dataRenderedLink.root, updated.updatedataRenderedRoot, listed];
+  };
+  const insert = async (document) => (await models.Root.collection.insertOne({ name: 'r', ...document })).insertedId.toHexString();
+
+  beforeAll(async () => {
+    await mongoose.connect(mongoUri, { dbName: namespace });
+    const track = (name, value) => {
+      calls.push(name);
+      return value;
+    };
+    const codeByGetter = { type: String, get: (value) => track('getter', value ?? 'default') };
+    const Coded = new GraphQLObjectType({
+      name: 'DataRenderedCoded', fields: { code: { type: new GraphQLNonNull(GraphQLString) }, other: { type: GraphQLString } },
+    });
+    const Root = new GraphQLObjectType({
+      name: 'DataRenderedRoot',
+      fields: {
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        ...Object.fromEntries(members.map((member) => [member, embedded(Coded)])),
+        meta: embedded(Coded),
+      },
+    });
+    const Link = new GraphQLObjectType({
+      name: 'DataRenderedLink',
+      fields: {
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        root: { type: Root, extensions: { relation: { connectionField: 'rootId' } } },
+      },
+    });
+    const virtualSub = new mongoose.Schema({ other: String }, { _id: false });
+    virtualSub.virtual('code').get(() => track('virtual', 'virtual'));
+    // Nested paths and single nested subdocuments of each kind.
+    const rootSchema = new mongoose.Schema({
+      name: String,
+      getter: { code: codeByGetter, other: String },
+      getterSub: new mongoose.Schema({ code: codeByGetter, other: String }, { _id: false }),
+      virtual: { other: String },
+      virtualSub,
+      // An alias stores its value under its own path, `c`.
+      alias: { c: { type: String, alias: 'alias.code' }, other: String },
+      aliasSub: new mongoose.Schema({ c: { type: String, alias: 'code' }, other: String }, { _id: false }),
+      meta: { type: Map, of: String },
+    });
+    rootSchema.virtual('virtual.code').get(() => track('virtual', 'virtual'));
+    models.Root = mongoose.model('DataRenderedRoot', rootSchema, 'DataRenderedRoot');
+
+    // A generated model whose embedded object has an embedded list, whose items Mongoose gives an
+    // `_id` and its automatic `id` virtual.
+    const Item = new GraphQLObjectType({ name: 'DataRenderedItem', fields: { x: { type: GraphQLString } } });
+    const Address = new GraphQLObjectType({
+      name: 'DataRenderedAddress',
+      fields: {
+        street: { type: new GraphQLNonNull(GraphQLString) },
+        items: { type: new GraphQLList(Item), extensions: { relation: { embedded: true } } },
+      },
+    });
+    const Shop = new GraphQLObjectType({
+      name: 'DataRenderedShop', fields: { id: { type: GraphQLID }, name: { type: GraphQLString }, main: embedded(Address) },
+    });
+
+    runtime = createRuntime(createMongoAdapter());
+    runtime.preventCreatingCollection(true);
+    for (const type of [Coded, Item, Address]) runtime.addNoEndpointType(type);
+    runtime.connect(models.Root, Root, 'dataRenderedRoot', 'dataRenderedRoots');
+    runtime.connect(null, Link, 'dataRenderedLink', 'dataRenderedLinks');
+    runtime.connect(null, Shop, 'dataRenderedShop', 'dataRenderedShops');
+    schema = runtime.createSchema();
+    models.Link = runtime.getModel(Link);
+    models.Shop = runtime.getModel(Shop);
+    for (const { model } of runtime.getRegistrations()) if (model) await model.createCollection();
+  }, 30000);
+
+  afterAll(async () => {
+    if (mongoose.connection.readyState) {
+      await mongoose.connection.db.dropDatabase();
+      await mongoose.disconnect();
+    }
+    mongoose.deleteModel(/^DataRendered/);
+  });
+
+  test('keeps hydrated objects whose required member a getter, a virtual or an alias supplies, as 3.5.8 did', async () => {
+    const id = await insert({
+      getter: {}, getterSub: {}, virtual: {}, virtualSub: {}, alias: { c: 'a' }, aliasSub: { c: 'b' },
+    });
+    const rendered = {
+      getter: { code: 'default' },
+      getterSub: { code: 'default' },
+      virtual: { code: 'virtual' },
+      virtualSub: { code: 'virtual' },
+      alias: { code: 'a' },
+      aliasSub: { code: 'b' },
+    };
+    const nulls = Object.fromEntries(members.map((member) => [member, null]));
+
+    calls.length = 0;
+    const withCode = await readAll(id, members.map((member) => `${member} { code }`).join(' '));
+    const selectedCalls = calls.splice(0);
+    const withoutCode = await readAll(id, members.map((member) => `${member} { other }`).join(' '));
+
+    // List reads return the stored data, which renders no getter, virtual or alias: those objects
+    // hold no data and miss `code` (#157).
+    expect(withCode).toEqual([rendered, rendered, rendered, nulls]);
+    const others = Object.fromEntries(members.map((member) => [member, { other: null }]));
+    expect(withoutCode).toEqual([others, others, others, nulls]);
+    // Getters and virtuals run only for the members a query selects.
+    expect([...new Set(selectedCalls)].sort()).toEqual(['getter', 'virtual']);
+    expect(calls).toEqual([]);
+  });
+
+  test('reads an empty Mongoose map as null on by-ID, reference, update and list reads', async () => {
+    const empty = await insert({ meta: {} });
+    const held = await insert({ meta: { other: 'x' } });
+
+    expect(await readAll(empty, 'meta { other }')).toEqual([{ meta: null }, { meta: null }, { meta: null }, { meta: null }]);
+    // A hydrated map renders no entry as a member, as on 3.5.8; list reads return its stored entries.
+    const kept = { meta: { other: null } };
+    expect(await readAll(held, 'meta { other }')).toEqual([kept, kept, kept, { meta: { other: 'x' } }]);
+  });
+
+  test('reads data-less objects of a generated model with an embedded list as null', async () => {
+    const { insertedIds } = await models.Shop.collection.insertMany([{ name: 'absent' }, { name: 'empty', main: { items: [] } }]);
+
+    for (const id of Object.values(insertedIds).map((value) => value.toHexString())) {
+      const byId = await run(`{ dataRenderedShop(id: "${id}") { main { street items { x } } } }`);
+      const list = await run('{ dataRenderedShops { id main { street items { x } } } }');
+      expect([byId.dataRenderedShop.main, list.dataRenderedShops.find((row) => row.id === id).main]).toEqual([null, null]);
+    }
+  });
+});
