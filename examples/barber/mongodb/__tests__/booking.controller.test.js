@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import mongoose from 'mongoose';
 
 vi.mock('@simtlix/simfinity-js', () => ({
   default: {},
@@ -100,6 +101,20 @@ describe('resolveBarbershopIdFromBookingPayload', () => {
   it('returns null when both are null', () => {
     const result = resolveBarbershopIdFromBookingPayload({}, {});
     expect(result).toBeUndefined();
+  });
+
+  // A booking created through updatebarbershop's bookings.added carries the parent link as an
+  // ObjectId, whose `.id` is a 12-byte Buffer that findById cannot cast.
+  it('returns the hex string of an ObjectId stored on the document', () => {
+    const shopId = new mongoose.Types.ObjectId();
+    const result = resolveBarbershopIdFromBookingPayload({}, { barbershop: shopId });
+    expect(result).toBe(shopId.toHexString());
+  });
+
+  it('returns the hex string of a document reference that holds an ObjectId', () => {
+    const shopId = new mongoose.Types.ObjectId();
+    const result = resolveBarbershopIdFromBookingPayload({ barbershop: { _id: shopId } }, {});
+    expect(result).toBe(shopId.toHexString());
   });
 });
 

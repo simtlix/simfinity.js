@@ -40,9 +40,8 @@ export function assignActingUserAsClientUnlessCanBookForOthers(doc, context) {
 export function resolveBarbershopIdFromBookingPayload(args, doc) {
   const raw = args.barbershop || doc.barbershop;
   if (raw == null) return raw;
-  return typeof raw === 'object'
-    ? (raw.id || raw._id || String(raw))
-    : raw;
+  // A nested create links the booking with an ObjectId, whose `.id` is a Buffer: read its hex string.
+  return typeof raw === 'object' ? idOf(raw) : raw;
 }
 
 /** Ensures the target barbershop exists and is approved; otherwise throws. */

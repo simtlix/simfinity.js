@@ -39,7 +39,7 @@ export default function AdminReviewsPage() {
         .fields(
           'id rating comment isReported createdAt client { id name avatarUrl } barbershop { id name }',
         )
-        .where('isReported', 'EQ', 'true')
+        .where('isReported', 'EQ', true)
         .sort('createdAt', 'DESC')
         .page(pagination.page, pagination.pageSize);
 
@@ -54,7 +54,7 @@ export default function AdminReviewsPage() {
         let aggQuery = client
           .aggregate('review')
           .fact('count', 'total')
-          .where('isReported', 'EQ', 'true');
+          .where('isReported', 'EQ', true);
         if (search.trim()) {
           aggQuery = aggQuery.where('comment', 'LIKE', search.trim());
         }
