@@ -1,9 +1,9 @@
 import {
-  beforeAll, beforeEach, describe, expect, test, vi,
+  afterAll, beforeAll, beforeEach, describe, expect, test, vi,
 } from 'vitest';
 import mongoose from 'mongoose';
 import {
-  GraphQLID, GraphQLList, GraphQLObjectType, GraphQLString,
+  GraphQLFloat, GraphQLID, GraphQLList, GraphQLNonNull, GraphQLObjectType, GraphQLSchema, GraphQLString, graphql,
 } from 'graphql';
 import { createMongoAdapter, createRuntime } from '../packages/mongodb/src/index.js';
 import { mapIdCastError } from '../packages/mongodb/src/mongo/ids.js';
@@ -292,5 +292,78 @@ describe('MongoDB embedded null hydration', () => {
     const stored = VirtualsModel.hydrate({ main: { street: 'M', geo: { lat: 1 } } });
     expect(readEmbeddedValue(stored.main.geo)).toBe(stored.main.geo);
     expect(readEmbeddedValue(stored.main)).toBe(stored.main);
+  });
+
+  describe('objects that hold no data', () => {
+    afterAll(() => mongoose.deleteModel(/^MongoIdsAbsent/));
+
+    test('reads absent and list-default-only objects that miss a required member as null', async () => {
+      const embedded = (type) => ({ type, extensions: { relation: { embedded: true } } });
+      const Geo = new GraphQLObjectType({
+        name: 'MongoIdsAbsentGeo',
+        fields: { lat: { type: new GraphQLNonNull(GraphQLFloat) }, aliases: { type: new GraphQLList(GraphQLString) } },
+      });
+      const Address = new GraphQLObjectType({
+        name: 'MongoIdsAbsentAddress',
+        fields: {
+          street: { type: new GraphQLNonNull(GraphQLString) }, phones: { type: new GraphQLList(GraphQLString) }, geo: embedded(Geo),
+        },
+      });
+      const Note = new GraphQLObjectType({ name: 'MongoIdsAbsentNote', fields: { text: { type: GraphQLString } } });
+      const Shop = new GraphQLObjectType({
+        name: 'MongoIdsAbsentShop',
+        fields: {
+          id: { type: GraphQLID }, name: { type: GraphQLString }, main: embedded(Address), note: embedded(Note),
+        },
+      });
+      const runtime = createRuntime(createMongoAdapter());
+      runtime.preventCreatingCollection(true);
+      runtime.addNoEndpointType(Geo);
+      runtime.addNoEndpointType(Address);
+      runtime.addNoEndpointType(Note);
+      runtime.connect(null, Shop, 'mongoIdsAbsentShop', 'mongoIdsAbsentShops');
+      runtime.createSchema();
+      const Model = runtime.getModel(Shop);
+      const stored = [
+        {},
+        { main: { phones: [], geo: { aliases: [] } } },
+        { main: { street: 'M', phones: [], geo: { aliases: [] } } },
+        { main: { street: 'M', phones: ['1'], geo: { lat: 1 } }, note: { text: 't' } },
+      ];
+      // Generated reads need a database. These read hydrated documents, as reads by ID return, and
+      // plain values, as list reads return, through the same types.
+      const schema = new GraphQLSchema({
+        query: new GraphQLObjectType({
+          name: 'MongoIdsAbsentQuery',
+          fields: {
+            hydrated: { type: new GraphQLList(Shop), resolve: () => stored.map((value) => Model.hydrate(value)) },
+            plain: { type: new GraphQLList(Shop), resolve: () => stored },
+          },
+        }),
+      });
+      const selection = 'main { street phones geo { lat } } note { text }';
+
+      const result = await graphql({ schema, source: `{ hydrated { ${selection} } plain { ${selection} } }` });
+      const withoutRequired = await graphql({ schema, source: '{ hydrated { main { phones } } }' });
+
+      expect(result.errors).toBeUndefined();
+      const complete = { main: { street: 'M', phones: ['1'], geo: { lat: 1 } }, note: { text: 't' } };
+      expect(result.data.hydrated).toEqual([
+        // A hydrated document renders an absent nested path as an object; one that needs no member is kept.
+        { main: null, note: { text: null } },
+        { main: null, note: { text: null } },
+        { main: { street: 'M', phones: [], geo: null }, note: { text: null } },
+        complete,
+      ]);
+      expect(result.data.plain).toEqual([
+        { main: null, note: null },
+        { main: null, note: null },
+        { main: { street: 'M', phones: [], geo: null }, note: null },
+        complete,
+      ]);
+      expect(withoutRequired).toEqual({
+        data: { hydrated: [{ main: null }, { main: null }, { main: { phones: [] } }, { main: { phones: ['1'] } }] },
+      });
+    });
   });
 });

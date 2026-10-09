@@ -26,7 +26,7 @@ alwaysApply: true
 throw new SimfinityError('Resource not found', 'NOT_FOUND', 404);
 ```
 
-- For auth errors, use `UnauthenticatedError` (401) or `ForbiddenError` (403) from `packages/core/src/auth/errors.js`; `packages/mongodb/src/auth/errors.js` is the compatibility shim.
+- For auth errors, use `UnauthenticatedError` (401) or `ForbiddenError` (403) from `packages/core/src/auth/errors.js`; `packages/mongodb/src/auth/errors.js` is the compatibility shim. The core root exports both classes as well.
 - Shared mutation logic uses `adapter.withTransaction`; do not import either database driver into core. Supplied sessions must already be active and remain caller-owned.
 - MongoDB owns Mongoose transaction handling: retry `TransientTransactionError` separately from commit-only `UnknownTransactionCommitResult` retries, with bounded attempts and a full-jitter backoff that starts after the abort; map an exhausted `WriteConflict` to `TRANSACTION_RETRY_EXCEEDED` (409) with the driver error as `cause`; preserve primary errors and await cleanup. Never mutate global Mongoose options (`mongoose.set`) from library code.
 - PostgreSQL owns `pg` clients and repeatable-read transactions; SQL retries confirmed serialization/deadlock aborts with fresh input snapshots and the same bounded full-jitter backoff, which starts only after rollback and `release` so no connection is held while waiting. Do not replay writes after uncertain commits or close an application-owned pool. A driver `commit` must reject when the engine did not commit; `normalizeError` maps only its engine's errors and returns application errors unchanged.
@@ -40,7 +40,7 @@ throw new SimfinityError('Resource not found', 'NOT_FOUND', 404);
 
 ## Schema Transformations
 
-- **Never** use `graphql-middleware`'s `applyMiddleware` or `@graphql-tools/utils`'s `mapSchema` on a Simfinity schema. These rebuild the schema, duplicating the globally-injected `FieldExtensionsType`.
+- **Never** use `graphql-middleware`'s `applyMiddleware` or `@graphql-tools/utils`'s `mapSchema` on a Simfinity schema. These rebuild the schema, duplicating the globally-injected `FieldExtensionsType` (or its fallback name, `SimfinityFieldExtensionsType`).
 - Use Envelop plugins (`onSchemaChange` hook) to wrap resolvers in-place.
 
 ## Export Conventions
@@ -50,6 +50,8 @@ throw new SimfinityError('Resource not found', 'NOT_FOUND', 404);
 - Re-export shared `validators`, `scalars`, `plugins` and `auth` helpers through both database facades. MongoDB also preserves MCP exports and legacy deep-import shims.
 - Keep implementations in their owning package and import other packages through their declared exports. Core and SQL must not depend on drivers or MCP; PostgreSQL depends on SQL, core and `pg`. Keep physical SQL/types, error classification and connection operations inside the engine plugin; shared SQL must not import PostgreSQL. Keep matching declarations in `packages/*/types/` current, including core's per-subpath files (`types/auth/*.d.ts`, `types/plugins.d.ts`, `types/scalars.d.ts`, `types/validators.d.ts`), which take each member from `types/index.d.ts` via `typeof`.
 - Every public core subpath export entry lists `types` first and has a matching `typesVersions` entry; `./internal/*` subpaths stay undeclared. A new runtime export on a subpath needs its declaration and an entry in `coreSubpaths` in `scripts/test-packages.js`. A new root type tied to a subpath's helpers goes in that subpath's `export type` list, in `coreSubpaths[...].types` and in `tests/core-subpath-types.test.js`.
+- Every public value exported by `packages/core/src/index.js` needs an explicit `export` in `packages/core/types/index.d.ts` (`export class`, `export const`, `export function`; never rely on the implicit export of a top-level declaration in a file without exports) and an entry in `coreRootValues` in `scripts/test-packages.js`.
+- A new MongoDB `src/` shim of public API needs a sibling `.d.ts`: the shim's text without the `register-mongo-object-id` import when it re-exports a core subpath, or a root-derived re-export otherwise. Add it to `legacySubpaths` or `legacyShims` in `tests/core-subpath-types.test.js`; the test `declares every legacy shim of public API and nothing else` fails until both exist. `src/mongo/*` stays undeclared.
 
 ## Function Naming
 

@@ -78,6 +78,12 @@ For an embedded list, use `new GraphQLList(DirectorType)` with the same `embedde
 
 Both outer and item `GraphQLNonNull` wrappers are supported. An embedded `[Director!]!` field generates a required create list of non-null nested inputs, and an optional update list whose items are still non-null. Nullable embedded list items are stored as `null`. An empty list replaces the stored list with `[]`.
 
+Omitting an optional embedded object whose type, or an embedded type inside it, has a list member stores it with empty lists on both backends. When the type also has a required member that is not a list, PostgreSQL rejects the create with `REQUIRED_VALUE`. MongoDB stores the object, and reads it as `null` unless that member is `id`, `readOnly`, an interface or union member or one with your own resolver; see [MongoDB embedded objects in hydrated documents](./mutations#update-selected-fields).
+
+Embedded types cannot contain themselves, directly or through other embedded types (`A.b: B` and `B.a: A`), as objects or lists. `createSchema()` fails with `INVALID_MODEL` (`Embedded cycle at …`), even when a field of the cycle is `readOnly`, on PostgreSQL, with MongoDB's `referentialIntegrity: 'transactional'`, and in default MongoDB mode when Simfinity generates a model whose embedded fields reach the cycle, including the model of an embedded type registered with `addNoEndpointType()`. In default MongoDB mode, a cycle that only supplied models reach is not checked: it fails with `INPUT_TYPE_UNRESOLVED`, or works when a field of the cycle is `readOnly`. Use a reference or a referenced collection for recursive structures.
+
+An embedded type without writable fields, such as one whose fields are all `readOnly`, has no generated input, so generated mutations cannot set the fields that embed it; see [what gets generated](./schema#what-gets-generated).
+
 ## Referenced objects and collections
 
 In this complete schema, each `Season` stores a reference to its `Serie`. The serie's `seasons` field reads back the matching child records:
@@ -146,7 +152,7 @@ For a single-object reference, omitting `connectionField` uses the GraphQL field
 
 The `added` input for a referenced collection omits its parent connection field. Simfinity fills in the newly created parent's ID:
 
-Required collection fields retain a required operation object on create and become optional on update. If the collection has non-null object items, its `added` and `updated` lists also require non-null items. `deleted` is `[ID]` whatever the item nullability. Nullable operation items and null IDs are ignored; use `deleted` with child IDs to remove records.
+Required collection fields retain a required operation object on create and become optional on update. When the collection has no `added` operation, because the child has no writable field besides the back-reference, send an empty operation object, such as `seasons: {}`, on create. If the collection has non-null object items, its `added` and `updated` lists also require non-null items. `deleted` is `[ID]` whatever the item nullability. Nullable operation items and null IDs are ignored; use `deleted` with child IDs to remove records.
 
 ```graphql
 mutation {
@@ -194,6 +200,8 @@ Each writable referenced collection gets one operation input in the type's creat
 | `deleted` | `[ID]` | `[ID]` |
 
 In general the operation inputs are `OneToMany<Type>A<field>` and `OneToMany<Type>U<field>`. An `added` item, `<Type>A<Item>InputFor<ConnectionField>` or `<Type>U<Item>InputFor<ConnectionField>`, is the item's creation input without the back-reference, which the parent supplies. `deleted` is `[ID]` whatever the item nullability, and null IDs are ignored. A collection without `connectionField`, which builds only with its own resolver or as `readOnly` in default MongoDB mode and with custom adapters, uses the item's `<Item>Input` for `added` items.
+
+An operation input has no `added` field when the child has no writable field besides the back-reference, such as a child with only `id`, the back-reference and `readOnly` fields, and no `updated` field when the child's update input would be empty, because it has no writable fields and no writable `id`. Each omission logs a `Configuration issue` warning; `deleted` always remains. Create such children with their own add mutation or a registered mutation.
 
 Collections that reach the same child through the same `connectionField`, such as `Serie.episodes` and `Serie.featured`, share one `added` item input. They also read the same children: both fields return every episode linked to the serie, unless one of them has its own resolver.
 

@@ -36,7 +36,7 @@ Consult these repository-relative files; locate functions by name rather than re
 | `packages/core/src/auth/index.js` | `createAuthPlugin`, configuration validation, permission resolution |
 | `packages/core/src/runtime.js` and the selected adapter under `packages/mongodb/src/` or `packages/postgres/src/` | `use`, `executeMiddleware`, `executeScope`, `connect`, `generateModel`, `saveObject`, transaction and controller implementation |
 | `packages/mcp/src/index.js` | `normalizeSchemaPlugins`, `applySchemaPlugins`, `normalizeToolMiddleware`, `normalizeLimits`, `validateDefaultPagination`, `resolveExecution`, `prepareMCPTools`, `composeToolMiddleware`, `createCallTool`, execution modes and result limits |
-| `packages/*/types/` | Existing public declarations that may need updating |
+| `packages/*/types/` and `packages/mongodb/src/**/*.d.ts` | Existing public declarations that may need updating, including the declarations of MongoDB's legacy `src/` deep imports |
 | `tests/` | Existing regression and integration fixtures |
 | `.cursor/rules/` | Architecture, coding, auth, extensions, testing, and documentation rules |
 

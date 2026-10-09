@@ -52,6 +52,14 @@ export interface MongoAdapterOptions {
   /** Fixed at adapter creation. Defaults to off; transactional mode requires initialize(). */
   referentialIntegrity?: 'off' | 'transactional';
 }
+/**
+ * In the default 'off' mode, withTransaction(null, callback) without a model, as custom mutations
+ * call it, opens its session on the default mongoose.connection, unless that connection has no
+ * client, no model is compiled on it or on its useDb() connections, and every model of the bound
+ * runtime's registrations uses one MongoDB client: then it opens it on that client. A supplied
+ * session or model is used as is. In transactional mode it uses the first protected model's
+ * connection.
+ */
 export interface MongoAdapter extends DatabaseAdapter {
   readonly referentialIntegrity: 'off' | 'transactional';
   /**
@@ -120,6 +128,20 @@ export function addNoEndpointType(gqltype: GraphQLObjectType): void;
  * connectionField, whose resolver Simfinity would generate, throws INVALID_MODEL (400). In default
  * mode, one with its own resolver or readOnly only logs a warning and rejects nested writes
  * (INVALID_MODEL, 500); referentialIntegrity 'transactional' rejects every such collection.
+ * Embedded types that contain each other throw INVALID_MODEL (400, `Embedded cycle at …`) when a
+ * generated model's embedded fields reach them, and always in transactional mode; in default mode a
+ * cycle that only supplied models reach is not checked.
+ * A generated input that would have no fields is left out with a warning, together with the
+ * collection operation, embedded field or add/update/state-action mutation that would take it; a
+ * non-null embedded field whose embedded type has no writable fields throws INVALID_MODEL (400)
+ * when the generated mutations reach its owner. An application type named FieldExtensionsType or
+ * RelationType renames Simfinity's introspection metadata types (SimfinityFieldExtensionsType,
+ * SimfinityRelationType) with a warning when it is in the process's first Simfinity schema. That
+ * schema fixes the names: in a later createSchema(), an application type with one of the current
+ * names (the original ones, or the fallback names after a rename) throws RESERVED_TYPE_NAME (500),
+ * before models are created when it is an included endpoint type, a registered mutation's input or
+ * output type, an output type they reach or a field argument's type, and when the schema is
+ * constructed otherwise.
  */
 export function createSchema(
   includedQueryTypes?: GraphQLObjectType[] | null,
@@ -187,7 +209,8 @@ export function configureMutationLimits(options?: MutationLimitsOptions): void;
  * Get the generated create input type, preserving field and list-item non-null
  * wrappers. Update inputs remove only the outer wrapper (except entity id).
  * References use IdInputType; embedded lists use nested inputs; referenced
- * collections use added/updated/deleted operation inputs.
+ * collections use added/updated/deleted operation inputs. It has no fields for a type without
+ * writable fields; such inputs are not part of generated schemas.
  */
 export function getInputType(type: GraphQLObjectType | { name: string }): GraphQLInputObjectType;
 

@@ -4,12 +4,8 @@
  */
 import { auth } from '../index.js';
 
-/** Authentication error: code `UNAUTHENTICATED`, status 401. */
-export const UnauthenticatedError: typeof auth.UnauthenticatedError;
-export type UnauthenticatedError = InstanceType<typeof auth.UnauthenticatedError>;
-/** Authorization error: code `FORBIDDEN`, status 403. */
-export const ForbiddenError: typeof auth.ForbiddenError;
-export type ForbiddenError = InstanceType<typeof auth.ForbiddenError>;
+// The root classes themselves, which `auth.UnauthenticatedError` and `auth.ForbiddenError` also are.
+export { UnauthenticatedError, ForbiddenError } from '../index.js';
 export const createAuthError: typeof auth.createAuthError;
 
 declare const errors: Pick<typeof auth, 'UnauthenticatedError' | 'ForbiddenError' | 'createAuthError'>;

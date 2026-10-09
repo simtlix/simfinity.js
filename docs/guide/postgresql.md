@@ -117,7 +117,7 @@ PostgreSQL uses stronger physical constraints than generated Mongoose storage. R
 
 Scalar lists, including `[ID]` lists, are native arrays without a generated index; element filters scan them. Databases created by earlier versions keep a btree index on `[ID]` list columns, which limits each list to about 167 identifiers until you drop it; startup logs a warning that names it. Native date-time values start at 4714-11-24 BC, and text cannot contain NUL (U+0000): such input fails with `INVALID_VALUE` (400). A text value of more than about 2.7 KB after compression cannot be stored in a unique field or another btree index. See [the storage reference](../postgresql#attributes-and-relationships).
 
-The runtime preserves absent versus explicit-null embedded fields, null list items, list order, duplicates, descendant list defaults, and minimized empty inline objects. An omitted optional inline parent may become present when a descendant list has a default; if that parent also contains a required scalar, creation must provide it. GraphQL create omits an explicit null object before defaults apply, while native `create` can store an explicit-null parent.
+The runtime preserves absent versus explicit-null embedded fields, null list items, list order, duplicates, descendant list defaults, and minimized empty inline objects. An omitted optional inline parent may become present when a descendant list has a default; if that parent also contains a required scalar, creation must provide it. MongoDB instead stores the defaulted parent without the required scalar and reads it as `null`. GraphQL create omits an explicit null object before defaults apply, while native `create` can store an explicit-null parent.
 
 ## Query support and boundaries
 

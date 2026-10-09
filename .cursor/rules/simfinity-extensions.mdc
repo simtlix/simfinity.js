@@ -12,7 +12,7 @@ Simfinity uses the standard GraphQL `extensions` property on fields and types to
 
 At import time, Simfinity adds an `extensions` field through `__Field.getFields()` if one is not already present. It preserves the existing field map and metadata type identity across repeated module evaluation with a shared GraphQL peer, including after fields or schemas have been materialized. The resolver returns the source field's original extensions; introspection exposes only `relation`, `stateMachine`, and `readOnly`, without removing arbitrary application metadata.
 
-This is still a global GraphQL extension. Schemas constructed afterward register `FieldExtensionsType` and `RelationType`; earlier schemas retain their original type maps and cannot validate named fragments on those new types. Schema cloning and `buildClientSchema()` roundtrips in a process that imported Simfinity remain unsupported; see the architecture rule.
+This is still a global GraphQL extension. Schemas constructed afterward register `FieldExtensionsType` and `RelationType` (or their fallback names `SimfinityFieldExtensionsType` and `SimfinityRelationType`, numbered when taken, after an application type with one of those names was in the process's first Simfinity schema; a later clash throws `RESERVED_TYPE_NAME`); earlier schemas retain their original type maps and cannot validate named fragments on those new types. Schema cloning and `buildClientSchema()` roundtrips in a process that imported Simfinity remain unsupported; see the architecture rule.
 
 ## Field-Level Extensions
 

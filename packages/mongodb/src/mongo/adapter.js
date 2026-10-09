@@ -50,10 +50,47 @@ const hasNoFindHooks = (hooks) => {
 const batchesFindOne = (Model) => hasNoFindHooks(Model.schema?.s?.hooks)
   && (Model.Query?.prototype?._queryMiddleware == null || hasNoFindHooks(Model.Query.prototype._queryMiddleware));
 
+// `useDb()` connections share their parent's MongoClient, and a session belongs to a client.
+const clientOf = (connection) => connection.getClient?.() || connection;
+
 export const createMongoAdapter = (options) => {
   const integrity = createMongoIntegrity(options);
   let queries;
+  let getRegistrations = () => [];
   const privateConnectionFields = new Map();
+
+  // A registered custom mutation passes no model, so its owned session stays on the default
+  // mongoose.connection, as before. While that connection has never been opened (no client), a
+  // session there can only wait and time out. Use the one MongoDB client of the registered models
+  // instead, but only when nothing can need the default connection:
+  // - any model compiled on it, generated or the application's, registered or not, means the
+  //   application opens it, maybe after the request arrived, and the callback may write that
+  //   model with the session, which must then come from the default connection's client. The
+  //   same holds for a model compiled on one of its useDb() connections, which share its client.
+  //   Only those in its otherDbs are seen: useDb(name, { noListener: true }) leaves a connection
+  //   out of it, and native collection writes (mongoose.connection.collection()) compile no model;
+  // - registered models on several clients have no single client to choose.
+  // Once the default connection has a client, nothing changes.
+  const hasModels = (connection) => Object.keys(connection.models).length > 0;
+  const sessionModel = () => {
+    if (mongoose.connection.getClient() || hasModels(mongoose.connection)
+      || mongoose.connection.otherDbs.some(hasModels)) return undefined;
+    let found;
+    for (const { model } of getRegistrations()) {
+      const connection = model?.db;
+      if (!connection) continue;
+      if (connection === mongoose.connection) return undefined;
+      if (!found) found = model;
+      else if (clientOf(found.db) !== clientOf(connection)) return undefined;
+    }
+    return found;
+  };
+
+  // A supplied session or model is used as is; only an owned session without a model looks up
+  // the registrations.
+  const withOwnedTransaction = (session, body, Model, ...rest) => withMongoTransaction(
+    session, body, (Model || session) ? Model : sessionModel(), ...rest,
+  );
 
   const addPrivateConnectionField = (typeName, fieldName) => {
     if (!privateConnectionFields.has(typeName)) privateConnectionFields.set(typeName, new Set());
@@ -63,6 +100,7 @@ export const createMongoAdapter = (options) => {
   const adapter = {
     bind(binding) {
       integrity.bind(binding);
+      getRegistrations = binding.getRegistrations;
       queries = createMongoQueries(binding);
       adapter.buildQuery = queries.buildQuery;
       adapter.buildFilterGroupMatch = queries.buildFilterGroupMatch;
@@ -103,7 +141,7 @@ export const createMongoAdapter = (options) => {
     // Relation inputs and batch keys: only an ObjectId or its hex form, never a newly minted one.
     castId: castObjectId,
     initialize: integrity.initialize,
-    withTransaction: integrity.enabled ? integrity.withTransaction : withMongoTransaction,
+    withTransaction: integrity.enabled ? integrity.withTransaction : withOwnedTransaction,
     newRecord(Model, data, session) {
       const record = new Model(data);
       record.$session(session);
@@ -118,7 +156,8 @@ export const createMongoAdapter = (options) => {
     },
     // A hydrated document renders a singular embedded path as an object even when the stored value
     // is an explicit null. Only that stored null reads as null; an absent value keeps Mongoose's
-    // materialized object, as legacy documents rely on.
+    // materialized object; core then reads it as null when it holds no data and misses a required
+    // member (runtime.js readEmbeddedObject).
     readEmbeddedValue(value) {
       // The nested accessor's toJSON is called without a receiver on purpose. It reads the schema's
       // toJSON virtuals option from `this` (guarded by `this &&`), and with that option set a stored

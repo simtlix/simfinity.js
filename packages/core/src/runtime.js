@@ -19,7 +19,9 @@ import { isThenable } from './auth/thenable.js';
 import {
   getFieldStorageName, getListShape, markStoredIdentity, normalizeConnectionField,
 } from './relation-storage.js';
-import './introspection.js';
+import {
+  fieldMetadataNamesFixed, fieldMetadataTypes, fixFieldMetadataNames, renameFieldMetadataTypes,
+} from './introspection.js';
 
 // Resolvers Simfinity generates. Any other resolver on a registered type when its schema is first
 // created is application code, such as a masking resolver, recorded once per type so later
@@ -212,8 +214,9 @@ const GraphQLJSON = new GraphQLScalarType({
 
 // The type called `name` that a schema built from these roots would contain, other than through
 // `skip`, following the references GraphQLSchema collects: fields, arguments, interfaces, union
-// members and input fields.
-const findSchemaType = (roots, name, skip) => {
+// members and input fields. With `inputFields` false, input objects are matched by their own name
+// only, and their fields are never read.
+const findSchemaType = (roots, name, skip, { inputFields = true } = {}) => {
   const visited = new Set();
   const pending = [...roots];
   while (pending.length) {
@@ -228,11 +231,73 @@ const findSchemaType = (roots, name, skip) => {
         pending.push(field.type, ...field.args.map((arg) => arg.type));
       }
     }
-    if (type instanceof GraphQLInputObjectType) {
+    if (inputFields && type instanceof GraphQLInputObjectType) {
       for (const field of Object.values(type.getFields())) pending.push(field.type);
     }
   }
   return null;
+};
+
+// Every schema contains Simfinity's field metadata types, the types of `__Field.extensions`, named
+// FieldExtensionsType and RelationType unless a clash renamed them. Returns the type of a schema built
+// from these roots that has the name of one of them, or null (#162).
+const fieldMetadataClash = (roots, options) => fieldMetadataTypes()
+  .map((own) => findSchemaType(roots, own.name, own, options)).find(Boolean) || null;
+
+// The first schema that contains the metadata types fixes their names for the process, so a later
+// schema with a type of the same name is rejected.
+const reservedTypeNameError = (clash) => new SimfinityError(
+  `Type ${clash.name} has the name of a type that Simfinity adds to every schema for __Field.extensions, `
+    + 'and a schema created earlier in this process already contains that type under this name. Rename '
+    + `${clash.name}, or create this schema first, so that Simfinity gives its types other names, such as `
+    + 'SimfinityFieldExtensionsType and SimfinityRelationType',
+  'RESERVED_TYPE_NAME',
+  500,
+);
+// The check before anything is built reads only what the output type check before it reads: output
+// types, their fields, arguments, interfaces and union members. Input objects, a registered
+// mutation's input among them, are checked by their own name, because their fields function may read
+// generated inputs (getInputType) that do not exist yet, and graphql-js keeps what it returns. A clash
+// inside an input's fields is found when the schema is constructed.
+const assertFieldMetadataNamesFree = (roots) => {
+  const clash = fieldMetadataNamesFixed() && fieldMetadataClash(roots, { inputFields: false });
+  if (clash) throw reservedTypeNameError(clash);
+};
+
+// Constructs the schema of these roots. When one of its types has the name of a field metadata type,
+// those are renamed SimfinityFieldExtensionsType and SimfinityRelationType, with a number appended
+// when the schema also has those names, in every schema the process constructs from then on. A
+// construction that fails puts the previous metadata types back, so only a schema that exists fixes
+// the names.
+const constructSchema = (query, mutation) => {
+  const roots = [query, mutation];
+  const clash = fieldMetadataClash(roots);
+  if (clash && fieldMetadataNamesFixed()) throw reservedTypeNameError(clash);
+  let names = null;
+  if (clash) {
+    const taken = (name) => findSchemaType(roots, name) !== null;
+    let suffix = '';
+    for (let n = 2; taken(`SimfinityFieldExtensionsType${suffix}`) || taken(`SimfinityRelationType${suffix}`); n += 1) {
+      suffix = String(n);
+    }
+    names = [`SimfinityFieldExtensionsType${suffix}`, `SimfinityRelationType${suffix}`];
+  }
+  const restore = names ? renameFieldMetadataTypes(...names) : null;
+  let schema;
+  try {
+    schema = new GraphQLSchema({ query, mutation });
+  } catch (error) {
+    if (restore) restore();
+    throw error;
+  }
+  fixFieldMetadataNames();
+  if (names) {
+    console.warn(`Configuration issue: the schema has a type named ${clash.name}, the name of a type that `
+      + `Simfinity adds to every schema for __Field.extensions, so Simfinity names its types ${names[0]} and `
+      + `${names[1]} in every schema this process creates from now on. Use these names in named fragments `
+      + 'and permission maps.');
+  }
+  return schema;
 };
 
 // graphql-js wraps a value thrown while resolving a field (locatedError): the wrapper has the field
@@ -609,6 +674,10 @@ const wrapListInputType = (itemType, listShape, preserveOuterNonNull) => {
 
 const capitalize = (name) => name.charAt(0).toUpperCase() + name.slice(1);
 
+// A GraphQL input object needs at least one field, so a generated input that would have none is
+// left out, together with the operations, fields and mutations that would take it (#161).
+const hasInputFields = (inputType) => Object.keys(inputType.getFields()).length > 0;
+
 /**
  * The `added` item input of a referenced collection: the item type's create input without the
  * back-reference that the parent supplies. Its fields are read from the item's create input when
@@ -649,9 +718,11 @@ const createTypeWithExcludedField = (inputNamePrefix, itemType, fieldToExclude,
 };
 
 // A referenced collection's operation input. The item inputs are read when the schema is built, so
-// the item type's inputs need not exist yet.
+// the item type's inputs need not exist yet. `added` or `updated` is left out when its item input
+// would have no fields, such as `added` for a child whose only writable field is the back-reference;
+// `deleted` always remains. `owner` names the collection, as `Type.field`, in the warning.
 const createOneToManyInputType = (name, inputNamePrefix, itemType, connection,
-  itemNonNull = false, optionalFields = []) => {
+  itemNonNull = false, optionalFields = [], owner = name) => {
   const inputTypeForAdd = connection.declaredFieldName
     ? createTypeWithExcludedField(
       inputNamePrefix,
@@ -663,16 +734,39 @@ const createOneToManyInputType = (name, inputNamePrefix, itemType, connection,
     : null;
   const listOf = (type) => new GraphQLList(itemNonNull ? new GraphQLNonNull(type) : type);
 
+  const omittedOperation = {
+    added: () => `because ${itemType.name} has no writable fields`
+      + `${connection.declaredFieldName ? ` besides its connectionField ${connection.declaredFieldName}` : ''}; `
+      + `create ${itemType.name} records with its own mutations or a registered mutation.`,
+    updated: () => `because ${itemType.name} has no writable fields and no writable id; update `
+      + `${itemType.name} records with a registered mutation.`,
+  };
+
   return new GraphQLInputObjectType({
     name,
-    fields: () => ({
-      added: { type: listOf(inputTypeForAdd || getInputType(itemType)) },
-      updated: { type: listOf(typesDictForUpdate.types[itemType.name].inputType) },
+    fields: () => {
+      const fields = {};
+      const itemInputs = {
+        added: inputTypeForAdd || getInputType(itemType),
+        updated: typesDictForUpdate.types[itemType.name].inputType,
+      };
+      for (const [operation, itemInput] of Object.entries(itemInputs)) {
+        if (hasInputFields(itemInput)) {
+          fields[operation] = { type: listOf(itemInput) };
+        } else {
+          warnOnce(itemType, `emptyItemInput:${owner}:${operation}`, `Configuration issue: ${owner} has no `
+            + `\`${operation}\` operation in generated inputs, ${omittedOperation[operation]()}`);
+        }
+      }
       // Null IDs are skipped, so `deleted` accepts them whatever the collection's item nullability.
-      deleted: { type: new GraphQLList(GraphQLID) },
-    }),
+      fields.deleted = { type: new GraphQLList(GraphQLID) };
+      return fields;
+    },
   });
 };
+
+// What graphQLListInputType returns for a list of an embedded type whose input has no fields.
+const NO_INPUT_FIELDS = Symbol('no input fields');
 
 const graphQLListInputType = (dict, fieldEntry, fieldEntryName,
   inputNamePrefix, connectionField, preserveOuterNonNull, ownerName) => {
@@ -686,13 +780,15 @@ const graphQLListInputType = (dict, fieldEntry, fieldEntryName,
     if (!fieldEntry.extensions?.relation?.embedded) {
       const oneToMany = createOneToManyInputType(`OneToMany${inputNamePrefix}${fieldEntryName}`,
         inputNamePrefix, itemType, normalizeConnectionField(itemType, connectionField),
-        listShape.itemNonNull);
+        listShape.itemNonNull, [], `${ownerName}.${fieldEntryName}`);
       return preserveOuterNonNull && listShape.outerNonNull
         ? new GraphQLNonNull(oneToMany)
         : oneToMany;
     }
     if (registration.inputType) {
-      return wrapListInputType(registration.inputType, listShape, preserveOuterNonNull);
+      return hasInputFields(registration.inputType)
+        ? wrapListInputType(registration.inputType, listShape, preserveOuterNonNull)
+        : NO_INPUT_FIELDS;
     }
   } else if (itemType instanceof GraphQLScalarType || itemType instanceof GraphQLEnumType) {
     return wrapListInputType(itemType, listShape, preserveOuterNonNull);
@@ -725,14 +821,47 @@ const selfCollectionInputType = (gqltype, fieldEntryName, fieldEntry, forUpdate,
     // optional there, as such items had no such fields before; items added by an update keep them
     // as the type declares them.
     forUpdate ? [] : selfFields,
+    `${gqltype.name}.${fieldEntryName}`,
   );
   return !forUpdate && listShape.outerNonNull ? new GraphQLNonNull(oneToMany) : oneToMany;
 };
 
+// An embedded field, single or list, whose embedded type's create or update input has no fields is
+// left out of that input of its owner. Only the create input is empty when the type's writable fields
+// hold only ids, which create inputs leave out; generated updates still set the field then.
+const warnEmptyEmbeddedInputs = (gqltype, fieldName, embeddedTypeName, noCreate, noUpdate) => {
+  if (!noCreate && !noUpdate) return;
+  const field = `Configuration issue: ${gqltype.name}.${fieldName} `;
+  if (!noUpdate) {
+    warnOnce(gqltype, `emptyEmbeddedInput:${fieldName}`, `${field}is left out of generated create inputs, because `
+      + `the create input of its embedded type ${embeddedTypeName} would have no fields (create inputs leave out `
+      + 'ids), so generated creates cannot set it, while generated updates still can; to set it on create, use a '
+      + 'controller or a registered mutation.');
+    return;
+  }
+  const inputs = [noCreate && 'create', 'update'].filter(Boolean).join(' and ');
+  warnOnce(gqltype, `emptyEmbeddedInput:${fieldName}`, `${field}is left out of generated ${inputs} inputs, because `
+    + `its embedded type ${embeddedTypeName} has no writable fields, so generated mutations cannot set it; set it `
+    + 'in a controller or a registered mutation, and mark it readOnly to state that it is output-only.');
+};
+
+// A non-null embedded field, single or list, that generated create inputs cannot set. Generated
+// mutations that reach the owner's create input would store records without it, so such a schema is
+// rejected; one whose generated mutations cannot reach that input only leaves the field out.
+const requiredEmbeddedWithoutInputError = (gqltype, { field, embeddedTypeName }) => new SimfinityError(
+  `${gqltype.name}.${field} is non-null but its embedded type ${embeddedTypeName} has no writable fields, so `
+    + 'generated create inputs cannot set it; mark it readOnly and set it in a controller, or make it nullable',
+  'INVALID_MODEL',
+  400,
+);
+// Registration -> the non-null embedded fields its create input left out.
+const requiredFieldsWithoutCreateInput = new WeakMap();
+
 // Builds a type's create and update inputs, or returns every field whose input cannot be built yet:
 // `{ unresolvedFields: [{ field, waitsFor }] }`, where `waitsFor` names the embedded type whose
-// inputs the field waits for, and is absent when the field can have no generated input.
-const buildInputType = (gqltype) => {
+// inputs the field waits for, and is absent when the field can have no generated input. `reachable`
+// holds the types whose inputs the generated mutations of the schema reach.
+const buildInputType = (gqltype, reachable) => {
   const argTypes = gqltype.getFields();
 
   const fieldsArgs = {};
@@ -740,6 +869,13 @@ const buildInputType = (gqltype) => {
 
   const selfReferenceCollections = {};
   const unresolvedFields = [];
+  const requiredWithoutCreateInput = [];
+  // Leaves a non-null embedded field without a create input out, or rejects the schema.
+  const omitRequiredEmbedded = (field, embeddedTypeName) => {
+    const omitted = { field, embeddedTypeName };
+    if (reachable.has(gqltype)) throw requiredEmbeddedWithoutInputError(gqltype, omitted);
+    requiredWithoutCreateInput.push(omitted);
+  };
 
   for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
     const fieldArg = {};
@@ -774,8 +910,17 @@ const buildInputType = (gqltype) => {
             } else if (requireRegisteredType(typesDict, unwrapNonNull(fieldEntry.type), fieldEntryName,
               gqltype.name).inputType
               && typesDictForUpdate.types[fieldEntryNameValue].inputType) {
-              fieldArg.type = typesDict.types[fieldEntryNameValue].inputType;
-              fieldArgForUpdate.type = typesDictForUpdate.types[fieldEntryNameValue].inputType;
+              // Create and update inputs are decided apart: an embedded type whose only writable
+              // field is `id` has one only for updates.
+              const embeddedCreate = typesDict.types[fieldEntryNameValue].inputType;
+              const embeddedUpdate = typesDictForUpdate.types[fieldEntryNameValue].inputType;
+              if (hasInputFields(embeddedCreate)) fieldArg.type = embeddedCreate;
+              else if (fieldEntry.type instanceof GraphQLNonNull) {
+                omitRequiredEmbedded(fieldEntryName, fieldEntryNameValue);
+              }
+              if (hasInputFields(embeddedUpdate)) fieldArgForUpdate.type = embeddedUpdate;
+              warnEmptyEmbeddedInputs(gqltype, fieldEntryName, fieldEntryNameValue,
+                !fieldArg.type, !fieldArgForUpdate.type);
             } else {
               unresolvedFields.push({ field: fieldEntryName, waitsFor: fieldEntryNameValue });
             }
@@ -802,8 +947,11 @@ const buildInputType = (gqltype) => {
               fieldEntryName, `${gqltype.name}U`,
               fieldEntry.extensions?.relation?.connectionField, false, gqltype.name);
             if (listInputTypeForAdd && listInputTypeForUpdate) {
-              fieldArg.type = listInputTypeForAdd;
-              fieldArgForUpdate.type = listInputTypeForUpdate;
+              if (listInputTypeForAdd !== NO_INPUT_FIELDS) fieldArg.type = listInputTypeForAdd;
+              else if (listShape.outerNonNull) omitRequiredEmbedded(fieldEntryName, listShape.itemType.name);
+              if (listInputTypeForUpdate !== NO_INPUT_FIELDS) fieldArgForUpdate.type = listInputTypeForUpdate;
+              warnEmptyEmbeddedInputs(gqltype, fieldEntryName, listShape.itemType.name,
+                listInputTypeForAdd === NO_INPUT_FIELDS, listInputTypeForUpdate === NO_INPUT_FIELDS);
             } else {
               // An object item here is embedded and its inputs are not built yet; any other item,
               // such as a list, has no generated input.
@@ -858,7 +1006,9 @@ const buildInputType = (gqltype) => {
     fields: fieldsArgForUpdate,
   });
 
-  return { inputTypeBody: inputTypeForAdd, inputTypeBodyForUpdate: inputTypeForUpdate };
+  return {
+    inputTypeBody: inputTypeForAdd, inputTypeBodyForUpdate: inputTypeForUpdate, requiredWithoutCreateInput,
+  };
 };
 
 const getInputType = (type) => typesDict.types[type.name].inputType;
@@ -964,6 +1114,14 @@ const unresolvedInputTypesMessage = (pendingTypeNames, unresolvedByType) => {
 
 const buildPendingInputTypes = (waitingForInputType, includedMutationTypes) => {
   claimSelfCollectionNames(waitingForInputType, includedMutationTypes);
+  // Inputs built for an earlier schema, which did not reach them, may leave out a non-null embedded
+  // field that this schema's generated mutations would need; inputs built now are checked as built.
+  const reachable = typesWithReachableInputs(includedMutationTypes);
+  for (const gqltype of reachable) {
+    const registration = typesDict.types[gqltype.name];
+    const [omitted] = (registration.inputType && requiredFieldsWithoutCreateInput.get(registration)) || [];
+    if (omitted) throw requiredEmbeddedWithoutInputError(gqltype, omitted);
+  }
   let pending = waitingForInputType;
   let previousPendingCount = Object.keys(pending).length + 1;
   // Type name -> the fields whose input could not be built in the last pass.
@@ -983,10 +1141,11 @@ const buildPendingInputTypes = (waitingForInputType, includedMutationTypes) => {
       const { gqltype } = value;
       if (typesDict.types[gqltype.name].inputType) continue;
 
-      const result = buildInputType(gqltype);
+      const result = buildInputType(gqltype, reachable);
       if (result.inputTypeBody && result.inputTypeBodyForUpdate) {
         typesDict.types[gqltype.name].inputType = result.inputTypeBody;
         typesDictForUpdate.types[gqltype.name].inputType = result.inputTypeBodyForUpdate;
+        requiredFieldsWithoutCreateInput.set(typesDict.types[gqltype.name], result.requiredWithoutCreateInput);
       } else {
         stillWaiting[key] = value;
         unresolvedFields[gqltype.name] = result.unresolvedFields;
@@ -1707,9 +1866,22 @@ const resolveById = async (type, args, context, requiredId) => {
   return results[0] || null;
 };
 
+// Why a type's generated create or update input has no fields, for the warnings of buildMutation. An
+// update input also needs a writable id.
+const withoutWritableFields = (type, { noWritableId = false } = {}) => {
+  const stateField = type.gqltype.getFields().state;
+  const managedState = type.stateMachine && stateField && !stateField.extensions?.readOnly;
+  const state = managedState ? ' besides its state, which its state machine manages' : '';
+  const id = noWritableId ? `${state ? ',' : ''} and no writable id` : '';
+  return `${type.gqltype.name} has no writable fields${state}${id}`;
+};
+
 // Every generated mutation field carries extensions.simfinityMutation with its operation (and, for
 // a state-machine action, the action and its from/to states), so tools such as the MCP package can
 // classify it without guessing from its name. Extensions do not appear in SDL or introspection.
+// An input object needs a field, so a type whose create input has none gets no add mutation, and
+// one whose update input has none, which only a type without a writable id can have, gets no update
+// mutation or state machine actions either (#161).
 const buildMutation = (name, includedMutationTypes, includedCustomMutations) => {
   const rootQueryArgs = {};
   rootQueryArgs.name = name;
@@ -1722,24 +1894,33 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
       if (type.endpoint) {
         const argsObject = { input: { type: new GraphQLNonNull(type.inputType) } };
 
-        rootQueryArgs.fields[`add${type.simpleEntityEndpointName}`] = {
-          type: type.gqltype,
-          description: 'add',
-          args: argsObject,
-          extensions: { simfinityMutation: { typeName: type.gqltype.name, operation: operations.SAVE } },
-          async resolve(parent, args, context) {
-            const params = {
-              type,
-              args,
-              operation: operations.SAVE,
-              context,
-            };
+        if (hasInputFields(type.inputType)) {
+          rootQueryArgs.fields[`add${type.simpleEntityEndpointName}`] = {
+            type: type.gqltype,
+            description: 'add',
+            args: argsObject,
+            extensions: { simfinityMutation: { typeName: type.gqltype.name, operation: operations.SAVE } },
+            async resolve(parent, args, context) {
+              const params = {
+                type,
+                args,
+                operation: operations.SAVE,
+                context,
+              };
 
-            await executeMiddleware(params);
-            return executeOperation(type.model, type.gqltype, type.controller,
-              args.input, operations.SAVE, null, null, context, type.inputType);
-          },
-        };
+              await executeMiddleware(params);
+              return executeOperation(type.model, type.gqltype, type.controller,
+                args.input, operations.SAVE, null, null, context, type.inputType);
+            },
+          };
+        } else {
+          warnOnce(type.gqltype, 'emptyCreateInput', `Configuration issue: ${withoutWritableFields(type)}, so the `
+            + `schema has no add${type.simpleEntityEndpointName} mutation; create its records with a registered `
+            + (type.stateMachine
+              ? 'mutation, which must set the initial state (saveObject() sets it).'
+              : `mutation that takes no input or an input of its own, since getInputType(${type.gqltype.name}) `
+                + 'has no fields.'));
+        }
         rootQueryArgs.fields[`delete${type.simpleEntityEndpointName}`] = {
           type: type.gqltype,
           description: 'delete',
@@ -1764,7 +1945,12 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
 
   for (const type of Object.values(typesDictForUpdate.types)) {
     if (!shouldNotBeIncludedInSchema(includedMutationTypes, type.gqltype)) {
-      if (type.endpoint) {
+      if (type.endpoint && !hasInputFields(type.inputType)) {
+        const reason = withoutWritableFields(type, { noWritableId: true });
+        warnOnce(type.gqltype, 'emptyUpdateInput', `Configuration issue: ${reason}, so its generated update input `
+          + `would have no fields and the schema has no update${type.simpleEntityEndpointName} mutation`
+          + `${type.stateMachine ? ' and no state machine actions' : ''}.`);
+      } else if (type.endpoint) {
         const argsObject = { input: { type: new GraphQLNonNull(type.inputType) } };
         rootQueryArgs.fields[`update${type.simpleEntityEndpointName}`] = {
           type: type.gqltype,
@@ -1967,6 +2153,57 @@ const installIdResolver = (gqltype) => {
   if (idField && !idField.resolve) idField.resolve = markGenerated((parent) => parent._id ?? parent.id);
 };
 
+// An embedded object whose members are read here: a plain object, or a hydrated record, which
+// converts itself with toObject() (MongoDB documents and their nested paths do). Promises, arrays,
+// functions and other objects, such as dates or identifiers, are values, never read into.
+const isRecordObject = (value) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || isThenable(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null || typeof value.toObject === 'function';
+};
+// A referenced collection stores nothing in the object; every other member is stored under its
+// storage name.
+const isReferencedCollection = (member) => {
+  const relation = member.extensions?.relation;
+  return Boolean(relation && !relation.embedded && getListShape(member.type));
+};
+const storedMemberValue = (value, memberName, member) => (
+  isReferencedCollection(member) ? undefined : ownValue(value, getFieldStorageName(memberName, member))
+);
+
+// Whether an embedded object holds no data: every member is null or undefined, an empty list, or a
+// singular embedded object that holds no data. Any other value, a promise included, is data. An
+// object that contains itself, which only a custom result can, holds data.
+const holdsNoData = (value, type, ancestors = []) => !ancestors.includes(value)
+  && Object.entries(type.getFields()).every(([memberName, member]) => {
+    const stored = storedMemberValue(value, memberName, member);
+    if (stored === null || stored === undefined) return true;
+    if (Array.isArray(stored)) return stored.length === 0;
+    const memberType = unwrapNonNull(member.type);
+    return member.extensions?.relation?.embedded === true && memberType instanceof GraphQLObjectType
+      && isRecordObject(stored) && holdsNoData(stored, memberType, [...ancestors, value]);
+  });
+
+// Whether rendering such an object fails: a non-null member is null or undefined, or is a singular
+// embedded object that misses one of its own. Only members that generated inputs accept count. As on
+// writes (completeEmbeddedValue), `id` and readOnly members do not; nor do interface and union
+// members, which buildInputType leaves out; nor do referenced collections or members with an
+// application resolver, which may compute a value. A promise counts as present.
+const missesRequiredMember = (value, type) => Object.entries(type.getFields()).some(([memberName, member]) => {
+  if (!(member.type instanceof GraphQLNonNull) || isReferencedCollection(member)) return false;
+  if (memberName === 'id' || member.extensions?.readOnly || hasApplicationResolver(type, memberName)) return false;
+  if (isAbstractOutputType(unwrapListAndNonNull(member.type))) return false;
+  const stored = storedMemberValue(value, memberName, member);
+  if (stored === null || stored === undefined) return true;
+  return member.extensions?.relation?.embedded === true && member.type.ofType instanceof GraphQLObjectType
+    && isRecordObject(stored) && missesRequiredMember(stored, member.type.ofType);
+});
+
+const readEmbeddedObject = (value, type) => (
+  type instanceof GraphQLObjectType && isRecordObject(value) && holdsNoData(value, type)
+    && missesRequiredMember(value, type) ? null : value
+);
+
 // An adapter that hydrates stored records may render an explicitly null singular embedded object as
 // an object (MongoDB nested paths do); readEmbeddedValue returns null for it. Nullable singular
 // embedded fields of registered types, and of the embedded types they reach, read through it. The
@@ -1975,11 +2212,23 @@ const installIdResolver = (gqltype) => {
 // The value is read as graphql's default resolver reads it, so a method on the parent, such as one a
 // custom mutation result supplies, is still called; a promise it returns is read once it settles.
 // Only a field named like an Object.prototype member that reads as that member reads as null.
+// Such an adapter may also render an absent object, or store an omitted one, as an object that holds
+// nothing but its list defaults (MongoDB nested paths do). An object that holds no data and misses a
+// required member (see missesRequiredMember) cannot be rendered, so it reads as null, as an absent
+// object does on other read paths, whatever the selection. The rule depends only on the value and
+// its type, so runtimes that share the type, with or without the hook, read the same. An object a
+// generated create or update writes does not read as null, since those writes require the members
+// counted, with one exception: Mongoose minimizes empty objects when it saves a new document, so a
+// create that writes an empty object for a required embedded member (`geo: {}`) stores that member
+// as absent. An object that holds nothing else then reads as null, as an omitted one does, except
+// where Mongoose hydrates the document (by-ID and reference reads, update responses) and the member is
+// a nested path, which it renders as `{}`. Generated models declare every embedded member as a nested
+// path except one named `type`, a single nested subdocument. PostgreSQL rejects such a create
+// (REQUIRED_VALUE).
 const readEmbeddedField = markGenerated((parent, args, context, info) => {
   const value = readOwnField(parent, args, context, info);
-  return isThenable(value)
-    ? value.then((resolved) => adapter.readEmbeddedValue(resolved))
-    : adapter.readEmbeddedValue(value);
+  const read = (resolved) => readEmbeddedObject(adapter.readEmbeddedValue(resolved), getNamedType(info.returnType));
+  return isThenable(value) ? value.then(read) : read(value);
 });
 
 const installEmbeddedValueResolvers = (gqltype, visited) => {
@@ -2042,6 +2291,20 @@ const assertCollectionConnections = () => {
 
 const getRegistrations = () => Object.values(typesDict.types);
 
+// Application types that a schema with these allowlists contains, whatever else it reaches: the
+// endpoint types of its queries and mutations, and the input and output types of its registered
+// mutations.
+const includedApplicationTypes = (includedQueryTypes, includedMutationTypes, includedCustomMutations) => [
+  ...Object.values(typesDict.types)
+    .filter((type) => type.endpoint
+      && ((type.simpleEntityEndpointName && !shouldNotBeIncludedInSchema(includedQueryTypes, type.gqltype))
+        || !shouldNotBeIncludedInSchema(includedMutationTypes, type.gqltype)))
+    .map((type) => type.gqltype),
+  ...Object.entries(registeredMutations)
+    .filter(([entry]) => !shouldNotBeIncludedInSchema(includedCustomMutations, entry))
+    .flatMap(([, { inputModel, outputModel }]) => [inputModel, outputModel].filter(Boolean)),
+];
+
 const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomMutations) => {
   // Reject before models, resolvers or roots are built, so a rejected schema changes nothing.
   Object.values(typesDict.types).forEach(({ gqltype }) => validateScope(gqltype));
@@ -2049,6 +2312,11 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
   schemaTypes.forEach(assertNotBoundElsewhere);
   schemaTypes.forEach(assertFieldsNotBoundElsewhere);
   assertCollectionConnections();
+  // An application type with the name of a field metadata type that an earlier schema fixed; one that
+  // only generated types or the fields of an input object reach is found when the schema is
+  // constructed.
+  assertFieldMetadataNamesFree(includedApplicationTypes(includedQueryTypes, includedMutationTypes,
+    includedCustomMutations));
   const referencedTypes = markReferencedTypesForModelGeneration();
   // Entities, which keep their own stored identity: connect() types and relation targets.
   Object.values(typesDict.types).forEach((typeInfo) => {
@@ -2110,7 +2378,7 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
     query = buildRootQuery('RootQueryType', includedQueryTypes, aggregationResultTypeFor(applicationJSON));
   }
 
-  const schema = new GraphQLSchema({ query, mutation });
+  const schema = constructSchema(query, mutation);
   // Reserve reachable types whose relation fields still have no resolver, such as an unregistered
   // custom mutation result, so another runtime cannot later generate resolvers this schema executes.
   schemaTypes.forEach((type) => {

@@ -133,13 +133,37 @@ const coreSubpaths = {
 const subpathBinding = (subpath) => `${subpath.replace(/\/(\w)/g, (match, letter) => letter.toUpperCase())}Subpath`;
 const quotedUnion = (names) => names.map((name) => `'${name}'`).join(' | ');
 
+// The value exports of the core root, pinned both ways: the packed runtime check compares them with
+// the module's keys, and the TypeScript fixture with the declared exports. A new root export needs an
+// explicit `export` in types/index.d.ts and an entry here.
+const coreRootValues = [
+  'ForbiddenError', 'InternalServerError', 'QLOperator', 'QLSort', 'QLValue', 'SimfinityError',
+  'UnauthenticatedError', 'auth', 'buildErrorFormatter', 'configureMutationLimits', 'configureQueryLimits',
+  'createQueryPlan', 'createRuntime', 'createValidatedScalar', 'describeModels', 'paginationStages',
+  'plugins', 'resolveModelPath', 'scalars', 'validators',
+];
+// MongoDB's legacy deep imports of the core subpaths, which re-export them unchanged, as do their
+// sibling declarations.
+const mongoLegacySubpaths = {
+  'src/auth/index.js': 'auth',
+  'src/auth/errors.js': 'auth/errors',
+  'src/auth/expressions.js': 'auth/expressions',
+  'src/auth/rules.js': 'auth/rules',
+  'src/plugins.js': 'plugins',
+  'src/scalars.js': 'scalars',
+  'src/validators.js': 'validators',
+};
+const legacyBinding = (path) => `legacy${path.slice(4, -3).replace(/(^|\/)(\w)/g, (match, slash, letter) => letter.toUpperCase())}`;
+
 const coreSource = `import assert from 'node:assert/strict';
   import {
+    ForbiddenError,
     InternalServerError,
     QLOperator,
     QLSort,
     QLValue,
     SimfinityError,
+    UnauthenticatedError,
     buildErrorFormatter,
     auth,
     configureMutationLimits,
@@ -209,7 +233,16 @@ const coreSource = `import assert from 'node:assert/strict';
   }
   for (const [name, namespace] of Object.entries({ auth, plugins, scalars, validators })) {
     assert.equal((await import(\`@simtlix/simfinity-core/\${name}\`)).default, namespace, name);
-  }`;
+  }
+  // The root error classes are the auth classes, as the declarations say.
+  const authErrors = await import('@simtlix/simfinity-core/auth/errors');
+  for (const [ErrorClass, name, status] of [[ForbiddenError, 'ForbiddenError', 403], [UnauthenticatedError, 'UnauthenticatedError', 401]]) {
+    assert.equal(ErrorClass, auth[name], name);
+    assert.equal(authErrors[name], ErrorClass, name);
+    assert(new ErrorClass() instanceof SimfinityError, name);
+    assert.equal(new ErrorClass().getStatus(), status, name);
+  }
+  assert.deepEqual(Object.keys(await import('@simtlix/simfinity-core')).sort(), ${JSON.stringify([...coreRootValues].sort())});`;
 
 const sqlSource = `import assert from 'node:assert/strict';
   import { createRequire } from 'node:module';
@@ -390,7 +423,14 @@ const mongoSource = `import assert from 'node:assert/strict';
   assert.equal(introspection.errors, undefined);
   assert(introspection.data.__type.fields.some((field) => field.name === 'extensions'));
   assert(simfinity.buildErrorFormatter()(new Error('root')).originalError instanceof simfinity.InternalServerError);
-  assert.equal(simfinity.configureMutationLimits, runtime.configureMutationLimits);`;
+  assert.equal(simfinity.configureMutationLimits, runtime.configureMutationLimits);
+  // The legacy deep imports of the core subpaths re-export them unchanged, as their declarations do.
+  const legacySubpaths = ${JSON.stringify(Object.fromEntries(Object.entries(mongoLegacySubpaths).map(([path, subpath]) => [path, [subpath, coreSubpaths[subpath].values]])))};
+  for (const [path, [subpath, names]] of Object.entries(legacySubpaths)) {
+    const legacy = await import(\`@simtlix/simfinity-js/\${path}\`);
+    assert.deepEqual(Object.keys(legacy).sort(), [...names].sort(), path);
+    assert.equal(legacy.default, (await import(\`@simtlix/simfinity-core/\${subpath}\`)).default, path);
+  }`;
 
 const mcpSource = `import assert from 'node:assert/strict';
   import {
@@ -633,6 +673,47 @@ void [${Object.keys(coreSubpaths).flatMap((subpath) => ['Keys', 'Values', 'Types
 void [sameAuth, samePlugins, sameScalars, sameValidators, errorFactory, roleFactory, referenced, authPlugin, readonlyRoles, frozenPermissions];
 void [ownerRule, policyRule, forbidden, unauthenticated, isForbidden, authError, rating, emailName, validations, tags, range, countPlugin];`;
 
+// The core root: the declared value exports match the pinned list both ways, and the root error
+// classes are the auth classes, so the root, /auth and /auth/errors can be re-exported together.
+const coreRootTypes = `import * as CoreRoot from '@simtlix/simfinity-core';
+import { ForbiddenError, SimfinityError, UnauthenticatedError, auth } from '@simtlix/simfinity-core';
+import * as authErrors from '@simtlix/simfinity-core/auth/errors';
+export * from '@simtlix/simfinity-core';
+export * from '@simtlix/simfinity-core/auth';
+export * from '@simtlix/simfinity-core/auth/errors';
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+const coreRootKeys: Record<keyof typeof CoreRoot, true> = { ${coreRootValues.map((name) => `${name}: true`).join(', ')} };
+const rootErrorClasses: {
+${['ForbiddenError', 'UnauthenticatedError'].map((name) => [
+    `  ${name}: Equals<typeof ${name}, typeof auth.${name}>;`,
+    `  ${name}Instance: Equals<${name}, InstanceType<typeof auth.${name}>>;`,
+    `  ${name}Subpath: Equals<typeof authErrors.${name}, typeof ${name}>;`,
+  ].join('\n')).join('\n')}
+} = { ${['ForbiddenError', 'UnauthenticatedError'].flatMap((name) => [name, `${name}Instance`, `${name}Subpath`]).map((name) => `${name}: true`).join(', ')} };
+class TenantForbidden extends ForbiddenError {}
+const denied: SimfinityError = new TenantForbidden('denied');
+const anonymous: UnauthenticatedError = new UnauthenticatedError();
+const caught: unknown = denied;
+const isForbidden: boolean = caught instanceof ForbiddenError && caught.getStatus() === 403;
+// @ts-expect-error The message is a string.
+new ForbiddenError(403);
+void [coreRootKeys, rootErrorClasses, anonymous, isForbidden];`;
+
+// /auth and /plugins export the same createAuthPlugin binding, which both declarations share, so the
+// two subpaths can be re-exported together.
+const coreAuthPluginsTypes = `import { auth, plugins } from '@simtlix/simfinity-core';
+import * as authSubpath from '@simtlix/simfinity-core/auth';
+import * as pluginsSubpath from '@simtlix/simfinity-core/plugins';
+export * from '@simtlix/simfinity-core/auth';
+export * from '@simtlix/simfinity-core/plugins';
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+const sharedAuthPlugin: {
+  auth: Equals<typeof authSubpath.createAuthPlugin, typeof auth.createAuthPlugin>;
+  plugins: Equals<typeof pluginsSubpath.createAuthPlugin, typeof plugins.createAuthPlugin>;
+  same: Equals<typeof pluginsSubpath.createAuthPlugin, typeof authSubpath.createAuthPlugin>;
+} = { auth: true, plugins: true, same: true };
+void sharedAuthPlugin;`;
+
 const sqlTypes = `import {
   createSQL,
   planRelationalSchema,
@@ -852,6 +933,76 @@ const sameItemValidators: Equals<ItemValidators, CoreItemValidators> = true;
 void [registrations, inputType, formatted, internal, rule, email, scalarName, countPlugin, generated, protection, ready, scopes];
 void [itemRules, tagRules, sameItemValidators];`;
 
+// MongoDB's legacy deep imports of public API and their aliases: each value and type export has
+// exactly the type of the core subpath or root member it re-exports, so a missing sibling
+// declaration, or one that degrades to \`any\`, fails.
+const mongoLegacyTypes = `${Object.keys(mongoLegacySubpaths).map((path) => (
+  `import * as ${legacyBinding(path)} from '@simtlix/simfinity-js/${path}';`
+)).join('\n')}
+import * as legacyEntry from '@simtlix/simfinity-js/src/index.js';
+import * as aliasEntry from '@simtlix/simfinity-js/src';
+import * as facade from '@simtlix/simfinity-js';
+import legacyMcp, { generateMCPTools as legacyGenerateMCPTools } from '@simtlix/simfinity-js/src/mcp.js';
+import mcpDefault, { generateMCPTools } from '@simtlix/simfinity-mcp';
+import LegacyQLOperator from '@simtlix/simfinity-js/src/const/QLOperator.js';
+import LegacyQLSort from '@simtlix/simfinity-js/src/const/QLSort.js';
+import LegacyQLValue from '@simtlix/simfinity-js/src/const/QLValue.js';
+import LegacySimfinityError from '@simtlix/simfinity-js/src/errors/simfinity.error.js';
+import LegacyInternalServerError from '@simtlix/simfinity-js/src/errors/internal-server.error.js';
+import aliasAuth from '@simtlix/simfinity-js/src/auth';
+import { isOwner as aliasIsOwner } from '@simtlix/simfinity-js/src/auth/rules';
+import { ForbiddenError as LegacyForbiddenError, requireRole, type AuthRuleFunction } from '@simtlix/simfinity-js/src/auth/index.js';
+import {
+  InternalServerError, QLOperator, QLSort, QLValue, SimfinityError, auth, plugins, scalars, validators,
+} from '@simtlix/simfinity-core';
+import type * as Core from '@simtlix/simfinity-core';
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+${Object.entries(mongoLegacySubpaths).map(([path, subpath]) => {
+    const binding = legacyBinding(path);
+    const config = coreSubpaths[subpath];
+    const { namespace, values, types, errorClasses = [] } = config;
+    const members = values.filter((name) => name !== 'default');
+    return [
+      `const ${binding}Keys: Record<keyof typeof ${binding}, true> = { ${values.map((name) => `${name}: true`).join(', ')} };`,
+      `const ${binding}Values: {`,
+      ...members.map((name) => `  ${name}: Equals<typeof ${binding}.${name}, typeof ${namespace}.${name}>;`),
+      `  default: Equals<typeof ${binding}.default, ${subpathDefaultType(config)}>;`,
+      `} = { ${[...members, 'default'].map((name) => `${name}: true`).join(', ')} };`,
+      `const ${binding}Types: {`,
+      ...types.map((name) => `  ${name}: Equals<${binding}.${name}, Core.${name}>;`),
+      ...errorClasses.map((name) => `  ${name}: Equals<${binding}.${name}, InstanceType<typeof auth.${name}>>;`),
+      `} = { ${[...types, ...errorClasses].map((name) => `${name}: true`).join(', ')} };`,
+    ].join('\n');
+  }).join('\n')}
+const legacyShims: {
+  entry: Equals<typeof legacyEntry, typeof facade>;
+  aliasEntry: Equals<typeof aliasEntry, typeof facade>;
+  mcp: Equals<typeof legacyMcp, typeof mcpDefault>;
+  mcpNamed: Equals<typeof legacyGenerateMCPTools, typeof generateMCPTools>;
+  aliasAuth: Equals<typeof aliasAuth, typeof auth>;
+  aliasIsOwner: Equals<typeof aliasIsOwner, typeof auth.isOwner>;
+  QLOperator: Equals<typeof LegacyQLOperator, typeof QLOperator>;
+  QLSort: Equals<typeof LegacyQLSort, typeof QLSort>;
+  QLValue: Equals<typeof LegacyQLValue, typeof QLValue>;
+  SimfinityError: Equals<typeof LegacySimfinityError, typeof SimfinityError>;
+  SimfinityErrorInstance: Equals<LegacySimfinityError, SimfinityError>;
+  InternalServerError: Equals<typeof LegacyInternalServerError, typeof InternalServerError>;
+  InternalServerErrorInstance: Equals<LegacyInternalServerError, InternalServerError>;
+} = {
+  entry: true, aliasEntry: true, mcp: true, mcpNamed: true, aliasAuth: true, aliasIsOwner: true, QLOperator: true, QLSort: true,
+  QLValue: true, SimfinityError: true, SimfinityErrorInstance: true, InternalServerError: true, InternalServerErrorInstance: true,
+};
+const editorRule: AuthRuleFunction = requireRole('editor');
+const legacyForbidden: SimfinityError = new LegacyForbiddenError('denied');
+// @ts-expect-error An owner field is a path or an extractor.
+${legacyBinding('src/auth/rules.js')}.isOwner(42);
+// @ts-expect-error A role is a string or an array of strings.
+${legacyBinding('src/auth/index.js')}.default.requireRole(42);
+// @ts-expect-error The default policy is ALLOW or DENY.
+${legacyBinding('src/plugins.js')}.createAuthPlugin({}, { defaultPolicy: 'MAYBE' });
+void [plugins, scalars, validators, legacyShims, editorRule, legacyForbidden];
+void [${Object.keys(mongoLegacySubpaths).flatMap((path) => ['Keys', 'Values', 'Types'].map((suffix) => `${legacyBinding(path)}${suffix}`)).join(', ')}];`;
+
 const mcpTypes = `import mcp, {
   createHTTPMCPHandler,
   createMCPServer,
@@ -940,13 +1091,28 @@ const readBack = [
 void [generated, server, sameGenerator, singleMiddleware, optionalPlugins, handler, sharedPlugins, memberPlugins];
 void [headerForms, fromEnvironment, stdio, fallible, unlimited, maxPageSize, maxResultBytes, defaultSize, readBack];`;
 
+// The legacy deep imports of /auth and /plugins re-export them unchanged, so they can be
+// re-exported together too.
+const mongoLegacyAuthPluginsTypes = `import { auth, plugins } from '@simtlix/simfinity-core';
+import * as legacyAuth from '@simtlix/simfinity-js/src/auth/index.js';
+import * as legacyPlugins from '@simtlix/simfinity-js/src/plugins.js';
+export * from '@simtlix/simfinity-js/src/auth/index.js';
+export * from '@simtlix/simfinity-js/src/plugins.js';
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+const sharedAuthPlugin: {
+  auth: Equals<typeof legacyAuth.createAuthPlugin, typeof auth.createAuthPlugin>;
+  plugins: Equals<typeof legacyPlugins.createAuthPlugin, typeof plugins.createAuthPlugin>;
+  same: Equals<typeof legacyPlugins.createAuthPlugin, typeof legacyAuth.createAuthPlugin>;
+} = { auth: true, plugins: true, same: true };
+void sharedAuthPlugin;`;
+
 const cases = [
   {
     name: 'core',
     archives: ({ core }) => [core],
     source: coreSource,
     types: coreTypes,
-    extraTypes: { 'subpaths.ts': coreSubpathTypes },
+    extraTypes: { 'subpaths.ts': coreSubpathTypes, 'root.ts': coreRootTypes, 'auth-plugins.ts': coreAuthPluginsTypes },
     // NodeNext, Node16 and Bundler read the subpath declarations from the exports map; Node10, which
     // ignores exports, reads them from typesVersions.
     moduleResolutions: ['NodeNext', 'Node16', 'Bundler', 'Node10'],
@@ -987,6 +1153,11 @@ const cases = [
     archives: ({ core, mcp, mongo }) => [core, mcp, mongo],
     source: mongoSource,
     types: mongoTypes,
+    extraTypes: { 'legacy.ts': mongoLegacyTypes, 'legacy-auth-plugins.ts': mongoLegacyAuthPluginsTypes },
+    // The legacy deep-import declarations sit next to the shims: NodeNext, Node16 and Bundler find
+    // them through the exports map, Node10 by path, and their core subpath imports through core's
+    // typesVersions.
+    moduleResolutions: ['NodeNext', 'Node16', 'Bundler', 'Node10'],
   },
 ];
 

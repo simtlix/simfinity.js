@@ -227,11 +227,30 @@ export interface Runtime<Model = any, Session = any> {
    * reserves reachable types that still have a
    * non-embedded relation field without a resolver, such as an unregistered custom mutation result.
    * Every entity type resolves `id` to `_id ?? id`, whatever the allowlists include.
+   *
+   * A generated input that would have no fields is left out, with a `Configuration issue`
+   * warning: the `added` or `updated` operation of a collection whose child has no writable fields
+   * for it, an embedded field whose embedded type has none, `add<type>` for a type without
+   * writable fields, and `update<type>` and its state actions for a type without writable fields
+   * and without a writable `id`. A non-null embedded field whose embedded type has no writable
+   * fields throws `INVALID_MODEL` (400) while inputs are built when the generated mutations reach
+   * its owner's create input. When the process's first Simfinity schema has an application type
+   * named `FieldExtensionsType` or `RelationType`, Simfinity renames its `__Field.extensions`
+   * metadata types `SimfinityFieldExtensionsType` and `SimfinityRelationType` (numbered when
+   * taken) for every later schema and logs a warning; once those names are fixed, a type with one
+   * of them throws `RESERVED_TYPE_NAME` (500), before `adapter.prepare()` when it is an included
+   * endpoint type, a registered mutation's input or output type, an output type they reach or a
+   * field argument's type, and when the schema is constructed otherwise, such as for a type inside
+   * an input object's fields. The check before `adapter.prepare()` never reads an input object's
+   * fields, so a registered input's `fields` function may call `getInputType()`.
    */
   createSchema(includedQueryTypes?: GraphQLObjectType[] | null, includedMutationTypes?: GraphQLObjectType[] | null, includedCustomMutations?: string[] | null): GraphQLSchema;
   getModel(type: GraphQLObjectType | { name: string }): Model | null | undefined;
   getType(name: string | { name: string }): GraphQLObjectType | null | undefined;
-  /** Available after createSchema has built input types. */
+  /**
+   * Available after createSchema has built input types. It has no fields for a type without
+   * writable fields; such inputs are not part of generated schemas.
+   */
   getInputType(type: GraphQLObjectType | { name: string }): GraphQLInputObjectType | undefined;
   getRegistrations(): RuntimeRegistration<Model, Session>[];
   /**
@@ -276,6 +295,14 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * record renders as an object although the stored value is an explicit null; return any other
    * value unchanged. It must depend only on the value: these resolvers read no data and do not bind
    * their types, so a runtime that reaches a shared type may read through another runtime's hook.
+   * Simfinity then reads as null an object that holds no data when a non-null member would read as
+   * null, whatever the selection. These members do not count: `id`, readOnly members, interface and
+   * union members, members with their own resolver and referenced collections. Runtimes that share
+   * the type read through the same resolver, with or without the hook. On MongoDB, a create that
+   * writes an empty object for a required embedded member stores it as absent (Mongoose minimizes
+   * it), so an object that holds nothing else reads as null too, except in by-ID and reference reads
+   * and update responses where the member is a nested path, as generated models declare every
+   * embedded member except one named `type`.
    */
   readEmbeddedValue?(value: any): any;
   getById(model: Model, id: any, session?: Session | null, options?: { projection?: Record<string, number>; plain?: boolean; lock?: boolean; requiredId?: any; context?: any }): any;
@@ -430,11 +457,19 @@ export interface AuthPluginOptions {
   debug?: boolean;
 }
 
-declare class UnauthenticatedError extends SimfinityError {
+/**
+ * Authentication error: code `UNAUTHENTICATED`, status 401, default message `Authentication required`.
+ * The same class as `auth.UnauthenticatedError` and the `/auth` and `/auth/errors` subpath exports.
+ */
+export class UnauthenticatedError extends SimfinityError {
   constructor(message?: string);
 }
 
-declare class ForbiddenError extends SimfinityError {
+/**
+ * Authorization error: code `FORBIDDEN`, status 403, default message `Access denied`.
+ * The same class as `auth.ForbiddenError` and the `/auth` and `/auth/errors` subpath exports.
+ */
+export class ForbiddenError extends SimfinityError {
   constructor(message?: string);
 }
 

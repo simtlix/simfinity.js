@@ -3,7 +3,7 @@ import {
 } from 'vitest';
 import mongoose from 'mongoose';
 import {
-  graphql, GraphQLID, GraphQLInt, GraphQLList, GraphQLObjectType, GraphQLScalarType, GraphQLString,
+  graphql, GraphQLID, GraphQLInt, GraphQLList, GraphQLNonNull, GraphQLObjectType, GraphQLScalarType, GraphQLString,
 } from 'graphql';
 import {
   auth, createMongoAdapter, createRuntime, createValidatedScalar, SimfinityError,
@@ -451,6 +451,78 @@ describe('MongoDB fields named like query controls', () => {
     // Aggregate queries still read `aggregation` as the expression.
     expect(groupOf(await aggregate({ groupId: 'title', facts: [count] }, { aggregation: { groupId: 'title', facts: [count] } })))
       .toEqual({ _id: '$title', fact_0: { $sum: 1 } });
+  });
+});
+
+describe('MongoDB filters on NonNull object fields', () => {
+  const NnAuthorType = new GraphQLObjectType({
+    name: 'QueryPathNnAuthor',
+    fields: { id: idField, name: { type: GraphQLString } },
+  });
+  const NnMetaType = new GraphQLObjectType({ name: 'QueryPathNnMeta', fields: { label: { type: GraphQLString } } });
+  const NnReviewType = new GraphQLObjectType({
+    name: 'QueryPathNnReview',
+    fields: { id: idField, stars: { type: GraphQLInt } },
+  });
+  const NnBookType = new GraphQLObjectType({
+    name: 'QueryPathNnBook',
+    fields: {
+      id: idField,
+      pages: { type: new GraphQLNonNull(GraphQLInt) },
+      author: { type: new GraphQLNonNull(NnAuthorType), extensions: { relation: { embedded: false } } },
+      meta: { type: new GraphQLNonNull(NnMetaType), extensions: { relation: { embedded: true } } },
+      reviews: {
+        type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(NnReviewType))),
+        extensions: { relation: { embedded: false, connectionField: 'bookKey' } },
+      },
+    },
+  });
+  const nnModels = new Map([
+    [NnBookType, modelFor('books')], [NnAuthorType, modelFor('authors')], [NnReviewType, modelFor('reviews')],
+  ]);
+  const nnQueries = createMongoQueries({ getModel: (type) => nnModels.get(type) ?? null, getRegistrations: () => [] });
+  const authorLookup = [
+    { $lookup: { from: 'authors', foreignField: '_id', localField: 'author', as: '__sf_l0' } },
+    { $unwind: { path: '$__sf_l0', preserveNullAndEmptyArrays: true } },
+  ];
+  const reviewsLookup = [
+    { $lookup: { from: 'reviews', foreignField: 'bookKey', localField: '_id', as: '__sf_l1' } },
+    { $unwind: { path: '$__sf_l1', preserveNullAndEmptyArrays: true } },
+  ];
+
+  test('rejects a NonNull object condition without a path and a path on a NonNull scalar condition', async () => {
+    for (const field of ['author', 'meta', 'reviews']) {
+      await expectRejection(nnQueries.buildFilterGroupMatch({ conditions: [{ field, value: 'x' }] }, NnBookType, [], {}),
+        'MISSING_FILTER_PATH');
+    }
+    await expectRejection(nnQueries.buildFilterGroupMatch({ conditions: [{ field: 'pages', path: 'x', value: 1 }] },
+      NnBookType, [], {}), 'INVALID_FILTER_PATH');
+  });
+
+  test('resolves NonNull reference, embedded and list collection conditions through their paths', async () => {
+    const clauses = [];
+    const included = {};
+    const match = await nnQueries.buildFilterGroupMatch({
+      conditions: [
+        { field: 'author.name', value: 'Ann' },
+        { field: 'meta', path: 'label', value: 'x' },
+        { field: 'reviews.stars', operator: 'GTE', value: 4 },
+      ],
+    }, NnBookType, clauses, included);
+    expect(match).toEqual({ $and: [{ '__sf_l0.name': 'Ann' }, { 'meta.label': 'x' }, { '__sf_l1.stars': { $gte: 4 } }] });
+    expect(clauses).toEqual([...authorLookup, ...reviewsLookup]);
+    expect(included).toEqual({ __sf_l0: true, __sf_l1: true });
+  });
+
+  test('requires terms on flat NonNull object filters and resolves their paths', async () => {
+    await expectRejection(nnQueries.buildQuery({ meta: { value: 'x' } }, NnBookType), 'MISSING_FILTER_PATH');
+    const pipeline = await nnQueries.buildQuery({
+      author: { terms: [{ path: 'name', value: 'Ann' }] },
+      meta: { terms: [{ path: 'label', value: 'x' }] },
+      reviews: { terms: [{ path: 'stars', operator: 'GTE', value: 4 }] },
+    }, NnBookType);
+    expect(lookups(pipeline)).toEqual([authorLookup[0].$lookup, reviewsLookup[0].$lookup]);
+    expect(matchOf(pipeline)).toEqual({ '__sf_l0.name': 'Ann', 'meta.label': 'x', '__sf_l1.stars': { $gte: 4 } });
   });
 });
 

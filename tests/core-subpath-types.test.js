@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 // The packed TypeScript check in scripts/test-packages.js compiles these declarations; this file
 // checks the export map and the declared names without packing.
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../packages/core');
+const mongoRoot = resolve(root, '../mongodb');
 const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 const rootDeclarations = readFileSync(join(root, 'types/index.d.ts'), 'utf8');
 
@@ -116,5 +117,103 @@ describe('core subpath type declarations', () => {
     for (const name of ['auth', 'plugins', 'scalars', 'validators']) {
       expect((await load[`./${name}`]()).default).toBe(core[name]);
     }
+  });
+});
+
+// Root value declarations: only an explicit `export const`, `export function` or `export class`
+// counts, with or without `declare`.
+const explicitRootValues = (text) => [...new Set(
+  [...text.matchAll(/^export (?:declare )?(?:const|function|class) (\w+)/gm)].map((match) => match[1]),
+)].sort();
+
+describe('core root declarations', () => {
+  it('exports the root error classes its declarations declare, as the auth namespace classes', async () => {
+    const core = await import('@simtlix/simfinity-core');
+    const errors = await load['./auth/errors']();
+    for (const [name, code, status] of [['ForbiddenError', 'FORBIDDEN', 403], ['UnauthenticatedError', 'UNAUTHENTICATED', 401]]) {
+      expect(core[name], name).toBeTypeOf('function');
+      expect(core[name], name).toBe(core.auth[name]);
+      expect(errors[name], name).toBe(core[name]);
+      expect(new core[name]()).toBeInstanceOf(core.SimfinityError);
+      expect(new core[name]().extensions).toMatchObject({ code, status });
+      expect(rootDeclarations).toMatch(new RegExp(`^export (?:declare )?class ${name} extends SimfinityError\\b`, 'm'));
+    }
+  });
+
+  it('declares exactly the root runtime value exports, each with an explicit export', async () => {
+    const core = await import('@simtlix/simfinity-core');
+    expect(explicitRootValues(rootDeclarations)).toEqual(Object.keys(core).sort());
+    // A top-level declaration without `export` is exported only while the file has no export
+    // lists, so every value the root declares must say `export`.
+    expect(rootDeclarations).not.toMatch(/^(?:declare )?(?:abstract )?(?:const|let|var|function|class|enum|namespace) /m);
+  });
+});
+
+// MongoDB's legacy `src/` deep imports that re-export a core subpath, and that subpath. Their
+// declarations are the JavaScript shims without the ObjectId registration import, so they cannot
+// drift from core.
+const legacySubpaths = {
+  'src/auth/index.js': './auth',
+  'src/auth/errors.js': './auth/errors',
+  'src/auth/expressions.js': './auth/expressions',
+  'src/auth/rules.js': './auth/rules',
+  'src/plugins.js': './plugins',
+  'src/scalars.js': './scalars',
+  'src/validators.js': './validators',
+};
+// Static imports, so the bundler resolves each legacy path through the MongoDB export map.
+const loadLegacy = {
+  'src/auth/index.js': () => import('@simtlix/simfinity-js/src/auth/index.js'),
+  'src/auth/errors.js': () => import('@simtlix/simfinity-js/src/auth/errors.js'),
+  'src/auth/expressions.js': () => import('@simtlix/simfinity-js/src/auth/expressions.js'),
+  'src/auth/rules.js': () => import('@simtlix/simfinity-js/src/auth/rules.js'),
+  'src/plugins.js': () => import('@simtlix/simfinity-js/src/plugins.js'),
+  'src/scalars.js': () => import('@simtlix/simfinity-js/src/scalars.js'),
+  'src/validators.js': () => import('@simtlix/simfinity-js/src/validators.js'),
+};
+// The other legacy shims of public API: the root-derived statements of each declaration. `null`
+// means the same statements as the JavaScript shim.
+const legacyShims = {
+  'src/index.js': 'export * from \'../types/index.js\';\n',
+  'src/mcp.js': null,
+  'src/const/QLOperator.js': null,
+  'src/const/QLSort.js': null,
+  'src/const/QLValue.js': null,
+  'src/errors/simfinity.error.js': null,
+  'src/errors/internal-server.error.js': null,
+};
+const mongoSource = (path) => readFileSync(join(mongoRoot, path), 'utf8');
+const siblingOf = (path) => join(mongoRoot, path.replace(/\.js$/, '.d.ts'));
+// Files with this suffix under packages/mongodb/src, except the adapter internals in src/mongo.
+const legacyFiles = (suffix) => readdirSync(join(mongoRoot, 'src'), { recursive: true })
+  .map((file) => `src/${String(file).split('\\').join('/')}`)
+  .filter((file) => file.endsWith(suffix) && !file.startsWith('src/mongo/'))
+  .sort();
+
+describe('MongoDB legacy deep-import declarations', () => {
+  it.each(Object.entries(legacySubpaths))('%s has a sibling that re-exports %s like its module', async (path, subpath) => {
+    expect(existsSync(siblingOf(path)), path).toBe(true);
+    const shim = mongoSource(path);
+    expect(shim).toContain(`export * from '@simtlix/simfinity-core/${subpath.slice(2)}';\n`);
+    expect(readFileSync(siblingOf(path), 'utf8')).toBe(shim.replace(/^import '\.\/register-mongo-object-id\.js';\n+/m, ''));
+    const legacy = await loadLegacy[path]();
+    const core = await load[subpath]();
+    expect(Object.keys(legacy).sort()).toEqual(Object.keys(core).sort());
+    expect(legacy.default).toBe(core.default);
+  });
+
+  it.each(Object.entries(legacyShims))('%s has a root-derived sibling', (path, statements) => {
+    expect(existsSync(siblingOf(path)), path).toBe(true);
+    const text = readFileSync(siblingOf(path), 'utf8').replace(/^\/\*\*[\s\S]*?\*\/\n/gm, '');
+    expect(text).toBe(statements ?? mongoSource(path));
+  });
+
+  it('declares every legacy shim of public API and nothing else', () => {
+    // The ObjectId registration is a side-effect import, which needs no declaration.
+    const shims = legacyFiles('.js').filter((file) => file !== 'src/auth/register-mongo-object-id.js');
+    expect(shims).toEqual([...Object.keys(legacySubpaths), ...Object.keys(legacyShims)].sort());
+    expect(legacyFiles('.d.ts')).toEqual(shims.map((file) => file.replace(/\.js$/, '.d.ts')).sort());
+    // The adapter internals stay undeclared.
+    expect(readdirSync(join(mongoRoot, 'src/mongo')).filter((file) => file.endsWith('.ts'))).toEqual([]);
   });
 });

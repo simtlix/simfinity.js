@@ -6,7 +6,7 @@ alwaysApply: false
 
 # Authorization Module (`packages/core/src/auth/`)
 
-Authorization is shared by MongoDB and PostgreSQL. Import public helpers from `@simtlix/simfinity-core/auth` (typed by `packages/core/types/auth/index.d.ts` and its `errors`, `expressions` and `rules` siblings) or the selected facade's `auth` export. `packages/mongodb/src/auth/` preserves legacy imports and registers Mongoose's genuine ObjectId constructor through the driver-free core hook. UUID strings work without that registration; core/PostgreSQL must not import Mongoose merely to recognize IDs.
+Authorization is shared by MongoDB and PostgreSQL. Import public helpers from `@simtlix/simfinity-core/auth` (typed by `packages/core/types/auth/index.d.ts` and its `errors`, `expressions` and `rules` siblings) or the selected facade's `auth` export. `packages/mongodb/src/auth/` preserves legacy imports and registers Mongoose's genuine ObjectId constructor through the driver-free core hook; its sibling `.d.ts` files declare those legacy imports by re-exporting the matching core subpaths. `UnauthenticatedError` and `ForbiddenError` are also exported from the core root, as the same classes. UUID strings work without that registration; core/PostgreSQL must not import Mongoose merely to recognize IDs.
 
 ## File Structure
 

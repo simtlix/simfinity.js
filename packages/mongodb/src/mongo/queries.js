@@ -1,10 +1,9 @@
 import {
   GraphQLEnumType,
   GraphQLID,
-  GraphQLList,
-  GraphQLNonNull,
   GraphQLObjectType,
   GraphQLScalarType,
+  getNamedType,
 } from 'graphql';
 import mongoose from 'mongoose';
 
@@ -15,18 +14,6 @@ import {
 
 import { castObjectId } from './ids.js';
 import { resolveStorageScalar } from './models.js';
-
-const isNonNullOfType = (fieldEntryType, graphQLType) => (
-  fieldEntryType instanceof GraphQLNonNull && fieldEntryType.ofType instanceof graphQLType
-);
-
-const unwrapListAndNonNull = (type) => {
-  let unwrapped = type;
-  while (unwrapped instanceof GraphQLList || unwrapped instanceof GraphQLNonNull) {
-    unwrapped = unwrapped.ofType;
-  }
-  return unwrapped;
-};
 
 const getEffectiveTypeName = (type) => (
   type instanceof GraphQLScalarType ? resolveStorageScalar(type).name : type.name
@@ -127,12 +114,6 @@ const AGG_OP_TO_MONGO = {
 
 const filterError = (message, code = 'INVALID_FILTER_VALUE') => new SimfinityError(message, code, 400);
 
-const queryNamedType = (type) => {
-  let result = type;
-  while (result instanceof GraphQLList || result instanceof GraphQLNonNull) result = result.ofType;
-  return result;
-};
-
 // `id` is the record key `_id` at an entity boundary: the root or a joined document. Inside an
 // embedded object it follows what reads return. Entity types read the stored subdocument `_id`
 // through the generated id resolver; that resolver lives on the type object, so any runtime that
@@ -159,7 +140,7 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
   for (const [index, part] of parts.entries()) {
     const field = Object.hasOwn(currentType.getFields(), part) ? currentType.getFields()[part] : null;
     if (!field) throw filterError(`Unknown query field: ${path}`, 'INVALID_FILTER_FIELD');
-    const fieldType = queryNamedType(field.type);
+    const fieldType = getNamedType(field.type);
     const relation = field.extensions?.relation;
     if (fieldType instanceof GraphQLObjectType) {
       if (index === parts.length - 1) throw filterError(`Query path must end in a scalar field: ${path}`, 'INVALID_FILTER_PATH');
@@ -267,7 +248,7 @@ const buildQueryTerms = async (filterField, qlField, fieldName, gqltype, aggrega
   if (!qlField) throw filterError(`Unknown filter field: ${fieldName}`, 'INVALID_FILTER_FIELD');
   if (filterField == null) return { aggregateClauses, matchesClauses };
   if (typeof filterField !== 'object' || Array.isArray(filterField)) throw filterError(`Invalid filter for ${fieldName}`);
-  const isObject = queryNamedType(qlField.type) instanceof GraphQLObjectType;
+  const isObject = getNamedType(qlField.type) instanceof GraphQLObjectType;
   if (isObject && (!Array.isArray(filterField.terms) || filterField.terms.length === 0)) {
     throw filterError(`Filter on ${fieldName} requires non-empty terms`, 'MISSING_FILTER_PATH');
   }
@@ -309,8 +290,7 @@ const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, agg
         throw new SimfinityError(`Unknown filter field: ${condition.field}`, 'INVALID_FILTER_FIELD', 400);
       }
 
-      const fieldType = unwrapListAndNonNull(qlField.type);
-      const isObject = fieldType instanceof GraphQLObjectType || isNonNullOfType(fieldType, GraphQLObjectType);
+      const isObject = getNamedType(qlField.type) instanceof GraphQLObjectType;
 
       let filterInput;
       if (isObject) {
@@ -326,8 +306,6 @@ const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, agg
       }
 
       const result = await buildQueryTerms(filterInput, qlField, condition.field, gqltype, aggregationsIncluded);
-      if (!result) continue;
-
       appendLookups(aggregateClauses, aggregationsIncluded, result.aggregateClauses);
       for (const matchClause of Object.values(result.matchesClauses)) {
         for (const [matchKey, match] of Object.entries(matchClause)) {
@@ -379,8 +357,6 @@ const collectFiltersAndLookups = async (input, gqltype, aggregateClauses, aggreg
     if (controlKeys.has(key)) continue;
     const qlField = fields[key];
     const result = await buildQueryTerms(filterField, qlField, key, gqltype, aggregationsIncluded);
-    if (!result) continue;
-
     appendLookups(aggregateClauses, aggregationsIncluded, result.aggregateClauses);
     for (const matchClause of Object.values(result.matchesClauses)) {
       for (const [matchKey, match] of Object.entries(matchClause)) {
