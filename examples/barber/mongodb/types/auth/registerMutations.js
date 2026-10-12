@@ -72,6 +72,39 @@ function signTokens(userDoc) {
   return { accessToken, refreshToken };
 }
 
+/** Suspended accounts (`user.status`, set by an admin) cannot sign in or renew a session. */
+function assertNotSuspended(user) {
+  if (user.status === 'SUSPENDED') {
+    throw new simfinity.SimfinityError('This account is suspended', 'ACCOUNT_SUSPENDED', 403);
+  }
+}
+
+/** Verifies a refresh token and returns its claims; throws jsonwebtoken's errors. */
+export function verifyRefreshToken(token) {
+  const decoded = jwt.verify(token, JWT_REFRESH_SECRET);
+  if (decoded.typ !== 'refresh') throw new jwt.JsonWebTokenError('not a refresh token');
+  return decoded;
+}
+
+/**
+ * Exchanges a refresh token for a new token pair, as the refreshSession mutation does. scripts/mcp-stdio.js
+ * also uses it to keep a long-running stdio session signed in.
+ */
+export async function renewSession(refreshToken) {
+  let decoded;
+  try {
+    decoded = verifyRefreshToken(refreshToken);
+  } catch {
+    throw new Error('Invalid refresh token');
+  }
+  const UserModel = simfinity.getModel(simfinity.getType('user'));
+  const user = await UserModel.findById(decoded.sub);
+  if (!user) throw new Error('User not found');
+  assertNotSuspended(user);
+  const u = user.toObject();
+  return { ...signTokens(u), user: { ...u, id: u._id, passwordHash: undefined } };
+}
+
 simfinity.registerMutation(
   'login',
   'Authenticate with email and password',
@@ -85,6 +118,8 @@ simfinity.registerMutation(
     }
     const ok = await bcrypt.compare(input.password, user.passwordHash);
     if (!ok) throw new Error('Invalid email or password');
+    // Checked after the password, so a wrong password never reveals that the account is suspended.
+    assertNotSuspended(user);
     const u = user.toObject();
     const { accessToken, refreshToken } = signTokens(u);
     return {
@@ -160,23 +195,5 @@ simfinity.registerMutation(
   'Exchange refresh token for new access token',
   RefreshInput,
   AuthPayloadType,
-  async (input) => {
-    let decoded;
-    try {
-      decoded = jwt.verify(input.refreshToken, JWT_REFRESH_SECRET);
-    } catch {
-      throw new Error('Invalid refresh token');
-    }
-    if (decoded.typ !== 'refresh') throw new Error('Invalid refresh token');
-    const UserModel = simfinity.getModel(simfinity.getType('user'));
-    const user = await UserModel.findById(decoded.sub);
-    if (!user) throw new Error('User not found');
-    const u = user.toObject();
-    const { accessToken, refreshToken } = signTokens(u);
-    return {
-      accessToken,
-      refreshToken,
-      user: { ...u, id: u._id, passwordHash: undefined },
-    };
-  }
+  async (input) => renewSession(input.refreshToken)
 );

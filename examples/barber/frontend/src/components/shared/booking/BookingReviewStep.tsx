@@ -6,6 +6,8 @@ export interface BookingReviewStepProps {
   professional?: string;
   date?: string;
   time?: string;
+  /** Total length of the booking; defaults to the sum of the services (a bundle passes its own). */
+  durationMinutes?: number;
   totalPrice: number;
   notes: string;
   onNotesChange: (notes: string) => void;
@@ -21,11 +23,12 @@ export function BookingReviewStep({
   professional,
   date,
   time,
+  durationMinutes,
   totalPrice,
   notes,
   onNotesChange,
 }: BookingReviewStepProps) {
-  const totalDuration = services.reduce((sum, s) => sum + s.duration, 0);
+  const totalDuration = durationMinutes ?? services.reduce((sum, s) => sum + s.duration, 0);
 
   return (
     <div className="max-w-3xl">

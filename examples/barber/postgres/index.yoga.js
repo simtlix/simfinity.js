@@ -1,17 +1,21 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import rateLimit from 'express-rate-limit';
 import { createYoga } from 'graphql-yoga';
 import * as simfinity from '@simtlix/simfinity-postgres';
 import { useErrorHandler } from '@envelop/core';
-import { schema, authPlugin, initializeApplication } from './application.js';
+import { schema, authPlugin, mcpOptions, initializeApplication } from './application.js';
 import { closeDatabase } from './database.js';
-import { buildUserContext } from './auth/context.js';
+import { resolveMcpUserContext, resolveUserContext } from './auth/context.js';
 import { createHTTPMCPHandler } from '@simtlix/simfinity-mcp';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import uploadRouter from './routes/upload.js';
+import { useSingleAuthOperation } from './auth/authOperations.js';
+import { createUploadRouter, serveUploads } from './routes/upload.js';
+import { createRateLimiters, rejectJsonRpcBatch } from './routes/rateLimits.js';
+import { jsonErrorHandler, mcpBodyErrors } from './routes/errors.js';
+
+// GraphQL, MCP and uploads each have their own budget (see routes/rateLimits.js). Created before
+// connecting, so an invalid limit in the environment stops the server at once.
+const limiters = createRateLimiters();
 
 await initializeApplication();
 
@@ -20,54 +24,47 @@ const useCountPlugin = simfinity.plugins.envelopCountPlugin;
 const app = express();
 app.use(cors());
 
-const graphqlLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: Number(process.env.GRAPHQL_RATE_LIMIT_MAX || 300),
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
 // Logs each request error as Simfinity classifies it. useErrorHandler is only a logging hook: it
 // receives { errors } and does not change responses, so pass it each error, not the formatter.
 const logError = simfinity.buildErrorFormatter(console.error);
 
 const yoga = createYoga({
   schema,
-  context: ({ request }) => buildUserContext(request.headers.get('authorization')),
+  // Reads the caller's account: a deleted or suspended account's token is anonymous here.
+  context: ({ request }) => resolveUserContext(request.headers.get('authorization')),
   plugins: [
     useErrorHandler(({ errors }) => { errors.forEach((error) => logError(error)); }),
     useCountPlugin(),
     authPlugin,
+    // One login, register, registerOwner or refreshSession per request, whatever the aliases.
+    useSingleAuthOperation(),
   ],
   graphiql: true,
   graphqlEndpoint: '/graphql',
   maskedErrors: false,
 });
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-app.use('/api/uploads', express.static(path.join(__dirname, 'uploads')));
-app.use('/api/uploads', uploadRouter);
+// Stored files are served inert (nosniff, sandbox CSP). POST stores one image, checked by its bytes,
+// with a loose per-IP limit before authentication and a per-account limit after it.
+app.use('/api/uploads', serveUploads());
+const uploads = createUploadRouter({ ipLimiter: limiters.uploadIp, userLimiter: limiters.upload });
+app.use('/api/uploads', uploads);
 
-app.use('/graphql', graphqlLimiter, yoga);
+app.use('/graphql', limiters.graphql, yoga);
 
-// MCP endpoint (Streamable HTTP) exposing the same GraphQL operations as tools.
-// The context factory receives the Express `req`, so the JWT is read per request
-// just like the GraphQL endpoint.
+// MCP endpoint (Streamable HTTP) exposing the GraphQL operations as tools, except login, register,
+// registerOwner and refreshSession, which stay GraphQL-only (see mcpOptions in application.js).
+// Callers send the access token of a GraphQL login as `Authorization: Bearer`. The context factory
+// receives the Express `req`, so the token is read per request, as on the GraphQL endpoint.
 const mcpHandler = await createHTTPMCPHandler(schema, {
-  serverName: 'simfinity-barber-mcp',
-  serverVersion: '1.0.0',
-  // Scalar results avoid automatically selecting related private user profiles.
-  selectionDepth: 0,
-  context: (req) => buildUserContext(req.headers.authorization),
-  // Apply the SAME auth plugin instance as Yoga so MCP tool calls enforce the
-  // permission rules. createAuthPlugin wraps the schema's resolvers from its
-  // onSchemaChange hook (which Envelop fires for Yoga); schemaPlugins fires it
-  // for the in-process MCP execution path too. Sharing the instance means the
-  // shared schema is wrapped exactly once (the plugin wraps each field once).
-  schemaPlugins: [authPlugin],
+  ...mcpOptions,
+  // Unlike GraphQL, a deleted or suspended account's token fails the tool call with an error.
+  context: (req) => resolveMcpUserContext(req.headers.authorization),
 });
 // The handler answers every method other than POST with 405, which Streamable HTTP clients expect.
-app.all('/mcp', express.json(), mcpHandler);
+// The limiter runs before the body is parsed, and a JSON-RPC batch is refused, so one request is one call.
+// A body that is not JSON, or is too large, gets a JSON-RPC error instead of Express's HTML error page.
+app.all('/mcp', limiters.mcp, express.json(), mcpBodyErrors, rejectJsonRpcBatch, mcpHandler);
 
 const PORT = process.env.PORT || 4500;
 const server = app.listen(PORT, () => {
@@ -76,9 +73,21 @@ const server = app.listen(PORT, () => {
 });
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', database: 'postgresql' }));
+// Errors that reach Express answer JSON, without stack traces or server paths.
+app.use(jsonErrorHandler);
+
+// On shutdown, requests in flight get a short grace period; then their connections are closed, so a
+// stalled upload is aborted and its staged file removed before a container stop's 10 s timeout ends in
+// SIGKILL. Files that a kill leaves behind are swept at the next start (see createUploadRouter).
+const SHUTDOWN_GRACE_MS = 5000;
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.once(signal, () => server.close(async () => {
-    await closeDatabase();
-    process.exit(0);
-  }));
+  process.once(signal, () => {
+    server.close(async () => {
+      // The connections are closed, but an aborted upload may still be removing its staged file.
+      await uploads.settled();
+      await closeDatabase();
+      process.exit(0);
+    });
+    setTimeout(() => server.closeAllConnections(), SHUTDOWN_GRACE_MS).unref();
+  });
 }

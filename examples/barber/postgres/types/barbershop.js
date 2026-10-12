@@ -91,7 +91,7 @@ const barbershopType = new GraphQLObjectType({
     },
     rejectionReason: {
       type: GraphQLString,
-      description: 'Explanation provided by an admin when the barbershop was rejected.',
+      description: 'Explanation provided by an admin when the barbershop was rejected. Cleared when the owner resubmits it or an admin approves it.',
     },
     businessHours: {
       type: new GraphQLList(businessHourSlotType),

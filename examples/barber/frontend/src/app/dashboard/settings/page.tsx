@@ -323,7 +323,7 @@ export default function OwnerSettingsPage() {
               value={values.logoUrl}
               onChange={(v) => setValue('logoUrl', v)}
               variant="square"
-              hint="SVG / PNG"
+              hint="PNG / JPG / WebP / GIF"
             />
           </div>
           <div className="md:col-span-2 space-y-6">

@@ -40,7 +40,8 @@ export default function FormImageUpload({
       <input
         ref={inputRef}
         type="file"
-        accept="image/*"
+        // The image types the upload API stores; it refuses SVG and other formats.
+        accept="image/jpeg,image/png,image/webp,image/gif"
         onChange={handleFile}
         disabled={disabled}
         className="sr-only"

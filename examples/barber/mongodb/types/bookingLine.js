@@ -18,8 +18,14 @@ const bookingLineType = new GraphQLObjectType({
       description: 'The selected bundle (mutually exclusive with `service`).',
       extensions: { relation: { connectionField: 'bundle', displayField: 'name' } },
     },
-    price: { type: GraphQLFloat, description: 'Price captured for this line at booking time.' },
-    durationMinutes: { type: GraphQLInt, description: 'Duration in minutes captured for this line.' },
+    price: {
+      type: GraphQLFloat,
+      description: "Price captured when the line is saved: the service's or bundle's catalog price, or the line's earlier price when an update keeps its service or bundle. Only the barbershop's owner or a platform admin may send another price, from 0 up to the catalog price.",
+    },
+    durationMinutes: {
+      type: GraphQLInt,
+      description: "Duration in minutes captured when the line is saved: the service's catalog duration, or the sum of the bundle's current services. A value sent in a mutation is ignored.",
+    },
   }),
 });
 

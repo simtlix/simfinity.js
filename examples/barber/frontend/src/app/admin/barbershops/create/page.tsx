@@ -352,7 +352,7 @@ export default function AdminBarbershopCreatePage() {
                     value={form.values.logoUrl}
                     onChange={(v) => form.setValue('logoUrl', v)}
                     variant="square"
-                    hint={t('logoHint', 'SVG, PNG o JPG (cuadrado)')}
+                    hint={t('logoHint', 'PNG, JPG, WebP o GIF (cuadrado)')}
                   />
                   <FormImageUpload
                     label={t('coverImage', 'Imagen de Portada')}

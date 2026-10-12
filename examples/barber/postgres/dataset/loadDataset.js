@@ -263,13 +263,15 @@ async function gqlLogin(client, auth, email, password) {
   }
 
   // ── 6. Create reviews ──
+  // A client reviews only a completed booking of theirs, and the sample bookings are still upcoming,
+  // so the platform admin imports the sample reviews for their clients, without a booking.
   console.log('\n--- Creating reviews ---');
   for (const review of sampleReviews) {
     const shopId = barbershopIds[review.barbershopName];
     if (!shopId) continue;
     const reviewClientAuth = userMap[review.clientEmail];
     if (!reviewClientAuth) continue;
-    auth.accessToken = reviewClientAuth.accessToken;
+    auth.accessToken = (adminAuth ?? seededAdmin).accessToken;
     try {
       const result = await client.add('review', {
         rating: review.rating,

@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useSimfinityClient } from '@/lib/simfinity';
 import { useT } from '@/hooks/useT';
+import { BOOKING_ERRORS, bookingErrorCode } from '@/lib/bookingErrors';
 import { PageHeader } from '@/components/shared/page';
 import { Button } from '@/components/shared/ui';
 import { format } from 'date-fns';
@@ -13,11 +14,13 @@ interface Service {
   name: string;
   price: number;
   durationMinutes: number;
+  barbershop?: { id: string } | null;
 }
 
 interface Professional {
   id: string;
   name: string;
+  barbershop?: { id: string } | null;
 }
 
 interface Barbershop {
@@ -27,6 +30,7 @@ interface Barbershop {
 
 export default function CreateBookingPage() {
   const t = useT('bookings');
+  const tBooking = useT('booking');
   const router = useRouter();
   const client = useSimfinityClient();
 
@@ -48,8 +52,8 @@ export default function CreateBookingPage() {
     (async () => {
       try {
         const [svcs, pros, shops] = await Promise.all([
-          client.find('service').fields('id name price durationMinutes').exec(),
-          client.find('professional').fields('id name').exec(),
+          client.find('service').fields('id name price durationMinutes barbershop { id }').exec(),
+          client.find('professional').fields('id name barbershop { id }').exec(),
           client.find('barbershop').fields('id name').exec(),
         ]);
         setServices(Array.isArray(svcs) ? (svcs as Service[]) : []);
@@ -64,6 +68,15 @@ export default function CreateBookingPage() {
       }
     })();
   }, [client]);
+
+  // The API books only the selected shop's services and professionals, so offer only those.
+  const shopServices = useMemo(() => services.filter((s) => s.barbershop?.id === selectedShop), [services, selectedShop]);
+  const shopProfessionals = useMemo(() => professionals.filter((p) => p.barbershop?.id === selectedShop), [professionals, selectedShop]);
+  const selectShop = useCallback((shopId: string) => {
+    setSelectedShop(shopId);
+    setSelectedService((current) => (services.some((s) => s.id === current && s.barbershop?.id === shopId) ? current : ''));
+    setSelectedPro((current) => (professionals.some((p) => p.id === current && p.barbershop?.id === shopId) ? current : ''));
+  }, [services, professionals]);
 
   const handleSubmit = useCallback(async () => {
     if (!selectedShop || !selectedService || !selectedPro || !date || !startTime) return;
@@ -86,12 +99,14 @@ export default function CreateBookingPage() {
         ],
       });
       router.push('/dashboard/bookings');
-    } catch {
-      setError(t('errorSaving', 'Error al guardar el turno'));
+    } catch (failure) {
+      // Explain the rejections the booking page explains too, such as a service the API refuses.
+      const message = BOOKING_ERRORS[bookingErrorCode(failure)];
+      setError(message ? tBooking(message.key, message.fallback) : t('errorSaving', 'Error al guardar el turno'));
     } finally {
       setSaving(false);
     }
-  }, [client, selectedShop, selectedService, selectedPro, date, startTime, notes, services, router, t]);
+  }, [client, selectedShop, selectedService, selectedPro, date, startTime, notes, services, router, t, tBooking]);
 
   if (loading) {
     return (
@@ -126,7 +141,7 @@ export default function CreateBookingPage() {
             </label>
             <select
               value={selectedShop}
-              onChange={(e) => setSelectedShop(e.target.value)}
+              onChange={(e) => selectShop(e.target.value)}
               className="w-full bg-surface-container-high border border-outline-variant/20 rounded-lg px-4 py-3 text-sm text-on-surface"
             >
               <option value="">{t('selectPlaceholder', 'Select...')}</option>
@@ -147,7 +162,7 @@ export default function CreateBookingPage() {
             className="w-full bg-surface-container-high border border-outline-variant/20 rounded-lg px-4 py-3 text-sm text-on-surface"
           >
             <option value="">{t('selectService', 'Select service...')}</option>
-            {services.map((s) => (
+            {shopServices.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name} — ${s.price} ({s.durationMinutes} min)
               </option>
@@ -165,7 +180,7 @@ export default function CreateBookingPage() {
             className="w-full bg-surface-container-high border border-outline-variant/20 rounded-lg px-4 py-3 text-sm text-on-surface"
           >
             <option value="">{t('selectProfessional', 'Select professional...')}</option>
-            {professionals.map((p) => (
+            {shopProfessionals.map((p) => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>

@@ -1,14 +1,14 @@
-import * as simfinity from '@simtlix/simfinity-postgres';
-import { isOwner, isPlatformAdmin, intersectScopeFilter, getBarbershopIdsForOwner } from './scopeHelpers.js';
+import { isOwner, isPlatformAdmin, intersectScopeFilter, ownedBarbershopTerm } from './scopeHelpers.js';
 
-/** Owner sees shop bookings or own client bookings; others only own client bookings. */
-export async function scopeBookingByRole({ args, context }) {
+/**
+ * Owner sees shop bookings or own client bookings; others only own client bookings.
+ * The owner branch restricts through the `barbershop` relation instead of loading shop IDs per call.
+ */
+export function scopeBookingByRole({ args, context }) {
   if (isPlatformAdmin(context)) return;
   if (isOwner(context)) {
-    const BarbershopModel = simfinity.getModel(simfinity.getType('barbershop'));
-    const shopIds = await getBarbershopIdsForOwner(BarbershopModel, context.user.id);
     intersectScopeFilter(args, 'OR', [
-      { conditions: [{ field: 'barbershop', path: 'id', operator: 'IN', value: shopIds }] },
+      { conditions: [{ field: 'barbershop', ...ownedBarbershopTerm(context) }] },
       { conditions: [{ field: 'client', path: 'id', operator: 'EQ', value: context.user.id }] },
     ]);
     return;

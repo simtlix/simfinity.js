@@ -265,7 +265,7 @@ export default function OnboardingBarbershopPage() {
                 value={values.logoUrl}
                 onChange={(v) => setValue('logoUrl', v)}
                 variant="square"
-                hint={t('logoHint', 'SVG, PNG o JPG (cuadrado recomendado)')}
+                hint={t('logoHint', 'PNG, JPG, WebP o GIF (cuadrado recomendado)')}
               />
 
               <TipCard title={t('tipTitle', 'Consejo Editorial')}>

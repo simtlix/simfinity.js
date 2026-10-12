@@ -28,18 +28,22 @@ export default function AdminReviewsPage() {
   const [reviews, setReviews] = useState<ReportedReview[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [actionError, setActionError] = useState(false);
 
   const [removeTarget, setRemoveTarget] = useState<ReportedReview | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       let query = client
         .find('review')
         .fields(
           'id rating comment isReported createdAt client { id name avatarUrl } barbershop { id name }',
         )
-        .where('isReported', 'EQ', 'true')
+        // A boolean field takes a boolean value: both APIs reject the string 'true' (INVALID_FILTER_VALUE).
+        .where('isReported', 'EQ', true)
         .sort('createdAt', 'DESC')
         .page(pagination.page, pagination.pageSize);
 
@@ -54,7 +58,7 @@ export default function AdminReviewsPage() {
         let aggQuery = client
           .aggregate('review')
           .fact('count', 'total')
-          .where('isReported', 'EQ', 'true');
+          .where('isReported', 'EQ', true);
         if (search.trim()) {
           aggQuery = aggQuery.where('comment', 'LIKE', search.trim());
         }
@@ -63,9 +67,12 @@ export default function AdminReviewsPage() {
       } catch {
         setTotal((results as unknown[]).length);
       }
-    } catch {
+    } catch (err) {
+      // An empty list would read as "nothing to moderate", so say that the list could not load.
+      console.error('Reported reviews failed to load:', err);
       setReviews([]);
       setTotal(0);
+      setLoadError(true);
     }
     setLoading(false);
   }, [client, pagination.page, pagination.pageSize, search]);
@@ -76,22 +83,27 @@ export default function AdminReviewsPage() {
   }, [fetchData]);
 
   const handleDismiss = async (reviewId: string) => {
+    setActionError(false);
     try {
       await client.update('review', reviewId, { isReported: false });
       await fetchData();
     } catch (err) {
       console.error('Dismiss failed:', err);
+      setActionError(true);
     }
   };
 
   const handleRemove = async () => {
     if (!removeTarget) return;
+    setActionError(false);
     try {
       await client.delete('review', removeTarget.id);
       setRemoveTarget(null);
       await fetchData();
     } catch (err) {
       console.error('Remove failed:', err);
+      setRemoveTarget(null);
+      setActionError(true);
     }
   };
 
@@ -142,9 +154,29 @@ export default function AdminReviewsPage() {
         </div>
       </div>
 
+      {actionError && (
+        <div role="alert" className="rounded-lg border border-error/25 bg-error/10 px-4 py-3 text-sm text-error">
+          {t('reviewActionError', 'No se pudo completar la acción. Intentá de nuevo.')}
+        </div>
+      )}
+
       {/* Reviews List */}
       <div className="grid grid-cols-1 gap-6">
-        {reviews.length === 0 ? (
+        {loadError ? (
+          <div role="alert" className="bg-surface-container-low rounded-xl p-12 text-center border border-error/25">
+            <span className="material-symbols-outlined text-error text-4xl">error</span>
+            <p className="text-on-surface-variant mt-4">
+              {t('reviewsLoadError', 'No se pudieron cargar las reseñas reportadas.')}
+            </p>
+            <button
+              type="button"
+              onClick={() => { void fetchData(); }}
+              className="mt-6 bg-surface-container-highest text-on-surface hover:bg-surface-bright py-3 px-6 rounded-lg text-xs uppercase tracking-widest transition-all font-semibold"
+            >
+              {t('retry', 'Reintentar')}
+            </button>
+          </div>
+        ) : reviews.length === 0 ? (
           <div className="bg-surface-container-low rounded-xl p-12 text-center border border-outline-variant/10">
             <span className="material-symbols-outlined text-on-surface-variant/30 text-4xl">
               check_circle

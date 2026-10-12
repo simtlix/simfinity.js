@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import pg from 'pg';
 
 const databaseSchema = `dataset_${randomUUID().replaceAll('-', '')}`;
-const env = { ...process.env, DATABASE_SCHEMA: databaseSchema, PORT: '4302', GRAPHQL_ENDPOINT: 'http://127.0.0.1:4302/graphql', GRAPHQL_RATE_LIMIT_MAX: '5000' };
+const port = process.env.DATASET_PORT || '4302';
+const env = { ...process.env, DATABASE_SCHEMA: databaseSchema, PORT: port, GRAPHQL_ENDPOINT: `http://127.0.0.1:${port}/graphql`, GRAPHQL_RATE_LIMIT_MAX: '5000' };
 const run = (file) => new Promise((resolve, reject) => {
   const child = spawn(process.execPath, [file], { env, cwd: new URL('..', import.meta.url), stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
@@ -18,7 +19,7 @@ try {
   await run('scripts/seedAdmin.js');
   server = spawn(process.execPath, ['index.yoga.js'], { env, cwd: new URL('..', import.meta.url), stdio: 'ignore' });
   for (let attempt = 0; attempt < 100; attempt++) {
-    const response = await fetch('http://127.0.0.1:4302/health').catch(() => null);
+    const response = await fetch(`http://127.0.0.1:${port}/health`).catch(() => null);
     if (response?.ok) break;
     if (attempt === 99) throw new Error('Dataset server did not start');
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -28,6 +29,13 @@ try {
   assert.doesNotMatch(loaded, /FAILED| err:|failed|Skip:|Approve:|Submit:/);
   const before = await pool.query(`SELECT count(*)::int AS count FROM ${pg.escapeIdentifier(databaseSchema)}.barbershop`);
   assert.ok(before.rows[0].count > 0);
+  // Review statistics come from a count/sum query on the review table of DATABASE_SCHEMA, here a private one.
+  const shops = await pool.query(`SELECT slug, state, "averageRating", "reviewCount" FROM ${pg.escapeIdentifier(databaseSchema)}.barbershop ORDER BY slug`);
+  assert.deepEqual(shops.rows.map((row) => ({ ...row, averageRating: row.averageRating == null ? null : Number(row.averageRating) })), [
+    { slug: 'barba-roja', state: 'APPROVED', averageRating: 4, reviewCount: 1 },
+    { slug: 'heritage-club', state: 'APPROVED', averageRating: 4.5, reviewCount: 2 },
+    { slug: 'noble-groomer', state: 'APPROVED', averageRating: 5, reviewCount: 1 },
+  ]);
   console.log(await run('dataset/deleteDataset.js'));
   const after = await pool.query(`SELECT count(*)::int AS count FROM ${pg.escapeIdentifier(databaseSchema)}.barbershop`);
   assert.equal(after.rows[0].count, 0);

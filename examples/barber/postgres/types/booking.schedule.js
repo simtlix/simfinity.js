@@ -112,7 +112,8 @@ const violation = (code, message) => ({ code, message });
 
 /**
  * First malformed booking line, as `{ code, message }`, or null. Each line references exactly one
- * service or bundle, and a captured duration must be a whole, non-negative number of minutes.
+ * service or bundle, a captured duration must be a whole, non-negative number of minutes and a sent
+ * price a non-negative number.
  */
 export function findLineViolation(lines) {
   for (const line of lines || []) {
@@ -122,6 +123,9 @@ export function findLineViolation(lines) {
     const duration = line.durationMinutes;
     if (duration != null && !(Number.isInteger(duration) && duration >= 0)) {
       return violation('INVALID_BOOKING_LINE', 'Booking line durations must be whole, non-negative minutes');
+    }
+    if (line.price != null && !(Number.isFinite(line.price) && line.price >= 0)) {
+      return violation('INVALID_BOOKING_LINE', 'Booking line prices must be non-negative numbers');
     }
   }
   return null;

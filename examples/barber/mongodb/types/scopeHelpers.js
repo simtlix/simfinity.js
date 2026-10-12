@@ -51,45 +51,27 @@ export function scopeRelationToUser(args, userId, field = 'user') {
 
 /**
  * Catalog entities under barbershop: admin sees all; owner sees owned shops; others approved shops only.
- * @param {typeof import('@simtlix/simfinity-js')} simfinity
+ * The restriction is a path through the `barbershop` relation, so the database applies it in the same
+ * query that reads the entity. Simfinity runs scopes once per parent row and once per resolved
+ * reference, so a scope must not load barbershop IDs itself.
  * @param {{ args: Record<string, unknown>, context: unknown }} payload
  */
-export async function scopeBarbershopRelationByRole(simfinity, { args, context }) {
+export function scopeBarbershopRelationByRole({ args, context }) {
   if (isPlatformAdmin(context)) return;
-  const BarbershopModel = simfinity.getModel(simfinity.getType('barbershop'));
-  if (isOwner(context)) {
-    const ids = await getBarbershopIdsForOwner(BarbershopModel, context.user.id);
-    intersectScopeFilter(args, 'barbershop', { terms: [{ path: 'id', operator: 'IN', value: ids.map(String) }] });
-    return;
-  }
-  await scopeToApprovedBarbershopsOnly(BarbershopModel, { args });
+  intersectScopeFilter(args, 'barbershop', {
+    terms: [isOwner(context) ? ownedBarbershopTerm(context) : approvedBarbershopTerm()],
+  });
 }
 
 /**
- * @param {import('mongoose').Model} BarbershopModel
- * @param {string} ownerUserId
- * @returns {Promise<import('mongoose').Types.ObjectId[]>}
+ * Term on the `barbershop` relation for shops owned by the signed-in user (a fresh object per call).
+ * @param {{ user: { id: string } }} context
  */
-export async function getBarbershopIdsForOwner(BarbershopModel, ownerUserId) {
-  const rows = await BarbershopModel.find({ owner: ownerUserId }).select('_id').lean();
-  return rows.map((r) => r._id);
+export function ownedBarbershopTerm(context) {
+  return { path: 'owner.id', operator: 'EQ', value: context.user.id };
 }
 
-/**
- * @param {import('mongoose').Model} BarbershopModel
- * @returns {Promise<string[]>}
- */
-export async function getApprovedBarbershopIds(BarbershopModel) {
-  const rows = await BarbershopModel.find({ state: 'APPROVED' }).select('_id').lean();
-  return rows.map((r) => String(r._id));
-}
-
-/**
- * Catalog / discovery: limit child entities to approved barbershops (anonymous + clients).
- * @param {import('mongoose').Model} BarbershopModel
- * @param {{ args: Record<string, unknown> }} param1
- */
-export async function scopeToApprovedBarbershopsOnly(BarbershopModel, { args }) {
-  const ids = await getApprovedBarbershopIds(BarbershopModel);
-  intersectScopeFilter(args, 'barbershop', { terms: [{ path: 'id', operator: 'IN', value: ids }] });
+/** Term on the `barbershop` relation for APPROVED shops (a fresh object per call). */
+export function approvedBarbershopTerm() {
+  return { path: 'state', operator: 'EQ', value: 'APPROVED' };
 }

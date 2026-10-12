@@ -1,9 +1,8 @@
-import * as simfinity from '@simtlix/simfinity-postgres';
 import { scopeBarbershopRelationByRole } from './scopeHelpers.js';
 
 /** Reviews scoped by barbershop ownership / approved shops. */
-export async function scopeReviewByRole(payload) {
-  await scopeBarbershopRelationByRole(simfinity, payload);
+export function scopeReviewByRole(payload) {
+  scopeBarbershopRelationByRole(payload);
 }
 
 export const reviewScopes = {

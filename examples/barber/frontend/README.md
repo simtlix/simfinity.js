@@ -24,7 +24,7 @@ There is **no** `simfinitySetup/` folder, **no** `registerFormCustomization`, an
 | Simfinity (runtime) | `src/lib/simfinity/` | `SimfinityClientProvider`, `I18nProvider`, hooks (mirrors former fe-components subset) |
 | GraphQL client API | `@simtlix/simfinity-js-client` | ^1.1.0 |
 | Component dev | Storybook 10 | `@storybook/nextjs-vite` |
-| Tests | Vitest 4 (Storybook browser tests + `npm run test:unit`), Playwright | Unit tests for the class-merge, business-hours, booking-slot and booking-error helpers |
+| Tests | Vitest 4 (Storybook browser tests + `npm run test:unit`), Playwright | Unit tests for the class-merge, business-hours, booking-slot, booking-error and catalog helpers |
 
 ## Getting started
 
@@ -150,6 +150,22 @@ The same frontend targets both [MongoDB](../mongodb/) and [PostgreSQL](../postgr
 
 The owner dashboard reads review professionals through `booking.professional`; the admin dashboard uses the shop city/name fields shared by both GraphQL schemas.
 
+The pages follow the API's [booking rules](../README.md#booking-rules) and [bundle rules](../README.md#bundle-rules):
+
+- The booking page lists only active services and bundles. A `/book?bundle=` link preselects its bundle only while the bundle is active.
+- The shop page shows inactive services and bundles as “No disponible”, without a booking link.
+- Rescheduling keeps what the booking being moved already has, even when it is inactive now: its services, or its bundle when it is a booking of one bundle. A booking with services and a bundle, or with several bundles, which only the API creates, is rescheduled with its services only. A booking that only prefills the form, because it is not `CONFIRMED` or belongs to another shop, keeps only its active services and bundle.
+- The booking page and the shop page compute a bundle's duration from its services' current durations, as the API does (`src/lib/catalog.ts`): a service listed twice counts twice, and a bundle none of whose services resolve uses its stored `totalDurationMinutes`. The booking page offers times for that duration.
+- The dashboard's bundle edit page shows that duration read-only for a bundle with services and does not send it, since the API derives it. A bundle without services keeps its editable duration.
+- The dashboard's new-booking page offers only the selected shop's services and professionals.
+- Both booking pages explain booking rejections, including `INVALID_BOOKING_LINE`, through `src/lib/bookingErrors.ts`.
+
+The admin “Reseñas Reportadas” page lists the reviews that shop owners flagged. It filters `isReported` with a boolean; earlier builds sent the string `'true'`, which both APIs reject, and showed an empty list. When the list cannot load, the page shows an error with a retry button instead of the empty state, and a failed dismiss or delete shows an alert.
+
+The login pages show the server's message, such as the English `This account is suspended`.
+
+Image fields (`FormImageUpload`) accept JPEG, PNG, WebP and GIF, the types the [upload API](../README.md#uploads) stores. They preview the chosen file in the browser and do not call `POST /api/uploads` yet.
+
 ## Verification
 
 ```bash
@@ -161,7 +177,7 @@ npm run build
 npm run start          # production server on 4401; use -- -p 4501 for PostgreSQL
 ```
 
-`typecheck` generates Next.js route types before strict TypeScript checking. `test:unit` first checks the real Next.js lint rule against default and globbed application roots, then runs Vitest's class-merge, business-hours, booking-slot and booking-error helper tests. Storybook configuration, browser tests, and all component stories remain available via `npm run build-storybook` and `npx vitest run --project storybook` (requires a Playwright browser).
+`typecheck` generates Next.js route types before strict TypeScript checking. `test:unit` first checks the real Next.js lint rule against default and globbed application roots, then runs Vitest's class-merge, business-hours, booking-slot, booking-error and catalog helper tests. The catalog tests cover a bundle's duration from its services and which services and bundles clients can book. Storybook configuration, browser tests, and all component stories remain available via `npm run build-storybook` and `npx vitest run --project storybook` (requires a Playwright browser).
 
 The lockfile resolves `sharp` 0.35.5 and `source-map-js` 1.2.2 for their security fixes. Next.js 16, React 19 and the existing ESLint rules are retained. `@next/eslint-plugin-next@16.1.7` depends on `fast-glob`, whose `micromatch` dependency pulls in the unpatched `braces` stack-exhaustion vulnerability. A temporary override replaces **only that plugin version's** `fast-glob` with the registry package `tinyglobby@0.2.15`. The plugin uses only `globSync(pattern, { onlyDirectories: true })` to discover application roots; this is not a general replacement for the fast-glob API.
 
@@ -175,7 +191,12 @@ GRAPHQL_ENDPOINT=http://localhost:4400/graphql PLAYWRIGHT_BASE_URL=http://localh
 GRAPHQL_ENDPOINT=http://localhost:4500/graphql PLAYWRIGHT_BASE_URL=http://localhost:4501 DEMO_SHOP_SLUG=barber-demo npm run test:e2e
 ```
 
-Playwright checks home and search pages, actual client login, a complete booking against the seeded API, a reschedule, and the mobile shop layout. It creates a real demo appointment for the next month's 15th using the first available slot, then validates the mutation response ID and confirmation screen. The reschedule test books the next month's 16th through the API, lets a second client take the time chosen on the page, and checks that the rejected `reschedule_booking` leaves the booking unchanged and that the next choice moves the same booking; It also cancels the original booking after the form loads and checks that the page reports the state change instead of confirming an unreserved time. It deletes its bookings and the second client afterwards. The booking screenshot is written to `test-results/booking-confirmed.png`. Run these tests only against disposable example data; repeated runs create additional bookings.
+Playwright checks home and search pages, actual client login, a complete booking against the seeded API, a reschedule, the mobile shop layout, inactive bundles and review moderation. It finds the demo shop by `DEMO_SHOP_SLUG` with a filter on the server, so the API's 100-row limit for unpaged lists does not matter. It creates a real demo appointment for the next month's 15th using the first available slot, then validates the mutation response ID and confirmation screen. The reschedule test books the next month's 16th through the API, lets a second client take the time chosen on the page, and checks that the rejected `reschedule_booking` leaves the booking unchanged and that the next choice moves the same booking; it also cancels the original booking after the form loads and checks that the page reports the state change instead of confirming an unreserved time. It deletes its bookings and the second client afterwards. Two more tests check:
+
+- **Inactive bundles:** the owner adds an inactive bundle through the API. The shop page shows it as “No disponible” without a booking link, and the client's `/book?bundle=` link to it neither lists nor selects it.
+- **Review moderation:** a client books the next month's 17th at the first free time, the owner completes the booking, the client reviews it and the owner flags the review. The admin's moderation page then lists the review.
+
+Both delete what they create. The booking screenshot is written to `test-results/booking-confirmed.png`. Run these tests only against disposable example data; repeated runs create additional bookings.
 
 ## License
 

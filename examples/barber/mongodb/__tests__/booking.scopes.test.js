@@ -20,21 +20,17 @@ describe('scopeBookingByRole', () => {
     expect(args).toEqual({ x: 1 });
   });
 
-  it('scopes OWNER to OR of shops and client', async () => {
-    vi.mocked(simfinity.getModel).mockReturnValue({
-      find: vi.fn().mockReturnValue({
-        select: vi.fn().mockReturnThis(),
-        lean: vi.fn().mockResolvedValue([{ _id: 'shop1' }]),
-      }),
-    });
+  it('scopes OWNER to an OR of owned shops and own client bookings without reading shops', async () => {
     const args = {};
     await scopeBookingByRole({
       args,
       context: { user: { id: 'owner1', roles: ['OWNER'] } },
     });
-    expect(args.OR).toHaveLength(2);
-    expect(args.OR[0].conditions[0].operator).toBe('IN');
-    expect(args.OR[1].conditions[0].field).toBe('client');
+    expect(args.OR).toEqual([
+      { conditions: [{ field: 'barbershop', path: 'owner.id', operator: 'EQ', value: 'owner1' }] },
+      { conditions: [{ field: 'client', path: 'id', operator: 'EQ', value: 'owner1' }] },
+    ]);
+    expect(simfinity.getModel).not.toHaveBeenCalled();
   });
 
   it('scopes CLIENT to own client id', async () => {

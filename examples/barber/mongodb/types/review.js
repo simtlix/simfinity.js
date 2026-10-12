@@ -16,7 +16,7 @@ const {
 const reviewType = new GraphQLObjectType({
   name: 'review',
   description:
-    "A client's rating and comment about a barbershop, usually tied to a completed booking. Saving a review recomputes the barbershop's averageRating and reviewCount.",
+    "A client's rating and comment about an APPROVED barbershop they do not own, tied to one of their COMPLETED bookings there; each booking takes one review, and only a platform admin imports a review without a booking or deletes one. Saving a review recomputes the barbershop's averageRating and reviewCount.",
   extensions: {
     scope: reviewScopes,
   },
@@ -24,14 +24,14 @@ const reviewType = new GraphQLObjectType({
     id: { type: GraphQLID, description: 'Unique identifier of the review.' },
     rating: { type: new GraphQLNonNull(GraphQLInt), description: 'Star rating from 1 (worst) to 5 (best).' },
     comment: { type: GraphQLString, description: 'Free-text feedback written by the client.' },
-    reply: { type: GraphQLString, description: 'Optional public reply from the barbershop owner.' },
+    reply: { type: GraphQLString, description: "Optional public reply, written and withdrawn only by the barbershop's owner." },
     isReported: {
       type: GraphQLBoolean,
-      description: 'Whether the review was flagged for moderation.',
+      description: "Whether the review was flagged for moderation. The barbershop's owner flags it; only a platform admin clears the flag.",
     },
     booking: {
       type: simfinity.getType('booking'),
-      description: 'The booking this review refers to (optional).',
+      description: "The author's COMPLETED booking at this barbershop. Required unless a platform admin imports the review; one review per booking, fixed once the review exists.",
       extensions: { relation: { connectionField: 'booking', displayField: 'confirmationCode' } },
     },
     barbershop: {
@@ -44,7 +44,11 @@ const reviewType = new GraphQLObjectType({
       description: 'The user who wrote the review.',
       extensions: { relation: { connectionField: 'client', displayField: 'email' } },
     },
-    createdAt: { type: GraphQLString, description: 'Timestamp when the review was created.' },
+    createdAt: {
+      type: GraphQLString,
+      description: 'Timestamp when the review was created. Set by the API.',
+      extensions: { readOnly: true },
+    },
   }),
 });
 

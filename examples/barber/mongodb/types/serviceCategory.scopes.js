@@ -1,9 +1,8 @@
-import * as simfinity from '@simtlix/simfinity-js';
 import { scopeBarbershopRelationByRole } from './scopeHelpers.js';
 
 /** Service categories scoped by barbershop ownership / approved shops. */
-export async function scopeServiceCategoryByRole(payload) {
-  await scopeBarbershopRelationByRole(simfinity, payload);
+export function scopeServiceCategoryByRole(payload) {
+  scopeBarbershopRelationByRole(payload);
 }
 
 export const serviceCategoryScopes = {
