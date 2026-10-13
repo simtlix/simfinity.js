@@ -1,15 +1,31 @@
 import { describeModels } from '@simtlix/simfinity-core';
 import { planRelationalSchema } from '@simtlix/simfinity-sql';
 import { queryFunctions } from '../query/functions.js';
-import { constraintBuilder } from './constraints.js';
+import { constraintBuilder, withLayouts } from './constraints.js';
 import { identifier, literal, generatedName, invalid } from './sql.js';
 
 const scalarTypes = { ID: 'uuid', String: 'text', Enum: 'text', Int: 'integer', Float: 'double precision', Boolean: 'boolean', DateTime: 'timestamp with time zone', Embedded: 'jsonb' };
 const physicalType = (column) => `${scalarTypes[column.scalar]}${column.list ? '[]' : ''}`;
 const physicalDefault = (value) => value.kind === 'identity' ? 'gen_random_uuid()' : typeof value.value === 'string' ? `${literal(value.value)}::text` : String(value.value);
+// The first value is the default, which keeps the 3.5.9 description.
+const option = (name, value, values) => {
+  if (value !== undefined && !values.includes(value)) invalid(`Unknown PostgreSQL ${name} option: ${String(value)}. Use ${values.map((item) => `'${item}'`).join(' or ')}`);
+  return value ?? values[0];
+};
 
-/** Lower engine-independent relational guarantees into PostgreSQL storage and enforcement. */
-export const describeRelationalSchema = (plan) => {
+/**
+ * Lower engine-independent relational guarantees into PostgreSQL storage and enforcement. Two opt-in
+ * options change what new databases get:
+ * - `refreshTriggers: 'perRoot'` refreshes each maintained root once per transaction, while its guard trigger
+ *   stays deferred, instead of once per changed row ('perRow'). Initialization keeps each existing root on
+ *   the layout its database holds;
+ * - `ownerIndexes: 'minimal'` omits the (__owner_id) index of owned and guard tables, which their primary
+ *   key or a unique index already covers ('all' keeps it). 'minimal' accepts existing owner indexes; a
+ *   database created with 'minimal' fails validation under 'all', and create mode adds the indexes back.
+ */
+export const describeRelationalSchema = (plan, options) => {
+  const refreshTriggers = option('refreshTriggers', options?.refreshTriggers, ['perRow', 'perRoot']);
+  const ownerIndexes = option('ownerIndexes', options?.ownerIndexes, ['all', 'minimal']);
   const { schema } = plan;
   identifier(schema);
   const tables = [];
@@ -79,6 +95,12 @@ export const describeRelationalSchema = (plan) => {
   }
   const generated = constraints.finish();
   generated.functions.push(...queryFunctions(schema));
+  if (ownerIndexes === 'minimal') {
+    for (const table of tables.filter((item) => item.ownership || item.auxiliary?.kind === 'guard')) {
+      const covered = table.primaryKey.columns[0] === '__owner_id' || table.indexes.some((index) => index.unique && index.columns[0] === '__owner_id');
+      if (covered) table.indexes = table.indexes.filter((index) => index.unique || index.columns.length !== 1 || index.columns[0] !== '__owner_id');
+    }
+  }
   // PostgreSQL shares one namespace for table and index names.
   const relationNames = new Set(tables.map((table) => table.name));
   for (const table of tables) {
@@ -92,10 +114,18 @@ export const describeRelationalSchema = (plan) => {
       relationNames.add(index.name);
     }
   }
-  return { schema, tables: tables.sort((a, b) => a.name.localeCompare(b.name)), ...generated };
+  const description = { schema, tables: tables.sort((a, b) => a.name.localeCompare(b.name)), ...generated };
+  if (refreshTriggers === 'perRow') return description;
+  const result = withLayouts(description, new Map(description.maintenance.map((item) => [item.rootTable, 'perRoot'])));
+  const functionNames = new Set();
+  for (const fn of result.functions) {
+    if (functionNames.has(fn.name)) invalid(`Function name collision: ${fn.name}`);
+    functionNames.add(fn.name);
+  }
+  return result;
 };
 
 /** Compile GraphQL storage metadata into the compatible PostgreSQL description. */
-export const describeDatabase = (registrations, { schema = 'public' } = {}) => describeRelationalSchema(planRelationalSchema(describeModels(registrations), {
+export const describeDatabase = (registrations, { schema = 'public', refreshTriggers, ownerIndexes } = {}) => describeRelationalSchema(planRelationalSchema(describeModels(registrations), {
   schema, naming: { validateIdentifier: identifier, generatedName },
-}));
+}), { refreshTriggers, ownerIndexes });

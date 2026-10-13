@@ -17,6 +17,9 @@ export const callDriver = async (call) => {
   }
 };
 
+/** Whether this error is the failure of a driver call, as opposed to one raised before any statement ran. */
+export const isDriverFailure = (error) => isObject(error) && driverFailures.has(error);
+
 /** The plugin classifies only objects; a thrown null or primitive is never retried. */
 export const isRetryableFailure = (driver, error) => isObject(error) && Boolean(driver.isRetryable(error));
 

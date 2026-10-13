@@ -5,7 +5,7 @@ import { describeRelationalSchema } from './schema/describe.js';
 import { initializeDatabase } from './schema/initialize.js';
 import { compileDatabaseSchema } from './schema/ddl.js';
 import { compileQuery } from './query/compiler.js';
-import { compileRecord } from './record-statements.js';
+import { compileRecord, compileRecordBatch, MAX_RECORD_BATCH_VALUES } from './record-statements.js';
 import { castId, encodeScalar, decodeScalar, encodeParameter, isRetryableDatabaseError, normalizeDatabaseError } from './codecs.js';
 
 export const postgresPlugin = (options) => ({
@@ -14,13 +14,18 @@ export const postgresPlugin = (options) => ({
   displayName: 'PostgreSQL',
   defaultSchema: 'public',
   options: options || null,
-  capabilities: ['transactions', 'foreignKeys', 'deferredForeignKeys', 'embeddedValues', 'ownedRecords', 'scalarLists', 'uniqueValues', 'nullableUnique'],
+  // singleStatementReads: one statement reads one snapshot at any isolation level, so a read without owned
+  // tables needs no repeatable-read transaction.
+  capabilities: ['transactions', 'foreignKeys', 'deferredForeignKeys', 'embeddedValues', 'ownedRecords', 'scalarLists', 'uniqueValues', 'nullableUnique', 'singleStatementReads'],
   naming: { validateIdentifier: identifier, generatedName },
-  describeSchema: describeRelationalSchema,
+  // The runtime passes its bound configuration: createPostgres(options) or configure(value).
+  describeSchema: (plan, configuration) => describeRelationalSchema(plan, { refreshTriggers: configuration?.refreshTriggers, ownerIndexes: configuration?.ownerIndexes }),
   initialize: (configuration, description, initialization) => initializeDatabase(configuration.pool, description, initialization),
   compileSchema: compileDatabaseSchema,
   compileQuery,
   compileRecord,
+  compileRecordBatch,
+  maxRecordBatchValues: MAX_RECORD_BATCH_VALUES,
   values: { createId: randomUUID, castId, encodeScalar, decodeScalar, encodeEmbedded: JSON.stringify },
   driver: {
     assertConfiguration(configuration) {

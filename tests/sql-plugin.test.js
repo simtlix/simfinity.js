@@ -5,7 +5,7 @@ import {
 import {
   GraphQLEnumType, GraphQLID, GraphQLInt, GraphQLList, GraphQLNonNull, GraphQLObjectType, GraphQLString, graphql,
 } from 'graphql';
-import { describeModels } from '@simtlix/simfinity-core';
+import { describeModels, SimfinityError } from '@simtlix/simfinity-core';
 import { createRecordStore } from '../packages/sql/src/records.js';
 import { createTransactions } from '../packages/sql/src/transactions.js';
 import { createSQL } from '../packages/sql/src/index.js';
@@ -50,6 +50,23 @@ describe('SQL plugin binding', () => {
     expect(bound.options.schema).toBe('original');
     expect(bound.options.pool).toBe(plugin.options.pool);
     expect(bound.capabilities).toEqual(['transactions']);
+  });
+  it('binds an optional record batch compiler and value limit and rejects malformed ones', () => {
+    const compileRecordBatch = () => ({ text: 'batch' });
+    const plugin = { ...stubPlugin(), compileRecordBatch, maxRecordBatchValues: 10 };
+    const bound = bindPlugin(plugin);
+    plugin.compileRecordBatch = () => ({ text: 'changed' });
+    expect(bound.compileRecordBatch).toBe(compileRecordBatch);
+    expect(bound.maxRecordBatchValues).toBe(10);
+    const plain = bindPlugin(stubPlugin());
+    expect([plain.compileRecordBatch, plain.maxRecordBatchValues]).toEqual([undefined, undefined]);
+    for (const extra of [
+      { compileRecordBatch: 'INSERT' }, { compileRecordBatch: null }, { compileRecordBatch: {} },
+      { maxRecordBatchValues: 0 }, { maxRecordBatchValues: -1 }, { maxRecordBatchValues: 1.5 }, { maxRecordBatchValues: '100' },
+      { maxRecordBatchValues: NaN }, { maxRecordBatchValues: Infinity }, { maxRecordBatchValues: Number.MAX_SAFE_INTEGER + 1 }, { maxRecordBatchValues: null },
+    ]) {
+      expect(() => bindPlugin({ ...stubPlugin(), ...extra }), JSON.stringify(extra)).toThrow(expect.objectContaining({ extensions: expect.objectContaining({ code: 'INVALID_SQL_PLUGIN' }) }));
+    }
   });
 });
 
@@ -147,6 +164,35 @@ it('preserves PostgreSQL facade metadata and initialization with the SQL entry p
   expect(pool.connect).not.toHaveBeenCalled();
 });
 
+it('passes the bound configuration to describeSchema, from the plugin options or configure()', () => {
+  const Item = () => new GraphQLObjectType({ name: 'DescribedItem', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+  for (const bind of [(plugin, options) => { plugin.options = options; return createSQL({ plugin }); }, (plugin, options) => {
+    const runtime = createSQL({ plugin });
+    runtime.configure(options);
+    return runtime;
+  }]) {
+    const plugin = stubPlugin();
+    plugin.describeSchema = vi.fn((plan) => plan);
+    const options = { schema: 'described', layout: 'custom' };
+    const runtime = bind(plugin, options);
+    runtime.connect(null, Item(), 'item', 'items');
+    runtime.createSchema();
+    expect(plugin.describeSchema).toHaveBeenCalledOnce();
+    const [plan, configuration] = plugin.describeSchema.mock.calls[0];
+    expect(plan.schema).toBe('described');
+    expect(configuration).toEqual(options);
+    expect(Object.isFrozen(configuration)).toBe(true);
+  }
+  // A plugin that reads only the plan describes the same storage.
+  const plugin = stubPlugin();
+  plugin.options = {};
+  plugin.describeSchema = (plan) => ({ ...plan, described: true });
+  const runtime = createSQL({ plugin });
+  runtime.connect(null, Item(), 'item', 'items');
+  runtime.createSchema();
+  expect(runtime.describeDatabase()).toMatchObject({ schema: 'main', described: true });
+});
+
 it('checks capabilities before physical compilation and initialization', () => {
   const plugin = stubPlugin();
   plugin.options = {};
@@ -214,6 +260,160 @@ it('never replays an unknown commit outcome and bounds confirmed abort retries',
   const abortedBody = vi.fn(() => { throw new Error('aborted'); });
   await expect(retrying.withTransaction(null, abortedBody)).rejects.toThrow('aborted');
   expect(abortedBody).toHaveBeenCalledTimes(6);
+});
+
+describe('SQL sessionless reads', () => {
+  const recordingRuntime = (capabilities) => {
+    const events = [];
+    const plugin = stubPlugin();
+    plugin.options = {};
+    plugin.capabilities = capabilities;
+    plugin.describeSchema = (plan) => plan;
+    plugin.values = { createId: () => 'record-one', castId: (value) => value, encodeScalar: (field, value) => value, decodeScalar: (field, value) => value, encodeEmbedded: (value) => value };
+    plugin.compileRecord = (description, operation) => ({ text: operation.kind, values: [operation] });
+    plugin.compileQuery = () => ({ text: 'read-all', values: [] });
+    plugin.driver = {
+      ...plugin.driver,
+      acquire: async () => { events.push('acquire'); return {}; },
+      begin: async () => { events.push('begin'); }, commit: async () => { events.push('commit'); },
+      rollback: async () => { events.push('rollback'); }, release: async () => { events.push('release'); },
+      query: async (configuration, statement) => { events.push(`query:${statement.text}`); return { rows: [] }; },
+      isRetryable: () => false, normalizeError: (error) => error,
+    };
+    const runtime = createSQL({ plugin });
+    const Item = new GraphQLObjectType({ name: 'ReadRoutingItem', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+    runtime.connect(null, Item, 'item', 'items');
+    runtime.createSchema();
+    return { events, model: runtime.getModel(Item), runtime };
+  };
+
+  it('keeps acquire, begin, query, commit and release around find and getById for plugins without singleStatementReads', async () => {
+    const { events, model, runtime } = recordingRuntime(['transactions']);
+    await runtime.initializeDatabase();
+    for (const [read, statement] of [[() => model.find(), 'read-all'], [() => model.findById('record-one'), 'selectById']]) {
+      events.length = 0;
+      await read();
+      expect(events).toEqual(['acquire', 'begin', `query:${statement}`, 'commit', 'release']);
+    }
+  });
+
+  it('runs find and getById as one statement on one connection for plugins with singleStatementReads', async () => {
+    const { events, model, runtime } = recordingRuntime(['transactions', 'singleStatementReads']);
+    await runtime.initializeDatabase();
+    for (const [read, statement] of [[() => model.find(), 'read-all'], [() => model.findById('record-one'), 'selectById']]) {
+      events.length = 0;
+      await read();
+      expect(events).toEqual(['acquire', `query:${statement}`, 'release']);
+    }
+  });
+});
+
+describe('SQL owned-row batches', () => {
+  // Writes only: hydration reads are not part of the insert order.
+  const fixture = ({ plugin: overrides = {}, options } = {}) => {
+    const Maker = new GraphQLObjectType({ name: 'BatchMaker', fields: { id: { type: GraphQLID } } });
+    const reference = { relation: { embedded: false } };
+    const Part = new GraphQLObjectType({ name: 'BatchPart', fields: { name: { type: GraphQLString }, maker: { type: Maker, extensions: reference } } });
+    const Line = new GraphQLObjectType({ name: 'BatchLine', fields: {
+      label: { type: new GraphQLNonNull(GraphQLString) }, maker: { type: Maker, extensions: reference },
+      parts: { type: new GraphQLList(Part), extensions: { relation: { embedded: true } } },
+    } });
+    const Order = new GraphQLObjectType({ name: 'BatchOrder', fields: {
+      id: { type: GraphQLID }, code: { type: GraphQLString },
+      lines: { type: new GraphQLList(Line), extensions: { relation: { embedded: true } } },
+      extras: { type: new GraphQLList(Part), extensions: { relation: { embedded: true } } },
+    } });
+    const models = describeModels([{ gqltype: Maker }, { gqltype: Order }]);
+    const database = planRelationalSchema(models, { schema: 'main', naming: { validateIdentifier() {}, generatedName: (...parts) => parts.join('__') } });
+    const writes = [];
+    let sequence = 0;
+    const plugin = stubPlugin();
+    // The codec rejects one marker value, as a plugin rejects a value its engine cannot store.
+    const encodeScalar = (field, value) => {
+      if (value === 'unstorable') throw new SimfinityError(`Invalid value for ${field.name}`, 'INVALID_VALUE', 400);
+      return value;
+    };
+    plugin.values = { createId: () => `row-${++sequence}`, castId: (value) => value, encodeScalar, decodeScalar: (field, value) => value, encodeEmbedded: (value) => value };
+    plugin.compileRecord = (description, operation) => ({ text: operation.kind, values: [operation] });
+    plugin.compileRecordBatch = (description, operation) => ({ text: operation.kind, values: [operation] });
+    plugin.maxRecordBatchValues = 32767;
+    Object.assign(plugin, overrides);
+    for (const [key, value] of Object.entries(overrides)) if (value === undefined) delete plugin[key];
+    const query = async ({ text, values: [operation] }) => {
+      if (text !== 'selectOwned' && text !== 'selectById') writes.push({ text, table: operation.table.name.replace('BatchOrder__', ''), rows: operation.rows ?? (operation.data ? [operation.data] : []) });
+      if (text === 'insert') return { rows: [{ ...operation.data }] };
+      if (text === 'update') return { rows: [{ id: operation.id }] };
+      return { rows: [] };
+    };
+    return { store: createRecordStore(models, database, query, bindPlugin(plugin), options), writes };
+  };
+  const trace = (writes) => writes.map(({ text, table, rows }) => (text === 'insertMany' ? `${text}:${table}:${rows.length}` : `${text}:${table}`));
+  const lines = (count) => Array.from({ length: count }, (_, index) => ({ label: `line-${index}` }));
+
+  it('inserts the rows of one owned list with one batch, null items included', async () => {
+    const { store, writes } = fixture();
+    await store.create('BatchOrder', { id: 'order', code: 'A', lines: [...lines(2), null, ...lines(2)] });
+    expect(trace(writes)).toEqual(['insert:BatchOrder', 'insertMany:lines:5']);
+    const [, batch] = writes;
+    expect(batch.rows.map((row) => [row.__position, row.__item_present, row.label])).toEqual([[0, true, 'line-0'], [1, true, 'line-1'], [2, false, null], [3, true, 'line-0'], [4, true, 'line-1']]);
+    expect(new Set(batch.rows.map((row) => Object.keys(row).join())).size).toBe(1);
+  });
+
+  it('keeps each owner row before the rows it owns, in the per-row order', async () => {
+    const { store, writes } = fixture();
+    const parts = (...names) => names.map((name) => ({ name }));
+    await store.create('BatchOrder', { id: 'order', lines: [{ label: 'a', parts: parts('p1', 'p2') }, { label: 'b', parts: parts('p3') }, { label: 'c', parts: [] }, { label: 'd' }], extras: parts('e1', 'e2') });
+    expect(trace(writes)).toEqual([
+      'insert:BatchOrder', 'insert:lines', 'insertMany:lines__parts:2', 'insert:lines', 'insert:lines__parts', 'insertMany:lines:2', 'insertMany:extras:2',
+    ]);
+    const owners = new Map(writes.filter(({ table }) => table === 'lines').flatMap(({ rows }) => rows.map((row) => [row.label, row.__id])));
+    expect(writes.filter(({ table }) => table === 'lines__parts').flatMap(({ rows }) => rows.map((row) => [row.name, row.__owner_id, row.__position])))
+      .toEqual([['p1', owners.get('a'), 0], ['p2', owners.get('a'), 1], ['p3', owners.get('b'), 0]]);
+  });
+
+  it.each([
+    ['a missing required value', { label: null }, 'REQUIRED_VALUE'],
+    ['a value the codec rejects', { label: 'unstorable' }, 'INVALID_VALUE'],
+  ])('inserts the rows queued before %s, then throws it', async (label, invalid, code) => {
+    const batched = fixture();
+    const perRow = fixture({ options: { multiRowInserts: false } });
+    for (const { store } of [batched, perRow]) {
+      await expect(store.create('BatchOrder', { id: 'order', lines: [...lines(3), invalid, ...lines(2)] })).rejects.toMatchObject({ extensions: { code } });
+    }
+    expect(trace(batched.writes)).toEqual(['insert:BatchOrder', 'insertMany:lines:3']);
+    expect(trace(perRow.writes)).toEqual(['insert:BatchOrder', 'insert:lines', 'insert:lines', 'insert:lines']);
+    expect(batched.writes[1].rows).toEqual(perRow.writes.slice(1).map(({ rows }) => rows[0]));
+  });
+
+  it('flushes queued rows before deleting the owned rows of the next replaced list', async () => {
+    const batched = fixture();
+    const perRow = fixture({ options: { multiRowInserts: false } });
+    for (const { store } of [batched, perRow]) await store.update('BatchOrder', 'order', { lines: lines(2), extras: [{ name: 'e1' }, { name: 'e2' }] });
+    expect(trace(batched.writes)).toEqual(['update:BatchOrder', 'deleteOwned:lines', 'insertMany:lines:2', 'deleteOwned:extras', 'insertMany:extras:2']);
+    expect(trace(perRow.writes)).toEqual(['update:BatchOrder', 'deleteOwned:lines', 'insert:lines', 'insert:lines', 'deleteOwned:extras', 'insert:extras', 'insert:extras']);
+  });
+
+  it('splits a run so that rows times columns stay within maxRecordBatchValues', async () => {
+    const probe = fixture();
+    await probe.store.create('BatchOrder', { id: 'order', lines: lines(2) });
+    const columns = Object.keys(probe.writes[1].rows[0]).length;
+    const { store, writes } = fixture({ plugin: { maxRecordBatchValues: 2 * columns + 1 } });
+    await store.create('BatchOrder', { id: 'order', lines: lines(5) });
+    expect(trace(writes)).toEqual(['insert:BatchOrder', 'insertMany:lines:2', 'insertMany:lines:2', 'insert:lines']);
+    const single = fixture({ plugin: { maxRecordBatchValues: columns - 1 } });
+    await single.store.create('BatchOrder', { id: 'order', lines: lines(2) });
+    expect(trace(single.writes)).toEqual(['insert:BatchOrder', 'insert:lines', 'insert:lines']);
+  });
+
+  it.each([
+    ['multiRowInserts is false', { options: { multiRowInserts: false } }],
+    ['the plugin has no compileRecordBatch', { plugin: { compileRecordBatch: undefined } }],
+    ['the plugin has no maxRecordBatchValues', { plugin: { maxRecordBatchValues: undefined } }],
+  ])('inserts one row per statement when %s', async (label, options) => {
+    const { store, writes } = fixture(options);
+    await store.create('BatchOrder', { id: 'order', lines: lines(3) });
+    expect(trace(writes)).toEqual(['insert:BatchOrder', 'insert:lines', 'insert:lines', 'insert:lines']);
+  });
 });
 
 it.each([

@@ -20,3 +20,14 @@ export const compileRecord = (database, operation) => {
   }
   throw new SimfinityError(`Unknown record operation ${kind}`, 'INVALID_RECORD_OPERATION', 400);
 };
+
+// Values (rows times columns) per multi-row INSERT, well below PostgreSQL's 65,535 bind parameters.
+export const MAX_RECORD_BATCH_VALUES = 32767;
+/** One multi-row INSERT of owned rows that share their columns in the same order; no rows are returned. */
+export const compileRecordBatch = (database, { table: storage, rows }) => {
+  const names = Object.keys(rows[0]);
+  const types = names.map((name) => storage.columns.find((column) => column.name === name).type);
+  const values = [];
+  const tuples = rows.map((row) => `(${names.map((name, index) => { values.push(row[name]); return `$${values.length}::${types[index]}`; }).join(', ')})`);
+  return { text: `INSERT INTO ${qualified(database.schema, storage.name)} (${names.map((name) => q(name)).join(', ')}) VALUES ${tuples.join(', ')}`, values };
+};

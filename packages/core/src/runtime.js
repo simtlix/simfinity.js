@@ -427,6 +427,21 @@ const cloneInput = (value, type) => {
   return value;
 };
 
+// Each transaction attempt works on its own copy of the request input, since hooks, validators and
+// state actions may change it. The first copy is taken now, before the transaction starts, and is
+// handed out once; a retry copies the request input again, which no attempt receives or changes.
+const attemptInputs = (input, type) => {
+  let first = cloneInput(input, type);
+  let taken = false;
+  return () => {
+    if (taken) return cloneInput(input, type);
+    taken = true;
+    const value = first;
+    first = undefined;
+    return value;
+  };
+};
+
 export const createRuntime = (adapter) => {
   if (!adapter) {
     throw new SimfinityError('A database adapter is required', 'ADAPTER_REQUIRED', 500);
@@ -1246,10 +1261,10 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
 };
 
 const executeRegisteredMutation = (args, callback, context, session, inputModel) => {
-  const inputSnapshot = cloneInput(args, inputModel);
+  const nextInput = attemptInputs(args, inputModel);
   return adapter.withTransaction(
     session,
-    (mySession) => callback(cloneInput(inputSnapshot, inputModel), mySession, context),
+    (mySession) => callback(nextInput(), mySession, context),
   );
 };
 
@@ -1270,10 +1285,23 @@ const iterateOnCollectionFields = async (materializedModel, gqltype, objectId, s
   }
 };
 
-const onDelete = async (Model, controller, id, session, context) => {
-  const currentObject = await adapter.getById(Model, id, session, { plain: true });
+// Whether the runtime may skip a read by ID whose result it does not use: the adapter reports that
+// such a read of the model has no side effects, such as query middleware, and fails only where the
+// update or delete by that ID fails too. Without the report, those reads run as before.
+const readByIdIsInert = (Model) => typeof adapter.readByIdIsInert === 'function'
+  && adapter.readByIdIsInert(Model) === true;
 
-  if (controller && controller.onDelete) {
+// The record is read for the onDelete hook; adapter.delete casts the ID, deletes and returns the
+// record itself. Without a hook, the read is skipped when it is inert. A nested delete passes the
+// child it has already read as `current`.
+const onDelete = async (Model, controller, id, session, context, current) => {
+  const hasHook = !!(controller && controller.onDelete);
+  let currentObject = current;
+  if (currentObject === undefined && (hasHook || !readByIdIsInert(Model))) {
+    currentObject = await adapter.getById(Model, id, session, { plain: true });
+  }
+
+  if (hasHook) {
     await controller.onDelete(currentObject, session, context);
   }
 
@@ -1346,13 +1374,35 @@ const clearNullEmbeddedMembers = (merged, fieldEntry, patch) => {
   }
 };
 
-const onUpdateSubject = async (Model, gqltype, controller, args, session, linkToParent, context) => {
+// Whether an update reads the stored embedded values of a type with embedded fields. They are used
+// to merge a singular embedded object, and a non-empty embedded list is completed only for an
+// existing record; empty lists and nulls use nothing. A top-level update also keeps the read before
+// onUpdating, so that a malformed ID fails before the hook, and before nested collection items, so
+// that the SQL adapter locks the parent row before child writes; otherwise it skips the read only
+// when it is inert. A state action or a nested update has already read and checked the record
+// (`recordChecked`).
+const readsStoredEmbedded = (Model, controller, materializedModel, embeddedFieldNames, recordChecked) => {
+  const usesStored = embeddedFieldNames.some((name) => {
+    const value = ownValue(materializedModel.modelArgs, name);
+    return value && (!Array.isArray(value) || value.length > 0);
+  });
+  if (usesStored) return true;
+  if (recordChecked) return false;
+  return !!(controller && controller.onUpdating)
+    || Object.values(materializedModel.collectionFields).some((field) => field
+      && ['added', 'updated', 'deleted'].some((key) => field[key] && hasNestedItems(field[key])))
+    || !readByIdIsInert(Model);
+};
+
+const onUpdateSubject = async (Model, gqltype, controller, args, session, linkToParent, context,
+  recordChecked = false) => {
   const materializedModel = await materializeModel(args, gqltype, linkToParent, 'UPDATE', session);
   const objectId = args.id;
   const argTypes = gqltype.getFields();
   const embeddedFieldNames = getEmbeddedFieldNames(gqltype);
 
-  if (embeddedFieldNames.length > 0) {
+  if (embeddedFieldNames.length > 0
+    && readsStoredEmbedded(Model, controller, materializedModel, embeddedFieldNames, recordChecked)) {
     const projection = Object.fromEntries(embeddedFieldNames.map((name) => [name, 1]));
     const currentObject = await adapter.getById(Model, objectId, session, {
       projection,
@@ -1365,7 +1415,6 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
         const newObjectData = ownValue(materializedModel.modelArgs, fieldEntryName);
         if (newObjectData) {
           if (Array.isArray(newObjectData)) {
-            materializedModel.modelArgs[fieldEntryName] = newObjectData;
             completeEmbeddedValue(fieldEntryName, argTypes[fieldEntryName], newObjectData);
           } else {
             materializedModel.modelArgs[fieldEntryName] = { ...oldObjectData, ...newObjectData };
@@ -1427,7 +1476,7 @@ const onStateChanged = async (Model, gqltype, controller, args, session, actionF
     }
 
     args.state = stateValue(actionField.to);
-    let result = await onUpdateSubject(Model, gqltype, controller, args, session, null, context);
+    let result = await onUpdateSubject(Model, gqltype, controller, args, session, null, context, true);
     result = adapter.toObject(result);
     result.state = actionField.to.value;
     return result;
@@ -1543,13 +1592,11 @@ const executeOperation = (Model, gqltype, controller, args, operation, actionFie
   const limit = getMaxNestedOperations();
   if (limit !== null && operation !== operations.DELETE) assertNestedOperations(gqltype, args, limit);
   if (operation !== operations.DELETE) assertCollectionWrites(gqltype, args);
-  const inputSnapshot = operation === operations.DELETE ? args : cloneInput(args, inputType);
+  const nextInput = operation === operations.DELETE ? () => args : attemptInputs(args, inputType);
   return adapter.withTransaction(
     session,
     async (mySession) => {
-      const attemptArgs = operation === operations.DELETE
-        ? inputSnapshot
-        : cloneInput(inputSnapshot, inputType);
+      const attemptArgs = nextInput();
       switch (operation) {
         case operations.SAVE:
           return onSaveObject(Model, gqltype, controller, attemptArgs, mySession, null, context);
@@ -1594,9 +1641,12 @@ const executeItemFunction = async (gqltype, collectionField, parentKey, session,
     const args = operationType === operations.DELETE ? { id: element } : { input: element };
     await executeMiddleware({ type, args, operation: operationType, context });
 
+    // The ownership check reads the child (the SQL adapter locks its row). onDelete receives this
+    // record, and an update reads the child again only to merge embedded values.
+    let child;
     if (operationType === operations.UPDATE || operationType === operations.DELETE) {
       const id = operationType === operations.DELETE ? args.id : args.input.id;
-      const child = await adapter.getById(type.model, id, session, { plain: true, lock: true });
+      child = await adapter.getById(type.model, id, session, { plain: true, lock: true });
       if (!child) {
         throw new SimfinityError(`${collectionGQLType.name} ${id} is not valid`, 'NOT_VALID_ID', 404);
       }
@@ -1612,10 +1662,10 @@ const executeItemFunction = async (gqltype, collectionField, parentKey, session,
         break;
       case operations.UPDATE:
         await onUpdateSubject(type.model, collectionGQLType, type.controller,
-          args.input, session, linkToParent, context);
+          args.input, session, linkToParent, context, true);
         break;
       case operations.DELETE:
-        await onDelete(type.model, type.controller, args.id, session, context);
+        await onDelete(type.model, type.controller, args.id, session, context, child);
     }
   }
 };

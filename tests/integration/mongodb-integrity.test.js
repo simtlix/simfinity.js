@@ -7,6 +7,7 @@ import {
 } from 'graphql';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { isDeepStrictEqual } from 'node:util';
 import { integrityFixture } from '../fixtures/mongodb-integrity.js';
 import { createMongoAdapter, createRuntime } from '../../packages/mongodb/src/index.js';
 
@@ -581,6 +582,393 @@ withMongo('MongoDB transactional reference integrity', () => {
       expect((await mutate(audit, 'add', 'Service', { name: 'blocked' })).errors[0].extensions.code)
         .toBe('MONGO_INTEGRITY_NOT_INITIALIZED');
     }, 30000);
+  });
+
+  describe('guarded write round trips', () => {
+    const prefix = 'RoundTrips';
+    const shopController = {};
+    // Shop's reference paths to Service, in declaration order, and the post-image projection.
+    const shopPaths = ['service_id', 'detail.primary_id', 'detail.items.service_id', 'nested.target_id',
+      'details.primary_id', 'details.items.service_id'];
+    const referenceProjection = Object.fromEntries([['_id', 1], ...shopPaths.map((path) => [path, 1])]);
+    let connection;
+    let guarded;
+    let commands = [];
+    let recording = false;
+    const run = (source, variableValues) => graphql({ schema: guarded.schema, source, variableValues });
+    const addShop = (input) => run(`mutation($input: ${prefix}ShopInput!) { addshop(input: $input) { id } }`, { input });
+    const removeService = (id) => run(`mutation { deleteservice(id: "${id}") { id } }`);
+    const items = (ids) => ({ details: [{ items: ids.map((id) => ({ service: { id: String(id) } })) }] });
+    const plain = (value) => JSON.parse(JSON.stringify(value));
+    const lockedServices = async () => plain((await guarded.models.Service.collection
+      .find({ _simfinityReferenceLock: { $exists: true } }, { projection: { _id: 1 } }).toArray()).map(({ _id }) => _id)).sort();
+    // The commands the body sends, by name and by collection without the fixture prefix.
+    const record = async (body) => {
+      commands = [];
+      recording = true;
+      try { return await body(); } finally { recording = false; }
+    };
+    const sent = (name, collection) => commands.filter((entry) => entry.name === name && entry.collection === collection);
+    // The guarded post-image read of one stored Shop: by its _id, with the reference-path projection.
+    const postImages = (id) => sent('find', 'Shop').filter(({ command }) => String(command.filter?._id) === String(id)
+      && isDeepStrictEqual(command.projection, referenceProjection));
+    // Reference probes of a guarded delete: existence queries by reference path, reading only _id.
+    const probes = () => commands.filter(({ name, command }) => name === 'find' && command.filter && !('_id' in command.filter)
+      && isDeepStrictEqual(command.projection, { _id: 1 }));
+    // The distinct Service targets of one write: one existence read and one lock write, each with every id.
+    const expectOneLockBatch = (ids) => {
+      const expected = plain(ids).sort();
+      const reads = sent('find', 'Service').filter(({ command }) => command.filter?._id?.$in);
+      expect(reads.map(({ command }) => [plain(command.filter._id.$in).sort(), command.projection]))
+        .toEqual([[expected, { _id: 1 }]]);
+      const writes = sent('update', 'Service');
+      expect(writes).toHaveLength(1);
+      expect(writes[0].command.updates).toHaveLength(1);
+      expect(writes[0].command.updates[0].multi).toBe(true);
+      expect(plain(writes[0].command.updates[0].q._id.$in).sort()).toEqual(expected);
+    };
+    const planNodes = (node, nodes = []) => {
+      if (Array.isArray(node)) node.forEach((child) => planNodes(child, nodes));
+      else if (node && typeof node === 'object') {
+        if (typeof node.stage === 'string') nodes.push({ stage: node.stage, indexName: node.indexName });
+        Object.values(node).forEach((child) => planNodes(child, nodes));
+      }
+      return nodes;
+    };
+
+    beforeAll(async () => {
+      connection = await mongoose.createConnection(uri, { dbName: mongoose.connection.name, monitorCommands: true })
+        .asPromise();
+      connection.getClient().on('commandStarted', ({ commandName, command }) => {
+        if (!recording) return;
+        const collection = typeof command[commandName] === 'string' ? command[commandName].replace(prefix, '') : undefined;
+        commands.push({ name: commandName, collection, command });
+      });
+      guarded = integrityFixture({
+        prefix,
+        controllers: { Shop: shopController },
+        modelFactory: (type) => connection.model(type.name,
+          fixture.models[type.name.slice(prefix.length)].schema.clone(), type.name),
+      });
+      for (const model of Object.values(guarded.models)) await model.createCollection();
+      await guarded.adapter.initialize();
+    }, 30000);
+
+    beforeEach(async () => {
+      delete shopController.onSaving;
+      for (const model of Object.values(guarded.models)) await model.deleteMany({});
+    });
+
+    afterAll(async () => { await connection.close(); });
+
+    test('a guarded save reads only _id and reference paths and locks each target collection with one write', async () => {
+      const services = await guarded.models.Service.insertMany(Array.from({ length: 20 }, (_, index) => ({ name: `service ${index}` })));
+      const ids = services.map(({ _id }) => _id);
+      const created = await record(() => addShop({
+        name: 'shop', service: { id: String(ids[0]) }, detail: { primary: { id: String(ids[1]) } }, ...items(ids),
+      }));
+      expect(created.errors).toBeUndefined();
+      expect(postImages(created.data.addshop.id)).toHaveLength(1);
+      expectOneLockBatch(ids);
+      expect(sent('getMore', 'Service')).toEqual([]);
+      expect(await lockedServices()).toEqual(plain(ids).sort());
+    });
+
+    test('a guarded update locks its targets with one write per target collection', async () => {
+      const services = await guarded.models.Service.insertMany(Array.from({ length: 20 }, (_, index) => ({ name: `service ${index}` })));
+      const ids = services.map(({ _id }) => _id);
+      const created = await addShop({ name: 'shop', ...items(ids) });
+      expect(created.errors).toBeUndefined();
+      const updated = await record(() => run(`mutation($input: ${prefix}ShopInputForUpdate!) { updateshop(input: $input) { id } }`,
+        { input: { id: created.data.addshop.id, name: 'renamed' } }));
+      expect(updated.errors).toBeUndefined();
+      expect(postImages(created.data.addshop.id)).toHaveLength(1);
+      expectOneLockBatch(ids);
+    });
+
+    test('a single target keeps one single-document lock write and no existence read', async () => {
+      const service = await guarded.models.Service.create({ name: 'only' });
+      const created = await record(() => addShop({ name: 'shop', service: { id: String(service._id) } }));
+      expect(created.errors).toBeUndefined();
+      expect(sent('find', 'Service').filter(({ command }) => command.filter?._id?.$in)).toEqual([]);
+      expect(sent('update', 'Service').map(({ command }) => command.updates.map(({ q, multi }) => [plain(q), !!multi])))
+        .toEqual([[[{ _id: String(service._id) }, false]]]);
+      expect(await lockedServices()).toEqual([String(service._id)]);
+    });
+
+    test('locks more than 1,000 distinct targets of one collection in batches of 1,000', async () => {
+      const services = await guarded.models.Service.insertMany(Array.from({ length: 1500 }, (_, index) => ({ name: `s${index}` })));
+      const created = await record(() => addShop({ name: 'many', ...items(services.map(({ _id }) => _id)) }));
+      expect(created.errors).toBeUndefined();
+      expect(sent('find', 'Service').filter(({ command }) => command.filter?._id?.$in)
+        .map(({ command }) => command.filter._id.$in.length)).toEqual([1000, 500]);
+      expect(sent('getMore', 'Service')).toEqual([]);
+      expect(sent('update', 'Service').map(({ command }) => command.updates.map(({ q, multi }) => [q._id.$in.length, multi])))
+        .toEqual([[[1000, true]], [[500, true]]]);
+      expect(await lockedServices()).toHaveLength(1500);
+    }, 60000);
+
+    test('a missing target among a batch rejects the write before any lock write', async () => {
+      const services = await guarded.models.Service.insertMany(Array.from({ length: 5 }, (_, index) => ({ name: `service ${index}` })));
+      const result = await record(() => addShop({ name: 'missing', ...items([...services.map(({ _id }) => _id), missingId()]) }));
+      expectViolation(result, 'addshop');
+      expect(result.errors[0].message).toBe('Reference constraint violated');
+      expect(sent('update', 'Service')).toEqual([]);
+      expect(await guarded.models.Shop.countDocuments()).toBe(0);
+      expect(await lockedServices()).toEqual([]);
+    });
+
+    // 3.5.9 locked targets one by one in id order: it reported this violation at once only when the
+    // missing id sorted first; otherwise it conflicted on the held target and retried.
+    test.each([
+      ['before', '000000000000000000000001'],
+      ['after', 'ffffffffffffffffffffffff'],
+    ])('a missing target that sorts %s a target held by another transaction fails at once without retries', async (_, missingHex) => {
+      const missing = new mongoose.Types.ObjectId(missingHex);
+      const held = await guarded.models.Service.create({ name: 'held' });
+      const deleter = await connection.startSession();
+      const creator = await connection.startSession();
+      let attempts = 0;
+      try {
+        deleter.startTransaction(transactionOptions);
+        await guarded.adapter.delete(guarded.models.Service, held._id, deleter);
+        creator.startTransaction(transactionOptions);
+        await expect(guarded.runtime.saveObject(guarded.types.Shop.name, items([missing, held._id]), creator)).rejects.toMatchObject({
+          message: 'Reference constraint violated', extensions: { code: 'REFERENCE_CONSTRAINT_VIOLATION', status: 409 },
+        });
+        expect(creator.inTransaction()).toBe(false);
+        shopController.onSaving = () => { attempts += 1; };
+        const owned = await addShop(items([missing, held._id]));
+        expectViolation(owned, 'addshop');
+        expect(owned.errors[0].message).toBe('Reference constraint violated');
+        expect(attempts).toBe(1);
+        await deleter.abortTransaction();
+        expect(await guarded.models.Shop.countDocuments()).toBe(0);
+        expect(await guarded.models.Service.countDocuments({ _id: held._id })).toBe(1);
+      } finally {
+        if (deleter.inTransaction()) await deleter.abortTransaction();
+        await creator.endSession();
+        await deleter.endSession();
+      }
+    }, 30000);
+
+    test('a target deleted after the creator read its snapshot makes the batched lock conflict', async () => {
+      const [a, b, c] = await guarded.models.Service.insertMany([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+      const creator = await connection.startSession();
+      try {
+        creator.startTransaction(transactionOptions);
+        expect(await guarded.models.Service.findById(a._id).session(creator)).not.toBeNull();
+        expect((await removeService(b._id)).errors).toBeUndefined();
+        await expect(guarded.runtime.saveObject(guarded.types.Shop.name, items([a._id, b._id, c._id]), creator))
+          .rejects.toMatchObject({ errorLabels: expect.arrayContaining(['TransientTransactionError']) });
+        expect(creator.inTransaction()).toBe(false);
+        expectViolation(await addShop(items([a._id, b._id, c._id])), 'addshop');
+        expect(await guarded.models.Shop.countDocuments()).toBe(0);
+      } finally { await creator.endSession(); }
+    });
+
+    test('an uncommitted batched lock makes a concurrent delete of each target conflict', async () => {
+      const targets = await guarded.models.Service.insertMany([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+      const creator = await connection.startSession();
+      const deleter = await connection.startSession();
+      try {
+        creator.startTransaction(transactionOptions);
+        await guarded.runtime.saveObject(guarded.types.Shop.name, items(targets.map(({ _id }) => _id)), creator);
+        for (const target of targets) {
+          deleter.startTransaction(transactionOptions);
+          await expect(guarded.adapter.delete(guarded.models.Service, target._id, deleter))
+            .rejects.toMatchObject({ errorLabels: expect.arrayContaining(['TransientTransactionError']) });
+          expect(deleter.inTransaction()).toBe(false);
+        }
+        await creator.commitTransaction();
+        for (const target of targets) expectViolation(await removeService(target._id), 'deleteservice');
+        expect(await guarded.models.Service.countDocuments()).toBe(3);
+      } finally { await creator.endSession(); await deleter.endSession(); }
+    });
+
+    test('an uncommitted delete of one target makes the batched lock conflict', async () => {
+      const [a, b, c] = await guarded.models.Service.insertMany([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+      const deleter = await connection.startSession();
+      const creator = await connection.startSession();
+      try {
+        deleter.startTransaction(transactionOptions);
+        await guarded.adapter.delete(guarded.models.Service, c._id, deleter);
+        creator.startTransaction(transactionOptions);
+        await expect(guarded.runtime.saveObject(guarded.types.Shop.name, items([a._id, b._id, c._id]), creator))
+          .rejects.toMatchObject({ errorLabels: expect.arrayContaining(['TransientTransactionError']) });
+        expect(creator.inTransaction()).toBe(false);
+        await deleter.commitTransaction();
+        expectViolation(await addShop(items([a._id, b._id, c._id])), 'addshop');
+        expect(await guarded.models.Shop.countDocuments()).toBe(0);
+      } finally { await creator.endSession(); await deleter.endSession(); }
+    });
+
+    test('a guarded update locks exactly the targets its stored document references, whatever their shape', async () => {
+      const ids = Array.from({ length: 12 }, () => new mongoose.Types.ObjectId());
+      const [a, b, c, d, e, f, g, h, i, j, k, l] = ids;
+      await guarded.models.Service.collection.insertMany(ids.map((_id) => ({ _id, name: 'target' })));
+      // Stored shapes generated writes never produce, and the targets each one locks; a value that
+      // is not an ObjectId on a reference path is a violation.
+      const cases = [
+        [{}, []],
+        [{ service_id: null, detail: null, details: null, nested: null }, []],
+        [{ service_id: a, unrelated: { service_id: 'x' }, other_id: b }, [a]],
+        [{ service_id: [a, b] }, [a, b]],
+        [{ service_id: [a, [b, [c]]] }, [a, b, c]],
+        [{ service_id: 'not an object id' }, 'violation'],
+        [{ service_id: { nested: a } }, 'violation'],
+        [{ service_id: 5 }, 'violation'],
+        [{ details: 'scalar' }, []],
+        [{ nested: true }, []],
+        [{ detail: [{ primary_id: a }, null, 'x', { primary_id: b, items: [{ service_id: c }] }] }, [a, b, c]],
+        [{ detail: { primary_id: [a, null] } }, [a]],
+        [{ detail: { primary_id: 'string' } }, 'violation'],
+        [{ detail: { items: { service_id: d } } }, [d]],
+        [{ detail: { items: [null, 1, 'x', [], [[{ service_id: e }]], { service_id: null }, { service_id: [f] }] } }, [e, f]],
+        [{ details: [null, { items: [null, { service_id: g }] }, 'x', 5, [{ items: [{ service_id: h }] }]] }, [g, h]],
+        [{ details: [[[{ items: [[{ service_id: i }]] }]]] }, [i]],
+        [{ details: [{ items: [{ service_id: 'str' }] }] }, 'violation'],
+        [{ details: [{ items: [{ service_id: { a: 1 } }] }] }, 'violation'],
+        [{ details: [{ items: [{ service_id: [[j]] }] }] }, [j]],
+        [{ nested: { target_id: k, other: 1 } }, [k]],
+        [{ nested: [{ target_id: k }, { target_id: [l] }] }, [k, l]],
+        [{ nested: { target_id: [] } }, []],
+        [{ 'nested.target_id': a }, []],
+        [{ details: [{ items: [{ service_id: b, service: { id: c } }] }], detail: { primary_id: a, title: 't' } }, [a, b]],
+      ];
+      const outcomes = [];
+      for (const [shape] of cases) {
+        await guarded.models.Service.collection.updateMany({}, { $unset: { _simfinityReferenceLock: '' } });
+        const { insertedId } = await guarded.models.Shop.collection.insertOne(shape);
+        const session = await connection.startSession();
+        try {
+          session.startTransaction(transactionOptions);
+          const error = await guarded.adapter.update(guarded.models.Shop, insertedId, { name: 'renamed' }, session)
+            .then(() => null, (failure) => failure);
+          if (error) {
+            expect(session.inTransaction()).toBe(false);
+            outcomes.push(error.extensions?.code ?? error.message);
+          } else {
+            await session.commitTransaction();
+            outcomes.push(await lockedServices());
+          }
+        } finally { await session.endSession(); }
+      }
+      expect(outcomes).toEqual(cases.map(([, expected]) => (expected === 'violation'
+        ? 'REFERENCE_CONSTRAINT_VIOLATION' : plain(expected).sort())));
+    }, 30000);
+
+    test('a guarded delete queries each referencing collection once', async () => {
+      const service = await guarded.models.Service.create({ name: 'free' });
+      const result = await record(() => removeService(service._id));
+      expect(result.errors).toBeUndefined();
+      const id = String(service._id);
+      expect(probes().map(({ collection, command }) => [collection, plain(command.filter)])
+        .sort(([left], [right]) => left.localeCompare(right))).toEqual([
+        ['Child', { service_id: id }],
+        ['Link', { service_id: id }],
+        ['Service', { $and: [{ related_id: id }, { _id: { $ne: id } }] }],
+        ['Shop', { $or: shopPaths.map((path) => ({ [path]: id })) }],
+      ]);
+    });
+
+    test('a multi-path self-reference, including an _id reference, is probed once', async () => {
+      const adapter = createMongoAdapter({ referentialIntegrity: 'transactional' });
+      const runtime = createRuntime(adapter);
+      runtime.preventCreatingCollection(true);
+      const reference = (connectionField) => ({ relation: { connectionField } });
+      const Node = new GraphQLObjectType({
+        name: `${prefix}SelfNode`,
+        fields: () => ({
+          id: { type: GraphQLID }, name: { type: GraphQLString },
+          self: { type: Node, extensions: reference('_id') },
+          parent: { type: Node, extensions: reference('parent_id') },
+          alias: { type: Node, extensions: reference('alias_id') },
+        }),
+      });
+      const schema = new mongoose.Schema({
+        _id: mongoose.Schema.Types.ObjectId, name: String,
+        parent_id: mongoose.Schema.Types.ObjectId, alias_id: mongoose.Schema.Types.ObjectId,
+      });
+      schema.index({ parent_id: 1 });
+      schema.index({ alias_id: 1 });
+      const NodeModel = connection.model(Node.name, schema, Node.name);
+      runtime.connect(NodeModel, Node, 'roundtripsnode', 'roundtripsnodes');
+      const graph = runtime.createSchema();
+      await NodeModel.createCollection();
+      await adapter.initialize();
+      const remove = (id) => graphql({ schema: graph, source: `mutation { deleteroundtripsnode(id: "${id}") { id } }` });
+      const oid = () => new mongoose.Types.ObjectId();
+
+      const self = oid();
+      await NodeModel.collection.insertOne({ _id: self, name: 'self only', parent_id: self, alias_id: self });
+      const freed = await record(() => remove(self));
+      expect(freed.errors).toBeUndefined();
+      expect(probes().filter(({ collection }) => collection === 'SelfNode')).toHaveLength(1);
+      expect(await NodeModel.countDocuments({ _id: self })).toBe(0);
+
+      for (const field of ['parent_id', 'alias_id']) {
+        const target = oid();
+        await NodeModel.collection.insertMany([{ _id: target, name: 'target', [field]: target }, { _id: oid(), name: 'other', [field]: target }]);
+        expectViolation(await remove(target), 'deleteroundtripsnode');
+        expect(await NodeModel.countDocuments({ _id: target })).toBe(1);
+        expect(await NodeModel.collection.countDocuments({ _simfinityReferenceLock: { $exists: true } })).toBe(0);
+      }
+      const lone = oid();
+      await NodeModel.collection.insertMany([{ _id: lone, name: 'lone' }, { _id: oid(), name: 'unrelated' }]);
+      expect((await remove(lone)).errors).toBeUndefined();
+      expect(await NodeModel.countDocuments()).toBe(5);
+    });
+
+    // Plans are checked only where every branch has one candidate index; a self-reference's _id
+    // branch can legitimately use the _id index.
+    test('the Shop, Child and Link probes use the index of every path they query', async () => {
+      const service = await guarded.models.Service.create({ name: 'free' });
+      expect((await record(() => removeService(service._id))).errors).toBeUndefined();
+      const expected = { Shop: shopPaths, Child: ['service_id'], Link: ['service_id'] };
+      const captured = probes().filter(({ collection }) => collection in expected);
+      expect(captured.map(({ collection }) => collection).sort()).toEqual(['Child', 'Link', 'Shop']);
+      const other = () => new mongoose.Types.ObjectId();
+      for (const size of [0, 1000]) {
+        if (size) {
+          await guarded.models.Shop.collection.insertMany(Array.from({ length: size }, () => ({
+            service_id: other(), detail: { primary_id: other(), items: [{ service_id: other() }] },
+            nested: { target_id: other() }, details: [{ primary_id: other(), items: [{ service_id: other() }] }],
+          })));
+          for (const name of ['Child', 'Link']) {
+            await guarded.models[name].collection.insertMany(Array.from({ length: size }, () => ({ shop_id: other(), service_id: other() })));
+          }
+        }
+        for (const { collection, command } of captured) {
+          const explained = await guarded.models[collection].collection.find(command.filter, { projection: { _id: 1 } })
+            .limit(1).explain('queryPlanner');
+          const nodes = planNodes(explained.queryPlanner.winningPlan);
+          expect(nodes.map(({ stage }) => stage)).not.toContain('COLLSCAN');
+          expect([...new Set(nodes.map(({ indexName }) => indexName).filter(Boolean))].sort())
+            .toEqual(expected[collection].map((path) => `${path}_1`).sort());
+        }
+      }
+    }, 30000);
+
+    test.each([
+      ['Shop.service_id', 'Shop', (id) => ({ service_id: id })],
+      ['Shop.detail.primary_id', 'Shop', (id) => ({ detail: { primary_id: id } })],
+      ['Shop.detail.items.service_id', 'Shop', (id) => ({ detail: { items: [{ service_id: id }] } })],
+      ['Shop.nested.target_id', 'Shop', (id) => ({ nested: { target_id: id } })],
+      ['Shop.details.primary_id', 'Shop', (id) => ({ details: [{ primary_id: id }] })],
+      ['Shop.details.items.service_id', 'Shop', (id) => ({ details: [null, { items: [null, { service_id: id }] }] })],
+      ['Child.service_id', 'Child', (id) => ({ service_id: id })],
+      ['Link.service_id', 'Link', (id) => ({ service_id: id })],
+      ['Service.related_id of another service', 'Service', (id) => ({ related_id: id })],
+    ])('a single reference through %s blocks the delete of its target', async (_, collection, reference) => {
+      const service = await guarded.models.Service.create({ name: 'target' });
+      await guarded.models[collection].collection.insertOne(reference(service._id));
+      const result = await removeService(service._id);
+      expectViolation(result, 'deleteservice');
+      expect(result.errors[0].message).toBe('Reference constraint violated');
+      expect(await guarded.models.Service.countDocuments({ _id: service._id })).toBe(1);
+      expect(await lockedServices()).toEqual([]);
+    });
   });
 
   test.skipIf(!process.env.SIMFINITY_STANDALONE_MONGODB_URI)('startup rejects a real standalone MongoDB server', async () => {

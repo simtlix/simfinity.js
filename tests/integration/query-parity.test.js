@@ -146,6 +146,17 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL GraphQL parity', 
     await assertParity(`{parityItems(sort:{terms:[{field:"entries.number",order:${order}},{field:"key",order:ASC}]}){key}}`);
   });
 
+  // Required fields sort without a NULLS clause on PostgreSQL; ties are broken by a unique non-ID field,
+  // because ObjectId and UUID order differ.
+  it.each(['ASC', 'DESC'])('pages sorts on required fields with ties identically (%s)', async (order) => {
+    for (const page of [1, 2]) {
+      const data = await assertParity(`{contractseries(sort:{terms:[{field:"tenant",order:${order}},{field:"title",order:ASC}]},pagination:{page:${page},size:2}){tenant title}}`);
+      expect(data.contractseries.length).toBeGreaterThan(0);
+      await assertParity(`{parityItems(sort:{terms:[{field:"key",order:${order}}]},pagination:{page:${page},size:2}){key}}`);
+      await assertParity(`{parityItems(sort:{terms:[{field:"number",order:${order}},{field:"key",order:${order}}]},pagination:{page:${page},size:3}){key number}}`);
+    }
+  });
+
   it('decodes dates, enums and scalar lists in reads', async () => {
     await assertParity('{parityItems(sort:{terms:[{field:"key",order:ASC}]}){key number score enabled date dates kind checked tags entries{number text}}}');
   });

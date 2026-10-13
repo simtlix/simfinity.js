@@ -62,6 +62,8 @@ Generated inputs distinguish omission from explicit null: defaulted arguments us
 
 `maxResultBytes` also covers errors and partial data. Oversized query results are replaced by an actionable limit error. An oversized mutation result is not an error when the mutation succeeded, because the write already ran: the tool returns a `truncated` notice telling the agent whether calling it again would repeat the change, with the record's id when the id fits within the cap. Limit diagnostics and that notice are exempt from the cap. `limits` is validated when the tools are created; see [limits](/reference/mcp#limits).
 
+`limits` bound reads, not writes. Generated add and update tools accept nested collection inputs, and each nested `added`, `updated` or `deleted` entry runs inside the parent's transaction. On servers exposed to MCP clients, cap them with [`configureMutationLimits({ maxNestedOperations })`](/guide/mutations#limit-nested-collection-operations) at startup.
+
 ## Start a stdio server
 
 Install the SDK for protocol transports:
@@ -138,7 +140,7 @@ For standalone in-process MCP, pass the plugin through `schemaPlugins`, as shown
 
 `schemaPlugins` invokes schema hooks only. It does not run every Envelop request hook; a plugin with request hooks gets a one-time console warning naming them. Each entry must be a plugin object, so pass `createAuthPlugin(permissions)`, not the factory; invalid entries, including a misspelled hook such as `onSchemaChanged` on a plugin without `onSchemaChange`, throw `MCP_INVALID_SCHEMA_PLUGIN` before any hook runs, and `false`, `null` and `undefined` entries are skipped. An asynchronous `onSchemaChange` is awaited before the server or HTTP handler is ready, and `generateMCPTools` calls wait for it. A schema containing types from another copy of the graphql module makes the auth plugin throw `TypeError` at this point. In remote mode, the remote GraphQL server enforces authorization using the credentials supplied in `execution.headers`.
 
-If a call is cancelled while its context factory is pending, GraphQL execution does not start. Cancellation cannot undo database work already started. Remote timeouts cover both the request and response-body reading; only queries may retry, and client cancellation, including during a retry backoff, rejects without retrying. Through the stateless HTTP handler, an MCP cancellation arrives as a separate request that cannot reach the call in flight, so only a closed HTTP connection cancels a call there.
+If a call is cancelled while its context factory is pending, GraphQL execution does not start. Cancellation cannot undo database work already started. Remote timeouts cover both the request and response-body reading; only queries may retry, and client cancellation, including during a retry backoff, rejects without retrying. Retry k waits `backoffMs × k`; set `retry.retryAfter: true` to honor a server's `Retry-After`, and `retry.jitter: true` to spread concurrent retries (see [remote execution](/reference/mcp#remote-execution)). Through the stateless HTTP handler, an MCP cancellation arrives as a separate request that cannot reach the call in flight, so only a closed HTTP connection cancels a call there.
 
 ## Choose the result shape
 
@@ -153,6 +155,15 @@ const generated = mcp.generateMCPTools(schema, {
       selection: 'id name year category',
     },
   },
+});
+```
+
+Nested collections, such as a series' seasons, are read with one query per returned row, up to 100 items each, and `limits` do not bound that work. For list-heavy agents, leave them out with `nestedCollections: 'none'`, globally or per tool in `toolOverrides`, or set `selectionDepth: 0`:
+
+```javascript
+const lean = mcp.generateMCPTools(schema, {
+  nestedCollections: 'none',
+  toolOverrides: { serie: { nestedCollections: 'all' } },
 });
 ```
 

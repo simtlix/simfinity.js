@@ -27,3 +27,19 @@ export const sqlSchemaFixtures = () => {
     { name: 'long-identifiers', registrations: [{ gqltype: Long }], options: { schema: 'public' } },
   ];
 };
+
+/**
+ * Fixtures pinned only by postgres-opt-in-schema.json, which also holds their default ('baselines') hashes,
+ * so postgres-3.2-schema.json stays unchanged. 'long-maintained-root' is a maintained root whose derived
+ * names reach PostgreSQL's 63-byte limit: its __guard and root __touch names are exactly 63 bytes, while
+ * the owned, keys, owned __touch, root __deferred and __guard__deferred names are shortened with a hash.
+ */
+export const sqlSchemaOptInFixtures = () => {
+  const Code = new GraphQLObjectType({ name: 'Code', fields: { code: { type: GraphQLString, extensions: { unique: true } } } });
+  const Root = new GraphQLObjectType({ name: 'L'.repeat(56), fields: {
+    entries: { type: new GraphQLList(Code), extensions: { relation: { embedded: true } } },
+  } });
+  return [
+    { name: 'long-maintained-root', registrations: [{ gqltype: Root }], options: { schema: 'public' } },
+  ];
+};

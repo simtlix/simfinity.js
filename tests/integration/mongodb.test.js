@@ -652,8 +652,8 @@ describeWithMongoDB('MongoDB GraphQL compatibility contract', () => {
       const deleted = await execute(setterSchema, 'mutation { deletecontractsetteritem(id: "item-12") { id title } }');
       expect(deleted.errors).toBeUndefined();
       expect(deleted.data.deletecontractsetteritem).toEqual({ id: '12', title: 'changed' });
-      // The delete reads the record for its hook first: two queries, each applying the setter once.
-      expect(appliedTo()).toEqual(['item-12', 'item-12']);
+      // The delete reads the record only for an onDelete hook; without one the delete is the only query.
+      expect(appliedTo()).toEqual(['item-12']);
       expect(await stored()).toEqual([]);
     });
 
@@ -678,7 +678,7 @@ describeWithMongoDB('MongoDB GraphQL compatibility contract', () => {
       }`), 'updatecontractsetteritem');
       expectInvalidId(await execute(setterSchema, 'mutation { deletecontractsetteritem(id: "item-abc") { id } }'),
         'deletecontractsetteritem');
-      // One query each: the delete stops at the read for its hook.
+      // One query each: the delete stops at its own query.
       expect(appliedTo()).toEqual(['item-abc', 'item-abc', 'item-abc']);
       expect(await stored()).toEqual([{ _id: 12, title: 'original' }]);
     });

@@ -154,3 +154,97 @@ describe('PostgreSQL DDL export for configured runtimes', () => {
     expect(pool.connect).not.toHaveBeenCalled();
   });
 });
+
+describe('PostgreSQL opt-in refresh triggers and owner indexes', () => {
+  const registrations = () => {
+    const Code = new GraphQLObjectType({ name: 'LayoutCode', fields: { code: { type: GraphQLString, extensions: { unique: true } } } });
+    const Owner = new GraphQLObjectType({ name: 'LayoutOwner', fields: {
+      id: { type: GraphQLID },
+      entries: { type: new GraphQLList(Code), extensions: { relation: { embedded: true } } },
+      main: { type: Code, extensions: { relation: { embedded: true } } },
+    } });
+    const Native = new GraphQLObjectType({ name: 'LayoutNative', fields: { codes: { type: new GraphQLList(GraphQLString), extensions: { unique: true } } } });
+    const Plain = new GraphQLObjectType({ name: 'LayoutPlain', fields: { name: { type: GraphQLString } } });
+    return [{ gqltype: Owner }, { gqltype: Native }, { gqltype: Plain }];
+  };
+  const connected = (api) => {
+    const list = registrations();
+    for (const [index, { gqltype }] of list.entries()) api.connect(null, gqltype, `layout${index}`, `layouts${index}`);
+    api.addNoEndpointType(list[0].gqltype.getFields().main.type);
+    return api;
+  };
+  const code = (error) => ({ code: error?.extensions?.code, status: error?.extensions?.status, message: error?.message });
+  const caught = (action) => { try { action(); } catch (error) { return code(error); } return null; };
+  const ownerIndex = (table) => table.indexes.some((index) => !index.unique && same(index.columns, ['__owner_id']));
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+  it.each([
+    ['refreshTriggers', 'perTransaction'], ['refreshTriggers', null], ['refreshTriggers', 'PERROOT'],
+    ['ownerIndexes', 'none'], ['ownerIndexes', false], ['ownerIndexes', 'Minimal'],
+  ])('rejects %s %s with INVALID_DATABASE_SCHEMA (400) in describeDatabase, createPostgres and configure', (name, value) => {
+    const expected = { code: 'INVALID_DATABASE_SCHEMA', status: 400, message: expect.stringContaining(`Unknown PostgreSQL ${name} option: ${String(value)}`) };
+    expect(caught(() => describeDatabase(registrations(), { schema: 'app', [name]: value }))).toEqual(expected);
+    const pool = { connect: vi.fn(), query: vi.fn() };
+    const fromOptions = connected(createPostgres({ pool, schema: 'app', [name]: value }));
+    expect(caught(() => fromOptions.createSchema())).toEqual(expected);
+    const fromConfigure = createPostgres();
+    fromConfigure.configure({ pool, schema: 'app', [name]: value });
+    expect(caught(() => connected(fromConfigure).createSchema())).toEqual(expected);
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('describes one deferred refresh trigger per maintained root, on its guard table, with perRoot', () => {
+    const perRow = describeDatabase(registrations(), { schema: 'app' });
+    const perRoot = describeDatabase(registrations(), { schema: 'app', refreshTriggers: 'perRoot' });
+    expect(perRow.maintenance.map((item) => item.rootTable)).toEqual(['LayoutNative', 'LayoutOwner']);
+    expect(perRoot.maintenance).toEqual(perRow.maintenance);
+    expect(perRoot.tables).toEqual(perRow.tables);
+    expect(perRow.triggers.filter((trigger) => trigger.constraint).map((trigger) => trigger.table)).toEqual(['LayoutNative', 'LayoutOwner', 'LayoutOwner__entries', 'LayoutOwner__main']);
+    expect(perRoot.triggers.filter((trigger) => trigger.constraint)).toEqual(perRow.maintenance.map(({ guardTable }) => ({
+      name: `${guardTable}__deferred`, table: guardTable, function: `${guardTable}__deferred`, constraint: true, deferrable: true, initiallyDeferred: true, events: ['INSERT', 'UPDATE'], when: 'new.version < 0',
+    })));
+    // The same touch triggers, with bodies that mark the guard row dirty once per transaction.
+    expect(perRoot.triggers.filter((trigger) => !trigger.constraint)).toEqual(perRow.triggers.filter((trigger) => !trigger.constraint));
+    const touch = (description) => description.functions.find((fn) => fn.name === 'LayoutOwner__entries__touch').body;
+    expect(touch(perRow)).toContain('DO UPDATE SET version = "LayoutOwner__guard".version + 1;');
+    expect(touch(perRoot)).toContain('(__owner_id, version) SELECT __root_id, -1 WHERE');
+    expect(touch(perRoot)).toContain('DO UPDATE SET version = -(abs("LayoutOwner__guard".version) + 1) WHERE "LayoutOwner__guard".version >= 0 OR age("LayoutOwner__guard".xmin) <> 0;');
+    expect(perRoot.functions.map((fn) => fn.name).filter((name) => name.endsWith('__deferred'))).toEqual(['LayoutNative__guard__deferred', 'LayoutOwner__guard__deferred']);
+    expect(compileDatabaseSchema(perRoot)).toContain('CREATE CONSTRAINT TRIGGER "LayoutNative__guard__deferred" AFTER INSERT OR UPDATE ON "app"."LayoutNative__guard" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (new.version < 0) EXECUTE FUNCTION "app"."LayoutNative__guard__deferred"()');
+    expect(compileDatabaseSchema(perRow).filter((sql) => sql.includes('TRIGGER')).every((sql) => sql.includes(' AFTER INSERT OR UPDATE OR DELETE ON ') && !sql.includes(' WHEN '))).toBe(true);
+  });
+
+  it('omits owner indexes that a primary key or unique index covers with ownerIndexes minimal', () => {
+    const all = describeDatabase(registrations(), { schema: 'app' });
+    const minimal = describeDatabase(registrations(), { schema: 'app', ownerIndexes: 'minimal' });
+    const covered = (description) => description.tables.filter((table) => (table.ownership || table.auxiliary?.kind === 'guard') && ownerIndex(table)).map((table) => table.name);
+    expect(covered(all)).toEqual(['LayoutNative__guard', 'LayoutOwner__entries', 'LayoutOwner__guard', 'LayoutOwner__main']);
+    expect(covered(minimal)).toEqual([]);
+    // Each of those tables still finds rows by owner through its primary key or a unique index.
+    for (const table of minimal.tables.filter((item) => item.ownership || item.auxiliary?.kind === 'guard')) {
+      expect(table.primaryKey.columns[0] === '__owner_id' || table.indexes.some((index) => index.unique && index.columns[0] === '__owner_id'), table.name).toBe(true);
+    }
+    // Keys tables keep theirs: their primary key and unique index start with other columns.
+    const keys = (description) => description.tables.filter((table) => table.uniqueKeys).map((table) => [table.name, ownerIndex(table)]);
+    expect(keys(minimal)).toEqual(keys(all));
+    expect(keys(minimal).every(([, indexed]) => indexed)).toBe(true);
+    expect(minimal.tables.map((table) => ({ ...table, indexes: undefined }))).toEqual(all.tables.map((table) => ({ ...table, indexes: undefined })));
+    expect(minimal.triggers).toEqual(all.triggers);
+  });
+
+  it('describes a runtime with the options given to createPostgres or configure', () => {
+    const options = { schema: 'app', refreshTriggers: 'perRoot', ownerIndexes: 'minimal' };
+    const pool = { connect: vi.fn(), query: vi.fn() };
+    const fromOptions = createPostgres({ pool, ...options });
+    const fromConfigure = createPostgres();
+    fromConfigure.configure({ pool, ...options });
+    for (const api of [fromOptions, fromConfigure]) {
+      connected(api).createSchema();
+      expect(api.describeDatabase()).toEqual(describeDatabase(api.getRegistrations(), options));
+      expect(api.compileDatabaseSchema()).toEqual(compileDatabaseSchema(describeDatabase(api.getRegistrations(), options)));
+      expect(api.describeDatabase().triggers.filter((trigger) => trigger.constraint).map((trigger) => trigger.table)).toEqual(['LayoutNative__guard', 'LayoutOwner__guard']);
+    }
+    expect(describeDatabase(registrations(), options)).not.toEqual(describeDatabase(registrations(), { schema: 'app' }));
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+});

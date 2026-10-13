@@ -33,7 +33,13 @@ export type {
   TypeScopes,
 } from '@simtlix/simfinity-core';
 
-export type SQLCapability = 'transactions' | 'foreignKeys' | 'deferredForeignKeys' | 'embeddedValues' | 'ownedRecords' | 'scalarLists' | 'uniqueValues' | 'nullableUnique';
+/**
+ * Guarantees a plugin provides. Planning never requires `singleStatementReads`: a plugin advertises it when one
+ * statement reads one consistent snapshot without a transaction and `rollback` resolves on a connection with no open
+ * transaction, and sessionless reads that one statement answers then run on one acquired connection without `begin`
+ * and `commit`.
+ */
+export type SQLCapability = 'transactions' | 'foreignKeys' | 'deferredForeignKeys' | 'embeddedValues' | 'ownedRecords' | 'scalarLists' | 'uniqueValues' | 'nullableUnique' | 'singleStatementReads';
 /** Core field metadata enriched by SQL runtime preparation. */
 export interface SQLFieldDescription extends FieldDescription {
   fields?: SQLFieldDescription[];
@@ -145,7 +151,20 @@ export type SQLRecordOperation<Table extends SQLTableDescription = SQLTableDescr
   | { kind: 'update'; table: Table; id: Id; data: Record<string, unknown> }
   | { kind: 'deleteById'; table: Table; id: Id }
   | { kind: 'deleteOwned'; table: Table; ownerId: Id };
-export interface SQLConfiguration { schema?: string }
+/** Owned rows of one table that share their columns in the same order; no result rows are needed. */
+export interface SQLInsertManyOperation<Table extends SQLTableDescription = SQLTableDescription> {
+  kind: 'insertMany';
+  table: Table;
+  rows: Array<Record<string, unknown>>;
+}
+export interface SQLConfiguration {
+  schema?: string;
+  /**
+   * Defaults to true: with a plugin that has `compileRecordBatch` and `maxRecordBatchValues`, the owned rows of
+   * a write are inserted with multi-row statements. `false` keeps one INSERT per owned row.
+   */
+  multiRowInserts?: boolean;
+}
 /**
  * Plugins receive only `create`, `validate` or no mode. Before calling the plugin, a runtime that allows creation rejects
  * any other mode with INVALID_INITIALIZATION_MODE (400); a validation-only runtime validates when the mode is missing or
@@ -165,13 +184,18 @@ export interface SQLValueCodec<Id = string> {
 export interface SQLDriver<Configuration extends object = SQLConfiguration, Client = unknown, Result extends SQLQueryResult = SQLQueryResult> {
   /** Called before planning; must reject missing or invalid configuration. */
   assertConfiguration(configuration: Configuration | null): void;
+  /** `client` is the connection of a transaction or of a single-statement read; counts and aggregates omit it. */
   query(configuration: Configuration, statement: SQLStatement, client?: Client): Promise<Result>;
   acquire(configuration: Configuration): Promise<Client>;
   begin(client: Client): void | Promise<unknown>;
   /** Must reject when the engine did not commit, for example when it rolled the transaction back instead. The rejection is retried only when `isRetryable` accepts it. */
   commit(client: Client): void | Promise<unknown>;
+  /** Also called outside a transaction on the connection of a failed single-statement read, to probe it: resolve when the connection is usable, reject when it is not. */
   rollback(client: Client): void | Promise<unknown>;
-  /** Receives the rollback failure when ROLLBACK did not complete; the driver must then discard the connection instead of reusing it. */
+  /**
+   * Receives the rollback failure when ROLLBACK did not complete, including the probe after a failed single-statement read;
+   * the driver must then discard the connection instead of reusing it.
+   */
   release(client: Client, error?: unknown): void | Promise<unknown>;
   /**
    * True only for confirmed transaction aborts safe to replay. Each of up to five retries waits a random delay that starts after `release` completes.
@@ -200,13 +224,22 @@ export interface SQLPlugin<
   options: Configuration | null;
   capabilities: readonly string[];
   naming: SQLNaming;
-  describeSchema(plan: RelationalPlan): Description;
+  /** Receives the bound configuration, or null when there is none, as its last argument. */
+  describeSchema(plan: RelationalPlan, configuration?: Configuration | null): Description;
   initialize(configuration: Configuration, description: Description, options?: SQLInitializationOptions): Promise<SQLInitializationResult>;
   /** Physical DDL for review or export, returned by `runtime.compileDatabaseSchema()`; storage is created and validated through `initialize`. */
   compileSchema(description: Description): string[];
-  compileQuery(models: SQLModelDescription, description: Description, plan: QueryPlan, extra?: { column: string; id: Id } | null): SQLCompiledQuery;
+  /** Receives the bound configuration, or null when there is none, as its last argument. */
+  compileQuery(models: SQLModelDescription, description: Description, plan: QueryPlan, extra?: { column: string; id: Id } | null, configuration?: Configuration | null): SQLCompiledQuery;
   /** The operation's table is the physical metadata from describeSchema. */
   compileRecord(description: Description, operation: SQLRecordOperation<Description['tables'][number], Id>): SQLStatement;
+  /**
+   * Optional, with `maxRecordBatchValues`: one statement that inserts every row of the operation. The runtime
+   * sends a single row through `compileRecord` instead.
+   */
+  compileRecordBatch?(description: Description, operation: SQLInsertManyOperation<Description['tables'][number]>): SQLStatement;
+  /** Positive safe integer: the most values (rows times columns) one `compileRecordBatch` statement carries. */
+  maxRecordBatchValues?: number;
   values: SQLValueCodec<Id>;
   driver: SQLDriver<Configuration, Client, Result>;
 }

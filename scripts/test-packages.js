@@ -461,6 +461,14 @@ const mcpSource = `import assert from 'node:assert/strict';
     () => generateMCPTools(schema, { toolMiddleware: new Array(1) }),
     (error) => error.getCode() === 'MCP_INVALID_MIDDLEWARE',
   );
+  const compact = await generateMCPTools(schema, { textFormat: 'compact', nestedCollections: 'none' }).callTool('greeting');
+  assert.equal(compact.content[0].text, '{"greeting":"hello"}');
+  for (const options of [{ textFormat: 'json' }, { nestedCollections: 'bounded' }, { toolOverrides: { greeting: { nestedCollections: 'some' } } }]) {
+    assert.throws(
+      () => generateMCPTools(schema, options),
+      (error) => error.getCode() === 'MCP_INVALID_OPTIONS',
+    );
+  }
   await assert.rejects(
     () => createMCPServer(schema),
     (error) => error.getCode() === 'MCP_SDK_NOT_INSTALLED',
@@ -524,6 +532,12 @@ const adapter: DatabaseAdapter<Model, Session> = {
   aggregate() { return []; },
   findChildren() { return []; },
 };
+// readByIdIsInert is optional: the literal above compiles without it.
+const inertAdapter: DatabaseAdapter<Model, Session> = { ...adapter, readByIdIsInert: (handle: Model) => handle.name !== 'Guarded' };
+const inert: boolean | undefined = inertAdapter.readByIdIsInert?.({ name: 'TypedCoreBook' });
+// @ts-expect-error readByIdIsInert returns a boolean.
+const looseInert: DatabaseAdapter<Model, Session> = { ...adapter, readByIdIsInert: () => 'yes' };
+void [inert, looseInert];
 const runtime = createRuntime(adapter);
 const type = new GraphQLObjectType({ name: 'TypedCoreBook', fields: { title: { type: GraphQLString } } });
 runtime.connect(null, type, 'typedCoreBook', 'typedCoreBooks');
@@ -719,8 +733,10 @@ const sqlTypes = `import {
   planRelationalSchema,
   type SQLCapability,
   type SQLCompiledQuery,
+  type SQLConfiguration,
   type SQLDatabaseDescription,
   type SQLFieldDescription,
+  type SQLInsertManyOperation,
   type SQLModelDescription,
   type SQLPlugin,
   type SQLRecordOperation,
@@ -787,6 +803,30 @@ const plugin: SQLPlugin<Configuration, Client, Description> = {
     async query(configuration, statement, client) { return { rows: [{ token: configuration.token, text: statement.text, active: client?.active }] }; },
   },
 };
+// Optional members of later releases; the 3.5.9-shaped plugin above keeps compiling without them.
+const batchPlugin: SQLPlugin<Configuration, Client, Description> = {
+  ...plugin,
+  describeSchema(logicalPlan, configuration) {
+    const schemaName: string | undefined = configuration?.schema;
+    return { ...plugin.describeSchema(logicalPlan), schema: schemaName ?? logicalPlan.schema };
+  },
+  compileQuery(models, description, query, extra, configuration) {
+    const token: string | undefined = configuration?.token;
+    return { text: query.mode, values: [token, description.dialect, extra?.id] };
+  },
+  compileRecordBatch(description, operation: SQLInsertManyOperation<Description['tables'][number]>): SQLStatement {
+    const kind: 'insertMany' = operation.kind;
+    return { text: kind + ':' + operation.table.name, values: operation.rows.flatMap((row) => Object.values(row)) };
+  },
+  maxRecordBatchValues: 1000,
+};
+const singleStatement: SQLCapability = 'singleStatementReads';
+const sqlConfiguration: SQLConfiguration = { schema: 'x', multiRowInserts: false };
+// @ts-expect-error The batch value limit is a number.
+const badLimit: Pick<SQLPlugin, 'maxRecordBatchValues'> = { maxRecordBatchValues: '100' };
+// @ts-expect-error multiRowInserts is a boolean.
+const badInserts: SQLConfiguration = { multiRowInserts: 'no' };
+void [batchPlugin, singleStatement, sqlConfiguration, badLimit, badInserts];
 declare const compiled: SQLCompiledQuery;
 const aggregateStateNames: string[] | undefined = compiled.aggregateFields?.[0].stateNames?.map((state) => state.name);
 void aggregateStateNames;
@@ -824,6 +864,7 @@ import {
   connect,
   createPostgres,
   createSchema,
+  describeDatabase,
   initializeDatabase,
   postgresPlugin,
   plugins,
@@ -832,6 +873,8 @@ import {
   configureMutationLimits,
   type AuthRuleFunction,
   type DatabaseDescription,
+  type DatabaseTrigger,
+  type PostgresConfiguration,
   type TypeScopes,
   type InitializationResult,
   type PostgresModel,
@@ -879,8 +922,32 @@ type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B
 const itemRules: ItemValidators = [validators.maxLength('Tag', 20), null];
 const tagRules = validators.arrayLength('Tags', 10, itemRules);
 const sameItemValidators: Equals<ItemValidators, CoreItemValidators> = true;
+const pgOptions: PostgresConfiguration = { pool, schema: 'app', multiRowInserts: false, explicitNullsOrder: true };
+createPostgres(pgOptions);
+createPostgres().configure({ pool, explicitNullsOrder: false, multiRowInserts: true });
+const pgPlugin = postgresPlugin(pgOptions);
+const batchLimit: number | undefined = pgPlugin.maxRecordBatchValues;
+const batchCompiler = pgPlugin.compileRecordBatch;
+const layoutOptions: PostgresConfiguration = { pool, schema: 'app', refreshTriggers: 'perRoot', ownerIndexes: 'minimal' };
+createPostgres(layoutOptions);
+createPostgres().configure({ pool, refreshTriggers: 'perRow', ownerIndexes: 'all' });
+const layoutDescription: DatabaseDescription = describeDatabase([], { schema: 'app', refreshTriggers: 'perRoot', ownerIndexes: 'minimal' });
+const guardTrigger: DatabaseTrigger = layoutDescription.triggers[0];
+const triggerEvents: Array<'INSERT' | 'UPDATE' | 'DELETE'> | undefined = guardTrigger.events;
+const triggerWhen: string | undefined = guardTrigger.when;
+// @ts-expect-error explicitNullsOrder is a boolean.
+const badNulls: PostgresConfiguration = { pool, explicitNullsOrder: 'yes' };
+// @ts-expect-error multiRowInserts is a boolean.
+const badInserts: PostgresConfiguration = { pool, multiRowInserts: 'no' };
+// @ts-expect-error refreshTriggers is 'perRow' or 'perRoot'.
+const badRefresh: PostgresConfiguration = { pool, refreshTriggers: 'perTransaction' };
+// @ts-expect-error ownerIndexes is 'all' or 'minimal'.
+const badOwnerIndexes: PostgresConfiguration = { pool, ownerIndexes: 'none' };
+// @ts-expect-error describeDatabase options take the same values.
+describeDatabase([], { refreshTriggers: 'yes' });
 void [schema, model, ready, lowLevel, defaultSchema, defaultReady, rule, email, scalarName, countPlugin, scopes];
-void [itemRules, tagRules, sameItemValidators];`;
+void [itemRules, tagRules, sameItemValidators];
+void [batchLimit, batchCompiler, triggerEvents, triggerWhen, badNulls, badInserts, badRefresh, badOwnerIndexes];`;
 
 const mongoTypes = `import {
   InternalServerError,
@@ -1012,8 +1079,11 @@ const mcpTypes = `import mcp, {
   type HTTPMCPHandlerOptions,
   type MCPExecutionOptions,
   type MCPLimits,
+  type MCPNestedCollections,
+  type MCPRetryOptions,
   type MCPServer,
   type MCPServerOptions,
+  type MCPTextFormat,
 } from '@simtlix/simfinity-mcp';
 import { plugins } from '@simtlix/simfinity-core';
 import { GraphQLObjectType, GraphQLSchema, GraphQLString } from 'graphql';
@@ -1068,6 +1138,26 @@ generateMCPTools(schema, { execution: { mode: 'remote', endpoint, headers: 'Bear
 generateMCPTools(schema, { execution: { mode: 'remote', endpoint, headers: Promise.resolve({ authorization: 'Bearer t' }) } });
 // @ts-expect-error A generator would be used up by the first request.
 generateMCPTools(schema, { execution: { mode: 'remote', endpoint, headers: (function* pairs() { yield ['authorization', 'Bearer t'] as const; }()) } });
+// Result shape and retry opt-ins.
+const shaped: GeneratedMCPTools = generateMCPTools(schema, {
+  nestedCollections: 'none',
+  textFormat: 'compact',
+  toolOverrides: { greeting: { nestedCollections: 'all' } },
+});
+const politeRetry = createHTTPMCPHandler(schema, {
+  textFormat: 'pretty',
+  execution: {
+    mode: 'remote', endpoint, retry: { attempts: 3, backoffMs: 250, retryAfter: true, maxRetryAfterMs: 30000, jitter: true },
+  },
+});
+// @ts-expect-error Bounded nested collections are not an option.
+generateMCPTools(schema, { nestedCollections: 'bounded' });
+// @ts-expect-error A tool's nested collections are 'all' or 'none'.
+generateMCPTools(schema, { toolOverrides: { greeting: { nestedCollections: { pageSize: 5 } } } });
+// @ts-expect-error The text format is 'pretty' or 'compact'.
+generateMCPTools(schema, { textFormat: 'json' });
+// @ts-expect-error retry.jitter is a boolean.
+generateMCPTools(schema, { execution: { mode: 'remote', endpoint, retry: { jitter: 'yes' } } });
 // Reading options back keeps the narrow 3.5.6 shapes, and they are still accepted as input.
 declare const serverOptions: MCPServerOptions;
 const execution: MCPExecutionOptions | null | undefined = serverOptions.execution;
@@ -1075,8 +1165,15 @@ if (execution && execution.mode === 'remote') {
   const authorization: string | undefined = execution.headers?.authorization;
   execution.headers!.authorization = 'Bearer rotated';
   const timeoutMs: number | undefined = execution.timeoutMs;
-  void [authorization, timeoutMs];
+  const retry: MCPRetryOptions | undefined = execution.retry;
+  const retryAfter: boolean | undefined = execution.retry?.retryAfter;
+  const maxRetryAfterMs: number | undefined = execution.retry?.maxRetryAfterMs;
+  const jitter: boolean | undefined = execution.retry?.jitter;
+  void [authorization, timeoutMs, retry, retryAfter, maxRetryAfterMs, jitter];
 }
+const nestedCollections: MCPNestedCollections | undefined = serverOptions.nestedCollections;
+const toolNestedCollections: 'all' | 'none' | undefined = serverOptions.toolOverrides?.greeting?.nestedCollections;
+const textFormat: MCPTextFormat | undefined = serverOptions.textFormat;
 const maxPageSize: number | undefined = serverOptions.limits?.maxPageSize;
 const maxResultBytes: number | undefined = serverOptions.limits?.maxResultBytes;
 const defaultSize: number | undefined = serverOptions.limits?.defaultPagination?.size;
@@ -1089,7 +1186,8 @@ const readBack = [
   generateMCPTools(schema, { limits: typedLimits }),
 ];
 void [generated, server, sameGenerator, singleMiddleware, optionalPlugins, handler, sharedPlugins, memberPlugins];
-void [headerForms, fromEnvironment, stdio, fallible, unlimited, maxPageSize, maxResultBytes, defaultSize, readBack];`;
+void [headerForms, fromEnvironment, stdio, fallible, unlimited, maxPageSize, maxResultBytes, defaultSize, readBack];
+void [shaped, politeRetry, nestedCollections, toolNestedCollections, textFormat];`;
 
 // The legacy deep imports of /auth and /plugins re-export them unchanged, so they can be
 // re-exported together too.

@@ -1,5 +1,5 @@
 import { SimfinityError } from '@simtlix/simfinity-core';
-import { callDriver, isRetryableFailure, normalizeFailure } from './errors.js';
+import { callDriver, isDriverFailure, isRetryableFailure, normalizeFailure } from './errors.js';
 
 // Full-jitter exponential backoff before each retry, as for MongoDB: a uniform wait below
 // 10, 20, 40, 80 and 160 ms, so conflicting transactions do not retry in lock-step.
@@ -50,5 +50,40 @@ export const createTransactions = (getConfiguration, assertReady, plugin) => {
       } finally { close(); await driver.release(client, rollbackError); }
     }
   };
-  return { withTransaction, requireSession };
+  // A read that one statement answers needs no transaction when the plugin advertises
+  // `singleStatementReads`: it runs on one acquired connection without begin and commit. A confirmed
+  // abort is retried with the backoff and limit of an owned transaction, without a rollback step, and
+  // every failure is normalized the same way.
+  const connections = new WeakSet();
+  const withConnection = async (body) => {
+    assertReady();
+    for (let attempt = 0; attempt <= 5; attempt++) {
+      if (attempt > 0) await sleep(retryDelay(attempt - 1));
+      let client;
+      try { client = await callDriver(() => driver.acquire(getConfiguration())); } catch (error) { throw normalizeFailure(driver, error); }
+      // An internal handle, never a session: withTransaction and user code reject it.
+      const handle = { client };
+      connections.add(handle);
+      let probeError;
+      try { return await body(handle); } catch (error) {
+        connections.delete(handle);
+        const retryable = isRetryableFailure(driver, error);
+        // A confirmed abort comes from a connection that answered, and an error raised before any statement,
+        // such as an invalid ID, leaves the connection untouched. After any other driver failure, such as a
+        // terminated backend, rollback probes the connection as after a failed statement in a transaction
+        // (PostgreSQL only warns outside one), and a failed probe reaches release, which discards the connection.
+        if (!retryable && isDriverFailure(error)) {
+          try { await driver.rollback(client); } catch (failure) { probeError = failure ?? new Error('ROLLBACK failed'); }
+        }
+        if (retryable && attempt < 5) continue;
+        throw normalizeFailure(driver, error);
+      } finally {
+        connections.delete(handle);
+        await (probeError === undefined ? driver.release(client) : driver.release(client, probeError));
+      }
+    }
+  };
+  // Record statements run on a transaction session or on the connection of a single-statement read.
+  const clientOf = (session) => (connections.has(session) ? session.client : requireSession(session));
+  return { withTransaction, withConnection, clientOf, requireSession };
 };

@@ -272,6 +272,11 @@ export const createMongoAdapter = (options) => {
       // Trusted, so that the `sanitizeFilter` option does not wrap the operator in `$eq`.
       return Model.find({ _id: mongoose.trusted({ $in: ids }) });
     },
+    // Without `find` or `findOne` middleware, which can guard or count reads, a read by ID has no
+    // side effects, and a malformed ID fails the update or delete as it fails the read.
+    readByIdIsInert(Model) {
+      return batchesFindOne(Model);
+    },
     prepareUpdate(set, unset) {
       return Object.keys(unset).length > 0 ? { ...set, $unset: unset } : set;
     },

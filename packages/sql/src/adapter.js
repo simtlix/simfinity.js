@@ -16,6 +16,8 @@ export const createSQLAdapter = (sourcePlugin) => {
   let initializations = 0;
   let allowSchemaCreation = true;
   let models; let database; let records;
+  // Entities whose rows hydrate from owned child tables; reading one takes several statements.
+  let snapshotEntities = new Set();
   const handles = new Map();
   const assertReady = () => {
     if (!ready) throw new SimfinityError(`Initialize the ${plugin.displayName} database before executing operations`, 'DATABASE_NOT_INITIALIZED', 503);
@@ -25,7 +27,7 @@ export const createSQLAdapter = (sourcePlugin) => {
   const query = async (statement, session) => {
     assertReady();
     // Retryable errors must reach withTransaction unchanged, so normalize only at operation boundaries.
-    const client = session ? transactions.requireSession(session) : undefined;
+    const client = session ? transactions.clientOf(session) : undefined;
     return callDriver(() => driver.query(configured, statement, client));
   };
   const safe = (operation) => async (...args) => {
@@ -42,7 +44,7 @@ export const createSQLAdapter = (sourcePlugin) => {
   const execute = async (model, gqltype, args, session, mode, extra) => {
     const name = nameOf(model);
     const plan = createQueryPlan(models, name, args, { mode });
-    const compiled = plugin.compileQuery(models, database, plan, extra);
+    const compiled = plugin.compileQuery(models, database, plan, extra, configured);
     const { rows } = await query(compiled, session);
     if (mode === 'count') return Number(rows[0]?.size || 0);
     const decodeAggregate = (value, field) => Array.isArray(value) ? value.map((item) => decodeAggregate(item, field)) : plugin.values.decodeScalar(field, value);
@@ -55,6 +57,13 @@ export const createSQLAdapter = (sourcePlugin) => {
     }));
     return records.hydrateRows(name, rows, session);
   };
+  // With `singleStatementReads`, a sessionless read that one statement answers runs on one connection
+  // without a transaction. Reads of entities with owned tables, locking reads and reads in a session keep
+  // withTransaction. The raw name only routes; the body still validates the model, so errors keep their order.
+  const singleStatementReads = plugin.capabilities.includes('singleStatementReads');
+  const read = (name, session, body, lock = false) => (singleStatementReads && !session && !lock && !snapshotEntities.has(name)
+    ? transactions.withConnection(body)
+    : transactions.withTransaction(session, body));
   const adapter = {
     configure(value) {
       if (configured || prepared) throw new SimfinityError(`${plugin.displayName} configuration is already bound`, 'DATABASE_ALREADY_CONFIGURED', 409);
@@ -78,9 +87,10 @@ export const createSQLAdapter = (sourcePlugin) => {
       }
       const plan = planRelationalSchema(models, { schema: configured?.schema || plugin.defaultSchema, naming: plugin.naming });
       assertCapabilities(plugin, plan);
-      database = plugin.describeSchema(plan);
+      database = plugin.describeSchema(plan, configured);
       allowSchemaCreation = createCollection;
-      records = createRecordStore(models, database, query, plugin);
+      snapshotEntities = new Set(database.tables.filter((table) => table.ownership).map((table) => table.ownership.ownerTable));
+      records = createRecordStore(models, database, query, plugin, { multiRowInserts: configured?.multiRowInserts });
       prepared = true;
     },
     createModel(gqltype, onModelCreated) {
@@ -102,25 +112,27 @@ export const createSQLAdapter = (sourcePlugin) => {
     newRecord(model, data) { nameOf(model); const id = data._id ?? data.id ?? createId(); return { ...data, _id: castId(id), id: castId(id) }; },
     toObject(record) { return record == null ? record : { ...record }; },
     saveRecord: safe((model, record, session) => transactions.withTransaction(session, (transaction) => records.create(nameOf(model), record, transaction))),
-    getById: safe((model, id, session, options = {}) => transactions.withTransaction(session, (transaction) => records.getById(nameOf(model), id, transaction, options))),
+    getById: safe((model, id, session, options = {}) => read(model?.name, session, (transaction) => records.getById(nameOf(model), id, transaction, options), options.lock)),
+    // A read by ID runs no hooks and changes nothing, so the runtime may skip one whose result it does not use.
+    readByIdIsInert: () => true,
     // One transaction reads the rows by ID and hydrates them, owned records included, as getById does.
     getByIds: safe((model, ids) => {
-      nameOf(model);
+      const name = nameOf(model);
       if (!ids.length) return [];
       const args = { id: { operator: 'IN', value: ids }, pagination: { page: 1, size: ids.length } };
-      return transactions.withTransaction(null, (transaction) => execute(model, model.gqltype, args, transaction, 'find'));
+      return read(name, null, (transaction) => execute(model, model.gqltype, args, transaction, 'find'));
     }),
     prepareUpdate(set, unset) { return { ...set, ...(Object.keys(unset).length ? { $unset: { ...unset } } : {}) }; },
     update: safe((model, id, update, session) => records.update(nameOf(model), id, update, session)),
     delete: safe((model, id, session) => records.remove(nameOf(model), id, session)),
-    find: safe((model, gqltype, args, session, { requiredId } = {}) => transactions.withTransaction(session, (transaction) => execute(model, gqltype, args, transaction, 'find', requiredId == null ? null : { column: 'id', id: castId(requiredId) }))),
+    find: safe((model, gqltype, args, session, { requiredId } = {}) => read(model?.name, session, (transaction) => execute(model, gqltype, args, transaction, 'find', requiredId == null ? null : { column: 'id', id: castId(requiredId) }))),
     count: safe((model, gqltype, args, session) => execute(model, gqltype, args, session, 'count')),
     aggregate: safe((model, gqltype, args, session) => execute(model, gqltype, args, session, 'aggregate')),
     findChildren: safe((model, gqltype, connectionField, parentId, args, session) => {
       const entity = models.entities.find((item) => item.name === nameOf(model));
       const field = entity.fields.find((item) => item.name === connectionField || item.storageName === connectionField);
       if (!field || field.kind !== 'reference') throw new SimfinityError('Invalid inverse connection field', 'INVALID_MODEL', 400);
-      return transactions.withTransaction(session, (transaction) => execute(model, gqltype, args, transaction, 'find', { column: field.storageName, id: castId(parentId) }));
+      return read(entity.name, session, (transaction) => execute(model, gqltype, args, transaction, 'find', { column: field.storageName, id: castId(parentId) }));
     }),
     async initialize(options = {}) {
       if (!prepared) throw new SimfinityError('Create the GraphQL schema before initializing storage', 'SCHEMA_NOT_CREATED', 500);

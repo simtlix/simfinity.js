@@ -133,6 +133,17 @@ describe.skipIf(!mongoUri || !postgresUri)('embedded query differential parity',
       }
     });
   }
+  // PostgreSQL evaluates each list path of MIN and MAX facts once per row, shared by both facts. MongoDB
+  // cannot sort on two array-valued facts at once, so the sort uses one.
+  for (const i of [0, 1]) for (const order of ['ASC', 'DESC']) {
+    it.each(['key', 'bucket'])(`aggregates MIN, MAX and COUNT of several list paths in one aggregation (${i}, ${order}, %s)`, async (groupId) => {
+      const facts = [
+        '{operation:MIN,factName:"minX",path:"a.x"}', '{operation:MAX,factName:"maxX",path:"a.x"}', '{operation:COUNT,factName:"count",path:"a.x"}',
+        '{operation:MAX,factName:"maxNested",path:"a.nested.x"}', '{operation:MIN,factName:"minTexts",path:"a.texts"}', '{operation:MIN,factName:"minNested",path:"a.nested.x"}',
+      ];
+      await parity(`{items${i}_aggregate(aggregation:{groupId:"${groupId}",facts:[${facts.join(',')}]},sort:{terms:[{field:"minNested",order:${order}},{field:"groupId",order:ASC}]}){groupId facts}}`);
+    });
+  }
   for (const i of [0, 1]) for (const order of ['ASC', 'DESC']) {
     it.each(['a.x', 'a.nested.x', 'a.texts', 'a.dates', 'a.kinds'])(`sorts array aggregate facts across multiple groups (${i}, ${order}, %s)`, async (path) => {
       await parity(`{items${i}_aggregate(aggregation:{groupId:"key",facts:[{operation:MIN,factName:"min",path:"${path}"},{operation:MAX,factName:"max",path:"${path}"}]},sort:{terms:[{field:"min",order:${order}},{field:"groupId",order:ASC}]}){groupId facts}}`);

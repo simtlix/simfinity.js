@@ -1,9 +1,12 @@
-import { GraphQLEnumType, GraphQLID, GraphQLObjectType, GraphQLString, GraphQLList } from 'graphql';
+import { GraphQLBoolean, GraphQLEnumType, GraphQLID, GraphQLInt, GraphQLNonNull, GraphQLObjectType, GraphQLScalarType, GraphQLString, GraphQLList } from 'graphql';
 import { describe, it, expect } from 'vitest';
 import { describeModels } from '../packages/core/src/metadata.js';
 import { createQueryPlan } from '../packages/core/src/query-plan.js';
 import { describeDatabase } from '../packages/postgres/src/schema/describe.js';
 import { compileQuery } from '../packages/postgres/src/query/compiler.js';
+import { compileRecordBatch } from '../packages/postgres/src/record-statements.js';
+import { postgresPlugin } from '../packages/postgres/src/plugin.js';
+import { bindPlugin } from '../packages/sql/src/plugin.js';
 import { createContractModelFixtures } from './contracts/model-fixtures.js';
 
 const compile = (args, options) => {
@@ -147,5 +150,126 @@ describe('enum query value normalization', () => {
   });
   it('rejects LIKE on enums even when the value is a valid internal string', () => {
     expect(() => compileEnum('kind', 'LIKE', 'two')).toThrow('LIKE requires a string');
+  });
+});
+
+describe('PostgreSQL sort null placement', () => {
+  const fixture = () => {
+    const DateTime = new GraphQLScalarType({ name: 'DateTime', serialize: (value) => value, parseValue: (value) => value });
+    const Kind = new GraphQLEnumType({ name: 'SortKind', values: { ONE: { value: 'one' }, TWO: { value: 'two' } } });
+    const Maker = new GraphQLObjectType({ name: 'SortMaker', fields: { id: { type: GraphQLID }, name: { type: new GraphQLNonNull(GraphQLString) } } });
+    // The reference stores the detail in an owned table that the sort joins.
+    const Detail = new GraphQLObjectType({ name: 'SortDetail', fields: { code: { type: new GraphQLNonNull(GraphQLString) }, maker: { type: Maker, extensions: { relation: { embedded: false } } } } });
+    const Root = new GraphQLObjectType({ name: 'SortRoot', fields: {
+      id: { type: GraphQLID }, code: { type: new GraphQLNonNull(GraphQLString) }, rank: { type: GraphQLInt }, at: { type: new GraphQLNonNull(DateTime) },
+      enabled: { type: new GraphQLNonNull(GraphQLBoolean) }, kind: { type: new GraphQLNonNull(Kind) }, note: { type: GraphQLString },
+      maker: { type: Maker, extensions: { relation: { embedded: false } } }, detail: { type: Detail, extensions: { relation: { embedded: true } } },
+      tags: { type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(GraphQLString))) },
+    } });
+    const registrations = [{ gqltype: Maker }, { gqltype: Root }];
+    return { models: describeModels(registrations), database: describeDatabase(registrations, { schema: 'app' }) };
+  };
+  const orderBy = ({ text }) => text.slice(text.indexOf(' ORDER BY ') + 10, text.indexOf(' LIMIT '));
+  const sorted = (models, database, terms, configuration) => orderBy(compileQuery(models, database, createQueryPlan(models, 'SortRoot', { sort: { terms } }), null, configuration));
+
+  it('omits the NULLS clause for the identity and required root columns', () => {
+    const { models, database } = fixture();
+    const C = 'COLLATE "pg_catalog"."C"';
+    for (const order of ['ASC', 'DESC']) {
+      expect(sorted(models, database, [{ field: 'id', order }])).toBe(`t0."id" ${order}`);
+      expect(sorted(models, database, [{ field: 'code', order }])).toBe(`(t0."code") ${C} ${order}`);
+      expect(sorted(models, database, [{ field: 'at', order }])).toBe(`t0."at" ${order}`);
+      expect(sorted(models, database, [{ field: 'enabled', order }])).toBe(`t0."enabled" ${order}`);
+      expect(sorted(models, database, [{ field: 'kind', order }])).toBe(`(t0."kind") ${C} ${order}`);
+    }
+    expect(compile({ sort: { terms: [{ field: 'title', order: 'DESC' }, { field: 'id', order: 'ASC' }] } }).text).toContain(`ORDER BY (t0."title") ${C} DESC, t0."id" ASC LIMIT`);
+  });
+
+  it('keeps nulls first ascending and last descending for nullable, joined, embedded and list paths', () => {
+    const { models, database } = fixture();
+    const C = 'COLLATE "pg_catalog"."C"';
+    const nulls = { ASC: 'NULLS FIRST', DESC: 'NULLS LAST' };
+    for (const order of ['ASC', 'DESC']) {
+      expect(sorted(models, database, [{ field: 'rank', order }])).toBe(`t0."rank" ${order} ${nulls[order]}`);
+      expect(sorted(models, database, [{ field: 'note', order }])).toBe(`(t0."note") ${C} ${order} ${nulls[order]}`);
+      // NOT NULL columns of joined rows are NULL when the join finds no row.
+      expect(sorted(models, database, [{ field: 'maker.name', order }])).toBe(`(t1."name") ${C} ${order} ${nulls[order]}`);
+      expect(sorted(models, database, [{ field: 'detail.code', order }])).toBe(`(t1."code") ${C} ${order} ${nulls[order]}`);
+      expect(sorted(models, database, [{ field: 'tags', order }])).toMatch(new RegExp(`^"app"\\."__simfinity_sort_key"\\(.*\\) ${order} ${nulls[order]}$`));
+    }
+    expect(compile({ sort: { terms: [{ field: 'director.name', order: 'ASC' }] } }).text).toContain(`ORDER BY ((t0."director" ->> 'name')::text) ${C} ASC NULLS FIRST LIMIT`);
+  });
+
+  it('keeps the explicit NULLS clause on every sort term when explicitNullsOrder is set, as 3.5.9 did', () => {
+    const { models, database } = fixture();
+    const C = 'COLLATE "pg_catalog"."C"';
+    const legacy = { explicitNullsOrder: true };
+    expect(sorted(models, database, [{ field: 'id', order: 'ASC' }], legacy)).toBe('t0."id" ASC NULLS FIRST');
+    expect(sorted(models, database, [{ field: 'code', order: 'DESC' }, { field: 'at', order: 'ASC' }, { field: 'rank', order: 'DESC' }], legacy))
+      .toBe(`(t0."code") ${C} DESC NULLS LAST, t0."at" ASC NULLS FIRST, t0."rank" DESC NULLS LAST`);
+    const { registrations } = createContractModelFixtures();
+    const contract = describeModels(registrations);
+    const plan = createQueryPlan(contract, 'ContractSerie', { sort: { terms: [{ field: 'title', order: 'DESC' }, { field: 'id', order: 'ASC' }] } });
+    expect(compileQuery(contract, describeDatabase(registrations, { schema: 'app' }), plan, null, legacy).text)
+      .toBe(`SELECT t0.* FROM "app"."ContractSerie" t0  WHERE TRUE ORDER BY (t0."title") ${C} DESC NULLS LAST, t0."id" ASC NULLS FIRST LIMIT $1::bigint OFFSET $2::bigint`);
+    // Sorts without a required root column compile to the same text either way.
+    for (const terms of [[{ field: 'rank', order: 'ASC' }], [{ field: 'maker.name', order: 'DESC' }, { field: 'tags', order: 'ASC' }]]) {
+      expect(sorted(models, database, terms, legacy)).toBe(sorted(models, database, terms));
+    }
+  });
+});
+
+describe('PostgreSQL list aggregates', () => {
+  const count = (text, table) => text.split(table).length - 1;
+
+  it('evaluates a list path once per row for MIN and MAX', () => {
+    const facts = [{ path: 'credits.role', operation: 'MIN', factName: 'first' }, { path: 'credits.role', operation: 'MAX', factName: 'last' }, { path: 'credits.role', operation: 'COUNT', factName: 'n' }];
+    const { text } = compile({ aggregation: { groupId: 'tenant', facts } }, { mode: 'aggregate' });
+    expect(count(text, '"app"."ContractSerie__credits"')).toBe(1);
+    expect(text).toContain('CROSS JOIN LATERAL (SELECT CASE WHEN t0."__credits_state" = \'present\' THEN');
+    expect(text).toContain('OFFSET 0) f0 WHERE');
+    expect(text).toContain('(array_agg(f0.value ORDER BY "app"."__simfinity_value_key"(f0.value, \'String\') ASC) FILTER (WHERE f0.value IS NOT NULL AND f0.value <> \'null\'::jsonb))[1] AS "fact_0"');
+    expect(text).toContain('(array_agg(f0.value ORDER BY "app"."__simfinity_value_key"(f0.value, \'String\') DESC) FILTER (WHERE f0.value IS NOT NULL AND f0.value <> \'null\'::jsonb))[1] AS "fact_1"');
+    expect(text).not.toContain(' f1');
+    // Each list path gets its own lateral, after the joins it can read.
+    const joined = compile({ aggregation: { groupId: 'label.name', facts: [{ path: 'credits.role', operation: 'MIN', factName: 'role' }, { path: 'categories', operation: 'MAX', factName: 'category' }] } }, { mode: 'aggregate' }).text;
+    expect(joined).toMatch(/LEFT JOIN "app"\."ContractLabel" t\d+ ON .* CROSS JOIN LATERAL \(SELECT .* OFFSET 0\) f0 CROSS JOIN LATERAL \(SELECT .*t0\."categories".* OFFSET 0\) f1 WHERE/);
+    expect(count(joined, '"app"."ContractSerie__credits"')).toBe(1);
+  });
+
+  it('evaluates a nested owned list once per row for MIN and MAX', () => {
+    const Star = new GraphQLObjectType({ name: 'ListStar', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+    const Credit = new GraphQLObjectType({ name: 'ListCredit', fields: { role: { type: GraphQLString }, star: { type: Star, extensions: { relation: { embedded: false } } } } });
+    const Season = new GraphQLObjectType({ name: 'ListSeason', fields: { number: { type: GraphQLInt }, credits: { type: new GraphQLList(Credit), extensions: { relation: { embedded: true } } } } });
+    const Serie = new GraphQLObjectType({ name: 'ListSerie', fields: { id: { type: GraphQLID }, key: { type: GraphQLString }, seasons: { type: new GraphQLList(Season), extensions: { relation: { embedded: true } } } } });
+    const registrations = [{ gqltype: Serie }, { gqltype: Star }];
+    const models = describeModels(registrations);
+    const plan = createQueryPlan(models, 'ListSerie', { aggregation: { groupId: 'key', facts: [{ path: 'seasons.credits.role', operation: 'MIN', factName: 'min' }, { path: 'seasons.credits.role', operation: 'MAX', factName: 'max' }] } }, { mode: 'aggregate' });
+    const { text } = compileQuery(models, describeDatabase(registrations, { schema: 'app' }), plan);
+    expect(count(text, '"app"."ListSerie__seasons" ')).toBe(1);
+    expect(count(text, '"app"."ListSerie__seasons__credits" ')).toBe(2);
+  });
+});
+
+describe('PostgreSQL owned-row batches', () => {
+  it('compiles a record batch into one multi-row INSERT without RETURNING', () => {
+    const { registrations } = createContractModelFixtures();
+    const table = describeDatabase(registrations, { schema: 'app' }).tables.find((item) => item.name === 'ContractSerie__credits');
+    const owner = '00000000-0000-4000-8000-000000000000';
+    const rows = [
+      { __id: '00000000-0000-4000-8000-000000000001', __owner_id: owner, __position: 0, role: 'Lead' },
+      { __id: '00000000-0000-4000-8000-000000000002', __owner_id: owner, __position: 1, role: null },
+    ];
+    expect(compileRecordBatch({ schema: 'app' }, { kind: 'insertMany', table, rows })).toEqual({
+      text: 'INSERT INTO "app"."ContractSerie__credits" ("__id", "__owner_id", "__position", "role") VALUES ($1::uuid, $2::uuid, $3::integer, $4::text), ($5::uuid, $6::uuid, $7::integer, $8::text)',
+      values: [rows[0].__id, owner, 0, 'Lead', rows[1].__id, owner, 1, null],
+    });
+  });
+
+  it('advertises single-statement reads and binds the batch compiler with a 32,767-value limit', () => {
+    const plugin = bindPlugin(postgresPlugin());
+    expect(plugin.capabilities).toContain('singleStatementReads');
+    expect(plugin.compileRecordBatch).toBe(compileRecordBatch);
+    expect(plugin.maxRecordBatchValues).toBe(32767);
   });
 });

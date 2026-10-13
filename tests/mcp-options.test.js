@@ -1185,3 +1185,360 @@ describe('MCP operation classification of core-generated schemas', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Nested collections and shared $defs (core runtimes over a counting
+// in-memory adapter; each call is a database round trip on a real backend).
+// ---------------------------------------------------------------------------
+
+describe('MCP nested collections and $defs of core-generated schemas', () => {
+  const countingAdapter = (data, counts) => ({
+    bind() {},
+    prepare() {},
+    createModel: (gqltype) => ({ name: gqltype.name }),
+    castId: (value) => String(value),
+    withTransaction: async (session, body) => body(session || {}),
+    async getById(Model, id) {
+      counts.getById += 1;
+      return (data[Model.name] || []).find((row) => row._id === String(id)) || null;
+    },
+    async getByIds(Model, ids) {
+      counts.getByIds += 1;
+      return (data[Model.name] || []).filter((row) => ids.map(String).includes(row._id));
+    },
+    async find(Model, gqltype, args) {
+      counts.find += 1;
+      const rows = data[Model.name] || [];
+      const page = args.pagination;
+      return page ? rows.slice((page.page - 1) * page.size, page.page * page.size) : rows;
+    },
+    async count(Model) { return (data[Model.name] || []).length; },
+    async aggregate() { return []; },
+    async findChildren(Model, gqltype, connectionField, parentId) {
+      counts.findChildren += 1;
+      return (data[Model.name] || []).filter((row) => row[connectionField] === String(parentId));
+    },
+  });
+
+  // A shop with a to-one owner and three referenced collections.
+  const buildShops = ({ shops = 4, perCollection = 3 } = {}) => {
+    const counts = {
+      find: 0, findChildren: 0, getById: 0, getByIds: 0,
+    };
+    const data = {
+      McpOptNcOwner: [], McpOptNcShop: [], McpOptNcService: [], McpOptNcReview: [], McpOptNcBooking: [],
+    };
+    for (let o = 0; o < 2; o += 1) data.McpOptNcOwner.push({ _id: `o${o}`, id: `o${o}`, name: `Owner ${o}` });
+    for (let s = 0; s < shops; s += 1) {
+      data.McpOptNcShop.push({
+        _id: `s${s}`, id: `s${s}`, name: `Shop ${s}`, city: 'Montevideo', owner: `o${s % 2}`,
+      });
+      for (let c = 0; c < perCollection; c += 1) {
+        data.McpOptNcService.push({
+          _id: `sv${s}-${c}`, id: `sv${s}-${c}`, name: `Cut ${c}`, price: 10 + c, shop: `s${s}`,
+        });
+        data.McpOptNcReview.push({
+          _id: `rv${s}-${c}`, id: `rv${s}-${c}`, text: `Review ${c}`, stars: 5, shop: `s${s}`,
+        });
+        data.McpOptNcBooking.push({
+          _id: `bk${s}-${c}`, id: `bk${s}-${c}`, day: `2026-10-${10 + c}`, shop: `s${s}`,
+        });
+      }
+    }
+    const runtime = createRuntime(countingAdapter(data, counts));
+    const relation = (connectionField) => ({ relation: { embedded: false, connectionField } });
+    const Owner = new GraphQLObjectType({
+      name: 'McpOptNcOwner',
+      fields: () => ({ id: { type: GraphQLID }, name: { type: GraphQLString } }),
+    });
+    const Service = new GraphQLObjectType({
+      name: 'McpOptNcService',
+      fields: () => ({
+        id: { type: GraphQLID }, name: { type: GraphQLString }, price: { type: GraphQLInt }, shop: { type: Shop, extensions: relation('shop') },
+      }),
+    });
+    const Review = new GraphQLObjectType({
+      name: 'McpOptNcReview',
+      fields: () => ({
+        id: { type: GraphQLID }, text: { type: GraphQLString }, stars: { type: GraphQLInt }, shop: { type: Shop, extensions: relation('shop') },
+      }),
+    });
+    const Booking = new GraphQLObjectType({
+      name: 'McpOptNcBooking',
+      fields: () => ({ id: { type: GraphQLID }, day: { type: GraphQLString }, shop: { type: Shop, extensions: relation('shop') } }),
+    });
+    const Shop = new GraphQLObjectType({
+      name: 'McpOptNcShop',
+      fields: () => ({
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        city: { type: GraphQLString },
+        owner: { type: Owner, extensions: relation('owner') },
+        services: { type: new GraphQLList(Service), extensions: relation('shop') },
+        reviews: { type: new GraphQLList(Review), extensions: relation('shop') },
+        bookings: { type: new GraphQLList(Booking), extensions: relation('shop') },
+      }),
+    });
+    for (const [type, name] of [[Owner, 'mcpoptncowner'], [Service, 'mcpoptncservice'], [Review, 'mcpoptncreview'], [Booking, 'mcpoptncbooking'], [Shop, 'mcpoptncshop']]) {
+      runtime.connect(null, type, name, `${name}s`);
+    }
+    return { schema: runtime.createSchema(), counts };
+  };
+
+  // Entities whose collection inputs form a chain: E0.children -> E1 -> ...
+  const buildChain = (n) => {
+    const runtime = createRuntime(countingAdapter({}, {}));
+    const relation = (connectionField) => ({ relation: { embedded: false, connectionField } });
+    const Status = new GraphQLEnumType({ name: 'McpOptChainStatus', values: { ON: { value: 'ON' }, OFF: { value: 'OFF' } } });
+    const types = [];
+    for (let i = 0; i < n; i += 1) {
+      const index = i;
+      types.push(new GraphQLObjectType({
+        name: `McpOptChain${index}`,
+        fields: () => {
+          const fields = {
+            id: { type: GraphQLID },
+            name: { type: new GraphQLNonNull(GraphQLString), description: `Name of entity ${index}` },
+            status: { type: Status },
+          };
+          if (index > 0) fields.parent = { type: types[index - 1], extensions: relation('parent') };
+          if (index < n - 1) fields.children = { type: new GraphQLList(types[index + 1]), extensions: relation('parent') };
+          return fields;
+        },
+      }));
+    }
+    for (const type of types) runtime.connect(null, type, type.name.toLowerCase(), `${type.name.toLowerCase()}s`);
+    return runtime.createSchema();
+  };
+
+  const COLLECTIONS = ['services', 'reviews', 'bookings'];
+  const byName = (tools, name) => tools.find((tool) => tool.name === name);
+  const rootFields = (schema) => ({ ...schema.getQueryType().getFields(), ...schema.getMutationType()?.getFields() });
+  const withoutCollections = (row) => Object.fromEntries(Object.entries(row).filter(([key]) => !COLLECTIONS.includes(key)));
+
+  describe('nestedCollections', () => {
+    it('omits nested collections from the selection and the outputSchema with nestedCollections: \'none\'', async () => {
+      const all = buildShops();
+      const none = buildShops();
+      const allTools = simfinity.generateMCPTools(all.schema);
+      const noneTools = simfinity.generateMCPTools(none.schema, { nestedCollections: 'none' });
+
+      const allResult = await allTools.callTool('mcpoptncshops', {});
+      const noneResult = await noneTools.callTool('mcpoptncshops', {});
+
+      expect(all.counts).toEqual({
+        find: 1, getByIds: 1, getById: 0, findChildren: 12,
+      });
+      expect(none.counts).toEqual({
+        find: 1, getByIds: 1, getById: 0, findChildren: 0,
+      });
+      expect(noneResult.isError).toBe(false);
+      expect(noneResult.structuredContent.mcpoptncshops).toEqual(allResult.structuredContent.mcpoptncshops.map(withoutCollections));
+      expect(noneResult.structuredContent.mcpoptncshops[0]).toEqual({
+        id: 's0', name: 'Shop 0', city: 'Montevideo', owner: { id: 'o0', name: 'Owner 0' },
+      });
+      // Only the selection changes: the collection filter arguments stay.
+      expect(noneTools.getOperation('mcpoptncshops')).toBe(allTools.getOperation('mcpoptncshops')
+        .replace(' services { id name price } reviews { id text stars } bookings { id day }', ''));
+      expect(noneTools.getOperation('mcpoptncshops')).toContain('{ id name city owner { id name } }\n}');
+
+      const items = byName(noneTools.tools, 'mcpoptncshops').outputSchema.properties.mcpoptncshops.items;
+      expect(Object.keys(items.properties)).toEqual(['id', 'name', 'city', 'owner']);
+      const validate = new AjvJsonSchemaValidator().getValidator(byName(noneTools.tools, 'mcpoptncshops').outputSchema);
+      expect(validate(noneResult.structuredContent).valid).toBe(true);
+      // The child's back reference is a to-one relation, which stays selected.
+      expect(noneTools.getOperation('mcpoptncservices')).toContain('shop { id name city }');
+    });
+
+    it('lets toolOverrides.nestedCollections win over the global option, both ways', async () => {
+      const { schema, counts } = buildShops();
+      const { getOperation, tools, callTool } = simfinity.generateMCPTools(schema, {
+        nestedCollections: 'none',
+        toolOverrides: { mcpoptncshops: { nestedCollections: 'all' } },
+      });
+      expect(getOperation('mcpoptncshops')).toContain('services { id name price }');
+      expect(getOperation('mcpoptncshop')).not.toContain('services {');
+      expect(byName(tools, 'mcpoptncshops').outputSchema.properties.mcpoptncshops.items.properties).toHaveProperty('services');
+      expect(byName(tools, 'mcpoptncshop').outputSchema.properties.mcpoptncshop.properties).not.toHaveProperty('services');
+      await callTool('mcpoptncshop', { id: 's1' });
+      expect(counts.findChildren).toBe(0);
+
+      const reversed = simfinity.generateMCPTools(buildShops().schema, {
+        toolOverrides: { mcpoptncshop: { nestedCollections: 'none' } },
+      });
+      expect(reversed.getOperation('mcpoptncshops')).toContain('services { id name price }');
+      expect(reversed.getOperation('mcpoptncshop')).not.toContain('services {');
+      // null leaves the tool on the global value.
+      const inherited = simfinity.generateMCPTools(buildShops().schema, {
+        nestedCollections: 'none',
+        toolOverrides: { mcpoptncshop: { nestedCollections: null } },
+      });
+      expect(inherited.getOperation('mcpoptncshop')).not.toContain('services {');
+    });
+
+    it('ignores nestedCollections when a tool has an explicit selection', () => {
+      const { getOperation, tools } = simfinity.generateMCPTools(buildShops().schema, {
+        nestedCollections: 'none',
+        toolOverrides: { mcpoptncshops: { selection: 'id services { id }', nestedCollections: 'none' } },
+      });
+      expect(getOperation('mcpoptncshops')).toContain('{ id services { id } }');
+      expect(byName(tools, 'mcpoptncshops').outputSchema).toBeUndefined();
+    });
+
+    it('drops only object lists that take a pagination argument', () => {
+      const Page = new GraphQLInputObjectType({ name: 'McpOptNcPage', fields: { page: { type: GraphQLInt }, size: { type: GraphQLInt } } });
+      const Leaf = new GraphQLObjectType({ name: 'McpOptNcLeaf', fields: { id: { type: GraphQLString } } });
+      const Parent = new GraphQLObjectType({
+        name: 'McpOptNcParent',
+        fields: {
+          id: { type: GraphQLString },
+          paged: { type: new GraphQLNonNull(new GraphQLList(Leaf)), args: { pagination: { type: Page } } },
+          filtered: { type: new GraphQLList(Leaf), args: { first: { type: GraphQLInt } } },
+          embedded: { type: new GraphQLList(Leaf) },
+          single: { type: Leaf, args: { pagination: { type: Page } } },
+        },
+      });
+      const schema = new GraphQLSchema({
+        query: new GraphQLObjectType({ name: 'Query', fields: { parent: { type: Parent } } }),
+      });
+      const { getOperation, tools } = simfinity.generateMCPTools(schema, { nestedCollections: 'none' });
+      expect(getOperation('parent')).toContain('parent { id filtered { id } embedded { id } single { id } }');
+      expect(Object.keys(tools[0].outputSchema.properties.parent.properties)).toEqual(['id', 'filtered', 'embedded', 'single']);
+    });
+
+    it('keeps the 3.5.9 selection and outputSchema when unset or \'all\' (guard)', () => {
+      for (const schema of [buildShops().schema, buildChain(4)]) {
+        for (const selectionDepth of [0, 1, 2]) {
+          const unset = simfinity.generateMCPTools(schema, { selectionDepth });
+          const all = simfinity.generateMCPTools(schema, { selectionDepth, nestedCollections: 'all' });
+          const overridden = simfinity.generateMCPTools(schema, {
+            selectionDepth,
+            nestedCollections: null,
+            toolOverrides: Object.fromEntries(unset.tools.map((tool) => [tool.name, { nestedCollections: 'all' }])),
+          });
+          for (const tool of unset.tools) {
+            for (const other of [all, overridden]) {
+              expect(other.getOperation(tool.name)).toBe(unset.getOperation(tool.name));
+              expect(JSON.stringify(byName(other.tools, tool.name).outputSchema)).toBe(JSON.stringify(tool.outputSchema));
+            }
+          }
+        }
+      }
+      expect(simfinity.generateMCPTools(buildShops().schema).getOperation('mcpoptncshops').replace(/\s+/g, ' '))
+        .toBe('query mcpoptncshopsOperation($id: QLFilter, $name: QLFilter, $city: QLFilter, $owner: QLTypeFilterExpression, '
+          + '$services: QLTypeFilterExpression, $reviews: QLTypeFilterExpression, $bookings: QLTypeFilterExpression, '
+          + '$pagination: QLPagination, $sort: QLSortExpression, $AND: [QLFilterGroup], $OR: [QLFilterGroup]) { '
+          + 'mcpoptncshops(id: $id, name: $name, city: $city, owner: $owner, services: $services, reviews: $reviews, bookings: $bookings, '
+          + 'pagination: $pagination, sort: $sort, AND: $AND, OR: $OR) { id name city owner { id name } '
+          + 'services { id name price } reviews { id text stars } bookings { id day } } }');
+    });
+
+    it.each([
+      ['an unknown mode', { nestedCollections: 'some' }, 'nestedCollections must be \'all\' or \'none\', got "some"'],
+      ['a bounded page', { nestedCollections: { pageSize: 5 } }, 'nestedCollections must be \'all\' or \'none\', got object'],
+      ['a boolean', { nestedCollections: false }, 'nestedCollections must be \'all\' or \'none\', got false'],
+      ['an empty string', { nestedCollections: '' }, 'nestedCollections must be \'all\' or \'none\', got ""'],
+      ['a published tool override', { toolOverrides: { mcpoptncshops: { nestedCollections: 'None' } } }, 'toolOverrides.mcpoptncshops.nestedCollections must be \'all\' or \'none\', got "None"'],
+      ['an excluded tool override', { exclude: ['mcpoptncshop'], toolOverrides: { mcpoptncshop: { nestedCollections: 'bounded' } } }, 'toolOverrides.mcpoptncshop.nestedCollections must be \'all\' or \'none\', got "bounded"'],
+      ['a misspelled tool key', { toolOverrides: { mcpoptncshopz: { nestedCollections: 1 } } }, 'toolOverrides.mcpoptncshopz.nestedCollections must be \'all\' or \'none\', got 1'],
+      ['an override with a selection', { toolOverrides: { mcpoptncshops: { selection: 'id', nestedCollections: 'nope' } } }, 'toolOverrides.mcpoptncshops.nestedCollections must be \'all\' or \'none\', got "nope"'],
+    ])('rejects %s with MCP_INVALID_OPTIONS before any schema plugin runs', (label, options, message) => {
+      const { schema } = buildShops();
+      const spy = { onSchemaChange: vi.fn() };
+      let error;
+      try {
+        simfinity.generateMCPTools(schema, { ...options, schemaPlugins: [spy] });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toBeDefined();
+      expect(error.extensions).toMatchObject({ code: 'MCP_INVALID_OPTIONS' });
+      expect(error.message).toBe(message);
+      expect(spy.onSchemaChange).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('shared $defs', () => {
+    const defsOf = (tools) => tools.flatMap((tool) => Object.entries(tool.inputSchema.$defs || {}));
+
+    it('builds each input or enum def once per tool set', () => {
+      for (const schema of [buildShops().schema, buildChain(5)]) {
+        const defs = defsOf(simfinity.generateMCPTools(schema).tools);
+        const names = new Set(defs.map(([name]) => name));
+        expect(defs.length).toBeGreaterThan(names.size);
+        expect(new Set(defs.map(([, def]) => def)).size).toBe(names.size);
+      }
+    });
+
+    it('publishes the inputSchema graphqlArgsToJSONSchema builds for each tool, key order included (guard)', () => {
+      const Mood = new GraphQLEnumType({ name: 'McpOptDefsMood', values: { UP: { value: 1 }, DOWN: { value: 2 } } });
+      const Tree = new GraphQLInputObjectType({
+        name: 'McpOptDefsTree',
+        fields: () => ({
+          label: { type: GraphQLString, defaultValue: 'root' },
+          mood: { type: Mood, defaultValue: 2 },
+          children: { type: new GraphQLList(new GraphQLNonNull(Tree)) },
+          sibling: { type: Pair },
+        }),
+      });
+      const Pair = new GraphQLInputObjectType({
+        name: 'McpOptDefsPair',
+        fields: () => ({ left: { type: Tree }, right: { type: new GraphQLNonNull(Mood) } }),
+      });
+      const stub = new GraphQLSchema({
+        query: new GraphQLObjectType({
+          name: 'Query',
+          fields: {
+            one: { type: GraphQLString, args: { mood: { type: Mood }, tree: { type: Tree } } },
+            two: { type: GraphQLString, args: { pair: { type: new GraphQLNonNull(Pair) }, tree: { type: Tree } } },
+            three: { type: GraphQLString, args: { moods: { type: new GraphQLList(Mood), defaultValue: [1] } } },
+          },
+        }),
+      });
+      for (const schema of [buildShops().schema, buildChain(5), stub]) {
+        const fields = rootFields(schema);
+        const { tools } = simfinity.generateMCPTools(schema);
+        expect(tools.length).toBeGreaterThan(2);
+        for (const tool of tools) {
+          expect(JSON.stringify(tool.inputSchema)).toBe(JSON.stringify(simfinity.graphqlArgsToJSONSchema(fields[tool.name])));
+        }
+      }
+
+      // graphqlArgsToJSONSchema shares collect with the tools, so pin what
+      // 3.5.9 published too (one $defs map per tool, filled by ensureInputDef).
+      const defKeys = (tools, names) => names.map((name) => Object.keys(byName(tools, name).inputSchema.$defs));
+      const stubTools = simfinity.generateMCPTools(stub).tools;
+      expect(defKeys(stubTools, ['one', 'two', 'three'])).toEqual([
+        ['McpOptDefsMood', 'McpOptDefsTree', 'McpOptDefsPair'],
+        ['McpOptDefsPair', 'McpOptDefsTree', 'McpOptDefsMood'],
+        ['McpOptDefsMood'],
+      ]);
+      expect(JSON.stringify(byName(stubTools, 'two').inputSchema)).toBe(
+        '{"type":"object","properties":{"pair":{"$ref":"#/$defs/McpOptDefsPair"},"tree":{"anyOf":[{"$ref":"#/$defs/McpOptDefsTree"},{"type":"null"}]}},'
+        + '"additionalProperties":false,"required":["pair"],"$defs":{'
+        + '"McpOptDefsPair":{"type":"object","properties":{"left":{"anyOf":[{"$ref":"#/$defs/McpOptDefsTree"},{"type":"null"}]},"right":{"$ref":"#/$defs/McpOptDefsMood"}},"required":["right"]},'
+        + '"McpOptDefsTree":{"type":"object","properties":{"label":{"type":["string","null"],"default":"root"},'
+        + '"mood":{"anyOf":[{"$ref":"#/$defs/McpOptDefsMood"},{"type":"null"}],"default":"DOWN"},'
+        + '"children":{"type":["array","null"],"items":{"$ref":"#/$defs/McpOptDefsTree"}},'
+        + '"sibling":{"anyOf":[{"$ref":"#/$defs/McpOptDefsPair"},{"type":"null"}]}}},'
+        + '"McpOptDefsMood":{"type":"string","enum":["UP","DOWN"]}}}',
+      );
+      expect(defKeys(simfinity.generateMCPTools(buildChain(5)).tools, ['mcpoptchain0s', 'addmcpoptchain3'])).toEqual([
+        ['QLFilter', 'QLOperator', 'QLTypeFilterExpression', 'QLTypeFilter', 'QLPagination', 'QLSortExpression', 'QLSort',
+          'QLSortOrder', 'QLFilterGroup', 'QLFilterCondition'],
+        ['McpOptChain3Input', 'McpOptChainStatus', 'IdInputType', 'OneToManyMcpOptChain3Achildren',
+          'McpOptChain3AMcpOptChain4InputForParent', 'McpOptChain4InputForUpdate'],
+      ]);
+    });
+
+    it('keeps graphqlArgsToJSONSchema returning independent objects (guard)', () => {
+      const field = buildShops().schema.getQueryType().getFields().mcpoptncshops;
+      const first = simfinity.graphqlArgsToJSONSchema(field);
+      const second = simfinity.graphqlArgsToJSONSchema(field);
+      expect(first).toEqual(second);
+      for (const name of Object.keys(first.$defs)) {
+        expect(first.$defs[name]).not.toBe(second.$defs[name]);
+      }
+    });
+  });
+});

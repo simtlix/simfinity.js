@@ -1,4 +1,4 @@
-import { identifier, qualified, columnsSQL, literal } from './sql.js';
+import { identifier, qualified, columnsSQL, literal, invalid } from './sql.js';
 
 export const createTableSQL = (schema, table) => {
   const columns = table.columns.map((column) => `${identifier(column.name)} ${column.type}${column.collation ? ` COLLATE ${qualified('pg_catalog', column.collation)}` : ''}${column.nullable ? '' : ' NOT NULL'}${column.default ? ` DEFAULT ${column.default}` : ''}`);
@@ -16,7 +16,9 @@ export const createFunctionSQL = (schema, fn) => {
   }).join(' ');
   return `CREATE FUNCTION ${qualified(schema, fn.name)}(${fn.arguments.join(', ')}) RETURNS ${fn.returns} LANGUAGE ${fn.language} ${fn.volatility} CALLED ON NULL INPUT SECURITY INVOKER PARALLEL UNSAFE ${settings} AS ${literal(fn.body)}`;
 };
-export const createTriggerSQL = (schema, trigger) => `CREATE ${trigger.constraint ? 'CONSTRAINT ' : ''}TRIGGER ${identifier(trigger.name)} AFTER INSERT OR UPDATE OR DELETE ON ${qualified(schema, trigger.table)} ${trigger.constraint ? 'DEFERRABLE INITIALLY DEFERRED ' : ''}FOR EACH ROW EXECUTE FUNCTION ${qualified(schema, trigger.function)}()`;
+/** Row events a trigger fires on; a trigger without `events` fires on all three. */
+export const triggerEvents = (trigger) => (trigger.events || ['INSERT', 'UPDATE', 'DELETE']).map((event) => (['INSERT', 'UPDATE', 'DELETE'].includes(event) ? event : invalid(`Unsupported trigger event: ${String(event)}`)));
+export const createTriggerSQL = (schema, trigger) => `CREATE ${trigger.constraint ? 'CONSTRAINT ' : ''}TRIGGER ${identifier(trigger.name)} AFTER ${triggerEvents(trigger).join(' OR ')} ON ${qualified(schema, trigger.table)} ${trigger.constraint ? 'DEFERRABLE INITIALLY DEFERRED ' : ''}FOR EACH ROW ${trigger.when ? `WHEN (${trigger.when}) ` : ''}EXECUTE FUNCTION ${qualified(schema, trigger.function)}()`;
 
 /** Tables/primary keys precede all FKs so forward and cyclic references work. */
 export const compileDatabaseSchema = (description) => [

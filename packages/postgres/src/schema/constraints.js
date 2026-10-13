@@ -12,13 +12,138 @@ const dateTimeValidation = `DECLARE parts integer[]; BEGIN
     AND parts >= ARRAY[-271821, 4, 20, 0, 0, 0, 0] AND parts <= ARRAY[275760, 9, 13, 0, 0, 0, 0];
 END;`;
 
+const functionObject = (name, args, returns, body, immutable = false) => ({ name, arguments: args, returns, language: 'plpgsql', volatility: immutable ? 'IMMUTABLE' : 'VOLATILE', configuration: ['search_path=pg_catalog', 'TimeZone=UTC', 'DateStyle=ISO, YMD'], body });
+// The ownership chain from its root (t0) to its last table.
+const joinChain = (schema, path, left = false) => path.map((table, index) => {
+  if (!index) return `${qualified(schema, table.name)} t0`;
+  const parent = path[index - 1];
+  return `${left ? 'LEFT ' : ''}JOIN ${qualified(schema, table.name)} t${index} ON t${index}.__owner_id = t${index - 1}.${q(parent.primaryKey.columns[0])}${left ? ` AND t${index - 1}.${q(table.ownership.stateColumn)} = 'present'${parent.ownership?.nullableItems ? ` AND t${index - 1}.__item_present` : ''}` : ''}`;
+}).join(' ');
+
+/**
+ * The refresh-trigger objects of one table of a maintained root; `path` runs from the root to the table.
+ * 'perRow' (3.5.9): a touch trigger bumps the root's guard row and a deferred trigger refreshes the root
+ * once per changed row. 'perRoot': while the guard row's trigger stays deferred, the touch trigger marks
+ * the guard row dirty (a negative version) once per transaction and that trigger refreshes the root once
+ * at commit; under IMMEDIATE both happen once per changed row (guardTriggerObjects).
+ */
+const refreshTriggerObjects = (schema, path, item, layout) => {
+  const table = path.at(-1);
+  const owner = (record) => path.length === 1 ? `${record}.id` : `(SELECT t0.id FROM ${joinChain(schema, path.slice(0, -1))} WHERE t${path.length - 2}.${q(path.at(-2).primaryKey.columns[0])} = ${record}.__owner_id)`;
+  const guard = q(item.guardTable);
+  const target = `${qualified(schema, item.guardTable)} (__owner_id${layout === 'perRoot' ? ', version' : ''}) SELECT __root_id${layout === 'perRoot' ? ', -1' : ''} WHERE EXISTS (SELECT 1 FROM ${qualified(schema, item.rootTable)} WHERE id = __root_id) ON CONFLICT (__owner_id) DO UPDATE SET`;
+  // A dirty row written by an earlier transaction (its guard trigger was disabled) is marked again.
+  const touch = layout === 'perRoot'
+    ? `INSERT INTO ${target} version = -(abs(${guard}.version) + 1) WHERE ${guard}.version >= 0 OR age(${guard}.xmin) <> 0;`
+    : `INSERT INTO ${target} version = ${guard}.version + 1;`;
+  const objects = { functions: [], triggers: [] };
+  for (const deferred of layout === 'perRow' ? [false, true] : [false]) {
+    const name = generatedName(table.name, deferred ? 'deferred' : 'touch');
+    const action = deferred ? `PERFORM ${qualified(schema, item.refreshFunction)}(__root_id);` : touch;
+    objects.functions.push(functionObject(name, [], 'trigger', `DECLARE __root_id uuid; __old_root_id uuid; BEGIN
+  IF TG_OP <> 'INSERT' THEN __old_root_id := ${owner('OLD')}; END IF;
+  IF TG_OP <> 'DELETE' THEN __root_id := ${owner('NEW')}; END IF;
+  IF __old_root_id IS NOT NULL AND __old_root_id IS DISTINCT FROM __root_id THEN
+    DECLARE __new_root_id uuid := __root_id; BEGIN __root_id := __old_root_id; ${action} __root_id := __new_root_id; END;
+  END IF;
+  IF __root_id IS NOT NULL THEN ${action} END IF;
+  RETURN NULL;
+END`));
+    objects.triggers.push({ name, table: table.name, function: name, constraint: deferred, deferrable: deferred, initiallyDeferred: deferred });
+  }
+  return objects;
+};
+// 'perRoot': at commit, each dirty guard row is marked clean and its root refreshed once. The event is
+// queued by the touch write itself, so it always follows the touch, whatever the trigger names; committed
+// guard rows stay clean, as earlier versions wrote them. The once-per-transaction saving holds only while
+// this trigger stays deferred: under IMMEDIATE its event fires at the end of the touch trigger's guard
+// upsert, so the root is refreshed once per changed row, as with 'perRow', and the guard row is written
+// twice per row (marked dirty, then clean).
+const guardTriggerObjects = (schema, item) => {
+  const name = generatedName(item.guardTable, 'deferred');
+  return {
+    functions: [functionObject(name, [], 'trigger', `BEGIN
+  IF NEW.version < 0 THEN
+    UPDATE ${qualified(schema, item.guardTable)} SET version = -version WHERE __owner_id = NEW.__owner_id AND version < 0;
+    IF FOUND THEN PERFORM ${qualified(schema, item.refreshFunction)}(NEW.__owner_id); END IF;
+  END IF;
+  RETURN NULL;
+END`)],
+    // Only dirty rows queue an event: not the clean-up update, nor a backfill's guard inserts.
+    triggers: [{ name, table: item.guardTable, function: name, constraint: true, deferrable: true, initiallyDeferred: true, events: ['INSERT', 'UPDATE'], when: 'new.version < 0' }],
+  };
+};
+
+/**
+ * For each maintained root of a description, the refresh-trigger functions and triggers of both layouts,
+ * built from the description alone. Tables follow the order of the description's touch triggers.
+ */
+export const maintenanceLayouts = (description) => {
+  const { schema } = description;
+  const byName = new Map(description.tables.map((table) => [table.name, table]));
+  const chainOf = (table) => {
+    const path = [table];
+    while (path[0].ownership && byName.has(path[0].ownership.ownerTable)) path.unshift(byName.get(path[0].ownership.ownerTable));
+    return path;
+  };
+  const touches = (description.triggers || []).filter((trigger) => !trigger.constraint && byName.has(trigger.table) && trigger.name === generatedName(trigger.table, 'touch'));
+  const layouts = new Map();
+  for (const item of description.maintenance || []) {
+    const layout = { perRow: { functions: [], triggers: [] }, perRoot: { functions: [], triggers: [] } };
+    for (const touch of touches) {
+      const path = chainOf(byName.get(touch.table));
+      if (path[0].name !== item.rootTable || path[0].ownership) continue;
+      for (const name of ['perRow', 'perRoot']) {
+        const objects = refreshTriggerObjects(schema, path, item, name);
+        layout[name].functions.push(...objects.functions);
+        layout[name].triggers.push(...objects.triggers);
+      }
+    }
+    const guard = guardTriggerObjects(schema, item);
+    layout.perRoot.functions.push(...guard.functions);
+    layout.perRoot.triggers.push(...guard.triggers);
+    layouts.set(item.rootTable, layout);
+  }
+  return layouts;
+};
+
+/** 'perRoot' when the root's guard table carries the deferred trigger, otherwise 'perRow'. */
+export const layoutOf = (description, item) => ((description.triggers || []).some((trigger) => trigger.constraint && trigger.table === item.guardTable) ? 'perRoot' : 'perRow');
+
+/**
+ * Replace the refresh-trigger objects of the chosen roots (a Map of root table to layout) with that layout's,
+ * at the position of the root's first object. Every other object and the list order are kept.
+ */
+export const withLayouts = (description, choices, layouts = maintenanceLayouts(description)) => {
+  const owners = { functions: new Map(), triggers: new Map() };
+  const keys = { functions: (object) => object.name, triggers: (object) => JSON.stringify([object.table, object.name]) };
+  for (const [root, layout] of layouts) {
+    for (const kind of ['functions', 'triggers']) {
+      for (const object of [...layout.perRow[kind], ...layout.perRoot[kind]]) owners[kind].set(keys[kind](object), root);
+    }
+  }
+  const replace = (kind) => {
+    const output = [];
+    const done = new Set();
+    for (const object of description[kind] || []) {
+      const root = owners[kind].get(keys[kind](object));
+      if (!choices.has(root)) output.push(object);
+      else if (!done.has(root)) {
+        done.add(root);
+        output.push(...layouts.get(root)[choices.get(root)][kind]);
+      }
+    }
+    return output;
+  };
+  return { ...description, functions: replace('functions'), triggers: replace('triggers') };
+};
+
 /** Database-side validation and multikey maintenance. All bodies resolve names in pg_catalog. */
 export const constraintBuilder = (schema, tables, { addTable, addColumn, addReference, addIndex, addCheck }) => {
   const functions = []; const triggers = []; const uniquePaths = [];
   const fn = (name, args, returns, body, immutable = false) => {
     if (functions.some((item) => item.name === name)) invalid(`Function name collision: ${name}`);
-    const result = { name, arguments: args, returns, language: 'plpgsql', volatility: immutable ? 'IMMUTABLE' : 'VOLATILE', configuration: ['search_path=pg_catalog', 'TimeZone=UTC', 'DateStyle=ISO, YMD'], body };
-    functions.push(result);
+    functions.push(functionObject(name, args, returns, body, immutable));
     return qualified(schema, name);
   };
   const jsonValidator = (table, field, path = []) => {
@@ -55,11 +180,7 @@ END`, true);
     while (result[0].ownership) result.unshift(tables.find((item) => item.name === result[0].ownership.ownerTable));
     return result;
   };
-  const joins = (path, left = false) => path.map((table, index) => {
-    if (!index) return `${qualified(schema, table.name)} t0`;
-    const parent = path[index - 1];
-    return `${left ? 'LEFT ' : ''}JOIN ${qualified(schema, table.name)} t${index} ON t${index}.__owner_id = t${index - 1}.${q(parent.primaryKey.columns[0])}${left ? ` AND t${index - 1}.${q(table.ownership.stateColumn)} = 'present'${parent.ownership?.nullableItems ? ` AND t${index - 1}.__item_present` : ''}` : ''}`;
-  }).join(' ');
+  const joins = (path, left = false) => joinChain(schema, path, left);
   const finish = () => {
     const sources = [...tables];
     const roots = sources.filter((table) => !table.ownership && (sources.some((owned) => owned.ownership && chain(owned)[0] === table) || uniquePaths.some((key) => chain(key.table)[0] === table)));
@@ -112,28 +233,17 @@ END`, true);
         rebuild += `\n  DELETE FROM ${qualified(schema, storage.name)} WHERE __owner_id = $1;\n  INSERT INTO ${qualified(schema, storage.name)} (__owner_id, kind, value) ${query};`;
       }
       const refreshName = generatedName(root.name, 'refresh');
-      const refresh = fn(refreshName, ['uuid'], 'void', `BEGIN\n  PERFORM ${validate}($1);${rebuild}\nEND`);
-      maintenance.push({ rootTable: root.name, guardTable: guard.name, validateFunction: validateName, refreshFunction: refreshName });
+      fn(refreshName, ['uuid'], 'void', `BEGIN\n  PERFORM ${validate}($1);${rebuild}\nEND`);
+      const item = { rootTable: root.name, guardTable: guard.name, validateFunction: validateName, refreshFunction: refreshName };
+      maintenance.push(item);
       // Touch a real shared tuple at write time, not only at deferred-check time.
       // RR writers must conflict on its version; RC writers then refresh using a new
       // command snapshot after acquiring it. Lock-only reads permit stale RR keys.
+      // describeRelationalSchema swaps these 'perRow' objects for 'perRoot' ones when asked.
       for (const table of [root, ...ownedTables]) {
-        const path = chain(table);
-        const owner = (record) => table === root ? `${record}.id` : `(SELECT t0.id FROM ${joins(path.slice(0, -1))} WHERE t${path.length - 2}.${q(path.at(-2).primaryKey.columns[0])} = ${record}.__owner_id)`;
-        for (const deferred of [false, true]) {
-          const name = generatedName(table.name, deferred ? 'deferred' : 'touch');
-          const action = deferred ? `PERFORM ${refresh}(__root_id);` : `INSERT INTO ${qualified(schema, guard.name)} (__owner_id) SELECT __root_id WHERE EXISTS (SELECT 1 FROM ${qualified(schema, root.name)} WHERE id = __root_id) ON CONFLICT (__owner_id) DO UPDATE SET version = ${q(guard.name)}.version + 1;`;
-          fn(name, [], 'trigger', `DECLARE __root_id uuid; __old_root_id uuid; BEGIN
-  IF TG_OP <> 'INSERT' THEN __old_root_id := ${owner('OLD')}; END IF;
-  IF TG_OP <> 'DELETE' THEN __root_id := ${owner('NEW')}; END IF;
-  IF __old_root_id IS NOT NULL AND __old_root_id IS DISTINCT FROM __root_id THEN
-    DECLARE __new_root_id uuid := __root_id; BEGIN __root_id := __old_root_id; ${action} __root_id := __new_root_id; END;
-  END IF;
-  IF __root_id IS NOT NULL THEN ${action} END IF;
-  RETURN NULL;
-END`);
-          triggers.push({ name, table: table.name, function: name, constraint: deferred, deferrable: deferred, initiallyDeferred: deferred });
-        }
+        const objects = refreshTriggerObjects(schema, chain(table), item, 'perRow');
+        for (const object of objects.functions) fn(object.name, object.arguments, object.returns, object.body);
+        triggers.push(...objects.triggers);
       }
     }
     return { functions, triggers, maintenance };
