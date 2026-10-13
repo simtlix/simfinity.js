@@ -144,7 +144,7 @@ afterAll(async () => {
     await mongoose.connection.db.dropDatabase();
     await mongoose.disconnect();
   }
-  mongoose.deleteModel(/^Mr(Mongo|Integrity|Guarded)/);
+  mongoose.deleteModel(/^Mr(Mongo|Integrity|Guarded|Written|Static)/);
   if (postgresPool) {
     await postgresPool.query(`DROP SCHEMA IF EXISTS "${namespace}" CASCADE`);
     await postgresPool.end();
@@ -660,6 +660,133 @@ describe.skipIf(!mongoUri)('a supplied Mongoose model with a findOne guard', () 
     expect(deleted.data).toEqual({ deletemrguardeditem: null });
 
     expect(guarded).toEqual([String(_id), String(_id)]);
+    expect(await Model.collection.findOne({ _id })).toEqual(record);
+  });
+});
+
+describe.skipIf(!mongoUri)('a supplied Mongoose model with write middleware', () => {
+  let schema;
+  let Model;
+  const hooked = [];
+
+  beforeAll(async () => {
+    const runtime = createRuntime(createMongoAdapter());
+    runtime.preventCreatingCollection(true);
+    const Info = new GraphQLObjectType({ name: 'MrWrittenInfo', fields: { note: { type: GraphQLString } } });
+    const Item = new GraphQLObjectType({
+      name: 'MrWrittenItem',
+      fields: () => ({
+        id: { type: GraphQLID },
+        title: { type: GraphQLString },
+        info: { type: Info, extensions: { relation: { embedded: true } } },
+      }),
+    });
+    const itemSchema = new mongoose.Schema({ title: String, info: { note: String } });
+    // Application write middleware that rewrites the filter before Mongoose casts it. Its read hooks
+    // are empty, so only the write hooks tell that the generated read must run first. The embedded
+    // field makes 3.5.9 read before a plain update, as it did before every delete.
+    for (const operation of ['findOneAndUpdate', 'findOneAndDelete']) {
+      itemSchema.pre(operation, function redirect() {
+        hooked.push(`${operation} ${String(this.getFilter()._id)}`);
+        this.setQuery({ _id: target });
+      });
+    }
+    Model = mongoose.model('MrWrittenItem', itemSchema);
+    runtime.addNoEndpointType(Info);
+    runtime.connect(Model, Item, 'mrwrittenitem', 'mrwrittenitems');
+    schema = runtime.createSchema();
+    await Model.createCollection();
+    await Model.init();
+  });
+  const target = new mongoose.Types.ObjectId();
+
+  test('rejects an invalid ID before the write middleware runs', async () => {
+    const record = { _id: target, title: 'kept', info: { note: 'n' } };
+    await Model.collection.insertOne(record);
+    const run = async (source) => {
+      const { data, errors } = await graphql({ schema, source: `mutation { ${source} { title } }` });
+      return { data, errors: errors?.map(({ message, extensions }) => ({ message, code: extensions.code, status: extensions.status })) };
+    };
+
+    const invalidId = { message: 'Invalid identifier', code: 'NOT_VALID_ID', status: 400 };
+    expect(await run('deletemrwrittenitem(id: "invalid")')).toEqual({ data: { deletemrwrittenitem: null }, errors: [invalidId] });
+    expect(await run('updatemrwrittenitem(input: { id: "invalid", title: "changed" })')).toEqual({ data: { updatemrwrittenitem: null }, errors: [invalidId] });
+
+    expect(hooked).toEqual([]);
+    expect(await Model.collection.findOne({ _id: target })).toEqual(record);
+  });
+});
+
+describe.skipIf(!mongoUri)('a supplied Mongoose model that overrides the by-ID statics', () => {
+  let schema;
+  let Model;
+  const calls = [];
+  const locked = new Set();
+
+  beforeAll(async () => {
+    const runtime = createRuntime(createMongoAdapter());
+    runtime.preventCreatingCollection(true);
+    const Info = new GraphQLObjectType({ name: 'MrStaticInfo', fields: { note: { type: GraphQLString } } });
+    const Item = new GraphQLObjectType({
+      name: 'MrStaticItem',
+      fields: () => ({
+        id: { type: GraphQLID },
+        title: { type: GraphQLString },
+        info: { type: Info, extensions: { relation: { embedded: true } } },
+      }),
+    });
+    const itemSchema = new mongoose.Schema({ title: String, info: { note: String }, slug: String });
+    // A read guard on findById, and writes that look a record up by slug when the ID is not an
+    // ObjectId. The embedded field makes 3.5.9 read before a plain update, as before every delete.
+    itemSchema.static('findById', function findById(id, ...rest) {
+      calls.push(`findById ${id}`);
+      if (locked.has(String(id))) throw new Error('record is locked');
+      return mongoose.Model.findById.call(this, id, ...rest);
+    });
+    for (const [byId, bySlug] of [['findByIdAndUpdate', 'findOneAndUpdate'], ['findByIdAndDelete', 'findOneAndDelete']]) {
+      itemSchema.static(byId, function write(id, ...rest) {
+        calls.push(`${byId} ${id}`);
+        return mongoose.isObjectIdOrHexString(id) ? mongoose.Model[byId].call(this, id, ...rest)
+          : mongoose.Model[bySlug].call(this, { slug: id }, ...rest);
+      });
+    }
+    Model = mongoose.model('MrStaticItem', itemSchema);
+    runtime.addNoEndpointType(Info);
+    runtime.connect(Model, Item, 'mrstaticitem', 'mrstaticitems');
+    schema = runtime.createSchema();
+    await Model.createCollection();
+    await Model.init();
+  });
+
+  const run = async (source) => {
+    const { data, errors } = await graphql({ schema, source: `mutation { ${source} { title } }` });
+    return { data, errors: errors?.map(({ message, extensions }) => ({ message, code: extensions.code, status: extensions.status })) };
+  };
+
+  test('runs the overridden read before a delete without onDelete and a plain update', async () => {
+    const _id = new mongoose.Types.ObjectId();
+    const record = { _id, title: 't', info: { note: 'n' } };
+    await Model.collection.insertOne(record);
+    locked.add(String(_id));
+    calls.length = 0;
+
+    const lockedError = { message: 'record is locked', code: undefined, status: undefined };
+    expect(await run(`updatemrstaticitem(input: { id: "${_id}", title: "changed" })`)).toEqual({ data: { updatemrstaticitem: null }, errors: [lockedError] });
+    expect(await run(`deletemrstaticitem(id: "${_id}")`)).toEqual({ data: { deletemrstaticitem: null }, errors: [lockedError] });
+    expect(calls).toEqual([`findById ${_id}`, `findById ${_id}`]);
+    expect(await Model.collection.findOne({ _id })).toEqual(record);
+  });
+
+  test('rejects an ID that is not an ObjectId before the overridden writes run', async () => {
+    const _id = new mongoose.Types.ObjectId();
+    const record = { _id, title: 'kept', info: { note: 'n' }, slug: 'my-slug' };
+    await Model.collection.insertOne(record);
+    calls.length = 0;
+
+    const invalidId = { message: 'Invalid identifier', code: 'NOT_VALID_ID', status: 400 };
+    expect(await run('updatemrstaticitem(input: { id: "my-slug", title: "changed" })')).toEqual({ data: { updatemrstaticitem: null }, errors: [invalidId] });
+    expect(await run('deletemrstaticitem(id: "my-slug")')).toEqual({ data: { deletemrstaticitem: null }, errors: [invalidId] });
+    expect(calls).toEqual(['findById my-slug', 'findById my-slug']);
     expect(await Model.collection.findOne({ _id })).toEqual(record);
   });
 });

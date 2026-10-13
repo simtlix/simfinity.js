@@ -39,16 +39,30 @@ const mapQueryIdCastErrors = (query, mapError = (error) => error) => {
 
 // Even a shared hook can branch on `this.op` or the filter shape. Preserve findOne semantics
 // whenever either query operation has hooks instead of inferring equivalence from function identity.
-const hasNoFindHooks = (hooks) => {
+const hasNoHooks = (hooks, operations) => {
   if (!(hooks?._pres instanceof Map) || !(hooks._posts instanceof Map)) return false;
-  return ['find', 'findOne'].every((operation) => !hooks._pres.get(operation)?.length
+  return operations.every((operation) => !hooks._pres.get(operation)?.length
     && !hooks._posts.get(operation)?.length);
 };
 
-// getById reads through `findOne` and getByIds through `find`. Mongoose copies the schema's query
-// hooks to the model when compiling it, so both registries must allow the batched read.
-const batchesFindOne = (Model) => hasNoFindHooks(Model.schema?.s?.hooks)
-  && (Model.Query?.prototype?._queryMiddleware == null || hasNoFindHooks(Model.Query.prototype._queryMiddleware));
+// Mongoose copies the schema's query hooks to the model when compiling it, so both registries must
+// be free of hooks for the operations.
+const hasNoQueryHooks = (Model, operations) => hasNoHooks(Model.schema?.s?.hooks, operations)
+  && (Model.Query?.prototype?._queryMiddleware == null || hasNoHooks(Model.Query.prototype._queryMiddleware, operations));
+
+// getById reads through `findOne` and getByIds through `find`.
+const batchesFindOne = (Model) => hasNoQueryHooks(Model, ['find', 'findOne']);
+
+// The statics that getById, update and delete call, directly or through each other.
+const BY_ID_STATICS = ['findById', 'findOne', 'findByIdAndUpdate', 'findOneAndUpdate', 'findByIdAndDelete', 'findOneAndDelete'];
+
+// update and delete write through findByIdAndUpdate and findByIdAndDelete, whose findOneAndUpdate and
+// findOneAndDelete middleware runs before Mongoose casts the ID. Such middleware, or an application
+// override of one of these statics (schema.static, loadClass), could guard the read or act on a
+// malformed ID that the read by ID rejects first, so the runtime keeps that read. A model from
+// another Mongoose copy has other statics and keeps it too.
+const readsByIdAreInert = (Model) => BY_ID_STATICS.every((name) => Model[name] === mongoose.Model[name])
+  && hasNoQueryHooks(Model, ['find', 'findOne', 'findOneAndUpdate', 'findOneAndDelete']);
 
 // `useDb()` connections share their parent's MongoClient, and a session belongs to a client.
 const clientOf = (connection) => connection.getClient?.() || connection;
@@ -272,10 +286,11 @@ export const createMongoAdapter = (options) => {
       // Trusted, so that the `sanitizeFilter` option does not wrap the operator in `$eq`.
       return Model.find({ _id: mongoose.trusted({ $in: ids }) });
     },
-    // Without `find` or `findOne` middleware, which can guard or count reads, a read by ID has no
-    // side effects, and a malformed ID fails the update or delete as it fails the read.
+    // Without middleware or overrides of the by-ID statics (see readsByIdAreInert), a read by ID has
+    // no side effects, and a malformed ID fails the update or delete before application code runs,
+    // as it fails the read.
     readByIdIsInert(Model) {
-      return batchesFindOne(Model);
+      return readsByIdAreInert(Model);
     },
     prepareUpdate(set, unset) {
       return Object.keys(unset).length > 0 ? { ...set, $unset: unset } : set;

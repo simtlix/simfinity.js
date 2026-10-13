@@ -304,14 +304,35 @@ describe('the MongoDB adapter reports reads by ID as inert', () => {
     return compiled;
   };
 
-  test('only for models without find or findOne query middleware, in both modes', () => {
+  test('only for models without find, findOne, findOneAndUpdate or findOneAndDelete query middleware or overrides of the by-ID statics, in both modes', () => {
     try {
-      const plain = model('MutationReadsPlain', (schema) => schema.pre('save', () => {}));
+      const plain = model('MutationReadsPlain', (schema) => {
+        schema.pre('save', () => {});
+        schema.pre('updateOne', () => {});
+        schema.pre('deleteOne', { document: false, query: true }, () => {});
+      });
       const guarded = [
         model('MutationReadsPreFindOne', (schema) => schema.pre('findOne', () => {})),
         model('MutationReadsPostFindOne', (schema) => schema.post('findOne', () => {})),
         model('MutationReadsPreFind', (schema) => schema.pre('find', () => {})),
+        model('MutationReadsPreFindOneAndUpdate', (schema) => schema.pre('findOneAndUpdate', () => {})),
+        model('MutationReadsPostFindOneAndUpdate', (schema) => schema.post('findOneAndUpdate', () => {})),
+        model('MutationReadsPreFindOneAndDelete', (schema) => schema.pre('findOneAndDelete', () => {})),
+        model('MutationReadsRegexWrite', (schema) => schema.pre(/^findOneAnd/, () => {})),
+        model('MutationReadsTimestamps', (schema) => schema.set('timestamps', true)),
+        model('MutationReadsStaticFindById', (schema) => schema.static('findById', function findById(...args) {
+          return mongoose.Model.findById.apply(this, args);
+        })),
+        model('MutationReadsClassFindOne', (schema) => schema.loadClass(class {
+          static findOne(...args) { return mongoose.Model.findOne.apply(this, args); }
+        })),
+        model('MutationReadsStaticDelete', (schema) => schema.static('findByIdAndDelete', function findByIdAndDelete(...args) {
+          return mongoose.Model.findByIdAndDelete.apply(this, args);
+        })),
       ];
+      const assigned = model('MutationReadsAssignedUpdate');
+      assigned.findByIdAndUpdate = (...args) => mongoose.Model.findByIdAndUpdate.apply(assigned, args);
+      guarded.push(assigned);
       for (const adapter of [createMongoAdapter(), createMongoAdapter({ referentialIntegrity: 'transactional' })]) {
         expect(adapter.readByIdIsInert(plain)).toBe(true);
         for (const Model of guarded) expect(adapter.readByIdIsInert(Model)).toBe(false);
