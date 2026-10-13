@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { bundleDurationMinutes, isBookable } from "./catalog";
+import {
+  bundleDurationMinutes,
+  isAllowedForBooking,
+  isBookable,
+  lineReference,
+  priceBookingLines,
+  storedLineMatcher,
+  storedLinePrice,
+  toggleServiceSelection,
+  type StoredLine,
+} from "./catalog";
 import { computeAvailableSlots, type BusinessHour } from "./slotUtils";
 
 const service = (durationMinutes: number | null) => ({ service: { durationMinutes } });
@@ -45,5 +55,103 @@ describe("isBookable", () => {
     expect(isBookable({})).toBe(true);
     expect(isBookable({ isActive: false })).toBe(false);
     expect(isBookable(undefined)).toBe(false);
+  });
+});
+
+const serviceLine = (id: string, price?: number | null): StoredLine => ({ service: { id }, bundle: null, price });
+const bundleLine = (id: string, price?: number | null): StoredLine => ({ service: null, bundle: { id }, price });
+
+describe("lineReference", () => {
+  it("names the service or bundle a line references, ignoring the case of its id", () => {
+    expect(lineReference({ service: { id: "A1" } })).toBe("service:a1");
+    expect(lineReference({ service: null, bundle: { id: "a1" } })).toBe("bundle:a1");
+  });
+});
+
+describe("storedLinePrice", () => {
+  it("reads a negative stored price as zero and a missing one as no price, as the API does", () => {
+    expect(storedLinePrice(serviceLine("a", 90))).toBe(90);
+    expect(storedLinePrice(serviceLine("a", -5))).toBe(0);
+    expect(storedLinePrice(serviceLine("a", null))).toBeUndefined();
+    expect(storedLinePrice(serviceLine("a"))).toBeUndefined();
+    expect(storedLinePrice(undefined)).toBeUndefined();
+  });
+});
+
+describe("storedLineMatcher", () => {
+  it("gives each line the first unused stored line with the same service or bundle", () => {
+    const take = storedLineMatcher([serviceLine("a", 10), bundleLine("a", 30), serviceLine("A", 20)]);
+    expect(take({ service: { id: "a" } })?.price).toBe(10);
+    expect(take({ service: { id: "a" } })?.price).toBe(20);
+    expect(take({ service: { id: "a" } })).toBeUndefined();
+    // A bundle and a service with the same id are different references.
+    expect(take({ bundle: { id: "a" } })?.price).toBe(30);
+    expect(take({ bundle: { id: "a" } })).toBeUndefined();
+  });
+
+  it("matches nothing for a new booking", () => {
+    expect(storedLineMatcher([])({ service: { id: "a" } })).toBeUndefined();
+    expect(storedLineMatcher(undefined)({ service: { id: "a" } })).toBeUndefined();
+  });
+});
+
+describe("priceBookingLines", () => {
+  it("keeps the price a moved booking was booked at when the service now costs another", () => {
+    // The booking was made at 90; the owner then set the service to 40. The API keeps 90.
+    expect(priceBookingLines([{ service: { id: "s1" }, catalogPrice: 40 }], [serviceLine("s1", 90)])).toEqual([90]);
+  });
+
+  it("keeps a bundle's booked price, discount included, and charges the catalog price for new lines", () => {
+    expect(priceBookingLines([{ bundle: { id: "b1" }, catalogPrice: 70 }], [bundleLine("b1", 50)])).toEqual([50]);
+    // A service the booking had only inside its bundle is a new line.
+    expect(priceBookingLines([{ service: { id: "s1" }, catalogPrice: 30 }, { service: { id: "s2" }, catalogPrice: 25 }], [bundleLine("b1", 50), serviceLine("s2", 20)])).toEqual([30, 20]);
+  });
+
+  it("prices one line per stored line, in any order, and the rest at the catalog price", () => {
+    const stored = [serviceLine("a", 10), serviceLine("b", 20), serviceLine("a", 15)];
+    expect(priceBookingLines([
+      { service: { id: "b" }, catalogPrice: 99 },
+      { service: { id: "a" }, catalogPrice: 99 },
+      { service: { id: "a" }, catalogPrice: 99 },
+      { service: { id: "a" }, catalogPrice: 99 },
+    ], stored)).toEqual([20, 10, 15, 99]);
+  });
+
+  it("counts a negative stored price as zero and takes the catalog price for a line stored without one", () => {
+    expect(priceBookingLines([{ service: { id: "a" }, catalogPrice: 40 }, { service: { id: "b" }, catalogPrice: 30 }], [serviceLine("a", -5), serviceLine("b", null)])).toEqual([0, 30]);
+  });
+
+  it("charges the catalog price, a negative or missing one as zero, on a new booking", () => {
+    expect(priceBookingLines([{ service: { id: "a" }, catalogPrice: 40 }, { bundle: { id: "b" }, catalogPrice: -3 }, { service: { id: "c" }, catalogPrice: Number.NaN }], [])).toEqual([40, 0, 0]);
+  });
+});
+
+describe("isAllowedForBooking", () => {
+  it("allows active items, and inactive ones only as lines of the booking being moved", () => {
+    expect(isAllowedForBooking({ isActive: true }, { service: { id: "a" } }, [])).toBe(true);
+    expect(isAllowedForBooking({ isActive: false }, { service: { id: "a" } }, [])).toBe(false);
+    expect(isAllowedForBooking({ isActive: false }, { service: { id: "a" } }, [serviceLine("A", 10)])).toBe(true);
+    expect(isAllowedForBooking({ isActive: false }, { bundle: { id: "b" } }, [bundleLine("b", 10)])).toBe(true);
+    expect(isAllowedForBooking(undefined, { service: { id: "a" } }, [serviceLine("a", 10)])).toBe(false);
+  });
+
+  it("does not allow an inactive service that the moved booking holds only inside its bundle", () => {
+    expect(isAllowedForBooking({ isActive: false }, { service: { id: "a" } }, [bundleLine("k", 15)])).toBe(false);
+    expect(isAllowedForBooking({ isActive: false }, { bundle: { id: "a" } }, [serviceLine("a", 15)])).toBe(false);
+  });
+});
+
+describe("toggleServiceSelection", () => {
+  const allowed = (ids: string[]) => (id: string) => ids.includes(id);
+
+  it("adds or removes the toggled service", () => {
+    expect([...toggleServiceSelection(new Set(["a"]), "b", allowed(["a", "b"]))]).toEqual(["a", "b"]);
+    expect([...toggleServiceSelection(new Set(["a", "b"]), "a", allowed(["a", "b"]))]).toEqual(["b"]);
+  });
+
+  it("drops a bundle's services that the booking may not hold on their own when the bundle is taken apart", () => {
+    // An active bundle lists inactive service A and active service B; unchecking B leaves nothing to book.
+    expect([...toggleServiceSelection(new Set(["a", "b"]), "b", allowed(["b"]))]).toEqual([]);
+    expect([...toggleServiceSelection(new Set(["a", "b"]), "c", allowed(["b", "c"]))]).toEqual(["b", "c"]);
   });
 });
