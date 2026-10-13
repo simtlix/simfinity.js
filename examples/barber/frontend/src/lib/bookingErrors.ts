@@ -1,6 +1,6 @@
 /*
- * Booking API rejections the booking page explains to the client. Keys live under "booking." in
- * public/i18n/es.json and en.json; the Spanish fallbacks match es.json.
+ * Booking API rejections the booking pages explain to the client or the shop. Keys live under
+ * "booking." in public/i18n/es.json and en.json; the Spanish fallbacks match es.json.
  */
 
 export type BookingMessage = { key: string; fallback: string };
@@ -25,6 +25,11 @@ export const BOOKING_ERRORS: Record<string, BookingMessage> = {
   },
   BOOKING_SCHEDULE_BUSY: SCHEDULE_BUSY,
   TRANSACTION_RETRY_EXCEEDED: SCHEDULE_BUSY,
+  // A line names a service or bundle of another shop, an inactive one, or a price the API rejects.
+  INVALID_BOOKING_LINE: {
+    key: "errors.invalidLine",
+    fallback: "Alguno de los servicios o paquetes elegidos no está disponible en esta barbería. Revisá la selección.",
+  },
 };
 
 export const BOOKING_FAILED: BookingMessage = { key: "bookingFailed", fallback: "No se pudo confirmar la reserva." };

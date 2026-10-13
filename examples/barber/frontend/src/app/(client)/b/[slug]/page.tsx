@@ -10,6 +10,7 @@ import { StarRating } from "@/components/shared/data";
 import { MapView } from "@/components/shared/maps";
 import { buttonVariants } from "@/components/shared/ui";
 import { cn } from "@/lib/cn";
+import { bundleDurationMinutes, isBookable } from "@/lib/catalog";
 
 type Address = {
   street?: string | null;
@@ -62,6 +63,7 @@ type Service = {
   price?: number | null;
   durationMinutes?: number | null;
   imageUrl?: string | null;
+  isActive?: boolean | null;
   category?: { id: string; name: string } | null;
 };
 
@@ -79,7 +81,8 @@ type Bundle = {
   description?: string | null;
   price?: number | null;
   totalDurationMinutes?: number | null;
-  services?: { service?: { id: string; name: string } | null }[] | null;
+  isActive?: boolean | null;
+  services?: { service?: { id: string; name: string; durationMinutes?: number | null } | null }[] | null;
 };
 
 type Review = {
@@ -102,9 +105,9 @@ const BARBERSHOP_FIELDS =
   "address { street number city state zip country } " +
   "contactInfo { phone email whatsapp instagramUrl facebookUrl } " +
   "businessHours { dayOfWeek openTime closeTime isClosed } " +
-  "services { id name description price durationMinutes imageUrl category { id name } } " +
+  "services { id name description price durationMinutes imageUrl isActive category { id name } } " +
   "professionals { id name bio photoUrl services { service { id name } } } " +
-  "bundles { id name description price totalDurationMinutes services { service { id name } } } " +
+  "bundles { id name description price totalDurationMinutes isActive services { service { id name durationMinutes } } } " +
   "reviews { id rating comment createdAt client { id name email } }";
 
 function formatAddress(addr?: Address | null): string {
@@ -128,6 +131,15 @@ function ProfileSkeleton() {
 }
 
 /* ─── Tab Content Components ─── */
+
+/** Shown instead of the booking link for an inactive service or bundle, which clients cannot book. */
+function UnavailableTag({ t }: { t: (key: string, fallback?: string) => string }) {
+  return (
+    <span className="px-6 py-2.5 rounded-lg text-sm font-semibold text-on-surface/40 border border-outline-variant/10">
+      {t("unavailable", "No disponible")}
+    </span>
+  );
+}
 
 function ServicesContent({
   services,
@@ -219,12 +231,16 @@ function ServicesContent({
                   })}
                 </span>
               )}
-              <Link
-                href={`/book?barbershop=${shopId}&service=${svc.id}`}
-                className="bg-surface-container-highest text-on-surface px-6 py-2.5 rounded-lg text-sm font-semibold border border-outline-variant/20 hover:bg-primary hover:text-on-primary transition-all"
-              >
-                {t("book", "Agendar")}
-              </Link>
+              {isBookable(svc) ? (
+                <Link
+                  href={`/book?barbershop=${shopId}&service=${svc.id}`}
+                  className="bg-surface-container-highest text-on-surface px-6 py-2.5 rounded-lg text-sm font-semibold border border-outline-variant/20 hover:bg-primary hover:text-on-primary transition-all"
+                >
+                  {t("book", "Agendar")}
+                </Link>
+              ) : (
+                <UnavailableTag t={t} />
+              )}
             </div>
           </div>
         ))}
@@ -329,7 +345,7 @@ function BundlesContent({
               <div className="flex flex-wrap gap-1.5">
                 {b.services.map((item, i) => (
                   <span
-                    key={item.service?.id ?? i}
+                    key={`${item.service?.id ?? "missing"}-${i}`}
                     className="px-2.5 py-0.5 bg-primary/10 rounded-full text-xs font-semibold text-primary"
                   >
                     {item.service?.name ?? "Servicio"}
@@ -337,9 +353,9 @@ function BundlesContent({
                 ))}
               </div>
             )}
-            {b.totalDurationMinutes != null && (
+            {(b.services?.length || b.totalDurationMinutes != null) && (
               <p className="text-xs text-outline">
-                {b.totalDurationMinutes} min en total
+                {bundleDurationMinutes(b)} min en total
               </p>
             )}
           </div>
@@ -347,12 +363,16 @@ function BundlesContent({
             <span className="text-xl font-headline text-primary font-bold">
               ${b.price?.toLocaleString("es-AR", { minimumFractionDigits: 2 }) ?? "—"}
             </span>
-            <Link
-              href={`/book?barbershop=${shopId}&bundle=${b.id}`}
-              className="bg-surface-container-highest text-on-surface px-6 py-2.5 rounded-lg text-sm font-semibold border border-outline-variant/20 hover:bg-primary hover:text-on-primary transition-all"
-            >
-              {t("book", "Agendar")}
-            </Link>
+            {isBookable(b) ? (
+              <Link
+                href={`/book?barbershop=${shopId}&bundle=${b.id}`}
+                className="bg-surface-container-highest text-on-surface px-6 py-2.5 rounded-lg text-sm font-semibold border border-outline-variant/20 hover:bg-primary hover:text-on-primary transition-all"
+              >
+                {t("book", "Agendar")}
+              </Link>
+            ) : (
+              <UnavailableTag t={t} />
+            )}
           </div>
         </div>
       ))}

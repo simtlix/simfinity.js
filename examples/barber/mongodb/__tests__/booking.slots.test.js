@@ -15,7 +15,7 @@ vi.mock('@simtlix/simfinity-js', () => ({
   registerMutation: vi.fn(),
 }));
 
-vi.mock('../auth/permissions.js', () => ({ hasAnyRole: () => false }));
+vi.mock('../auth/permissions.js', () => ({ hasAnyRole: (context, roles) => roles.some((role) => context?.user?.roles?.includes(role)) }));
 
 const simfinity = await import('@simtlix/simfinity-js');
 const { bookingController, findSlotHoldingBookings } = await import('../types/booking.controller.js');
@@ -45,11 +45,11 @@ beforeEach(() => {
   calls = [];
   data = {
     barbershop: [{
-      _id: SHOP, state: 'APPROVED', timezone: 'America/Argentina/Buenos_Aires', bufferMinutes: 0, minAdvanceHours: 1, maxAdvanceDays: 30, businessHours: hours,
-    }, { _id: 'other-shop', state: 'APPROVED' }],
+      _id: SHOP, owner: 'owner', state: 'APPROVED', timezone: 'America/Argentina/Buenos_Aires', bufferMinutes: 0, minAdvanceHours: 1, maxAdvanceDays: 30, businessHours: hours,
+    }, { _id: 'other-shop', owner: 'other-owner', state: 'APPROVED' }],
     professional: [{ _id: 'p1', barbershop: SHOP }, { _id: 'p2', barbershop: SHOP }, { _id: 'foreign', barbershop: 'other-shop' }],
-    service: [{ _id: 'cut', durationMinutes: 30 }, { _id: 'color', durationMinutes: 60 }],
-    bundle: [{ _id: 'combo', totalDurationMinutes: 90 }],
+    service: [{ _id: 'cut', barbershop: SHOP, price: 25, durationMinutes: 30 }, { _id: 'color', barbershop: SHOP, price: 40, durationMinutes: 60 }],
+    bundle: [{ _id: 'combo', barbershop: SHOP, price: 50, totalDurationMinutes: 90 }],
     booking: [
       { _id: 'held', barbershop: SHOP, professional: 'p1', scheduledDate: '2026-10-02', startTime: '10:00', endTime: '10:30', state: 'CONFIRMED', lines: [{ service: 'cut', durationMinutes: 30 }] },
       { _id: 'cancelled', barbershop: SHOP, professional: 'p1', scheduledDate: '2026-10-02', startTime: '15:00', endTime: '15:30', state: 'CANCELLED_BY_CLIENT' },
@@ -67,9 +67,13 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 const session = { id: 'session' };
-const create = (input) => {
+const CLIENT = { user: { id: 'client', roles: ['CLIENT'] } };
+const ADMIN = { user: { id: 'admin', roles: ['PLATFORM_ADMIN'] } };
+const OWNER = { user: { id: 'owner', roles: ['OWNER'] } };
+const OTHER_OWNER = { user: { id: 'other-owner', roles: ['OWNER'] } };
+const create = (input, context = CLIENT) => {
   const doc = { _id: 'new', barbershop: SHOP, professional: 'p2', scheduledDate: '2026-10-02', startTime: '10:00', state: 'CONFIRMED', lines: [{ service: 'cut', price: 25, durationMinutes: 30 }], ...input };
-  return bookingController.onSaving(doc, { barbershop: { id: doc.barbershop } }, session, { user: { id: 'client', roles: ['CLIENT'] } }).then(() => doc);
+  return bookingController.onSaving(doc, { barbershop: { id: doc.barbershop } }, session, context).then(() => doc);
 };
 const rejection = (promise) => promise.then(() => null, (error) => error.extensions?.code ?? error.message);
 
@@ -90,17 +94,24 @@ describe('booking create slot validation', () => {
     expect(await rejection(create({ professional: 'p2', startTime: '16:00' }))).toBe('BOOKING_SLOT_UNAVAILABLE');
   });
 
-  it('derives durations and endTime from the catalog instead of client durations', async () => {
+  it('derives durations, prices and endTime from the catalog instead of client values', async () => {
     expect(await rejection(create({ professional: 'p1', startTime: '09:45', lines: [{ service: 'cut', price: 25, durationMinutes: 0 }] }))).toBe('BOOKING_SLOT_UNAVAILABLE');
     const doc = await create({ startTime: '14:00', lines: [{ service: 'cut', price: 1, durationMinutes: 5 }, { bundle: 'combo', price: 2, durationMinutes: 5 }] });
     expect(doc.lines.map((line) => line.durationMinutes)).toEqual([30, 90]);
+    expect(doc.lines.map((line) => line.price)).toEqual([25, 50]);
     expect(doc.endTime).toBe('16:00');
-    expect(doc.totalPrice).toBe(3);
+    expect(doc.totalPrice).toBe(75);
   });
 
-  it('keeps the captured duration of lines whose reference does not resolve', async () => {
-    const doc = await create({ startTime: '14:00', lines: [{ service: 'missing', price: 1, durationMinutes: 45 }, { bundle: 'missing', price: 2, durationMinutes: 15 }] });
-    expect(doc.endTime).toBe('15:00');
+  it("keeps the captured duration and price of unresolved lines only for the shop's owner or an admin", async () => {
+    const lines = () => [{ service: 'missing', price: 1, durationMinutes: 45 }, { bundle: 'missing', price: 2, durationMinutes: 15 }];
+    expect(await rejection(create({ startTime: '14:00', lines: lines() }))).toBe('INVALID_BOOKING_LINE');
+    expect(await rejection(create({ startTime: '14:00', lines: lines() }, OTHER_OWNER))).toBe('INVALID_BOOKING_LINE');
+    for (const context of [OWNER, ADMIN]) {
+      const doc = await create({ startTime: '14:00', lines: lines() }, context);
+      expect(doc.endTime).toBe('15:00');
+      expect(doc.totalPrice).toBe(3);
+    }
   });
 
   it('rejects lines without exactly one reference or with negative durations before checking the slot', async () => {
@@ -252,7 +263,8 @@ describe('booking update slot validation', () => {
       expect(changes.endTime).toBe('10:30');
     }
     const unset = await update('held', { id: 'held', $unset: { endTime: '' } });
-    expect(unset).toEqual({ id: 'held', endTime: '10:30' });
+    // Every update also stores the total derived from the stored lines, which have no price here.
+    expect(unset).toEqual({ id: 'held', endTime: '10:30', totalPrice: 0 });
     await expect(update('mine', { id: 'mine', startTime: '11:15', endTime: '11:15' })).resolves.toMatchObject({ endTime: '11:45' });
     // An endTime-only update does not move the booking, so nothing is rechecked or locked.
     expect(calls.filter((call) => call.lock && call.filter._id === 'p1').length).toBe(1);
@@ -260,7 +272,7 @@ describe('booking update slot validation', () => {
 
   it('keeps derived totals when the client also unsets them', async () => {
     const changes = await update('mine', { id: 'mine', lines: [{ service: 'cut', price: 5 }], $unset: { totalPrice: '', endTime: '' } });
-    expect(changes).toMatchObject({ totalPrice: 5, endTime: '11:30' });
+    expect(changes).toMatchObject({ totalPrice: 25, endTime: '11:30' });
     expect(changes.$unset).toBeUndefined();
     const other = await update('mine', { id: 'mine', lines: [{ service: 'cut', price: 5 }], $unset: { notes: '', endTime: '' } });
     expect(other.$unset).toEqual({ notes: '' });

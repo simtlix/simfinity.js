@@ -33,9 +33,12 @@ const bundleType = new GraphQLObjectType({
     },
     totalDurationMinutes: {
       type: GraphQLInt,
-      description: 'Computed total duration in minutes, summed from the included services.',
+      description: 'Total duration in minutes, summed by the API from the included services (a service listed twice counts twice) and updated when one of them changes its duration or is deleted. Only a bundle without services keeps a value sent in a mutation.',
     },
-    isActive: { type: GraphQLBoolean, description: 'Whether the bundle is currently bookable.' },
+    isActive: {
+      type: GraphQLBoolean,
+      description: "Whether clients can book the bundle. Only the barbershop's owner or a platform admin adds an inactive bundle to a booking; a booking that already has it keeps it.",
+    },
     barbershop: {
       type: simfinity.getType('barbershop'),
       description: 'The barbershop that offers this bundle.',
@@ -43,7 +46,7 @@ const bundleType = new GraphQLObjectType({
     },
     services: {
       type: new GraphQLList(bundleItemType),
-      description: 'The services included in this bundle.',
+      description: "The services included in this bundle; each must be a service of the bundle's barbershop and may be listed more than once.",
       extensions: { relation: { embedded: true } },
     },
   }),

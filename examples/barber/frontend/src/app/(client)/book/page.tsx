@@ -16,6 +16,16 @@ import {
 } from "@/lib/slotUtils";
 import { ORIGINAL_KEPT, SLOT_ERROR_CODES, bookingErrorCode, bookingErrorMessage } from "@/lib/bookingErrors";
 import {
+  bundleDurationMinutes,
+  isAllowedForBooking,
+  isBookable,
+  priceBookingLines,
+  toggleServiceSelection,
+  type BundleDurationSource,
+  type LineReference,
+  type StoredLine,
+} from "@/lib/catalog";
+import {
   StepIndicator,
   ServiceSelectionCard,
   CalendarPicker,
@@ -54,6 +64,7 @@ type ServiceData = {
   duration: number;
   price: number;
   category?: string;
+  isActive: boolean;
 };
 
 type BundleData = {
@@ -61,8 +72,18 @@ type BundleData = {
   name: string;
   description?: string;
   price: number;
-  totalDurationMinutes: number;
+  /** What a booking of the bundle holds: the sum of its current services, as the API derives it. */
+  durationMinutes: number;
+  isActive: boolean;
   services?: { service?: { id: string; name: string } }[];
+};
+
+/** A line the page sends, at the price the API stores for it. */
+type BookingLine = {
+  service?: { id: string };
+  bundle?: { id: string };
+  price: number;
+  durationMinutes: number;
 };
 
 type ProfessionalData = {
@@ -122,6 +143,8 @@ function BookingFlow() {
   const [availabilityVersion, setAvailabilityVersion] = useState(0);
   // A confirmed booking of this shop being rescheduled; the action rechecks its current state.
   const [rescheduleTarget, setRescheduleTarget] = useState<string | null>(null);
+  // The lines of that booking with the prices they were booked at; empty for a new booking.
+  const [storedLines, setStoredLines] = useState<StoredLine[]>([]);
   const [slotsLoading, setSlotsLoading] = useState(false);
 
   useEffect(() => {
@@ -133,7 +156,7 @@ function BookingFlow() {
         const shop = (await client.getById(
           "barbershop",
           barbershopId,
-          `id name slug timezone slotDurationMinutes bufferMinutes minAdvanceHours maxAdvanceDays ${HOURS_FIELDS} services { id name description durationMinutes price category { name } } bundles { id name description price totalDurationMinutes services { service { id name } } } professionals { id name bio photoUrl isActive ${HOURS_FIELDS} }`,
+          `id name slug timezone slotDurationMinutes bufferMinutes minAdvanceHours maxAdvanceDays ${HOURS_FIELDS} services { id name description durationMinutes price isActive category { name } } bundles { id name description price totalDurationMinutes isActive services { service { id name durationMinutes } } } professionals { id name bio photoUrl isActive ${HOURS_FIELDS} }`,
         )) as Record<string, unknown> | null;
 
         if (cancelled) return;
@@ -149,6 +172,7 @@ function BookingFlow() {
             category: (s.category as Record<string, unknown>)?.name
               ? String((s.category as Record<string, unknown>).name)
               : undefined,
+            isActive: s.isActive !== false,
           }));
           setServices(mappedServices);
 
@@ -158,7 +182,8 @@ function BookingFlow() {
             name: String(b.name ?? ""),
             description: b.description ? String(b.description) : undefined,
             price: Number(b.price ?? 0),
-            totalDurationMinutes: Number(b.totalDurationMinutes ?? 0),
+            durationMinutes: bundleDurationMinutes(b as BundleDurationSource),
+            isActive: b.isActive !== false,
             services: ((b.services ?? []) as Record<string, unknown>[]).map((bs) => {
               const svc = bs.service as Record<string, unknown> | null;
               return {
@@ -180,43 +205,72 @@ function BookingFlow() {
               })),
           );
 
-          if (bundleParam && !cancelled) {
-            setSelectedBundleId(bundleParam);
-            const autoBundle = mappedBundles.find((b) => b.id === bundleParam);
-            if (autoBundle) {
-              const svcIds = new Set(
-                (autoBundle.services ?? [])
-                  .map((s) => s.service?.id)
-                  .filter((id): id is string => id != null),
-              );
-              setSelectedServiceIds(svcIds);
-            }
-          }
+          const selectBundle = (bundle: BundleData) => {
+            setSelectedBundleId(bundle.id);
+            setSelectedServiceIds(new Set(
+              (bundle.services ?? [])
+                .map((s) => s.service?.id)
+                .filter((id): id is string => id != null),
+            ));
+          };
+
+          // A link preselects a bundle only while clients can book it (the API refuses inactive ones).
+          const autoBundle = bundleParam ? mappedBundles.find((b) => b.id === bundleParam) : undefined;
+          if (autoBundle && isBookable(autoBundle) && !cancelled) selectBundle(autoBundle);
 
           if (rescheduleId) {
             try {
               const booking = (await client.getById(
                 "booking",
                 rescheduleId,
-                "id state barbershop { id } lines { service { id } price durationMinutes } professional { id }",
+                "id state barbershop { id } lines { service { id } bundle { id } price durationMinutes } professional { id }",
               )) as Record<string, unknown> | null;
 
               if (!cancelled && booking) {
                 // Any other booking only prefills the form, and confirming books a new appointment.
                 const bookingShopId = (booking.barbershop as { id?: string } | null)?.id;
-                if (booking.state === "CONFIRMED" && bookingShopId != null && String(bookingShopId) === String(shop.id)) {
-                  setRescheduleTarget(String(booking.id));
-                }
+                const moving = booking.state === "CONFIRMED" && bookingShopId != null && String(bookingShopId) === String(shop.id);
+                if (moving) setRescheduleTarget(String(booking.id));
                 const lines = (booking.lines ?? []) as Record<string, unknown>[];
-                const serviceIds = new Set(
-                  lines
-                    .map((l) => {
-                      const svc = l.service as Record<string, unknown> | null;
-                      return svc?.id ? String(svc.id) : null;
+                const refId = (line: Record<string, unknown>, field: "service" | "bundle") => {
+                  const ref = line[field] as Record<string, unknown> | null;
+                  return ref?.id ? String(ref.id) : null;
+                };
+                const lineIds = (field: "service" | "bundle") =>
+                  lines.map((l) => refId(l, field)).filter((id): id is string => id !== null);
+                // The API keeps the price of a line whose service or bundle the booking being moved already
+                // had, and lets a client keep one that is no longer offered. A booking that only prefills
+                // the form books a new appointment, which has no stored lines.
+                const stored: StoredLine[] = moving
+                  ? lines.map((l) => {
+                      const serviceId = refId(l, "service");
+                      const lineBundleId = refId(l, "bundle");
+                      return {
+                        service: serviceId ? { id: serviceId } : null,
+                        bundle: lineBundleId ? { id: lineBundleId } : null,
+                        price: l.price == null ? null : Number(l.price),
+                      };
                     })
-                    .filter((id): id is string => id !== null),
-                );
-                setSelectedServiceIds(serviceIds);
+                  : [];
+                setStoredLines(stored);
+                // The booking being moved keeps its services and bundle even when they are no longer
+                // offered (isAllowedForBooking); a new booking takes only active ones.
+                const serviceIds = new Set(lineIds("service").filter((id) =>
+                  isAllowedForBooking(mappedServices.find((s) => s.id === id), { service: { id } }, stored)));
+                // A booking of one bundle selects it; other bookings keep their services.
+                const [bundleId, ...otherBundles] = lineIds("bundle");
+                const bundleLine = otherBundles.length === 0 && lineIds("service").length === 0
+                  ? mappedBundles.find((b) => b.id === bundleId)
+                  : undefined;
+                const keptBundle = bundleLine && isAllowedForBooking(bundleLine, { bundle: { id: bundleLine.id } }, stored)
+                  ? bundleLine
+                  : undefined;
+                if (keptBundle) {
+                  selectBundle(keptBundle);
+                } else {
+                  setSelectedBundleId(null);
+                  setSelectedServiceIds(serviceIds);
+                }
 
                 const pro = booking.professional as Record<string, unknown> | null;
                 if (pro?.id) setSelectedProfessionalId(String(pro.id));
@@ -317,16 +371,40 @@ function BookingFlow() {
     setBookingError(null);
   }, []);
 
+  // What a listed service or bundle costs on this booking: one the booking being moved already has keeps
+  // the price it was booked at, as the API stores it; anything else costs its catalog price.
+  const priceOnBooking = useCallback(
+    (reference: LineReference, catalogPrice: number) => priceBookingLines([{ ...reference, catalogPrice }], storedLines)[0],
+    [storedLines],
+  );
+
+  // Clients book active services and bundles only. One that is no longer offered stays listed only as a
+  // line of the booking being moved: the API keeps it when the booking's lines are resent.
+  const bookableServices = useMemo(
+    () =>
+      services
+        .filter((s) => isAllowedForBooking(s, { service: { id: s.id } }, storedLines))
+        .map((s) => ({ ...s, price: priceOnBooking({ service: { id: s.id } }, s.price) })),
+    [services, storedLines, priceOnBooking],
+  );
+
+  const bookableBundles = useMemo(
+    () =>
+      bundles
+        .filter((b) => isAllowedForBooking(b, { bundle: { id: b.id } }, storedLines))
+        .map((b) => ({ ...b, price: priceOnBooking({ bundle: { id: b.id } }, b.price) })),
+    [bundles, storedLines, priceOnBooking],
+  );
+
+  const bookableServiceIds = useMemo(() => new Set(bookableServices.map((s) => s.id)), [bookableServices]);
+
+  // Toggling a service takes a selected bundle apart: its services stay selected only where they are listed,
+  // since a bundle can include a service that the booking may not hold as a line of its own.
   const toggleService = useCallback((id: string) => {
     if (selectedBundleId) setSelectedBundleId(null);
     setSelectedTime(null);
-    setSelectedServiceIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, [selectedBundleId]);
+    setSelectedServiceIds((prev) => toggleServiceSelection(prev, id, (serviceId) => bookableServiceIds.has(serviceId)));
+  }, [bookableServiceIds, selectedBundleId]);
 
   const toggleBundle = useCallback(
     (bundleId: string) => {
@@ -360,18 +438,31 @@ function BookingFlow() {
     [bundles, selectedBundleId],
   );
 
-  const totalPrice = useMemo(
-    () =>
-      selectedBundle
-        ? selectedBundle.price
-        : selectedServices.reduce((sum, s) => sum + s.price, 0),
-    [selectedBundle, selectedServices],
+  // The lines to send, priced as the API stores them for a client (priceBookingLines): the booking being
+  // moved keeps the price of the services or bundle it already had. The page sends that price, which the
+  // shop's owner and admins may set and the API keeps for them too.
+  const bookingLines = useMemo<BookingLine[]>(() => {
+    if (selectedBundle) {
+      const [price] = priceBookingLines([{ bundle: { id: selectedBundle.id }, catalogPrice: selectedBundle.price }], storedLines);
+      return [{ bundle: { id: selectedBundle.id }, price, durationMinutes: selectedBundle.durationMinutes }];
+    }
+    const prices = priceBookingLines(selectedServices.map((s) => ({ service: { id: s.id }, catalogPrice: s.price })), storedLines);
+    return selectedServices.map((s, index) => ({ service: { id: s.id }, price: prices[index], durationMinutes: s.duration }));
+  }, [selectedBundle, selectedServices, storedLines]);
+
+  const totalPrice = useMemo(() => bookingLines.reduce((sum, line) => sum + line.price, 0), [bookingLines]);
+
+  // The review lists each service at its line's price; a bundle's services show their own prices.
+  const reviewServices = useMemo(
+    () => (selectedBundle ? selectedServices : selectedServices.map((s, index) => ({ ...s, price: bookingLines[index]?.price ?? s.price }))),
+    [bookingLines, selectedBundle, selectedServices],
   );
 
+  // A bundle lasts as long as its current services, as the API counts it, so the times offered fit.
   const totalDuration = useMemo(
     () =>
       selectedBundle
-        ? selectedBundle.totalDurationMinutes
+        ? selectedBundle.durationMinutes
         : selectedServices.reduce((sum, s) => sum + s.duration, 0),
     [selectedBundle, selectedServices],
   );
@@ -425,25 +516,10 @@ function BookingFlow() {
     try {
       const proId = selectedProfessionalId === NO_PREFERENCE_ID ? null : selectedProfessionalId;
 
-      const lines =
-        selectedBundle
-          ? [
-              {
-                bundle: { id: selectedBundle.id },
-                price: selectedBundle.price,
-                durationMinutes: selectedBundle.totalDurationMinutes,
-              },
-            ]
-          : selectedServices.map((s) => ({
-              service: { id: s.id },
-              price: s.price,
-              durationMinutes: s.duration,
-            }));
-
       const payload: Record<string, unknown> = {
         scheduledDate: format(selectedDate, "yyyy-MM-dd"),
         startTime: selectedTime,
-        lines,
+        lines: bookingLines,
       };
       if (notes.trim()) payload.notes = notes.trim();
 
@@ -478,7 +554,7 @@ function BookingFlow() {
         setStep("time");
       }
     }
-  }, [barbershop, client, notes, rescheduleTarget, selectedBundle, selectedDate, selectedProfessionalId, selectedServices, selectedTime, setStep, t]);
+  }, [barbershop, bookingLines, client, notes, rescheduleTarget, selectedDate, selectedProfessionalId, selectedTime, setStep, t]);
 
   if (loading) {
     return (
@@ -591,8 +667,8 @@ function BookingFlow() {
         <div className="flex-1 px-8 lg:px-16 py-8 overflow-y-auto w-full max-w-4xl">
           {currentStep === "services" && (
             <StepServices
-              services={services}
-              bundles={bundles}
+              services={bookableServices}
+              bundles={bookableBundles}
               selectedIds={selectedServiceIds}
               selectedBundleId={selectedBundleId}
               onToggle={toggleService}
@@ -630,7 +706,7 @@ function BookingFlow() {
           {currentStep === "review" && (
             <BookingReviewStep
               barbershopName={barbershop?.name ?? ""}
-              services={selectedServices}
+              services={reviewServices}
               professional={
                 selectedProfessionalId === NO_PREFERENCE_ID
                   ? t("noPreference", "Sin preferencia")
@@ -642,6 +718,7 @@ function BookingFlow() {
                   : undefined
               }
               time={selectedTime ?? undefined}
+              durationMinutes={totalDuration}
               totalPrice={totalPrice}
               notes={notes}
               onNotesChange={setNotes}
@@ -826,7 +903,7 @@ function StepServices({
                     </span>
                     <span className="text-on-surface/30">/</span>
                     <span className="text-xs uppercase tracking-widest text-on-surface/50">
-                      {bundle.totalDurationMinutes} min
+                      {bundle.durationMinutes} min
                     </span>
                   </div>
                   {bundle.services && bundle.services.length > 0 && (
@@ -835,10 +912,10 @@ function StepServices({
                         {t("flow.bundleIncludes", "Incluye")}
                       </p>
                       <div className="flex flex-wrap gap-1.5">
-                        {bundle.services.map((bs) =>
+                        {bundle.services.map((bs, index) =>
                           bs.service ? (
                             <span
-                              key={bs.service.id}
+                              key={`${bs.service.id}-${index}`}
                               className="px-2 py-0.5 rounded-full bg-primary/10 text-primary text-[10px] font-medium"
                             >
                               {bs.service.name}

@@ -3,6 +3,7 @@ import * as graphql from 'graphql';
 import * as simfinity from '@simtlix/simfinity-js';
 import { scalars } from '@simtlix/simfinity-js';
 import { serviceScopes } from './service.scopes.js';
+import { serviceController } from './service.controller.js';
 
 const {
   GraphQLObjectType,
@@ -41,9 +42,15 @@ const serviceType = new GraphQLObjectType({
       type: PriceTypeEnum,
       description: 'How the price is presented: FIXED (exact price) or STARTING_AT (minimum, may vary).',
     },
-    durationMinutes: { type: GraphQLInt, description: 'Estimated duration of the service in minutes.' },
+    durationMinutes: {
+      type: GraphQLInt,
+      description: 'Estimated duration of the service in minutes. The API keeps the totalDurationMinutes of the bundles that list the service up to date when it changes.',
+    },
     imageUrl: { type: GraphQLString, description: 'URL of an illustrative image for the service.' },
-    isActive: { type: GraphQLBoolean, description: 'Whether the service is currently bookable.' },
+    isActive: {
+      type: GraphQLBoolean,
+      description: "Whether clients can book the service. Only the barbershop's owner or a platform admin adds an inactive service to a booking; a booking that already has it keeps it.",
+    },
     sortOrder: { type: GraphQLInt, description: 'Display order within its category (lower shows first).' },
     barbershop: {
       type: simfinity.getType('barbershop'),
@@ -59,4 +66,4 @@ const serviceType = new GraphQLObjectType({
 });
 
 export default serviceType;
-simfinity.connect(null, serviceType, 'service', 'services', protect('service'), null, null);
+simfinity.connect(null, serviceType, 'service', 'services', protect('service', serviceController), null, null);

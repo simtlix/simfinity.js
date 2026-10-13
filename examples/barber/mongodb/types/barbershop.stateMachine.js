@@ -13,6 +13,15 @@ export const BarbershopStateEnum = new GraphQLEnumType({
   },
 });
 
+/**
+ * A shop that leaves REJECTED drops the admin's rejection note, so the reason is never readable once
+ * the shop is public again. Simfinity runs a state-machine action before it writes the new state, and
+ * `null` clears the stored value.
+ */
+export function clearRejectionReason(args) {
+  args.rejectionReason = null;
+}
+
 export const barbershopStateMachine = {
   initialState: BarbershopStateEnum.getValue('DRAFT'),
   actions: {
@@ -24,15 +33,18 @@ export const barbershopStateMachine = {
     },
     resubmit: {
       description:
-        'Resubmit a previously REJECTED barbershop for another review (REJECTED -> PENDING_REVIEW). Performed by the owner after addressing the rejection reason.',
+        'Resubmit a previously REJECTED barbershop for another review (REJECTED -> PENDING_REVIEW). Performed by the owner after addressing the rejection reason; clears rejectionReason.',
       from: BarbershopStateEnum.getValue('REJECTED'),
       to: BarbershopStateEnum.getValue('PENDING_REVIEW'),
+      action: clearRejectionReason,
     },
     approve: {
       description:
-        'Approve a barbershop under review, making it publicly visible to clients (PENDING_REVIEW -> APPROVED). Platform admin only.',
+        'Approve a barbershop under review, making it publicly visible to clients (PENDING_REVIEW -> APPROVED). Platform admin only; clears rejectionReason.',
       from: BarbershopStateEnum.getValue('PENDING_REVIEW'),
       to: BarbershopStateEnum.getValue('APPROVED'),
+      // Also covers shops resubmitted before resubmit started clearing the reason.
+      action: clearRejectionReason,
     },
     reject: {
       description:

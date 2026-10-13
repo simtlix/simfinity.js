@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { after, before, test } from 'node:test';
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { graphql } from 'graphql';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import * as simfinity from '@simtlix/simfinity-js';
 
 const databaseName = `barber_test_${randomUUID().replaceAll('-', '')}`;
@@ -11,6 +18,7 @@ uri.pathname = `/${databaseName}`;
 process.env.MONGO = uri.toString();
 const { schema, initializeApplication } = await import('../application.js');
 const { closeDatabase } = await import('../database.js');
+const { resolveMcpUserContext, resolveUserContext } = await import('../auth/context.js');
 const model = (name) => simfinity.getModel(simfinity.getType(name));
 let context;
 let user;
@@ -157,6 +165,16 @@ for (const cleared of [[], null]) {
   });
 }
 
+test('every booking update stores the total of the stored lines, correcting a total an earlier version stored', async () => {
+  const { shop, service } = await fixture();
+  const created = await booking(shop, service);
+  // Earlier versions let a client write totalPrice; the next update, a transition included, corrects it (#61).
+  await model('booking').updateOne({ _id: created.id }, { totalPrice: 0 });
+  const cancelled = await mutation('cancelbyclient_booking', { id: created.id }, 'state totalPrice');
+  assert.deepEqual({ ...cancelled }, { state: 'CANCELLED_BY_CLIENT', totalPrice: 20 });
+  assert.equal((await model('booking').findById(created.id).lean()).totalPrice, 20);
+});
+
 test('bundle updates validate price against persisted services and recalculate replacement duration', async () => {
   const { shop, service } = await fixture();
   const created = await mutation('addbundle', { name: 'Deal', price: 15, barbershop: { id: shop.id }, services: [{ service: { id: service.id } }] }, 'id totalDurationMinutes');
@@ -234,6 +252,27 @@ test('review statistics use the active transaction and roll back with the review
   assert.equal(await model('review').countDocuments({ barbershop: shop._id }), 1);
 });
 
+// #59: a non-admin reviews a COMPLETED booking of theirs at the shop, and each booking takes one review.
+test('reviews by non-admins need a completed booking of their author, once per booking', async () => {
+  const { shop, service } = await fixture();
+  const author = await model('user').create({ email: `client-${randomUUID()}@test.local`, name: 'Client', role: 'CLIENT' });
+  const authorContext = { user: { id: String(author._id), roles: ['CLIENT'] } };
+  const visit = await mutation('addbooking', { barbershop: { id: shop.id }, client: { id: String(author._id) }, scheduledDate: nextWeek, startTime: '12:00', lines: [{ service: { id: service.id }, price: 20 }] }, 'id');
+  const review = { rating: 5, client: { id: String(author._id) }, barbershop: { id: shop.id }, booking: { id: visit.id } };
+  const add = (input) => graphql({ schema, source: 'mutation($input: reviewInput!) { addreview(input: $input) { id } }', variableValues: { input }, contextValue: authorContext });
+  const code = (result) => result.errors?.[0]?.extensions?.code;
+  assert.equal(code(await add({ ...review, booking: undefined })), 'REVIEW_BOOKING_REQUIRED');
+  assert.equal(code(await add(review)), 'INVALID_REVIEW_BOOKING', 'A confirmed booking cannot be reviewed yet');
+  await mutation('complete_booking', { id: visit.id }, 'id state');
+  // Both transactions rewrite the shop's statistics, so the later one conflicts, is retried, and then
+  // finds the committed review: exactly one is stored.
+  const results = await Promise.all([add(review), add(review)]);
+  assert.equal(results.filter((result) => !result.errors).length, 1, JSON.stringify(results));
+  assert.equal(code(results.find((result) => result.errors)), 'REVIEW_ALREADY_EXISTS');
+  assert.equal(await model('review').countDocuments({ booking: visit.id }), 1);
+  assert.equal((await model('barbershop').findById(shop.id)).reviewCount, 1);
+});
+
 test('booking approval and bundle duration see records created in their active transaction', async () => {
   const session = await mongoose.startSession();
   try {
@@ -250,5 +289,177 @@ test('booking approval and bundle duration see records created in their active t
   } finally {
     if (session.inTransaction()) await session.abortTransaction();
     await session.endSession();
+  }
+});
+
+// #86: catalog scopes and the owner booking branch restrict through the barbershop relation, so they
+// add no barbershop queries per parent row or per resolved reference.
+test('catalog scopes restrict through the barbershop relation without reading shops per row or reference', async () => {
+  const owner = await model('user').create({ email: `owner-${randomUUID()}@test.local`, name: 'Scope Owner', role: 'OWNER' });
+  const marker = randomUUID();
+  for (const [index, state] of ['APPROVED', 'APPROVED', 'APPROVED', 'DRAFT'].entries()) {
+    const shop = await model('barbershop').create({ name: `Scope ${index}`, slug: `${marker}-${index}`, owner: owner._id, state });
+    const service = await model('service').create({ name: `${marker} cut ${state}`, price: 10, durationMinutes: 30, barbershop: shop._id });
+    await model('professional').create({ name: `${marker} pro ${index}`, barbershop: shop._id });
+    await model('bundle').create({ name: `${marker} deal ${state}`, price: 9, barbershop: shop._id, services: [{ service: service._id }] });
+  }
+  const contexts = {
+    anonymous: { user: null },
+    client: { user: { id: new mongoose.Types.ObjectId().toHexString(), roles: ['CLIENT'] } },
+    owner: { user: { id: String(owner._id), roles: ['OWNER'] } },
+  };
+  const operations = [];
+  const shopReads = () => operations.filter((operation) => operation.startsWith('barbershop.'));
+  mongoose.set('debug', (collection, method) => { operations.push(`${collection}.${method}`); });
+  try {
+    for (const [role, contextValue] of Object.entries(contexts)) {
+      const visible = role === 'owner' ? ['APPROVED', 'APPROVED', 'APPROVED', 'DRAFT'] : ['APPROVED', 'APPROVED', 'APPROVED'];
+      const services = await graphql({ schema, source: `{ services(name: { operator: LIKE, value: "${marker}" }) { name } }`, contextValue });
+      assert.equal(services.errors, undefined, role);
+      assert.deepEqual(services.data.services.map((row) => row.name).sort(), visible.map((state) => `${marker} cut ${state}`), role);
+
+      operations.length = 0;
+      const catalog = await graphql({ schema, source: `{ barbershops(slug: { operator: LIKE, value: "${marker}" }) { id services { name } professionals { name } } }`, contextValue });
+      assert.equal(catalog.errors, undefined, role);
+      assert.equal(catalog.data.barbershops.length, visible.length, role);
+      assert.ok(catalog.data.barbershops.every((shop) => shop.services.length === 1 && shop.professionals.length === 1), role);
+      assert.equal(shopReads().length, 1, `${role} nested catalog: ${shopReads().join(', ')}`);
+
+      // Each bundle item resolves its service by ID through the service get_by_id scope.
+      operations.length = 0;
+      const bundles = await graphql({ schema, source: `{ bundles(name: { operator: LIKE, value: "${marker}" }) { name services { service { id name } } } }`, contextValue });
+      assert.equal(bundles.errors, undefined, role);
+      assert.deepEqual(bundles.data.bundles.map((row) => row.services[0].service?.name).sort(), visible.map((state) => `${marker} cut ${state}`), role);
+      assert.equal(shopReads().length, 0, `${role} bundle service references: ${shopReads().join(', ')}`);
+    }
+  } finally {
+    mongoose.set('debug', false);
+  }
+});
+
+// #54: suspension (user.status) blocks sign-in and renewal, and ends access tokens already issued.
+test('a suspended account cannot sign in, renew its session or use an access token already issued', async () => {
+  const email = `suspended-${randomUUID()}@test.local`;
+  const registered = await mutation('register', { email, name: 'Suspended', password: 'password123' }, 'accessToken refreshToken user { id }');
+  const header = `Bearer ${registered.accessToken}`;
+  assert.equal((await resolveUserContext(header)).user.id, registered.user.id);
+  await model('user').updateOne({ email }, { status: 'SUSPENDED' });
+  for (const [name, input] of [['login', { email, password: 'password123' }], ['refreshSession', { refreshToken: registered.refreshToken }]]) {
+    const rejected = await mutation(name, input, 'accessToken', true);
+    assert.equal(rejected.errors[0].extensions.code, 'ACCOUNT_SUSPENDED', name);
+  }
+  const wrongPassword = await mutation('login', { email, password: 'wrong-password' }, 'accessToken', true);
+  assert.equal(wrongPassword.errors[0].message, 'Invalid email or password', 'A wrong password must not reveal the suspension');
+  assert.deepEqual(await resolveUserContext(header), { user: null });
+  await assert.rejects(resolveMcpUserContext(header), { message: 'This account is suspended' });
+  await model('user').updateOne({ email }, { status: 'ACTIVE' });
+  assert.ok((await mutation('login', { email, password: 'password123' }, 'accessToken')).accessToken);
+  assert.equal((await resolveUserContext(header)).user.id, registered.user.id);
+});
+
+// #128: seed:admin creates or reactivates its own admin and never promotes an account someone registered.
+const backendRoot = fileURLToPath(new URL('..', import.meta.url));
+const seedAdmin = (email) => new Promise((resolve, reject) => {
+  const child = spawn(process.execPath, ['scripts/seedAdmin.js'], {
+    cwd: backendRoot, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, SEED_ADMIN_EMAIL: email, SEED_ADMIN_PASSWORD: 'seed-password' },
+  });
+  let output = '';
+  child.stdout.on('data', (chunk) => { output += chunk; });
+  child.stderr.on('data', (chunk) => { output += chunk; });
+  child.once('error', reject);
+  child.once('close', (code) => resolve({ code, output }));
+});
+
+test('seed:admin creates or reactivates its admin but never promotes another account', async () => {
+  for (const role of ['CLIENT', 'OWNER']) {
+    const taken = `seed-taken-${randomUUID()}@test.local`;
+    await model('user').create({ email: taken, name: 'Registrant', role, status: 'ACTIVE', passwordHash: await bcrypt.hash('registrant', 4) });
+    const refused = await seedAdmin(taken);
+    assert.equal(refused.code, 1, refused.output);
+    assert.match(refused.output, new RegExp(`already belongs to an? ${role} account; refusing to promote it`));
+    const kept = await model('user').findOne({ email: taken }).lean();
+    assert.equal(kept.role, role);
+    assert.ok(await bcrypt.compare('registrant', kept.passwordHash), 'The registrant keeps its password');
+  }
+
+  const email = `seed-admin-${randomUUID()}@test.local`;
+  const created = await seedAdmin(email);
+  assert.equal(created.code, 0, created.output);
+  assert.match(created.output, /Admin created/);
+  await model('user').updateOne({ email }, { status: 'SUSPENDED', passwordHash: await bcrypt.hash('changed-by-admin', 4) });
+  const rerun = await seedAdmin(email);
+  assert.equal(rerun.code, 0, rerun.output);
+  const admin = await model('user').findOne({ email }).lean();
+  assert.deepEqual([admin.role, admin.status], ['PLATFORM_ADMIN', 'ACTIVE']);
+  assert.ok(await bcrypt.compare('changed-by-admin', admin.passwordHash), 'An existing admin keeps its password');
+});
+
+// #131: stdio MCP checks its credentials at startup and on every call, and renews with MCP_REFRESH_TOKEN.
+// Returns { client } once the MCP handshake is done, or { error } when the process exits first.
+async function startStdioMcp(env) {
+  const transport = new StdioClientTransport({
+    command: process.execPath, args: ['scripts/mcp-stdio.js'], cwd: backendRoot, stderr: 'pipe',
+    env: { ...process.env, MCP_BEARER: '', MCP_REFRESH_TOKEN: '', ...env },
+  });
+  let stderr = '';
+  transport.stderr?.on('data', (chunk) => { stderr += chunk; });
+  const client = new Client({ name: 'barber-integration', version: '1.0.0' });
+  try {
+    await client.connect(transport);
+    return { client, stderr: () => stderr };
+  } catch (error) {
+    await transport.close().catch(() => {});
+    return { error, stderr: () => stderr };
+  }
+}
+
+test('stdio MCP refuses bad credentials, renews with MCP_REFRESH_TOKEN and never falls back to anonymous', async () => {
+  const password = 'password123';
+  const email = `stdio-${randomUUID()}@test.local`;
+  const registered = await mutation('register', { email, name: 'Stdio', password }, 'accessToken refreshToken user { id }');
+  const other = await mutation('register', { email: `stdio-other-${randomUUID()}@test.local`, name: 'Other', password }, 'refreshToken');
+  const { iat: _iat, exp: _exp, ...claims } = jwt.decode(registered.accessToken);
+  const accessTokenExpiringAt = (exp) => jwt.sign({ ...claims, exp }, process.env.JWT_SECRET || 'dev-jwt-secret-change-in-production');
+  const seconds = () => Math.floor(Date.now() / 1000);
+  const ownProfile = async (client) => (await client.callTool({ name: 'users', arguments: {} })).content[0].text;
+
+  const refusals = [
+    [{ MCP_BEARER: accessTokenExpiringAt(seconds() - 5) }, /MCP_BEARER expired at/],
+    [{ MCP_BEARER: 'not-a-jwt' }, /MCP_BEARER is not a valid access token/],
+    [{ MCP_REFRESH_TOKEN: 'not-a-jwt' }, /MCP_REFRESH_TOKEN is not a valid refresh token/],
+    [{ MCP_REFRESH_TOKEN: registered.accessToken }, /MCP_REFRESH_TOKEN is not a valid refresh token/],
+    [{ MCP_BEARER: registered.accessToken, MCP_REFRESH_TOKEN: other.refreshToken }, /belong to different accounts/],
+  ];
+  const refused = await Promise.all(refusals.map(([env]) => startStdioMcp(env)));
+  // Close every started process before asserting, or a failure leaves children that keep the test alive.
+  await Promise.all(refused.map((attempt) => attempt.client?.close()));
+  for (const [index, [, message]] of refusals.entries()) {
+    assert.ok(refused[index].error, `mcp:stdio must exit (${message})`);
+    assert.match(refused[index].stderr(), message);
+  }
+
+  // Both processes get a bearer with the same explicit expiry, far enough ahead for startup and a call.
+  const exp = seconds() + 8;
+  const [expiring, renewing] = await Promise.all([
+    startStdioMcp({ MCP_BEARER: accessTokenExpiringAt(exp) }),
+    startStdioMcp({ MCP_BEARER: accessTokenExpiringAt(exp), MCP_REFRESH_TOKEN: registered.refreshToken }),
+  ]);
+  try {
+    assert.ok(expiring.client, expiring.stderr());
+    assert.ok(renewing.client, renewing.stderr());
+    // The same catalog as HTTP /mcp (mcpOptions in application.js): no password or token tools.
+    const toolNames = (await renewing.client.listTools()).tools.map((tool) => tool.name);
+    assert.ok(toolNames.includes('users'));
+    assert.deepEqual(toolNames.filter((name) => ['login', 'register', 'registerOwner', 'refreshSession'].includes(name)), []);
+    assert.ok((await ownProfile(expiring.client)).includes(email));
+    await sleep(Math.max(0, exp * 1000 - Date.now()) + 1100);
+    await assert.rejects(expiring.client.callTool({ name: 'users', arguments: {} }), /MCP_BEARER expired at/);
+    assert.ok((await ownProfile(renewing.client)).includes(email), 'MCP_REFRESH_TOKEN renews the session in memory');
+    await model('user').updateOne({ email }, { status: 'SUSPENDED' });
+    await assert.rejects(renewing.client.callTool({ name: 'users', arguments: {} }), /This account is suspended/);
+  } finally {
+    await expiring.client?.close();
+    await renewing.client?.close();
   }
 });

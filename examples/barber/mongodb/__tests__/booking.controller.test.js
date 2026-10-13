@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import mongoose from 'mongoose';
 
 vi.mock('@simtlix/simfinity-js', () => ({
   default: {},
@@ -22,7 +23,7 @@ const {
   assignActingUserAsClientUnlessCanBookForOthers,
   resolveBarbershopIdFromBookingPayload,
   assertBarbershopApprovedForBooking,
-  applyMissingBookingFieldDefaults,
+  applyServerOwnedBookingFields,
   recalculatePriceAndEndTimeFromLines,
 } = await import('../types/booking.controller.js');
 
@@ -61,12 +62,47 @@ describe('assignActingUserAsClientUnlessCanBookForOthers', () => {
     expect(doc.client).toBe('other-user');
   });
 
-  it('does not set doc.client for OWNER', () => {
-    vi.mocked(hasAnyRole).mockReturnValue(true);
-    const doc = { client: 'client-for-owner' };
-    const context = { user: { id: 'owner-1', roles: ['OWNER'] } };
-    assignActingUserAsClientUnlessCanBookForOthers(doc, context);
-    expect(doc.client).toBe('client-for-owner');
+  describe('by role and shop (#62)', () => {
+    const as = (id, role) => ({ user: { id, roles: [role] } });
+    beforeEach(() => {
+      vi.mocked(hasAnyRole).mockImplementation((context, roles) => roles.some((role) => context?.user?.roles?.includes(role)));
+    });
+
+    it("books an OWNER at another owner's shop for themselves", () => {
+      const doc = {};
+      assignActingUserAsClientUnlessCanBookForOthers(doc, as('owner-1', 'OWNER'), { owner: 'owner-2' });
+      expect(doc.client).toBe('owner-1');
+    });
+
+    it('books an OWNER who names another client at another shop for themselves', () => {
+      const doc = { client: 'client-9' };
+      assignActingUserAsClientUnlessCanBookForOthers(doc, as('owner-1', 'OWNER'), { owner: 'owner-2' });
+      expect(doc.client).toBe('owner-1');
+    });
+
+    it("keeps a walk-in booking at the OWNER's own shop without a client", () => {
+      const doc = {};
+      assignActingUserAsClientUnlessCanBookForOthers(doc, as('owner-1', 'OWNER'), { owner: { toHexString: () => 'owner-1' } });
+      expect(doc.client).toBeUndefined();
+    });
+
+    it("keeps the client named by the shop's OWNER", () => {
+      const doc = { client: 'client-9' };
+      assignActingUserAsClientUnlessCanBookForOthers(doc, as('owner-1', 'OWNER'), { owner: 'owner-1' });
+      expect(doc.client).toBe('client-9');
+    });
+
+    it('books a PLATFORM_ADMIN who names no client for themselves', () => {
+      const doc = {};
+      assignActingUserAsClientUnlessCanBookForOthers(doc, as('admin-1', 'PLATFORM_ADMIN'), { owner: 'owner-2' });
+      expect(doc.client).toBe('admin-1');
+    });
+
+    it('keeps the client named by a PLATFORM_ADMIN', () => {
+      const doc = { client: 'client-9' };
+      assignActingUserAsClientUnlessCanBookForOthers(doc, as('admin-1', 'PLATFORM_ADMIN'), { owner: 'owner-2' });
+      expect(doc.client).toBe('client-9');
+    });
   });
 
   it('does nothing when context has no user', () => {
@@ -101,15 +137,29 @@ describe('resolveBarbershopIdFromBookingPayload', () => {
     const result = resolveBarbershopIdFromBookingPayload({}, {});
     expect(result).toBeUndefined();
   });
+
+  // A booking created through updatebarbershop's bookings.added carries the parent link as an
+  // ObjectId, whose `.id` is a 12-byte Buffer that findById cannot cast.
+  it('returns the hex string of an ObjectId stored on the document', () => {
+    const shopId = new mongoose.Types.ObjectId();
+    const result = resolveBarbershopIdFromBookingPayload({}, { barbershop: shopId });
+    expect(result).toBe(shopId.toHexString());
+  });
+
+  it('returns the hex string of a document reference that holds an ObjectId', () => {
+    const shopId = new mongoose.Types.ObjectId();
+    const result = resolveBarbershopIdFromBookingPayload({ barbershop: { _id: shopId } }, {});
+    expect(result).toBe(shopId.toHexString());
+  });
 });
 
 describe('assertBarbershopApprovedForBooking', () => {
-  it('passes when barbershop is approved', async () => {
+  it('returns the barbershop when it is approved', async () => {
     const mockModel = { findById: vi.fn().mockReturnValue({ lean: () => Promise.resolve({ _id: '1', state: 'APPROVED' }) }) };
     simfinity.getType.mockReturnValue('barbershop-type');
     simfinity.getModel.mockReturnValue(mockModel);
 
-    await expect(assertBarbershopApprovedForBooking('shop-1')).resolves.toBeUndefined();
+    await expect(assertBarbershopApprovedForBooking('shop-1')).resolves.toMatchObject({ _id: '1', state: 'APPROVED' });
   });
 
   it('throws when barbershop not found', async () => {
@@ -129,28 +179,28 @@ describe('assertBarbershopApprovedForBooking', () => {
   });
 });
 
-describe('applyMissingBookingFieldDefaults', () => {
+describe('applyServerOwnedBookingFields', () => {
   it('fills all missing defaults', () => {
     const doc = {};
-    applyMissingBookingFieldDefaults(doc);
+    applyServerOwnedBookingFields(doc);
     expect(doc.confirmationCode).toMatch(/^[A-Z0-9]{6}$/);
     expect(doc.paymentMethod).toBe('ON_SITE');
     expect(doc.state).toBe('CONFIRMED');
     expect(doc.createdAt).toBeDefined();
   });
 
-  it('preserves existing values', () => {
+  it('replaces a sent confirmation code and creation time but keeps payment method and state', () => {
     const doc = {
       confirmationCode: 'CUSTOM',
       paymentMethod: 'CARD',
       state: 'COMPLETED',
       createdAt: '2025-01-01',
     };
-    applyMissingBookingFieldDefaults(doc);
-    expect(doc.confirmationCode).toBe('CUSTOM');
+    applyServerOwnedBookingFields(doc, new Date('2026-10-01T12:00:00.000Z'));
+    expect(doc.confirmationCode).toMatch(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/);
     expect(doc.paymentMethod).toBe('CARD');
     expect(doc.state).toBe('COMPLETED');
-    expect(doc.createdAt).toBe('2025-01-01');
+    expect(doc.createdAt).toBe('2026-10-01T12:00:00.000Z');
   });
 });
 
@@ -178,18 +228,24 @@ describe('recalculatePriceAndEndTimeFromLines', () => {
     expect(doc.endTime).toBe('15:30');
   });
 
-  it('leaves totalPrice alone without lines but still derives endTime', () => {
-    const doc = { startTime: '10:00', lines: [] };
+  it('stores totalPrice 0 without lines, replacing a sent total, and still derives endTime', () => {
+    const doc = { startTime: '10:00', lines: [], totalPrice: 999 };
     recalculatePriceAndEndTimeFromLines(doc);
-    expect(doc.totalPrice).toBeUndefined();
+    expect(doc.totalPrice).toBe(0);
     expect(doc.endTime).toBe('10:00');
   });
 
   it('derives no endTime when lines and startTime are undefined', () => {
     const doc = {};
     recalculatePriceAndEndTimeFromLines(doc);
-    expect(doc.totalPrice).toBeUndefined();
+    expect(doc.totalPrice).toBe(0);
     expect(doc.endTime).toBeNull();
+  });
+
+  it('counts a negative price stored by an earlier version as zero', () => {
+    const doc = { startTime: '10:00', lines: [{ price: -500, durationMinutes: 30 }, { price: 25, durationMinutes: 30 }] };
+    recalculatePriceAndEndTimeFromLines(doc);
+    expect(doc.totalPrice).toBe(25);
   });
 
   it('computes totalPrice and clears endTime when startTime is missing', () => {

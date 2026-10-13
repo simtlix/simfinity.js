@@ -37,6 +37,7 @@ describe("booking error messages", () => {
     expect(bookingErrorCode(failure)).toBe("BOOKING_SLOT_UNAVAILABLE");
     expect(bookingErrorMessage(bookingErrorCode(failure)).key).toBe("errors.slotUnavailable");
     expect(bookingErrorMessage("TRANSACTION_RETRY_EXCEEDED").key).toBe("errors.scheduleBusy");
+    expect(bookingErrorMessage("INVALID_BOOKING_LINE").key).toBe("errors.invalidLine");
     for (const error of [new Error("offline"), null, { graphQLErrors: [] }, { graphQLErrors: [{ extensions: { code: 7 } }] }]) {
       expect(bookingErrorCode(error)).toBe("");
     }

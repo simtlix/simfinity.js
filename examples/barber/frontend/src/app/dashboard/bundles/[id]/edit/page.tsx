@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { useSimfinityClient } from '@/lib/simfinity';
 import { useT } from '@/hooks/useT';
 import { useFormState } from '@/hooks/useFormState';
+import { bundleDurationMinutes, type BundleDurationSource } from '@/lib/catalog';
 import {
   PageHeader,
   FormLayout,
@@ -33,6 +34,8 @@ export default function EditBundlePage() {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // A bundle with services lasts as long as they do: the API derives its duration and ignores a sent one.
+  const [derivedDuration, setDerivedDuration] = useState<number | null>(null);
 
   const { values, errors, setValue, setValues, setError, clearErrors } =
     useFormState<BundleForm>({
@@ -52,15 +55,16 @@ export default function EditBundlePage() {
         const bundle = (await client.getById(
           'bundle',
           id,
-          'id name description price totalDurationMinutes isActive',
-        )) as {
+          'id name description price totalDurationMinutes isActive services { service { id durationMinutes } }',
+        )) as (BundleDurationSource & {
           name?: string;
           description?: string;
           price?: unknown;
           totalDurationMinutes?: number;
           isActive?: boolean;
-        } | null;
+        }) | null;
         if (!cancelled && bundle) {
+          setDerivedDuration(bundle.services?.length ? bundleDurationMinutes(bundle) : null);
           setValues({
             name: bundle.name ?? '',
             description: bundle.description ?? '',
@@ -102,7 +106,7 @@ export default function EditBundlePage() {
         name: values.name.trim(),
         description: values.description.trim(),
         price: parseFloat(values.price),
-        totalDurationMinutes: values.totalDurationMinutes,
+        ...(derivedDuration == null ? { totalDurationMinutes: values.totalDurationMinutes } : {}),
         isActive: values.isActive,
       });
       router.push('/dashboard/bundles');
@@ -164,11 +168,25 @@ export default function EditBundlePage() {
               required
             />
 
-            <FormDurationSelect
-              label={t('durationLabel', 'Duración Total')}
-              value={values.totalDurationMinutes}
-              onChange={(v) => setValue('totalDurationMinutes', v)}
-            />
+            {derivedDuration == null ? (
+              <FormDurationSelect
+                label={t('durationLabel', 'Duración Total')}
+                value={values.totalDurationMinutes}
+                onChange={(v) => setValue('totalDurationMinutes', v)}
+              />
+            ) : (
+              <div>
+                <FormField
+                  label={t('durationLabel', 'Duración Total')}
+                  value={`${derivedDuration} min`}
+                  onChange={() => {}}
+                  disabled
+                />
+                <p className="text-xs text-on-surface-variant/60 mt-1">
+                  {t('durationFromServices', 'La duración es la suma de sus servicios y se actualiza cuando cambian.')}
+                </p>
+              </div>
+            )}
           </div>
 
           <FormToggle

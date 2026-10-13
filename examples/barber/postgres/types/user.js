@@ -54,12 +54,12 @@ const userType = new GraphQLObjectType({
     role: {
       type: UserRoleEnum,
       description:
-        'Platform role that controls permissions: CLIENT (books appointments), OWNER (manages barbershops), STAFF (works at a barbershop) or PLATFORM_ADMIN (full administration).',
+        'Platform role that controls permissions: CLIENT (books appointments), OWNER (manages barbershops), STAFF (works at a barbershop) or PLATFORM_ADMIN (full administration). Requests use the role stored now, so a change also applies to access tokens already issued.',
     },
     emailVerified: { type: GraphQLBoolean, description: 'Whether the user has verified their email address.' },
     status: {
       type: UserStatusEnum,
-      description: 'Account status: ACTIVE (can sign in) or SUSPENDED (access blocked).',
+      description: 'Account status: ACTIVE (can sign in) or SUSPENDED (cannot sign in or renew a session; access tokens already issued stop working).',
     },
     passwordHash: {
       type: GraphQLString,

@@ -20,6 +20,11 @@ services:
       GRAPHQL_ENDPOINT: http://localhost:4300/graphql
       JWT_SECRET: ${JWT_SECRET:-example-barber-access-secret}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-example-barber-refresh-secret}
+      # Requests per minute; see routes/rateLimits.js. Raise them for repeated contract runs.
+      GRAPHQL_RATE_LIMIT_MAX: ${GRAPHQL_RATE_LIMIT_MAX:-300}
+      MCP_RATE_LIMIT_MAX: ${MCP_RATE_LIMIT_MAX:-300}
+      UPLOAD_IP_RATE_LIMIT_MAX: ${UPLOAD_IP_RATE_LIMIT_MAX:-100}
+      UPLOAD_RATE_LIMIT_MAX: ${UPLOAD_RATE_LIMIT_MAX:-20}
       SEED_ADMIN_EMAIL: admin@demo.com
       SEED_ADMIN_PASSWORD: demo1234
     ports:
