@@ -149,6 +149,30 @@ describe.skipIf(!uri)('registered data operations on MongoDB', () => {
       expect((await Model.findById('integer')).version).toBe(2147483647);
     } finally { if (session.inTransaction()) await session.abortTransaction(); await session.endSession(); }
   });
+  test('Float increments atomically reject rounded overflow while retaining missing-field and CAS semantics', async () => {
+    const delta = 1.5 * 2 ** 971;
+    const old = Number.MAX_VALUE - delta;
+    expect(Number.isFinite(old)).toBe(true);
+    expect(old + delta).toBe(Infinity);
+    await Model.insertMany([{ _id: 'float-positive', ratio: old }, { _id: 'float-negative', ratio: -old }, { _id: 'float-missing', version: 1 }]);
+    await Model.collection.insertMany([{ _id: 'float-string', ratio: 'invalid' }, { _id: 'float-null', ratio: null }]);
+    const session = await connection.startSession(); session.startTransaction();
+    try {
+      for (const [id, amount] of [['float-positive', delta], ['float-negative', -delta], ['float-string', 1], ['float-null', 1]]) {
+        await expect(runtime.execute(typeName, 'update', { input: { id } }, { session, storage: { increments: { ratio: amount } } })).rejects.toMatchObject({ extensions: { code: 'NOT_VALID_ID' } });
+        expect(session.inTransaction()).toBe(true);
+      }
+      await expect(runtime.execute(typeName, 'update', { input: { id: 'float-missing' } }, { session, storage: { filter: { version: 0 }, increments: { ratio: 0.5 } } })).rejects.toMatchObject({ extensions: { code: 'NOT_VALID_ID' } });
+      const changed = await runtime.execute(typeName, 'update', { input: { id: 'float-missing' } }, { session, storage: { filter: { version: 1 }, increments: { ratio: 0.5 } } });
+      expect(changed.ratio).toBe(0.5);
+      await session.commitTransaction();
+      expect((await Model.collection.findOne({ _id: 'float-positive' })).ratio).toBe(old);
+      expect((await Model.collection.findOne({ _id: 'float-negative' })).ratio).toBe(-old);
+      expect((await Model.collection.findOne({ _id: 'float-string' })).ratio).toBe('invalid');
+      expect((await Model.collection.findOne({ _id: 'float-null' })).ratio).toBeNull();
+      expect((await Model.findById('float-missing')).ratio).toBe(0.5);
+    } finally { if (session.inTransaction()) await session.abortTransaction(); await session.endSession(); }
+  });
   test('rejects inactive and foreign-client sessions before any operation', async () => {
     const inactive = await connection.startSession();
     await expect(runtime.execute(typeName, 'find', {}, { session: inactive })).rejects.toMatchObject({ extensions: { code: 'ACTIVE_TRANSACTION_REQUIRED' } });

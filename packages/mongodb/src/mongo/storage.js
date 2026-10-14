@@ -126,11 +126,20 @@ export const validateStorageOptions = (Model, gqltype, operation, storage, integ
       const max = scalar === GraphQLInt ? 2147483647 : Number.MAX_VALUE;
       // Check the old and resulting range in the atomic predicate, not after writing: a caller
       // may catch an error and commit its adopted transaction. Missing fields start at zero.
-      const range = { $type: 'number', $gte: Math.max(min, min - value), $lte: Math.min(max, max - value) };
-      // Query $mod truncates stored doubles; expression $mod retains their fractional part.
-      const numeric = scalar === GraphQLInt ? { $and: [{ [path]: range }, { $expr: { $cond: [
-        { $isNumber: '$' + path }, { $eq: [{ $mod: ['$' + path, 1] }, 0] }, false,
-      ] } }] } : { [path]: range };
+      const range = scalar === GraphQLInt
+        ? { $type: 'number', $gte: Math.max(min, min - value), $lte: Math.min(max, max - value) }
+        : { $type: 'number', $gte: min, $lte: max };
+      // Query $mod truncates doubles; expression $mod retains their fractional part.
+      // Float subtraction rounds near the limits, so test MongoDB's actual addition.
+      // $cond protects arithmetic from missing, null and nonnumeric stored values.
+      const result = scalar === GraphQLInt
+        ? { $eq: [{ $mod: ['$' + path, 1] }, 0] }
+        : { $let: { vars: { sum: { $add: ['$' + path, value] } }, in: {
+          $and: [{ $gte: ['$$sum', min] }, { $lte: ['$$sum', max] }],
+        } } };
+      const numeric = { $and: [{ [path]: range }, { $expr: { $cond: [
+        { $isNumber: '$' + path }, result, false,
+      ] } }] };
       guards.push({ $or: [{ [path]: { $exists: false } }, numeric] });
     }
   }
