@@ -8,6 +8,12 @@ import type {
   GraphQLSchema,
 } from 'graphql';
 
+/** Disable optional field-extension introspection process-wide before any Simfinity schema.
+ * Repeated calls after disabling are idempotent. Runtime.configureIntrospection is an alias.
+ * @throws Error if options are invalid or an enabled Simfinity schema was already constructed.
+ */
+export function configureIntrospection(options: { fieldExtensions: false }): void;
+
 export const QLOperator: GraphQLEnumType;
 export const QLSort: GraphQLInputObjectType;
 export const QLValue: GraphQLScalarType<unknown, unknown>;
@@ -318,7 +324,7 @@ export interface DatabaseAdapter<Model = any, Session = any> {
   storageBackend?: string;
   supportsObservedReads?: boolean;
   validateSession?(model: Model, session: Session): void;
-  validateStorageOptions?(model: Model, type: GraphQLObjectType, operation: RegisteredOperation, options: RegisteredStorageOptions): void;
+  validateStorageOptions?(model: Model, type: GraphQLObjectType, operation: RegisteredOperation, options: RegisteredStorageOptions): RegisteredStorageOptions | void;
   prepareStorageUpdate?(update: unknown, storage: RegisteredStorageOptions): unknown;
   setRecordIdentity?(model: Model, record: unknown, id: unknown): void;
   executeStorage?(model: Model, type: GraphQLObjectType, request: StorageRequest, options: { session?: Session; context?: unknown; queryArgs: Record<string, unknown>; observer?: ReadObserver }): Promise<unknown>;

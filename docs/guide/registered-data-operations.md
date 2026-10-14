@@ -43,8 +43,12 @@ run inside that transaction and may repeat; keep external effects outside them.
 Mongo supports explicit `storage` write options: `id` on save; `filter` on update
 and delete (ANDed with the requested ID, never replacing it); `increments` on update;
 and `nulls: 'preserve'` on save/update. The default generated null behavior is unchanged.
-Increments must target registered writable numeric fields, cannot overlap the normal
-update, and cannot bypass field validators (use absolute validated updates there).
+Increments must target registered writable built-in GraphQL Int or Float fields, cannot
+overlap the normal update, and cannot bypass type/field validators (use absolute
+validated updates there). Int deltas must be 32-bit integers. Atomic range predicates
+keep the existing and resulting Int values in [-2147483648, 2147483647] and Float
+values finite, even in adopted transactions. A range miss has the same NOT_VALID_ID
+conflict behavior as any conditional update. Opaque/custom scalars are rejected.
 A conditional update that matches nothing throws `NOT_VALID_ID` as generated updates
 do; conditional deletion returns null. Native matched counts are available below.
 Backend storage options fail with `UNSUPPORTED_CAPABILITY` on adapters without that
@@ -71,7 +75,11 @@ with the registered entity and `storage.<operation>`. Unsupported backends fail 
 
 Supported reads are `find` (filter/projection/sort/pagination), `aggregate` and `stream`
 (pipeline). They compile the owner's find scope and prepend it to the native request.
-Projection pipelines cannot write collections, add unrelated root streams, or run
+Scope compilation includes filters/lookups only: it does not add generated default
+pagination. Caller filters precede explicit sorting/pagination, and projections and
+streams can cover more than 100 rows. Scopes containing sort/pagination are rejected;
+put those controls on the operation. Explicit read options are applied once, after
+the supplied pipeline. Projection pipelines cannot write collections, add unrelated root streams, or run
 server JavaScript. Trusted lookup pipelines are caller-owned: this API does not apply
 a joined entity's authorization to arbitrary Mongo expressions. Use generated queries
 when those joins need generated path authorization.
@@ -104,6 +112,7 @@ Observers expose `beforeFetch()` (every physical initialize/getMore, including e
 batches), `beforeRead()`, `onRows(batch)` (the entire fetched batch before another
 fetch), and `track(promise)` (pending fetch, read and cleanup). Hooks may throw to
 stop work; error cleanup closes the cursor while preserving the primary read error.
+A tracking callback failure can stop a read but can never suppress native close.
 A caller can count rows, apply weighted measurements to count/group projections and
 track/drain outstanding work without patching model collections or driver methods.
 `stream` returns a closeable async iterator; early iteration exit closes it.
@@ -115,12 +124,14 @@ reads preserve their existing Mongoose behavior.
 
 ## Standard introspection
 
-`runtime.configureIntrospection({ fieldExtensions: false })` disables Simfinity's
+`configureIntrospection({ fieldExtensions: false })`, exported from
+`@simtlix/simfinity-core`, disables Simfinity's
 optional `__Field.extensions` metadata process-wide, before any Simfinity schema is
 created. Repeat calls after disabling are idempotent. Enabling it again or disabling
 it after an enabled schema was built is unsupported. The setting survives repeated
 module evaluation and supports standard `buildClientSchema` introspection roundtrips.
-Do not directly delete fields from GraphQL's shared introspection types. Configure
+`runtime.configureIntrospection` remains an alias for the same function. No dummy
+runtime is needed. Do not directly delete fields from GraphQL's shared introspection types. Configure
 this once during process initialization; it affects all runtimes sharing GraphQL.
 
 ## Errors and limits

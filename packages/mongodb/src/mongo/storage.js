@@ -1,3 +1,4 @@
+import { GraphQLInt, GraphQLFloat, getNullableType } from 'graphql';
 import { SimfinityError } from '@simtlix/simfinity-core';
 import { readMongoPipeline } from './cursor.js';
 
@@ -108,6 +109,7 @@ export const validateStorageOptions = (Model, gqltype, operation, storage, integ
     if (operation === 'save') throw invalid('Save does not accept a conditional filter');
     assertFilter(Model, storage.filter);
   }
+  const guards = [];
   if (storage.increments) {
     if (operation !== 'update') throw invalid('Increments require update');
     if (gqltype.extensions?.validations) throw invalid('Types with validators require a generated absolute update');
@@ -117,8 +119,22 @@ export const validateStorageOptions = (Model, gqltype, operation, storage, integ
       if (!field || field.extensions?.readOnly || !['Number', 'Decimal128'].includes(Model.schema.path(path)?.instance)
         || typeof value !== 'number' || !Number.isFinite(value)) throw invalid('Increments require registered writable numeric fields and finite amounts');
       if (field.extensions?.validations) throw invalid('Fields with validators require a generated absolute update');
+      const scalar = getNullableType(field.type);
+      if (scalar !== GraphQLInt && scalar !== GraphQLFloat) throw invalid('Increments require built-in Int or Float fields');
+      try { scalar.parseValue(value); } catch { throw invalid('Increment does not match its declared numeric scalar'); }
+      const min = scalar === GraphQLInt ? -2147483648 : -Number.MAX_VALUE;
+      const max = scalar === GraphQLInt ? 2147483647 : Number.MAX_VALUE;
+      // Check the old and resulting range in the atomic predicate, not after writing: a caller
+      // may catch an error and commit its adopted transaction. Missing fields start at zero.
+      const range = { $type: 'number', $gte: Math.max(min, min - value), $lte: Math.min(max, max - value) };
+      // Query $mod truncates stored doubles; expression $mod retains their fractional part.
+      const numeric = scalar === GraphQLInt ? { $and: [{ [path]: range }, { $expr: { $cond: [
+        { $isNumber: '$' + path }, { $eq: [{ $mod: ['$' + path, 1] }, 0] }, false,
+      ] } }] } : { [path]: range };
+      guards.push({ $or: [{ [path]: { $exists: false } }, numeric] });
     }
   }
+  return guards.length ? { ...storage, filter: { $and: [...(storage.filter ? [storage.filter] : []), ...guards] } } : storage;
 };
 
 export const createStorageExecutor = (queries, integrity) => async (Model, gqltype, request, { session, queryArgs, observer }) => {
@@ -142,17 +158,12 @@ export const createStorageExecutor = (queries, integrity) => async (Model, gqlty
     if (key === 'upsert' && !['updateOne', 'updateMany', 'replaceOne', 'findOneAndUpdate'].includes(operation)) throw invalid('upsert requires an update operation');
   }
   if (reads.has(operation)) {
-    const pipeline = await queries.buildQuery(queryArgs, gqltype);
+    const pipeline = await queries.buildFilterQuery(queryArgs, gqltype);
     if (request.filter) {
       assertFilter(Model, request.filter);
       pipeline.push({ $match: request.filter });
     }
-    if (operation === 'find') {
-      if (options.sort) pipeline.push({ $sort: options.sort });
-      if (options.skip) pipeline.push({ $skip: options.skip });
-      if (options.limit) pipeline.push({ $limit: options.limit });
-      if (options.projection) pipeline.push({ $project: options.projection });
-    } else {
+    if (operation !== 'find') {
       if (!Array.isArray(request.pipeline)) throw invalid('pipeline must be an array');
       const inspect = (value) => {
         if (!value || typeof value !== 'object') return;
@@ -164,9 +175,7 @@ export const createStorageExecutor = (queries, integrity) => async (Model, gqlty
       inspect(request.pipeline);
       pipeline.push(...request.pipeline);
     }
-    const { projection, sort, skip, limit, ...aggregateOptions } = options;
-    void projection; void sort; void skip; void limit;
-    return readMongoPipeline(Model, pipeline, aggregateOptions, observer, operation === 'stream');
+    return readMongoPipeline(Model, pipeline, options, observer, operation === 'stream');
   }
   validateWrite(Model, request);
   // Each primitive is one native operation. No user effects/callbacks are enclosed or replayed.

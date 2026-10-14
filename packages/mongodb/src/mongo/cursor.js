@@ -11,10 +11,16 @@ export const observeMongoCursor = (cursor, observer) => {
   if (typeof cursor._initialize !== 'function' || typeof cursor.getMore !== 'function') {
     throw new SimfinityError('MongoDB cursor does not support fetch observation', 'UNSUPPORTED_CAPABILITY', 500);
   }
-  const track = (body) => {
-    let trackingError;
-    const promise = Promise.resolve().then(() => { if (trackingError) throw trackingError; return body(); });
-    try { observer.track?.(promise); } catch (error) { trackingError = error; }
+  const track = (body, cleanup = false) => {
+    let trackingError, trackingFailed = false;
+    const promise = Promise.resolve().then(async () => {
+      if (trackingFailed && !cleanup) {
+        try { await close(); } catch { /* Preserve the observer failure. */ }
+        throw trackingError;
+      }
+      return body();
+    });
+    try { observer.track?.(promise); } catch (error) { trackingError = error; trackingFailed = true; }
     return promise;
   };
   for (const method of ['_initialize', 'getMore']) {
@@ -40,7 +46,7 @@ export const observeMongoCursor = (cursor, observer) => {
       throw error;
     }
   });
-  cursor.close = () => track(() => { buffered = []; return close(); });
+  cursor.close = () => track(() => { buffered = []; return close(); }, true);
   cursor.toArray = async () => {
     const result = [];
     let failed = false;

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 import mongoose from 'mongoose';
-import { GraphQLID, GraphQLInt, GraphQLObjectType, GraphQLString } from 'graphql';
+import { GraphQLFloat, GraphQLID, GraphQLInt, GraphQLList, GraphQLObjectType, GraphQLString } from 'graphql';
 import { createRuntime } from '../packages/core/src/index.js';
 import { createMongoAdapter } from '../packages/mongodb/src/mongo/adapter.js';
 import { observeMongoCursor } from '../packages/mongodb/src/mongo/cursor.js';
@@ -12,10 +12,10 @@ describe.skipIf(!uri)('registered data operations on MongoDB', () => {
   const typeName = 'RegisteredDataItem';
   beforeAll(async () => {
     connection = await mongoose.createConnection(uri, { dbName: 'simfinity_registered_data_tests' }).asPromise();
-    Model = connection.model(typeName, new mongoose.Schema({ _id: String, tenant: String, title: String, version: Number, data: mongoose.Schema.Types.Mixed }, { versionKey: false }));
+    Model = connection.model(typeName, new mongoose.Schema({ _id: String, tenant: String, title: String, version: Number, ratio: Number, data: mongoose.Schema.Types.Mixed }, { versionKey: false }));
     await Model.deleteMany({});
-    const type = new GraphQLObjectType({ name: typeName, fields: { id: { type: GraphQLID }, tenant: { type: GraphQLString }, title: { type: GraphQLString }, version: { type: GraphQLInt } },
-      extensions: { scope: { find({ args, context }) { if (context?.tenant) args.tenant = { operator: 'EQ', value: context.tenant }; } } } });
+    const type = new GraphQLObjectType({ name: typeName, fields: { id: { type: GraphQLID }, tenant: { type: GraphQLString }, title: { type: GraphQLString }, version: { type: GraphQLInt }, ratio: { type: GraphQLFloat } },
+      extensions: { scope: { find({ args, context }) { if (context?.tenant) args.tenant = { operator: 'EQ', value: context.tenant }; if (context?.pageScope) args.pagination = { page: 1, size: 1 }; } } } });
     runtime = createRuntime(createMongoAdapter());
     runtime.preventCreatingCollection(true);
     runtime.connect(Model, type, 'registeredDataItem', 'registeredDataItems', { onSaving() { hooks.push('save'); }, onUpdating() { hooks.push('update'); } });
@@ -97,6 +97,58 @@ describe.skipIf(!uri)('registered data operations on MongoDB', () => {
     await expect(protectedRuntime.executeStorage('ProtectedStorageItem', { backend: 'mongodb', operation: 'deleteMany', filter: {} })).rejects.toMatchObject({ extensions: { code: 'UNSUPPORTED_CAPABILITY' } });
     await expect(runtime.executeStorage(typeName, { backend: 'other', operation: 'deleteMany', filter: {} })).rejects.toMatchObject({ extensions: { code: 'UNSUPPORTED_CAPABILITY' } });
   });
+  test('storage filters and projections see all scoped rows before explicit pagination', async () => {
+    await Model.insertMany(Array.from({ length: 101 }, (_, index) => ({ _id: 'page-' + String(index).padStart(3, '0'), tenant: 'large', version: index })));
+    await Model.create({ _id: 'page-outside', tenant: 'other', version: 999 });
+    const read = (request) => runtime.executeStorage(typeName, { backend: 'mongodb', ...request }, { context: { tenant: 'large' } });
+    expect(await read({ operation: 'find', options: { limit: 200 } })).toHaveLength(101);
+    expect(await read({ operation: 'find', filter: { _id: 'page-100' } })).toHaveLength(1);
+    expect(await read({ operation: 'aggregate', pipeline: [{ $count: 'total' }] })).toEqual([{ total: 101 }]);
+    const cursor = await read({ operation: 'stream', pipeline: [], options: { batchSize: 7 } });
+    const rows = []; for await (const row of cursor) rows.push(row);
+    expect(rows).toHaveLength(101);
+    const page = await read({ operation: 'find', filter: { version: { $gte: 95 } }, options: { sort: { version: -1 }, skip: 1, limit: 2 } });
+    expect(page.map((row) => row.version)).toEqual([99, 98]);
+    const projected = await read({ operation: 'aggregate', pipeline: [{ $match: { version: { $gte: 95 } } }], options: { sort: { version: -1 }, skip: 1, limit: 2 } });
+    expect(projected.map((row) => row.version)).toEqual([99, 98]);
+    await expect(runtime.executeStorage(typeName, { backend: 'mongodb', operation: 'find' }, { context: { pageScope: true } })).rejects.toMatchObject({ extensions: { code: 'INVALID_SCOPE' } });
+  });
+  test('preserve null retains embedded nullable lists while legacy update retains empty-list semantics', async () => {
+    const Embedded = new GraphQLObjectType({ name: 'DataNullEmbedded', fields: { tags: { type: new GraphQLList(GraphQLString) } } });
+    const Type = new GraphQLObjectType({ name: 'DataNullOwner', fields: { id: { type: GraphQLID }, settings: { type: Embedded, extensions: { relation: { embedded: true } } } } });
+    const Owner = connection.model('DataNullOwner', new mongoose.Schema({ _id: String, settings: { tags: [String] } }, { versionKey: false }));
+    const instance = createRuntime(createMongoAdapter()); instance.preventCreatingCollection(true);
+    instance.addNoEndpointType(Embedded); instance.connect(Owner, Type, 'nullOwner', 'nullOwners'); instance.createSchema();
+    await instance.execute('DataNullOwner', 'save', { input: { settings: { tags: ['before'] } } }, { storage: { id: 'one', nulls: 'preserve' } });
+    await instance.execute('DataNullOwner', 'update', { input: { id: 'one', settings: { tags: null } } }, { storage: { nulls: 'preserve' } });
+    expect((await Owner.collection.findOne({ _id: 'one' })).settings.tags).toBeNull();
+    await instance.execute('DataNullOwner', 'update', { input: { id: 'one', settings: { tags: null } } });
+    expect((await Owner.collection.findOne({ _id: 'one' })).settings.tags).toEqual([]);
+  });
+  test('integer increments reject fractional deltas and cannot commit out-of-range results in an adopted transaction', async () => {
+    await Model.create({ _id: 'integer', tenant: 'one', version: 1, ratio: 1 });
+    await expect(runtime.execute(typeName, 'update', { input: { id: 'integer' } }, { storage: { increments: { version: 0.5 } } })).rejects.toThrow();
+    expect((await Model.findById('integer')).version).toBe(1);
+    const fractional = await runtime.execute(typeName, 'update', { input: { id: 'integer' } }, { storage: { increments: { ratio: 0.5 } } });
+    expect(fractional.ratio).toBe(1.5);
+    await Model.updateOne({ _id: 'integer' }, { $set: { ratio: Number.MAX_VALUE } });
+    await expect(runtime.execute(typeName, 'update', { input: { id: 'integer' } }, { storage: { increments: { ratio: 1e308 } } })).rejects.toMatchObject({ extensions: { code: 'NOT_VALID_ID' } });
+    expect((await Model.findById('integer')).ratio).toBe(Number.MAX_VALUE);
+    await expect(runtime.execute(typeName, 'update', { input: { id: 'integer' } }, { storage: { increments: { version: 2147483648 } } })).rejects.toThrow();
+    await Model.updateOne({ _id: 'integer' }, { $set: { version: 1.5 } });
+    await expect(runtime.execute(typeName, 'update', { input: { id: 'integer' } }, { storage: { increments: { version: 1 } } })).rejects.toMatchObject({ extensions: { code: 'NOT_VALID_ID' } });
+    expect((await Model.findById('integer')).version).toBe(1.5);
+    await Model.updateOne({ _id: 'integer' }, { $set: { version: -2147483648 } });
+    await expect(runtime.execute(typeName, 'update', { input: { id: 'integer' } }, { storage: { increments: { version: -1 } } })).rejects.toMatchObject({ extensions: { code: 'NOT_VALID_ID' } });
+    expect((await Model.findById('integer')).version).toBe(-2147483648);
+    await Model.updateOne({ _id: 'integer' }, { $set: { version: 2147483647 } });
+    const session = await connection.startSession(); session.startTransaction();
+    try {
+      await expect(runtime.execute(typeName, 'update', { input: { id: 'integer' } }, { session, storage: { increments: { version: 1 } } })).rejects.toThrow();
+      await session.commitTransaction();
+      expect((await Model.findById('integer')).version).toBe(2147483647);
+    } finally { if (session.inTransaction()) await session.abortTransaction(); await session.endSession(); }
+  });
   test('rejects inactive and foreign-client sessions before any operation', async () => {
     const inactive = await connection.startSession();
     await expect(runtime.execute(typeName, 'find', {}, { session: inactive })).rejects.toMatchObject({ extensions: { code: 'ACTIVE_TRANSACTION_REQUIRED' } });
@@ -114,4 +166,16 @@ test('cursor observation charges empty physical batches and closes after a budge
   observeMongoCursor(cursor, { beforeFetch() { if (++count > 2) throw new Error('budget'); } });
   await expect(cursor.toArray()).rejects.toThrow('budget');
   expect(count).toBe(3); expect(cursor.getMore).toBeTypeOf('function'); expect(cursor.close).toBeTypeOf('function');
+});
+
+test('observer tracking failures cannot suppress native cursor cleanup', async () => {
+  const close = vi.fn(async () => {});
+  const cursor = { _initialize: vi.fn(), getMore: vi.fn(), readBufferedDocuments: () => [], next: vi.fn(async () => null), close };
+  const failure = new Error('tracking failed');
+  observeMongoCursor(cursor, { track() { throw failure; } });
+  await expect(cursor.toArray()).rejects.toBe(failure);
+  expect(close).toHaveBeenCalled();
+  close.mockClear();
+  await expect(cursor.close()).resolves.toBeUndefined();
+  expect(close).toHaveBeenCalledTimes(1);
 });

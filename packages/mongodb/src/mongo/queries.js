@@ -418,6 +418,20 @@ const buildSortClause = (sortTerms, gqltype, aggregateClauses, aggregationsInclu
   return { $sort: sortExpressions };
 };
 
+// Private storage capabilities need authorization filters without generated list pagination.
+// Compile the same filter/lookups and clean up only aliases this compiler introduced.
+const buildFilterQuery = async (input, gqltype) => {
+  if (input.sort != null || input.pagination != null) {
+    throw new SimfinityError('Storage scopes must contain filters; provide sorting and pagination on the operation', 'INVALID_SCOPE', 400);
+  }
+  const pipeline = [], lookups = {};
+  const match = await collectFiltersAndLookups(input, gqltype, pipeline, lookups, 'find');
+  if (match) pipeline.push(match);
+  const aliases = Object.keys(lookups);
+  if (aliases.length) pipeline.push({ $unset: aliases });
+  return pipeline;
+};
+
 const buildQuery = async (input, gqltype, isCount) => {
   const aggregateClauses = [];
   const aggregationsIncluded = {};
@@ -503,5 +517,5 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
   return aggregateClauses;
 };
 
-  return { buildQuery, buildFilterGroupMatch, buildAggregationQuery };
+  return { buildQuery, buildFilterQuery, buildFilterGroupMatch, buildAggregationQuery };
 };

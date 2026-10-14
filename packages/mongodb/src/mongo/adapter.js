@@ -231,7 +231,7 @@ export const createMongoAdapter = (options) => {
     supportsObservedReads: true,
     validateSession: validateMongoSession,
     validateStorageOptions(Model, gqltype, operation, storage) {
-      validateStorageOptions(Model, gqltype, operation, storage, integrity);
+      return validateStorageOptions(Model, gqltype, operation, storage, integrity);
     },
     setRecordIdentity(Model, record, id) { record._id = castModelId(Model, id); },
     // Relation inputs and batch keys: only an ObjectId or its hex form, never a newly minted one.

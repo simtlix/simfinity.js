@@ -1363,7 +1363,7 @@ const completeEmbeddedValue = (fieldName, fieldEntry, value, patch = null) => {
 // a removed nested object is materialized again from its list defaults. A null for a non-null member
 // keeps the stored value, also as at the top level. Nested objects in the patch replace the stored
 // ones wholesale.
-const clearNullEmbeddedMembers = (merged, fieldEntry, patch) => {
+const clearNullEmbeddedMembers = (merged, fieldEntry, patch, storage) => {
   if (!patch || typeof patch !== 'object') return;
   const members = unwrapNonNull(fieldEntry.type).getFields();
   for (const [memberName, value] of Object.entries(patch)) {
@@ -1372,7 +1372,7 @@ const clearNullEmbeddedMembers = (merged, fieldEntry, patch) => {
     const relation = member.extensions?.relation;
     const listShape = getListShape(member.type);
     if (relation && !relation.embedded && listShape) continue;
-    merged[getFieldStorageName(memberName, member)] = listShape ? [] : null;
+    merged[getFieldStorageName(memberName, member)] = listShape && storage?.nulls !== 'preserve' ? [] : null;
   }
 };
 
@@ -1422,7 +1422,7 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
           } else {
             materializedModel.modelArgs[fieldEntryName] = { ...oldObjectData, ...newObjectData };
             clearNullEmbeddedMembers(materializedModel.modelArgs[fieldEntryName],
-              argTypes[fieldEntryName], ownValue(args, fieldEntryName));
+              argTypes[fieldEntryName], ownValue(args, fieldEntryName), storage);
             completeEmbeddedValue(fieldEntryName, argTypes[fieldEntryName],
               materializedModel.modelArgs[fieldEntryName], newObjectData);
           }
@@ -2756,14 +2756,15 @@ const registered = (typeName) => {
 };
 const execute = async (typeName, operation, args = {}, options = {}) => {
   const type = registered(typeName);
-  const { context, session, storage } = options;
+  const { context, session } = options;
+  let { storage } = options;
   if ((options.readOptions || options.observer) && !adapter.supportsObservedReads) {
     throw new SimfinityError('Observed reads are unsupported by this backend', 'UNSUPPORTED_CAPABILITY', 400);
   }
   if (session && adapter.validateSession) adapter.validateSession(type.model, session);
   if (storage) {
     if (!adapter.validateStorageOptions) throw new SimfinityError('Storage write options are unsupported by this backend', 'UNSUPPORTED_CAPABILITY', 400);
-    adapter.validateStorageOptions(type.model, type.gqltype, operation, storage);
+    storage = adapter.validateStorageOptions(type.model, type.gqltype, operation, storage) || storage;
   }
   const mutation = [operations.SAVE, operations.UPDATE, operations.DELETE].includes(operation);
   if (mutation) {

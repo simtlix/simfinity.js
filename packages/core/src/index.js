@@ -19,3 +19,5 @@ export { UnauthenticatedError, ForbiddenError } from './auth/errors.js';
 export { default as plugins } from './plugins.js';
 export { default as scalars } from './scalars.js';
 export { default as validators } from './validators.js';
+
+export { configureIntrospection } from './introspection.js';

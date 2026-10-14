@@ -1,5 +1,6 @@
-import { createRuntime, type ExecuteOptions } from '@simtlix/simfinity-core';
+import { configureIntrospection, createRuntime, type ExecuteOptions } from '@simtlix/simfinity-core';
 import { createMongoAdapter, type MongoStorageRequest } from '@simtlix/simfinity-js';
+configureIntrospection({ fieldExtensions: false });
 const runtime = createRuntime(createMongoAdapter());
 runtime.configureIntrospection({ fieldExtensions: false });
 const options: ExecuteOptions = { storage: { nulls: 'preserve', filter: { version: 1 }, increments: { version: 1 } }, observer: { onRows(rows) { void rows; } } };

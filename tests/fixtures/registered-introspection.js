@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { GraphQLID, GraphQLObjectType, GraphQLString, buildClientSchema, introspectionFromSchema, validateSchema, __Field } from 'graphql';
-import { createRuntime } from '../../packages/core/src/index.js';
+import { configureIntrospection, createRuntime } from '../../packages/core/src/index.js';
 import { createMongoAdapter } from '../../packages/mongodb/src/mongo/adapter.js';
+configureIntrospection({ fieldExtensions: false });
 const runtime = createRuntime(createMongoAdapter());
-runtime.configureIntrospection({ fieldExtensions: false });
+assert.equal(runtime.configureIntrospection, configureIntrospection);
 runtime.preventCreatingCollection(true);
 const Type = new GraphQLObjectType({ name: 'StandardIntrospection', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
 runtime.connect(null, Type, 'standardItem', 'standardItems');
