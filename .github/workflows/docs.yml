@@ -40,19 +40,20 @@ jobs:
     outputs:
       pages_artifact: github-pages-${{ github.run_attempt }}
       version: ${{ steps.version.outputs.version }}
+      commit: ${{ steps.version.outputs.commit }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           ref: ${{ inputs.source_ref || github.sha }}
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: inputs.deploy
         with:
           ref: ${{ github.sha }}
           path: .release-tools
           sparse-checkout: scripts
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -69,38 +70,89 @@ jobs:
         run: |
           git merge-base --is-ancestor HEAD refs/remotes/origin/master
           node .release-tools/scripts/verify-published.js --workspace
-      - name: Record documented version
+      - name: Record documented version and commit
         id: version
-        run: node --input-type=module -e 'import { readFileSync } from "node:fs"; console.log("version=" + JSON.parse(readFileSync("package.json", "utf8")).version)' >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-pages-artifact@v3
+        run: |
+          node --input-type=module -e 'import { readFileSync } from "node:fs"; console.log("version=" + JSON.parse(readFileSync("package.json", "utf8")).version)' >> "$GITHUB_OUTPUT"
+          commit=$(git rev-parse HEAD)
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           name: github-pages-${{ github.run_attempt }}
           path: docs/.vitepress/dist
 
-  deploy:
+  # Decides before the github-pages environment job starts: that job records a deployment of
+  # its commit, so it must never succeed without deploying.
+  gate:
     if: inputs.deploy && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      deployments: read
+    outputs:
+      deploy: ${{ steps.gate.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Allow only a stable, current version that keeps Pages moving forward
+        id: gate
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.build.outputs.commit }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-state.js verify-docs "$RELEASE_VERSION" "$SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
+      - name: Report documentation the live site already contains
+        if: steps.gate.outputs.deploy == 'false'
+        env:
+          SOURCE_COMMIT: ${{ needs.build.outputs.commit }}
+          LIVE_COMMIT: ${{ steps.gate.outputs.live }}
+          LIVE_DEPLOYMENT: ${{ steps.gate.outputs.deployment }}
+        run: |
+          message="GitHub Pages deployment $LIVE_DEPLOYMENT already serves $LIVE_COMMIT, which contains $SOURCE_COMMIT; documentation was not deployed again."
+          echo "::notice title=Documentation already live::$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    if: needs.gate.outputs.deploy == 'true'
+    needs: [build, gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
       pages: write
       id-token: write
+      deployments: read
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
+      # Re-running a failed deploy reuses the gate's earlier answer, so check again. Fail rather
+      # than skip here: this job's own deployment must never succeed without deploying.
       - name: Prevent an old retry from replacing newer documentation
         env:
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
-        run: node scripts/release-state.js verify-current "$RELEASE_VERSION"
-      - uses: actions/configure-pages@v5
-      - uses: actions/deploy-pages@v4
+          SOURCE_COMMIT: ${{ needs.build.outputs.commit }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          result=$(node scripts/release-state.js verify-docs "$RELEASE_VERSION" "$SOURCE_COMMIT")
+          echo "$result"
+          if ! grep -qx deploy=true <<< "$result"; then
+            echo "::error title=Documentation already live::The live site already contains $SOURCE_COMMIT (${result//$'\n'/ }); not deploying again"
+            exit 1
+          fi
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
         id: deployment
         with:
           artifact_name: ${{ needs.build.outputs.pages_artifact }}

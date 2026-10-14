@@ -1,14 +1,19 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { writeReleaseFixture } from './helpers/release-fixture.js';
 import { packRelease, setReleaseVersion } from '../scripts/release-packages.js';
 import { publishRelease } from '../scripts/publish-packages.js';
 
+// Git fixtures and spawned CLIs can exceed the default 5 s while the full suite loads the machine.
+vi.setConfig({ testTimeout: 30000 });
+
 let root; let manifest; let manifestPath;
+const manifestDigest = () => createHash('sha256').update(readFileSync(manifestPath)).digest('hex');
 const remoteError = (code) => Object.assign(new Error('Registry rejected request'), { status: 1, stdout: JSON.stringify({ error: { code } }), stderr: '' });
 const registry = (initial = new Map(), release = manifest) => {
   const versions = new Map(initial);
@@ -62,7 +67,56 @@ describe('manual workspace publication', () => {
       const output = execFileSync(process.execPath, [...args, ...flags], { env, encoding: 'utf8' });
       expect(JSON.parse(output).dryRun).toBe(true);
     }
-    expect(() => execFileSync(process.execPath, [...args, '--execute'], { env: { ...env, SIMFINITY_RELEASE_COMMIT: 'c'.repeat(40) }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).toThrow(/commit/i);
+    const wrongCommit = { ...env, SIMFINITY_RELEASE_COMMIT: 'c'.repeat(40), SIMFINITY_RELEASE_MANIFEST_SHA256: manifestDigest() };
+    expect(() => execFileSync(process.execPath, [...args, '--execute'], { env: wrongCommit, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).toThrow(/commit/i);
+  });
+
+  it('rejects a manifest that differs from the digest the packing job recorded before registry access (#28)', () => {
+    const digest = manifestDigest();
+    const offline = () => { throw new Error('Network must not be called'); };
+    expect(publishRelease(manifestPath, { registry: 'npm', expectedManifestSha256: digest, run: offline }).dryRun).toBe(true);
+    for (const wrong of ['0'.repeat(64), '', digest.toUpperCase(), digest.slice(1), 42]) {
+      for (const dryRun of [true, false]) {
+        expect(() => publishRelease(manifestPath, { registry: 'npm', dryRun, expectedManifestSha256: wrong, run: offline })).toThrow('Release manifest differs from the packed manifest digest');
+      }
+    }
+  });
+
+  it('publishes from the CLI only with the packed manifest digest and the validated commit (#28)', () => {
+    const binaryDirectory = join(root, 'logging-npm');
+    const log = join(root, 'logging-npm.log');
+    mkdirSync(binaryDirectory);
+    writeFileSync(join(binaryDirectory, 'npm'), '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$SIMFINITY_NPM_LOG"\nexit 93\n');
+    chmodSync(join(binaryDirectory, 'npm'), 0o755);
+    const script = fileURLToPath(new URL('../scripts/publish-packages.js', import.meta.url));
+    const inherited = { ...process.env };
+    delete inherited.SIMFINITY_RELEASE_COMMIT;
+    delete inherited.SIMFINITY_RELEASE_MANIFEST_SHA256;
+    const cli = (execution, variables) => {
+      rmSync(log, { force: true });
+      const result = spawnSync(process.execPath, [script, manifestPath, '--registry', 'npm', execution], {
+        env: { ...inherited, PATH: `${binaryDirectory}${delimiter}${process.env.PATH}`, SIMFINITY_NPM_LOG: log, ...variables },
+        encoding: 'utf8',
+      });
+      return { status: result.status, stderr: result.stderr, npm: existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [] };
+    };
+    const commit = { SIMFINITY_RELEASE_COMMIT: manifest.commit };
+    const digest = { SIMFINITY_RELEASE_MANIFEST_SHA256: manifestDigest() };
+    const refused = (message) => ({ status: 1, stderr: `${message}\n`, npm: [] });
+    expect(cli('--execute', commit)).toEqual(refused('Publishing requires SIMFINITY_RELEASE_MANIFEST_SHA256, the packed manifest digest'));
+    expect(cli('--execute', { ...commit, SIMFINITY_RELEASE_MANIFEST_SHA256: '' })).toEqual(refused('Publishing requires SIMFINITY_RELEASE_MANIFEST_SHA256, the packed manifest digest'));
+    expect(cli('--execute', digest)).toEqual(refused('Publishing requires SIMFINITY_RELEASE_COMMIT, the validated source commit'));
+    expect(cli('--execute', { ...digest, SIMFINITY_RELEASE_COMMIT: '' })).toEqual(refused('Publishing requires SIMFINITY_RELEASE_COMMIT, the validated source commit'));
+    expect(cli('--execute', { ...commit, SIMFINITY_RELEASE_MANIFEST_SHA256: 'f'.repeat(64) })).toEqual(refused('Release manifest differs from the packed manifest digest'));
+    // With both, the CLI reaches the registry, here a stub that fails the first lookup.
+    const published = cli('--execute', { ...commit, ...digest });
+    expect(published.status).toBe(1);
+    expect(published.npm).toEqual([`view ${manifest.packages[0].name}@${manifest.version} dist.integrity --json --registry https://registry.npmjs.org/`]);
+    // Dry runs stay local and keep both variables optional, but check them when given.
+    for (const variables of [{}, digest, { ...commit, ...digest }]) {
+      expect(cli('--dry-run', variables)).toMatchObject({ status: 0, stderr: '', npm: [] });
+    }
+    expect(cli('--dry-run', { SIMFINITY_RELEASE_MANIFEST_SHA256: '0'.repeat(64) })).toEqual(refused('Release manifest differs from the packed manifest digest'));
   });
 
   it('publishes verified archives in dependency order using the stable distribution tag', () => {

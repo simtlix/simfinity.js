@@ -13,6 +13,13 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same pull request cancels its older run. Master pushes and release runs
+# that call this workflow (github.* is the caller's there) each get their own group and always
+# complete.
+concurrency:
+  group: database-integration-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   integration:
     runs-on: ubuntu-24.04
@@ -47,11 +54,11 @@ jobs:
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 5s --health-retries 12
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm

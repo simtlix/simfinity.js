@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { writeReleaseFixture } from './helpers/release-fixture.js';
-import { packRelease, readRelease, readReleaseManifest, setReleaseVersion } from '../scripts/release-packages.js';
+import { packRelease, readRelease, readReleaseManifest, releaseAssets, setReleaseVersion } from '../scripts/release-packages.js';
 
 const roots = [];
 const json = (path) => JSON.parse(readFileSync(path, 'utf8'));
@@ -17,6 +18,20 @@ const fixture = () => {
   return writeReleaseFixture(root);
 };
 afterEach(() => { vi.restoreAllMocks(); syncBuiltinESMExports(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+const git = (root, ...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+// A committed release fixture whose core package also matches an ignored and an untracked file.
+const committedFixture = () => {
+  const root = fixture();
+  setReleaseVersion(root, '3.2.0');
+  writeFileSync(join(root, '.gitignore'), '**/config.js\nscripts/\n');
+  git(root, 'init', '-q');
+  git(root, 'add', '.');
+  git(root, '-c', 'user.name=Release Test', '-c', 'user.email=release@example.test', 'commit', '-qm', 'fixture');
+  writeFileSync(join(root, 'packages/core/src/config.js'), 'export const secret = 1;\n');
+  writeFileSync(join(root, 'packages/sql/src/scratch.js'), 'export const draft = 1;\n');
+  return root;
+};
+const sha256 = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
 
 describe('workspace release preparation', () => {
   it('updates every internal package and v2 lock dependency together without changing external resolutions', () => {
@@ -153,6 +168,120 @@ describe('workspace release preparation', () => {
     writeFileSync(firstArchive, 'tampered');
     expect(() => readReleaseManifest(join(destination, 'manifest.json'))).toThrow(/integrity/i);
   }, 30000);
+
+  it('verifies the manifest digest recorded by the packing job before reading archives (#28)', () => {
+    const root = fixture();
+    setReleaseVersion(root, '3.2.0');
+    const manifest = packRelease(root, join(root, 'artifacts'), { commit: 'a'.repeat(40) });
+    const path = join(root, 'artifacts/manifest.json');
+    const digest = sha256(path);
+    expect(readReleaseManifest(path, { sha256: digest })).toEqual(manifest);
+    for (const wrong of ['0'.repeat(64), '', digest.toUpperCase(), ` ${digest}`, null, 42]) {
+      expect(() => readReleaseManifest(path, { sha256: wrong })).toThrow('Release manifest differs from the packed manifest digest');
+    }
+    writeFileSync(path, `${JSON.stringify(manifest)}\n`);
+    expect(() => readReleaseManifest(path, { sha256: digest })).toThrow('Release manifest differs from the packed manifest digest');
+    expect(readReleaseManifest(path)).toEqual(manifest);
+    expect(readReleaseManifest(path, {})).toEqual(manifest);
+  }, 30000);
+
+  it('lists only the verified manifest, its archives and the npm evidence as GitHub release assets (#28)', () => {
+    const root = fixture();
+    setReleaseVersion(root, '3.2.0');
+    const manifest = packRelease(root, join(root, 'artifacts'), { commit: 'a'.repeat(40) });
+    const path = join(root, 'artifacts/manifest.json');
+    const digest = sha256(path);
+    expect(() => releaseAssets(path, { sha256: digest })).toThrow('npm-verification.json must be a regular file next to the release manifest');
+    writeFileSync(join(root, 'artifacts/npm-verification.json'), '{}\n');
+    writeFileSync(join(root, 'artifacts/install.sh'), 'echo extra\n');
+    expect(releaseAssets(path, { sha256: digest })).toEqual([
+      path, ...manifest.packages.map((item) => join(root, 'artifacts', item.filename)), join(root, 'artifacts/npm-verification.json'),
+    ]);
+    expect(() => releaseAssets(path, { sha256: '0'.repeat(64) })).toThrow('Release manifest differs from the packed manifest digest');
+  }, 30000);
+
+  it('refuses to pack untracked or ignored files only when asked to (#28)', () => {
+    const root = committedFixture();
+    const destination = join(root, 'tracked');
+    expect(() => packRelease(root, destination, { requireTracked: true })).toThrow('Release archive for @simtlix/simfinity-core would include files git does not track: src/config.js');
+    expect(existsSync(destination)).toBe(false);
+    rmSync(join(root, 'packages/core/src/config.js'));
+    expect(() => packRelease(root, destination, { requireTracked: true })).toThrow('Release archive for @simtlix/simfinity-sql would include files git does not track: src/scratch.js');
+    expect(existsSync(destination)).toBe(false);
+    writeFileSync(join(root, 'packages/core/src/config.js'), 'export const secret = 1;\n');
+    // Without the option (test:packages on a working tree), the files on disk are packed.
+    const loose = packRelease(root, join(root, 'loose'));
+    expect(loose.commit).toBe(git(root, 'rev-parse', 'HEAD'));
+    expect(execFileSync('tar', ['-tzf', join(root, 'loose', loose.packages[0].filename)], { encoding: 'utf8' })).toContain('package/src/config.js');
+    rmSync(join(root, 'packages/core/src/config.js'));
+    rmSync(join(root, 'packages/sql/src/scratch.js'));
+    const tracked = packRelease(root, destination, { requireTracked: true });
+    expect(execFileSync('tar', ['-tzf', join(destination, tracked.packages[0].filename)], { encoding: 'utf8' })).not.toContain('config.js');
+    expect(tracked.packages.slice(2)).toEqual(loose.packages.slice(2));
+    // Outside a git checkout the check cannot list tracked files and fails closed.
+    const plain = fixture();
+    setReleaseVersion(plain, '3.2.0');
+    expect(() => packRelease(plain, join(plain, 'artifacts'), { commit: 'a'.repeat(40), requireTracked: true })).toThrow(/git/);
+    expect(existsSync(join(plain, 'artifacts'))).toBe(false);
+  }, 30000);
+
+  it('runs the pack CLI with the tracked-file check and the verify CLI with the manifest digest (#28)', () => {
+    const root = committedFixture();
+    mkdirSync(join(root, 'scripts'));
+    for (const file of ['release-packages.js', 'cli.js']) copyFileSync(fileURLToPath(new URL(`../scripts/${file}`, import.meta.url)), join(root, 'scripts', file));
+    writeFileSync(join(root, 'scripts/package.json'), '{ "type": "module" }\n');
+    const script = join(root, 'scripts/release-packages.js');
+    const inherited = { ...process.env };
+    delete inherited.SIMFINITY_RELEASE_MANIFEST_SHA256;
+    const run = (args, env = {}) => spawnSync(process.execPath, [script, ...args], { cwd: root, env: { ...inherited, ...env }, encoding: 'utf8' });
+    const cli = (args, env = {}) => {
+      const result = run(args, env);
+      return { status: result.status, stderr: result.stderr };
+    };
+    const destination = join(root, 'artifacts');
+    expect(cli(['pack', destination])).toEqual({ status: 1, stderr: 'Release archive for @simtlix/simfinity-core would include files git does not track: src/config.js\n' });
+    expect(existsSync(destination)).toBe(false);
+    rmSync(join(root, 'packages/core/src/config.js'));
+    rmSync(join(root, 'packages/sql/src/scratch.js'));
+    expect(cli(['pack', destination])).toEqual({ status: 0, stderr: '' });
+    const manifest = join(destination, 'manifest.json');
+    expect(cli(['verify', manifest])).toEqual({ status: 0, stderr: '' });
+    expect(cli(['verify', manifest], { SIMFINITY_RELEASE_MANIFEST_SHA256: sha256(manifest) })).toEqual({ status: 0, stderr: '' });
+    for (const wrong of ['', 'f'.repeat(64)]) {
+      expect(cli(['verify', manifest], { SIMFINITY_RELEASE_MANIFEST_SHA256: wrong })).toEqual({ status: 1, stderr: 'Release manifest differs from the packed manifest digest\n' });
+    }
+
+    // The GitHub release upload list: one path per line, only from a digest-checked manifest.
+    const digest = { SIMFINITY_RELEASE_MANIFEST_SHA256: sha256(manifest) };
+    for (const env of [{}, { SIMFINITY_RELEASE_MANIFEST_SHA256: '' }]) {
+      expect(cli(['assets', manifest], env)).toEqual({ status: 1, stderr: 'Release assets require SIMFINITY_RELEASE_MANIFEST_SHA256, the packed manifest digest\n' });
+    }
+    expect(cli(['assets', manifest], digest)).toEqual({ status: 1, stderr: 'npm-verification.json must be a regular file next to the release manifest\n' });
+    writeFileSync(join(destination, 'npm-verification.json'), '{}\n');
+    writeFileSync(join(destination, 'install.sh'), 'echo extra\n');
+    const listed = run(['assets', manifest], digest);
+    expect({ status: listed.status, stderr: listed.stderr }).toEqual({ status: 0, stderr: '' });
+    const archives = JSON.parse(readFileSync(manifest, 'utf8')).packages.map((item) => join(destination, item.filename));
+    expect(listed.stdout).toBe(`${[manifest, ...archives, join(destination, 'npm-verification.json')].join('\n')}\n`);
+    expect(cli(['assets', manifest], { SIMFINITY_RELEASE_MANIFEST_SHA256: 'f'.repeat(64) })).toEqual({ status: 1, stderr: 'Release manifest differs from the packed manifest digest\n' });
+  }, 30000);
+
+  it('names the package directory of a misplaced package manifest (#156)', () => {
+    const root = fixture();
+    const path = join(root, 'packages/mcp/package.json');
+    writeFileSync(path, JSON.stringify({ ...json(path), name: '@simtlix/simfinity-other' }));
+    expect(() => readRelease(root)).toThrow('Expected package @simtlix/simfinity-mcp in packages/mcp');
+  });
+
+  it.each(['0.0.9', '^3.2.0'])('reports a wrong v2 internal requires range %s at the manifest edge check (#156)', (range) => {
+    const root = fixture();
+    setReleaseVersion(root, '3.2.0');
+    const path = join(root, 'package-lock.json');
+    const lock = json(path);
+    lock.dependencies['@simtlix/simfinity-postgres'].requires['@simtlix/simfinity-sql'] = range;
+    writeFileSync(path, JSON.stringify(lock));
+    expect(() => readRelease(root)).toThrow('Lockfile internal dependency is missing or differs for @simtlix/simfinity-postgres');
+  });
 
   it.each(['core', 'sql'])('rejects a new internal dependency that would publish %s before its dependency', (consumer) => {
     const root = fixture();

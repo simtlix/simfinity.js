@@ -8,10 +8,16 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkPackageQuality } from './package-quality.js';
+import { packRelease, readReleaseManifest } from './release-packages.js';
 
+// Usage: node scripts/test-packages.js [<release manifest.json>]
+// With a manifest, test exactly the archives it names (the release build passes the packing
+// job's). Without one, pack the working tree the way a release does.
+const [manifestArgument, ...extraArguments] = process.argv.slice(2);
+if (extraArguments.length) throw new Error('Usage: node scripts/test-packages.js [<release manifest.json>]');
 const root = fileURLToPath(new URL('../', import.meta.url));
 const temporary = mkdtempSync(join(tmpdir(), 'simfinity-packages-'));
 const run = (command, args, cwd) => {
@@ -26,19 +32,33 @@ const run = (command, args, cwd) => {
     throw new Error(`${command} ${args.slice(0, 2).join(' ')} failed${detail ? `:\n${detail}` : ''}`);
   }
 };
-const pack = (path) => {
-  const output = JSON.parse(run('npm', ['pack', '--json', '--pack-destination', temporary], path));
-  for (const required of ['types/index.d.ts', 'README.md', 'LICENSE']) {
-    assert(output[0].files.some((file) => file.path === required), `${output[0].name} is missing ${required}`);
+// Archives are verified against the manifest hashes before any npm call. The digest the packing
+// job recorded, and its commit, only apply to a given manifest: a fresh pack is the working tree.
+const releaseArchives = () => {
+  let manifestPath;
+  let manifest;
+  if (manifestArgument) {
+    manifestPath = resolve(manifestArgument);
+    manifest = readReleaseManifest(manifestPath, { sha256: process.env.SIMFINITY_RELEASE_MANIFEST_SHA256 });
+    const commit = process.env.SIMFINITY_RELEASE_COMMIT || run('git', ['rev-parse', 'HEAD'], root).trim();
+    if (manifest.commit !== commit) throw new Error(`Release archives were packed from ${manifest.commit}, not the tested source ${commit}`);
+  } else {
+    manifestPath = join(temporary, 'release', 'manifest.json');
+    manifest = packRelease(root, dirname(manifestPath));
   }
-  assert(!output[0].files.some((file) => (
-    file.path.includes('.superpowers') || file.path.startsWith('node_modules/')
-  )));
-  const archive = join(temporary, output[0].filename);
+  return new Map(manifest.packages.map((item) => [item.name, join(dirname(manifestPath), item.filename)]));
+};
+const check = (archives, name) => {
+  const archive = archives.get(name);
+  const files = run('tar', ['-tzf', archive], root).split('\n').filter(Boolean).map((path) => path.replace(/^package\//, ''));
+  for (const required of ['types/index.d.ts', 'README.md', 'LICENSE']) {
+    assert(files.includes(required), `${name} is missing ${required}`);
+  }
+  assert(!files.some((path) => path.includes('.superpowers') || path.startsWith('node_modules/')));
   const extracted = mkdtempSync(join(temporary, 'quality-'));
   run('tar', ['-xzf', archive, '-C', extracted], root);
   checkPackageQuality(join(extracted, 'package'));
-  console.log(`${output[0].name}: package quality 100/100`);
+  console.log(`${name}: package quality 100/100`);
   return archive;
 };
 
@@ -1260,11 +1280,12 @@ const cases = [
 ];
 
 try {
-  const core = pack(resolve(root, 'packages/core'));
-  const sql = pack(resolve(root, 'packages/sql'));
-  const mcp = pack(resolve(root, 'packages/mcp'));
-  const postgres = pack(resolve(root, 'packages/postgres'));
-  const mongo = pack(resolve(root, 'packages/mongodb'));
+  const archives = releaseArchives();
+  const core = check(archives, '@simtlix/simfinity-core');
+  const sql = check(archives, '@simtlix/simfinity-sql');
+  const mcp = check(archives, '@simtlix/simfinity-mcp');
+  const postgres = check(archives, '@simtlix/simfinity-postgres');
+  const mongo = check(archives, '@simtlix/simfinity-js');
   for (const testCase of cases) {
     const cwd = join(temporary, testCase.name);
     mkdirSync(cwd);
