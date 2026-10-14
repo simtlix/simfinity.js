@@ -144,7 +144,7 @@ afterAll(async () => {
     await mongoose.connection.db.dropDatabase();
     await mongoose.disconnect();
   }
-  mongoose.deleteModel(/^Mr(Mongo|Integrity|Guarded|Written|Static)/);
+  mongoose.deleteModel(/^Mr(Mongo|Integrity|Guarded|Written|Static|Setter)/);
   if (postgresPool) {
     await postgresPool.query(`DROP SCHEMA IF EXISTS "${namespace}" CASCADE`);
     await postgresPool.end();
@@ -788,5 +788,58 @@ describe.skipIf(!mongoUri)('a supplied Mongoose model that overrides the by-ID s
     expect(await run('deletemrstaticitem(id: "my-slug")')).toEqual({ data: { deletemrstaticitem: null }, errors: [invalidId] });
     expect(calls).toEqual(['findById my-slug', 'findById my-slug']);
     expect(await Model.collection.findOne({ _id })).toEqual(record);
+  });
+});
+
+describe.skipIf(!mongoUri)('a supplied Mongoose model with an operation-specific ID setter', () => {
+  let schema;
+  let Model;
+  let target;
+  const writes = [];
+
+  beforeAll(async () => {
+    const runtime = createRuntime(createMongoAdapter());
+    runtime.preventCreatingCollection(true);
+    const Info = new GraphQLObjectType({ name: 'MrSetterInfo', fields: { note: { type: GraphQLString } } });
+    const Item = new GraphQLObjectType({
+      name: 'MrSetterItem',
+      fields: {
+        id: { type: GraphQLID },
+        title: { type: GraphQLString },
+        info: { type: Info, extensions: { relation: { embedded: true } } },
+      },
+    });
+    const itemSchema = new mongoose.Schema({ title: String, info: { note: String } });
+    // Setters run before casting too, without query hooks or overridden statics. Reads must reject
+    // the malformed ID before a write-specific setter can redirect it to another record.
+    itemSchema.path('_id').set(function redirect(value) {
+      if (['findOneAndUpdate', 'findOneAndDelete'].includes(this.op)) {
+        writes.push(this.op);
+        return target;
+      }
+      return value;
+    });
+    Model = mongoose.model('MrSetterItem', itemSchema);
+    runtime.addNoEndpointType(Info);
+    runtime.connect(Model, Item, 'mrsetteritem', 'mrsetteritems');
+    schema = runtime.createSchema();
+    await Model.createCollection();
+    await Model.init();
+  });
+
+  test.each(['delete', 'update'])('rejects an invalid ID before the %s setter can redirect the write', async (operation) => {
+    target = new mongoose.Types.ObjectId();
+    const record = { _id: target, title: 'kept', info: { note: 'n' } };
+    await Model.collection.insertOne(record);
+    writes.length = 0;
+    const input = operation === 'delete' ? 'id: "invalid"' : 'input: { id: "invalid", title: "changed" }';
+    const field = `${operation}mrsetteritem`;
+    const result = await graphql({ schema, source: `mutation { ${field}(${input}) { title } }` });
+
+    expect(result.errors?.map(({ extensions }) => ({ code: extensions.code, status: extensions.status })))
+      .toEqual([{ code: 'NOT_VALID_ID', status: 400 }]);
+    expect(result.data).toEqual({ [field]: null });
+    expect(writes).toEqual([]);
+    expect(await Model.collection.findOne({ _id: target })).toEqual(record);
   });
 });

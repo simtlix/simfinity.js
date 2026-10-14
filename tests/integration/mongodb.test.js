@@ -652,8 +652,8 @@ describeWithMongoDB('MongoDB GraphQL compatibility contract', () => {
       const deleted = await execute(setterSchema, 'mutation { deletecontractsetteritem(id: "item-12") { id title } }');
       expect(deleted.errors).toBeUndefined();
       expect(deleted.data.deletecontractsetteritem).toEqual({ id: '12', title: 'changed' });
-      // The delete reads the record only for an onDelete hook; without one the delete is the only query.
-      expect(appliedTo()).toEqual(['item-12']);
+      // Application ID setters preserve the preliminary read, even without an onDelete hook.
+      expect(appliedTo()).toEqual(['item-12', 'item-12']);
       expect(await stored()).toEqual([]);
     });
 

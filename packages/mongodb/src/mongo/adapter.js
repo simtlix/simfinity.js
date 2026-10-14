@@ -55,13 +55,17 @@ const batchesFindOne = (Model) => hasNoQueryHooks(Model, ['find', 'findOne']);
 
 // The statics that getById, update and delete call, directly or through each other.
 const BY_ID_STATICS = ['findById', 'findOne', 'findByIdAndUpdate', 'findOneAndUpdate', 'findByIdAndDelete', 'findOneAndDelete'];
+// Mongoose's automatic ObjectId setter only changes document assignments, never query filters.
+const autoIdSetter = new mongoose.Schema.Types.ObjectId('_id').auto(true).setters.at(-1);
 
 // update and delete write through findByIdAndUpdate and findByIdAndDelete, whose findOneAndUpdate and
 // findOneAndDelete middleware runs before Mongoose casts the ID. Such middleware, or an application
 // override of one of these statics (schema.static, loadClass), could guard the read or act on a
-// malformed ID that the read by ID rejects first, so the runtime keeps that read. A model from
-// another Mongoose copy has other statics and keeps it too.
+// malformed ID that the read by ID rejects first, so the runtime keeps that read. ID setters also
+// run before casting and can branch on the query operation. A model from another Mongoose copy
+// has other statics and keeps the read too.
 const readsByIdAreInert = (Model) => BY_ID_STATICS.every((name) => Model[name] === mongoose.Model[name])
+  && Model.schema?.path('_id')?.setters?.every((setter) => setter === autoIdSetter)
   && hasNoQueryHooks(Model, ['find', 'findOne', 'findOneAndUpdate', 'findOneAndDelete']);
 
 // `useDb()` connections share their parent's MongoClient, and a session belongs to a client.
