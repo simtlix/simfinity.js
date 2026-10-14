@@ -1271,7 +1271,8 @@ const cases = [
     archives: ({ core, mcp, mongo }) => [core, mcp, mongo],
     source: mongoSource,
     types: mongoTypes,
-    extraTypes: { 'legacy.ts': mongoLegacyTypes, 'legacy-auth-plugins.ts': mongoLegacyAuthPluginsTypes },
+    extraTypes: { 'legacy.ts': mongoLegacyTypes, 'legacy-auth-plugins.ts': mongoLegacyAuthPluginsTypes,
+      'registered-data.ts': readFileSync(join(root, 'tests/fixtures/registered-data-consumer.ts'), 'utf8') },
     // The legacy deep-import declarations sit next to the shims: NodeNext, Node16 and Bundler find
     // them through the exports map, Node10 by path, and their core subpath imports through core's
     // typesVersions.

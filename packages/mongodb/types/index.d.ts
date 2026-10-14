@@ -13,6 +13,7 @@ import type {
   GraphQLOutputType,
 } from 'graphql';
 import type {
+  ReadObserver,
   DatabaseAdapter,
   MutationLimitsOptions,
   RuntimeRegistration,
@@ -48,9 +49,63 @@ export type {
 } from '@simtlix/simfinity-core';
 export * from '@simtlix/simfinity-mcp';
 export { default as mcp } from '@simtlix/simfinity-mcp';
+
+export type MongoStorageDocument = Record<string, unknown>;
+export interface MongoReadOptions {
+  projection?: MongoStorageDocument;
+  sort?: Record<string, 1 | -1>;
+  skip?: number;
+  limit?: number;
+  batchSize?: number;
+  collation?: MongoStorageDocument;
+  hint?: string | MongoStorageDocument;
+  maxTimeMS?: number;
+  timeoutMS?: number;
+  timeoutMode?: 'cursorLifetime' | 'iteration';
+  signal?: AbortSignal;
+  allowDiskUse?: boolean;
+  readConcern?: MongoStorageDocument;
+}
+export interface MongoWriteOptions {
+  collation?: MongoStorageDocument;
+  hint?: string | MongoStorageDocument;
+  maxTimeMS?: number;
+  timeoutMS?: number;
+  signal?: AbortSignal;
+  upsert?: boolean;
+  returnDocument?: 'before' | 'after';
+  includeResultMetadata?: boolean;
+  projection?: MongoStorageDocument;
+  sort?: Record<string, 1 | -1>;
+  arrayFilters?: MongoStorageDocument[];
+  ordered?: boolean;
+}
+export type MongoUpdate = MongoStorageDocument | MongoStorageDocument[];
+export type MongoBulkOperation =
+  | { insertOne: { document: MongoStorageDocument } }
+  | { updateOne: { filter: MongoStorageDocument; update: MongoUpdate; upsert?: boolean; arrayFilters?: MongoStorageDocument[]; collation?: MongoStorageDocument } }
+  | { updateMany: { filter: MongoStorageDocument; update: MongoUpdate; upsert?: boolean; arrayFilters?: MongoStorageDocument[]; collation?: MongoStorageDocument } }
+  | { replaceOne: { filter: MongoStorageDocument; replacement: MongoStorageDocument; upsert?: boolean; collation?: MongoStorageDocument } }
+  | { deleteOne: { filter: MongoStorageDocument; collation?: MongoStorageDocument } }
+  | { deleteMany: { filter: MongoStorageDocument; collation?: MongoStorageDocument } };
+export type MongoStorageRequest = { backend: 'mongodb' } & (
+  | { operation: 'find'; filter?: MongoStorageDocument; options?: MongoReadOptions }
+  | { operation: 'aggregate' | 'stream'; pipeline: MongoStorageDocument[]; filter?: MongoStorageDocument; options?: MongoReadOptions }
+  | { operation: 'updateOne' | 'updateMany' | 'findOneAndUpdate'; filter: MongoStorageDocument; update: MongoUpdate; options?: MongoWriteOptions }
+  | { operation: 'replaceOne'; filter: MongoStorageDocument; replacement: MongoStorageDocument; options?: MongoWriteOptions }
+  | { operation: 'findOneAndDelete' | 'deleteMany'; filter: MongoStorageDocument; options?: MongoWriteOptions }
+  | { operation: 'insertMany'; documents: MongoStorageDocument[]; options?: Pick<MongoWriteOptions, 'ordered' | 'timeoutMS'> }
+  | { operation: 'bulkWrite'; operations: MongoBulkOperation[]; options?: Pick<MongoWriteOptions, 'ordered' | 'timeoutMS'> }
+);
+declare module '@simtlix/simfinity-core' {
+  interface StorageCapabilities { mongodb: MongoStorageRequest }
+}
+
 export interface MongoAdapterOptions {
   /** Fixed at adapter creation. Defaults to off; transactional mode requires initialize(). */
   referentialIntegrity?: 'off' | 'transactional';
+  /** Optional observer for generated list/count/aggregate reads. */
+  queryObserver?: () => ReadObserver | undefined;
 }
 /**
  * In the default 'off' mode, withTransaction(null, callback) without a model, as custom mutations

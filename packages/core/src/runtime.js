@@ -4,7 +4,7 @@ import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
   GraphQLInt, GraphQLEnumType, GraphQLBoolean, GraphQLError, GraphQLInterfaceType, GraphQLUnionType,
-  Kind, getNamedType,
+  Kind, getNamedType, coerceInputValue,
 } from 'graphql';
 
 import SimfinityError from './errors/simfinity.error.js';
@@ -20,7 +20,7 @@ import {
   getFieldStorageName, getListShape, markStoredIdentity, normalizeConnectionField,
 } from './relation-storage.js';
 import {
-  fieldMetadataNamesFixed, fieldMetadataTypes, fixFieldMetadataNames, renameFieldMetadataTypes,
+  configureIntrospection, fieldMetadataNamesFixed, fieldMetadataTypes, fixFieldMetadataNames, renameFieldMetadataTypes,
 } from './introspection.js';
 
 // Resolvers Simfinity generates. Any other resolver on a registered type when its schema is first
@@ -1170,7 +1170,7 @@ const buildPendingInputTypes = (waitingForInputType, includedMutationTypes) => {
   }
 };
 
-const materializeModel = async (args, gqltype, linkToParent, operation, session) => {
+const materializeModel = async (args, gqltype, linkToParent, operation, session, storage) => {
   if (!args) {
     return null;
   }
@@ -1204,7 +1204,7 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
             const fieldType = fieldEntry.type instanceof GraphQLNonNull
               ? fieldEntry.type.ofType : fieldEntry.type;
             modelArgs[fieldEntryName] = (await materializeModel(fieldValue, fieldType,
-              null, operation, session)).modelArgs;
+              null, operation, session, storage)).modelArgs;
           }
         } else {
           throw new SimfinityError(
@@ -1227,7 +1227,7 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
                 collectionEntries.push(null);
               } else {
                 const collectionEntry = (await materializeModel(element, itemType,
-                  null, operation, session)).modelArgs;
+                  null, operation, session, storage)).modelArgs;
                 if (collectionEntry) collectionEntries.push(collectionEntry);
               }
             }
@@ -1237,6 +1237,8 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
           modelArgs[fieldEntryName] = fieldValue;
         }
       }
+    } else if (fieldValue === null && storage?.nulls === 'preserve' && !(fieldEntry.type instanceof GraphQLNonNull)) {
+      modelArgs[getFieldStorageName(fieldEntryName, fieldEntry)] = null;
     } else if (operation === 'CREATE' && fieldEntryName in Object.prototype && getListShape(fieldEntry.type)
       && !(fieldEntry.extensions?.relation && !fieldEntry.extensions.relation.embedded)) {
       // A create without a value stores [] for a list: SQL backends store it for every list, and
@@ -1294,18 +1296,18 @@ const readByIdIsInert = (Model) => typeof adapter.readByIdIsInert === 'function'
 // The record is read for the onDelete hook; adapter.delete casts the ID, deletes and returns the
 // record itself. Without a hook, the read is skipped when it is inert. A nested delete passes the
 // child it has already read as `current`.
-const onDelete = async (Model, controller, id, session, context, current) => {
+const onDelete = async (Model, controller, id, session, context, current, storage) => {
   const hasHook = !!(controller && controller.onDelete);
   let currentObject = current;
   if (currentObject === undefined && (hasHook || !readByIdIsInert(Model))) {
-    currentObject = await adapter.getById(Model, id, session, { plain: true });
+    currentObject = await adapter.getById(Model, id, session, { plain: true, ...(storage ? { storage } : {}) });
   }
 
   if (hasHook) {
     await controller.onDelete(currentObject, session, context);
   }
 
-  return adapter.delete(Model, id, session);
+  return adapter.delete(Model, id, session, ...(storage ? [storage] : []));
 };
 
 const getEmbeddedFieldNames = (gqltype) => {
@@ -1395,8 +1397,8 @@ const readsStoredEmbedded = (Model, controller, materializedModel, embeddedField
 };
 
 const onUpdateSubject = async (Model, gqltype, controller, args, session, linkToParent, context,
-  recordChecked = false) => {
-  const materializedModel = await materializeModel(args, gqltype, linkToParent, 'UPDATE', session);
+  recordChecked = false, storage) => {
+  const materializedModel = await materializeModel(args, gqltype, linkToParent, 'UPDATE', session, storage);
   const objectId = args.id;
   const argTypes = gqltype.getFields();
   const embeddedFieldNames = getEmbeddedFieldNames(gqltype);
@@ -1408,6 +1410,7 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
       projection,
       plain: true,
       lock: true,
+      ...(storage ? { storage } : {}),
     });
     if (currentObject) {
       for (const fieldEntryName of embeddedFieldNames) {
@@ -1430,6 +1433,10 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
 
   for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
     if (args[fieldEntryName] === null && !(fieldEntry.type instanceof GraphQLNonNull)) {
+      if (storage?.nulls === 'preserve') {
+        materializedModel.modelArgs[getFieldStorageName(fieldEntryName, fieldEntry)] = null;
+        continue;
+      }
       materializedModel.modelArgs.$unset = {
         ...materializedModel.modelArgs.$unset,
         [getFieldStorageName(fieldEntryName, fieldEntry)]: '',
@@ -1440,14 +1447,15 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
   const unset = materializedModel.modelArgs.$unset || {};
   const set = { ...materializedModel.modelArgs };
   delete set.$unset;
-  const update = adapter.prepareUpdate(set, unset);
+  const prepared = adapter.prepareUpdate(set, unset);
+  const update = storage?.increments ? adapter.prepareStorageUpdate(prepared, storage) : prepared;
 
   if (controller && controller.onUpdating) {
     await controller.onUpdating(objectId, update, session, context);
   }
 
   if (linkToParent) linkToParent(update);
-  const result = await adapter.update(Model, objectId, update, session);
+  const result = await adapter.update(Model, objectId, update, session, ...(storage ? [storage] : []));
   if (!result) throw new SimfinityError(`${gqltype.name} ${objectId} is not valid`, 'NOT_VALID_ID', 404);
 
   if (materializedModel.collectionFields) {
@@ -1484,15 +1492,23 @@ const onStateChanged = async (Model, gqltype, controller, args, session, actionF
   throw new SimfinityError(`Action is not allowed from state ${storedModel.state}`, 'BAD_REQUEST', 400);
 };
 
-const onSaveObject = async (Model, gqltype, controller, args, session, linkToParent, context) => {
-  const materializedModel = await materializeModel(args, gqltype, linkToParent, 'CREATE', session);
+const onSaveObject = async (Model, gqltype, controller, args, session, linkToParent, context, storage) => {
+  const materializedModel = await materializeModel(args, gqltype, linkToParent, 'CREATE', session, storage);
   if (typesDict.types[gqltype.name].stateMachine) {
     materializedModel.modelArgs.state = stateValue(
       typesDict.types[gqltype.name].stateMachine.initialState,
     );
   }
 
+  if (storage?.nulls === 'preserve') {
+    for (const [name, field] of Object.entries(gqltype.getFields())) {
+      if (args[name] === null && !(field.type instanceof GraphQLNonNull)) {
+        materializedModel.modelArgs[getFieldStorageName(name, field)] = null;
+      }
+    }
+  }
   const newObject = adapter.newRecord(Model, materializedModel.modelArgs, session);
+  if (storage?.id !== undefined) adapter.setRecordIdentity(Model, newObject, storage.id);
 
   if (controller && controller.onSaving) {
     await controller.onSaving(newObject, args, session, context);
@@ -1588,7 +1604,7 @@ const assertCollectionWrites = (gqltype, input) => {
 };
 
 const executeOperation = (Model, gqltype, controller, args, operation, actionField,
-  session, context, inputType) => {
+  session, context, inputType, storage) => {
   const limit = getMaxNestedOperations();
   if (limit !== null && operation !== operations.DELETE) assertNestedOperations(gqltype, args, limit);
   if (operation !== operations.DELETE) assertCollectionWrites(gqltype, args);
@@ -1599,11 +1615,11 @@ const executeOperation = (Model, gqltype, controller, args, operation, actionFie
       const attemptArgs = nextInput();
       switch (operation) {
         case operations.SAVE:
-          return onSaveObject(Model, gqltype, controller, attemptArgs, mySession, null, context);
+          return onSaveObject(Model, gqltype, controller, attemptArgs, mySession, null, context, storage);
         case operations.UPDATE:
-          return onUpdateSubject(Model, gqltype, controller, attemptArgs, mySession, null, context);
+          return onUpdateSubject(Model, gqltype, controller, attemptArgs, mySession, null, context, false, storage);
         case operations.DELETE:
-          return onDelete(Model, controller, attemptArgs, mySession, context);
+          return onDelete(Model, controller, attemptArgs, mySession, context, undefined, storage);
         case operations.STATE_CHANGED:
           return onStateChanged(Model, gqltype, controller,
             attemptArgs, mySession, actionField, context);
@@ -2729,11 +2745,92 @@ function formatArgs(argsArray) {
   return graphqlArgs;
 }
 
+// Server-side entry point for the generated lifecycle. It takes GraphQL input values, not
+// resolver arguments/info, and never relies on a captured schema resolver.
+const registered = (typeName) => {
+  const type = typesDict.types[typeName];
+  if (!type?.endpoint || !type.model || !type.inputType) {
+    throw new SimfinityError('Entity must be registered and its schema initialized', 'UNREGISTERED_ENTITY', 400);
+  }
+  return type;
+};
+const execute = async (typeName, operation, args = {}, options = {}) => {
+  const type = registered(typeName);
+  const { context, session, storage } = options;
+  if ((options.readOptions || options.observer) && !adapter.supportsObservedReads) {
+    throw new SimfinityError('Observed reads are unsupported by this backend', 'UNSUPPORTED_CAPABILITY', 400);
+  }
+  if (session && adapter.validateSession) adapter.validateSession(type.model, session);
+  if (storage) {
+    if (!adapter.validateStorageOptions) throw new SimfinityError('Storage write options are unsupported by this backend', 'UNSUPPORTED_CAPABILITY', 400);
+    adapter.validateStorageOptions(type.model, type.gqltype, operation, storage);
+  }
+  const mutation = [operations.SAVE, operations.UPDATE, operations.DELETE].includes(operation);
+  if (mutation) {
+    const inputType = operation === operations.UPDATE ? typesDictForUpdate.types[typeName].inputType : type.inputType;
+    const params = { type, operation, context, args: operation === operations.DELETE
+      ? { id: coerceInputValue(args.id, new GraphQLNonNull(GraphQLID)) }
+      : { input: coerceInputValue(args.input, new GraphQLNonNull(inputType)) } };
+    await executeMiddleware(params);
+    return executeOperation(type.model, type.gqltype, type.controller,
+      operation === operations.DELETE ? params.args.id : params.args.input,
+      operation, null, session, context, inputType, storage);
+  }
+  if (!['find', 'count', 'get_by_id', 'aggregate'].includes(operation)) {
+    throw new SimfinityError('Unsupported registered operation', 'INVALID_OPERATION', 400);
+  }
+  if (operation === 'get_by_id') {
+    const params = { type, args: { id: coerceInputValue(args.id, new GraphQLNonNull(GraphQLID)) }, operation, context };
+    await executeMiddleware(params);
+    if (!getScope(type.gqltype, operation)) return adapter.getById(type.model, params.args.id, session, { context, readOptions: options.readOptions, observer: options.observer });
+    const queryArgs = { id: { operator: 'EQ', value: params.args.id } };
+    await executeScope({ ...params, args: queryArgs });
+    const rows = await adapter.find(type.model, type.gqltype, queryArgs, session, { context, readOptions: options.readOptions, observer: options.observer });
+    return rows[0] || null;
+  }
+  const queryArgs = { ...args };
+  const scopeOperation = operation === 'count' ? 'find' : operation;
+  const joinedScopes = inspectClientPaths(type.gqltype, queryArgs, scopeOperation);
+  const params = { type, args: queryArgs, operation: scopeOperation, context };
+  await executeMiddleware(params);
+  await executeScope(params);
+  await applyJoinedScopes(joinedScopes, params);
+  return adapter[operation](type.model, type.gqltype, params.args, session, { context, readOptions: options.readOptions, observer: options.observer });
+};
+
+// Explicit backend capability, private to server code. The adapter owns its fixed operation
+// vocabulary and validation; no callback, collection name or model can be supplied by callers.
+const executeMutation = async (name, input, { context, session } = {}) => {
+  const mutation = Object.hasOwn(registeredMutations, name) && registeredMutations[name];
+  if (!mutation) throw new SimfinityError('Unregistered custom mutation', 'UNREGISTERED_OPERATION', 400);
+  const args = { input: mutation.inputModel ? coerceInputValue(input, new GraphQLNonNull(mutation.inputModel)) : input };
+  const params = { args, operation: operations.CUSTOM_MUTATION, entry: name, context };
+  await executeMiddleware(params);
+  return executeRegisteredMutation(params.args.input, mutation.callback, context, session, mutation.inputModel);
+};
+
+const executeStorage = async (typeName, request, options = {}) => {
+  const type = registered(typeName);
+  if (!adapter.executeStorage || request?.backend !== adapter.storageBackend) {
+    throw new SimfinityError('Storage capability is unsupported by this backend', 'UNSUPPORTED_CAPABILITY', 400);
+  }
+  if (options.session && adapter.validateSession) adapter.validateSession(type.model, options.session);
+  const params = { type, args: { request }, operation: 'storage.' + request.operation, context: options.context };
+  await executeMiddleware(params);
+  const queryArgs = {};
+  if (['find', 'aggregate', 'stream'].includes(request.operation)) {
+    await executeScope({ type, args: queryArgs, operation: 'find', context: options.context });
+  }
+  return adapter.executeStorage(type.model, type.gqltype, params.args.request,
+    { session: options.session, context: options.context, queryArgs, observer: options.observer });
+};
+
   if (adapter.bind) {
     adapter.bind({ getModel, getType, getRegistrations });
   }
 
   return {
+    configureIntrospection,
     configureQueryLimits,
     configureMutationLimits,
     connect,
@@ -2746,6 +2843,9 @@ function formatArgs(argsArray) {
     use,
     registerMutation,
     saveObject,
+    execute,
+    executeStorage,
+    executeMutation,
     preventCreatingCollection,
   };
 };

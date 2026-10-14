@@ -195,7 +195,52 @@ export interface MutationLimitsOptions {
   maxNestedOperations?: number | null;
 }
 
+/** Driver-independent registered operations; inputs use the generated GraphQL input contract. */
+export type RegisteredOperation = 'save' | 'update' | 'delete' | 'get_by_id' | 'find' | 'count' | 'aggregate';
+export interface RegisteredStorageOptions {
+  /** Supplied identity for create; encoded/cast by the owning adapter. */
+  id?: unknown;
+  /** Additional backend-native predicate, ANDed with the immutable requested identity. */
+  filter?: Record<string, unknown>;
+  increments?: Record<string, number>;
+  nulls?: 'preserve';
+}
+/** Observation of physical Mongo fetches, including empty getMore batches. Throwing cancels reads. */
+export interface ReadObserver {
+  beforeFetch?(): void | Promise<void>;
+  beforeRead?(): void | Promise<void>;
+  onRows?(rows: ReadonlyArray<Record<string, unknown>>): void | Promise<void>;
+  /** Track every outstanding fetch, next and cleanup promise in the caller's budget. */
+  track?(pending: Promise<unknown>): void;
+}
+export interface ExecuteOptions<Session = unknown> {
+  context?: unknown;
+  session?: Session;
+  storage?: RegisteredStorageOptions;
+  readOptions?: Record<string, unknown>;
+  observer?: ReadObserver;
+}
+/** Backends augment this interface with their discriminated capability request union. */
+export interface StorageCapabilities {}
+export type StorageRequest = StorageCapabilities[keyof StorageCapabilities];
+
 export interface Runtime<Model = any, Session = any> {
+  /** Process-wide opt-out, before any Simfinity schema is created. */
+  configureIntrospection(options: { fieldExtensions: false }): void;
+  /** Run the generated lifecycle with GraphQL input coercion and runtime middleware.
+   * @throws UNREGISTERED_ENTITY, INVALID_OPERATION, backend/session/coercion errors.
+   * @remarks Schema auth wrappers and GraphQL output resolvers do not execute.
+   */
+  execute<Result = unknown>(typeName: string, operation: RegisteredOperation, args?: Record<string, unknown>, options?: ExecuteOptions<Session>): Promise<Result>;
+  /** Execute an explicitly supported trusted backend capability on the registered owner.
+   * @throws UNSUPPORTED_CAPABILITY or INVALID_STORAGE_OPERATION for unsupported requests.
+   * @remarks Native primitives skip generated validators/controllers; authorize in middleware.
+   */
+  executeStorage<Result = unknown>(typeName: string, request: StorageRequest, options?: Omit<ExecuteOptions<Session>, 'storage' | 'readOptions'>): Promise<Result>;
+  /** Invoke a custom mutation through middleware and its adapter transaction lifecycle.
+   * @throws UNREGISTERED_OPERATION for unknown names; preserves opaque input identity without an input model.
+   */
+  executeMutation<Result = unknown>(name: string, input?: unknown, options?: Pick<ExecuteOptions<Session>, 'context' | 'session'>): Promise<Result>;
   configureQueryLimits(options?: { maxPageSize?: number }): void;
   /**
    * Process-wide; calling it without options restores the unlimited default. Invalid options,
@@ -270,6 +315,13 @@ export interface Runtime<Model = any, Session = any> {
 
 /** Driver adapter contract. GraphQL generation and lifecycle live in createRuntime. */
 export interface DatabaseAdapter<Model = any, Session = any> {
+  storageBackend?: string;
+  supportsObservedReads?: boolean;
+  validateSession?(model: Model, session: Session): void;
+  validateStorageOptions?(model: Model, type: GraphQLObjectType, operation: RegisteredOperation, options: RegisteredStorageOptions): void;
+  prepareStorageUpdate?(update: unknown, storage: RegisteredStorageOptions): unknown;
+  setRecordIdentity?(model: Model, record: unknown, id: unknown): void;
+  executeStorage?(model: Model, type: GraphQLObjectType, request: StorageRequest, options: { session?: Session; context?: unknown; queryArgs: Record<string, unknown>; observer?: ReadObserver }): Promise<unknown>;
   bind?(runtime: Pick<Runtime<Model, Session>, 'getModel' | 'getType' | 'getRegistrations'>): void;
   validateRegistration?(registration: RuntimeRegistration<Model, Session>): void;
   prepare?(registrations: RuntimeRegistration<Model, Session>[], options: { createCollection: boolean }): void;
@@ -320,7 +372,7 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * present without being called, and a value that is not a plain object counts as data.
    */
   rawEmbeddedValue?(value: any): any;
-  getById(model: Model, id: any, session?: Session | null, options?: { projection?: Record<string, number>; plain?: boolean; lock?: boolean; requiredId?: any; context?: any }): any;
+  getById(model: Model, id: any, session?: Session | null, options?: { projection?: Record<string, number>; plain?: boolean; lock?: boolean; requiredId?: any; context?: any; storage?: RegisteredStorageOptions; readOptions?: Record<string, unknown>; observer?: ReadObserver }): any;
   /** Optional batch read: the records found for `ids`, in getById shape and any order. After a failure, the runtime reads each ID with getById. */
   getByIds?(model: Model, ids: any[], options?: { context?: any }): any;
   /**
@@ -334,11 +386,11 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    */
   readByIdIsInert?(model: Model): boolean;
   prepareUpdate(set: Record<string, any>, unset: Record<string, string>): any;
-  update(model: Model, id: any, changes: any, session?: Session): any;
-  delete(model: Model, id: any, session?: Session): any;
-  find(model: Model, type: GraphQLObjectType, args: any, session?: Session | null, options?: { requiredId?: any; context?: any }): any;
-  count(model: Model, type: GraphQLObjectType, args: any, session?: Session | null): Promise<number> | number;
-  aggregate(model: Model, type: GraphQLObjectType, args: any, session?: Session | null): any;
+  update(model: Model, id: any, changes: any, session?: Session, storage?: RegisteredStorageOptions): any;
+  delete(model: Model, id: any, session?: Session, storage?: RegisteredStorageOptions): any;
+  find(model: Model, type: GraphQLObjectType, args: any, session?: Session | null, options?: { requiredId?: any; context?: any; readOptions?: Record<string, unknown>; observer?: ReadObserver }): any;
+  count(model: Model, type: GraphQLObjectType, args: any, session?: Session | null, options?: Pick<ExecuteOptions<Session>, 'readOptions' | 'observer'>): Promise<number> | number;
+  aggregate(model: Model, type: GraphQLObjectType, args: any, session?: Session | null, options?: Pick<ExecuteOptions<Session>, 'readOptions' | 'observer'>): any;
   findChildren(model: Model, type: GraphQLObjectType, connectionField: string, parentId: any, args: any, session?: Session | null): any;
 }
 export function createRuntime<Model = any, Session = any>(adapter: DatabaseAdapter<Model, Session>): Runtime<Model, Session>;

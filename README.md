@@ -4450,3 +4450,5 @@ const schema = simfinity.createSchema();
 ```
 
 *Built with ❤️ by [Simtlix](https://github.com/simtlix)*
+
+Registered server operations reuse the generated runtime lifecycle without GraphQL resolver calls. See [registered data operations](docs/guide/registered-data-operations.md) for programmatic CRUD, trusted Mongo capabilities, cursor observation and standard introspection.

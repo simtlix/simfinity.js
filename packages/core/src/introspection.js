@@ -27,10 +27,13 @@ const createFieldMetadataType = (extensionsName, relationName) => {
   });
 };
 
+const FIELD_METADATA_DISABLED = Symbol.for('simfinity.fieldMetadataDisabled');
+const SCHEMA_BUILT = Symbol.for('simfinity.schemaBuilt');
+
 // getFields() supports both lazy and already materialized introspection fields.
 // Reuse the shared field on repeated module evaluation to preserve type identity.
 const introspectionFields = __Field.getFields();
-if (!introspectionFields.extensions) {
+if (!__Field[FIELD_METADATA_DISABLED] && !introspectionFields.extensions) {
   introspectionFields.extensions = {
     type: createFieldMetadataType('FieldExtensionsType', 'RelationType'),
     name: 'extensions',
@@ -47,14 +50,16 @@ const extensionsField = () => __Field.getFields().extensions;
 
 /** The metadata types `__Field.extensions` returns now: [FieldExtensionsType, RelationType]. */
 export const fieldMetadataTypes = () => {
+  if (__Field[FIELD_METADATA_DISABLED]) return [];
   const extensionsType = extensionsField().type;
   return [extensionsType, extensionsType.getFields().relation.type];
 };
 
-export const fieldMetadataNamesFixed = () => extensionsField()[NAMES_FIXED] === true;
+export const fieldMetadataNamesFixed = () => !__Field[FIELD_METADATA_DISABLED] && extensionsField()[NAMES_FIXED] === true;
 
 export const fixFieldMetadataNames = () => {
-  extensionsField()[NAMES_FIXED] = true;
+  __Field[SCHEMA_BUILT] = true;
+  if (!__Field[FIELD_METADATA_DISABLED]) extensionsField()[NAMES_FIXED] = true;
 };
 
 // Every schema constructed afterwards, in the whole process, contains the metadata types under the
@@ -68,4 +73,15 @@ export const renameFieldMetadataTypes = (extensionsName, relationName) => {
   return () => {
     field.type = previous;
   };
+};
+
+/** Process-wide opt-out; configure before building any Simfinity schema. */
+export const configureIntrospection = (options) => {
+  if (!options || Object.keys(options).length !== 1 || options.fieldExtensions !== false) {
+    throw new Error('configureIntrospection supports only { fieldExtensions: false }');
+  }
+  if (__Field[FIELD_METADATA_DISABLED]) return;
+  if (__Field[SCHEMA_BUILT] || fieldMetadataNamesFixed()) throw new Error('Configure introspection before creating a Simfinity schema');
+  __Field[FIELD_METADATA_DISABLED] = true;
+  delete __Field.getFields().extensions;
 };

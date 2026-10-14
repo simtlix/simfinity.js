@@ -5,6 +5,8 @@ import { getListShape, normalizeConnectionField } from '@simtlix/simfinity-core/
 import { createMongoModel } from './models.js';
 import { createMongoQueries } from './queries.js';
 import { withMongoTransaction } from './transactions.js';
+import { readMongoPipeline } from './cursor.js';
+import { createStorageExecutor, validateMongoSession, validateStorageOptions } from './storage.js';
 import { createMongoIntegrity } from './integrity.js';
 import {
   castModelId, castObjectId, castPathValue, invalidId, isQueryKeyCastFailure, mapIdCastError,
@@ -188,6 +190,7 @@ export const createMongoAdapter = (options) => {
       integrity.bind(binding);
       getRegistrations = binding.getRegistrations;
       queries = createMongoQueries(binding);
+      adapter.executeStorage = createStorageExecutor(queries, integrity);
       adapter.buildQuery = queries.buildQuery;
       adapter.buildFilterGroupMatch = queries.buildFilterGroupMatch;
     },
@@ -224,6 +227,13 @@ export const createMongoAdapter = (options) => {
         if (onModelCreated) onModelCreated(model);
       }, integrity.enabled ? { ...modelOptions, createCollection: false } : modelOptions);
     },
+    storageBackend: 'mongodb',
+    supportsObservedReads: true,
+    validateSession: validateMongoSession,
+    validateStorageOptions(Model, gqltype, operation, storage) {
+      validateStorageOptions(Model, gqltype, operation, storage, integrity);
+    },
+    setRecordIdentity(Model, record, id) { record._id = castModelId(Model, id); },
     // Relation inputs and batch keys: only an ObjectId or its hex form, never a newly minted one.
     castId: castObjectId,
     initialize: integrity.initialize,
@@ -275,9 +285,21 @@ export const createMongoAdapter = (options) => {
       const schema = value.$__schema ?? value.schema;
       return !schema || declaresComputedMembers(schema, '') ? value : value._doc;
     },
-    getById(Model, id, session, { projection, plain, requiredId } = {}) {
+    getById(Model, id, session, { projection, plain, requiredId, storage, readOptions, observer } = {}) {
       integrity.assertReady();
-      let query = withSession(requiredId == null ? Model.findById(id, projection)
+      const observation = observer || options?.queryObserver?.();
+      if (observation || readOptions) {
+        if (!hasNoQueryHooks(Model, ['findOne'])) throw new SimfinityError('Observed by-ID reads require a model without findOne hooks', 'UNSUPPORTED_CAPABILITY', 400);
+        const predicates = [{ _id: castModelId(Model, id) }];
+        if (requiredId != null) predicates.push({ _id: castModelId(Model, requiredId) });
+        if (storage?.filter) predicates.push(storage.filter);
+        const pipeline = [{ $match: { $and: predicates } }];
+        if (projection) pipeline.push({ $project: projection });
+        pipeline.push({ $limit: 1 });
+        return readMongoPipeline(Model, pipeline, { ...readOptions, session }, observation).then((rows) => rows[0] || null);
+      }
+      let query = withSession(storage?.filter ? Model.findOne({ $and: [{ _id: id }, storage.filter] }, projection, { sanitizeFilter: false, strictQuery: false })
+        : requiredId == null ? Model.findById(id, projection)
         : Model.findOne({ $and: [{ _id: requiredId }, { _id: id }] }, projection), session);
       if (plain) query = query.lean();
       return mapQueryIdCastErrors(query);
@@ -299,36 +321,62 @@ export const createMongoAdapter = (options) => {
     prepareUpdate(set, unset) {
       return Object.keys(unset).length > 0 ? { ...set, $unset: unset } : set;
     },
-    update(Model, id, update, session) {
-      if (integrity.enabled) return integrity.updateRecord(Model, id, update, session);
-      return mapQueryIdCastErrors(withSession(
-        Model.findByIdAndUpdate(id, update, { new: true }), session,
-      ), mapIdCastError);
+    prepareStorageUpdate(update, storage) {
+      let changes = update;
+      if (storage?.increments) {
+        const set = {}, operators = {};
+        for (const [key, value] of Object.entries(update)) {
+          if (key.startsWith('$')) operators[key] = value;
+          else set[key] = value;
+        }
+        for (const key of Object.keys(storage.increments)) {
+          if (Object.hasOwn(set, key) || Object.values(operators).some((fields) => Object.hasOwn(fields, key))) {
+            throw new SimfinityError('Increment overlaps a generated update field', 'INVALID_STORAGE_OPERATION', 400);
+          }
+        }
+        changes = { ...operators, ...(Object.keys(set).length ? { $set: set } : {}), $inc: storage.increments };
+      }
+      return changes;
     },
-    delete(Model, id, session) {
+    update(Model, id, update, session, storage) {
+      if (integrity.enabled) return integrity.updateRecord(Model, id, update, session);
+      return mapQueryIdCastErrors(withSession(storage?.filter
+        ? Model.findOneAndUpdate({ $and: [{ _id: id }, storage.filter] }, update, { new: true, sanitizeFilter: false, strictQuery: false })
+        : Model.findByIdAndUpdate(id, update, { new: true }), session), mapIdCastError);
+    },
+    delete(Model, id, session, storage) {
       if (integrity.enabled) {
         integrity.assertWrite(Model, session);
         return integrity.deleteRecord(Model, id, session);
       }
-      return mapQueryIdCastErrors(withSession(Model.findByIdAndDelete(id), session));
+      return mapQueryIdCastErrors(withSession(storage?.filter
+        ? Model.findOneAndDelete({ $and: [{ _id: id }, storage.filter] }, { sanitizeFilter: false, strictQuery: false })
+        : Model.findByIdAndDelete(id), session));
     },
-    async find(Model, gqltype, args, session, { requiredId } = {}) {
+    async find(Model, gqltype, args, session, { requiredId, readOptions, observer } = {}) {
       integrity.assertReady();
       const pipeline = await queries.buildQuery(args, gqltype);
       // Mongoose does not cast aggregation stages, so cast the key type here, without setters.
       if (requiredId != null) pipeline.unshift({ $match: { _id: castModelId(Model, requiredId) } });
+      const observation = observer || options?.queryObserver?.();
+      if (observation || readOptions) return readMongoPipeline(Model, pipeline, { ...readOptions, session }, observation);
       if (pipeline.length === 0) return withSession(Model.find({}), session);
       return withSession(Model.aggregate(pipeline), session);
     },
-    async count(Model, gqltype, args, session) {
+    async count(Model, gqltype, args, session, { readOptions, observer } = {}) {
       integrity.assertReady();
       const pipeline = await queries.buildQuery(args, gqltype, true);
-      const result = await withSession(Model.aggregate(pipeline), session);
+      const observation = observer || options?.queryObserver?.();
+      const result = observation || readOptions
+        ? await readMongoPipeline(Model, pipeline, { ...readOptions, session }, observation)
+        : await withSession(Model.aggregate(pipeline), session);
       return result[0] ? result[0].size : 0;
     },
-    async aggregate(Model, gqltype, args, session) {
+    async aggregate(Model, gqltype, args, session, { readOptions, observer } = {}) {
       integrity.assertReady();
       const pipeline = await queries.buildAggregationQuery(args, gqltype, args.aggregation);
+      const observation = observer || options?.queryObserver?.();
+      if (observation || readOptions) return readMongoPipeline(Model, pipeline, { ...readOptions, session }, observation);
       return withSession(Model.aggregate(pipeline), session);
     },
     async findChildren(Model, gqltype, connectionField, parentId, args, session) {

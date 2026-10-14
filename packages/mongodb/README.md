@@ -60,3 +60,5 @@ For tooling that locates the package, use `require.resolve('@simtlix/simfinity-j
 - [MCP integration](https://simtlix.github.io/simfinity.js/guide/mcp.html)
 - [Complete library documentation](https://github.com/simtlix/simfinity.js#readme)
 - [Aggregation examples](./AGGREGATION_EXAMPLE.md)
+
+The Mongo adapter supports registered conditional writes, explicit atomic and projection capabilities, and physical cursor observation. See the [registered data operations guide](https://simtlix.github.io/simfinity.js/guide/registered-data-operations.html). Native capabilities are private server infrastructure and do not claim SQL portability.
