@@ -25,10 +25,10 @@ jobs:
       commit: ${{ steps.release.outputs.commit }}
       prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           package-manager-cache: false
@@ -64,34 +64,53 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Prevent an old retry from replacing the latest release
         env:
           RELEASE_TAG: ${{ needs.source.outputs.tag }}
         run: node scripts/release-state.js verify-current "${RELEASE_TAG#v}"
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-packages
           path: ${{ runner.temp }}/simfinity-release
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: npm-verification
           path: ${{ runner.temp }}/simfinity-release
+      # Only the verified manifest, its archives and the npm evidence are attached, never other artifact files.
+      - name: Verify the archives against the packed manifest digest
+        env:
+          SIMFINITY_RELEASE_MANIFEST_SHA256: ${{ needs.packages.outputs.manifest_sha256 }}
+        run: node scripts/release-packages.js assets "$RUNNER_TEMP/simfinity-release/manifest.json" > "$RUNNER_TEMP/release-assets.txt"
+      # A complete listing decides creation, so a failed lookup never adds a second release for the tag.
+      - name: Find the GitHub release for this tag
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.source.outputs.tag }}
+        run: node scripts/github-release.js find "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
       - name: Create release notes and attach verified archives
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.source.outputs.tag }}
           PRERELEASE: ${{ needs.source.outputs.prerelease }}
+          RELEASE_EXISTS: ${{ steps.existing.outputs.exists }}
         run: |
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG" --draft
-          fi
-          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/simfinity-release/"* --clobber
+          case "$RELEASE_EXISTS" in
+            true) ;;
+            false) gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG" --draft ;;
+            *) echo 'The GitHub release lookup did not complete' >&2; exit 1 ;;
+          esac
+          mapfile -t assets < "$RUNNER_TEMP/release-assets.txt"
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          # The package version, not the release form, decides pre-release and latest.
           if [ "$PRERELEASE" = true ]; then
             gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
           else
+            # GitHub cannot mark a pre-release as latest: clear the flag in its own call first.
+            gh release edit "$RELEASE_TAG" --prerelease=false
             gh release edit "$RELEASE_TAG" --draft=false --latest
           fi
           echo "Released $RELEASE_TAG after both registries and npm integrity checks passed." >> "$GITHUB_STEP_SUMMARY"
@@ -103,7 +122,9 @@ jobs:
     with:
       deploy: true
       source_ref: ${{ needs.source.outputs.commit }}
+    # docs.yml's gate reads the live github-pages deployment; a called workflow gets no scope its caller lacks.
     permissions:
       contents: read
       pages: write
       id-token: write
+      deployments: read

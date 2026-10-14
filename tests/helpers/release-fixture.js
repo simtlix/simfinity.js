@@ -20,10 +20,8 @@ export const writeReleaseFixture = (root) => {
     writeFileSync(join(root, directory, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`.replaceAll('\n', '\r\n'));
     writeFileSync(join(root, directory, 'src/index.js'), 'export const value = 42;\n');
     lock.packages[directory] = structuredClone(manifest);
-    if (directory) {
-      lock.packages[`node_modules/${name}`] = { resolved: directory, link: true };
-      lock.dependencies[name] = { version: `file:${directory}`, requires: { ...dependencies } };
-    }
+    lock.packages[`node_modules/${name}`] = { resolved: directory, link: true };
+    lock.dependencies[name] = { version: `file:${directory}`, requires: { ...dependencies } };
   }
   lock.packages['node_modules/pg'] = { version: '8.16.3', integrity: 'preserve-external-entry' };
   writeFileSync(join(root, 'package-lock.json'), `${JSON.stringify(lock, null, 2)}\n`.replaceAll('\n', '\r\n'));

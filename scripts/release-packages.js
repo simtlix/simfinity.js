@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isEntryPoint } from './cli.js';
 
 // Dependencies precede every consumer in both archive manifests and publication.
 const packages = [
@@ -25,14 +26,14 @@ const readInputs = (root) => {
   if (rootManifest.private !== true) throw new Error('The repository root must be private');
   const entries = packages.map(([directory, name]) => {
     const manifest = parseJSON(join(root, directory, 'package.json'));
-    if (manifest.name !== name) throw new Error(`Expected package ${name} in ${directory || '.'}`);
+    if (manifest.name !== name) throw new Error(`Expected package ${name} in ${directory}`);
     return { directory, name, manifest };
   });
   const lock = parseJSON(join(root, 'package-lock.json'));
   if (![2, 3].includes(lock.lockfileVersion) || !lock.packages?.[''] || entries.some(({ directory }) => !lock.packages?.[directory])) {
     throw new Error('Release requires a complete npm v2 or v3 workspace lockfile');
   }
-  if (lock.lockfileVersion === 2 && entries.some(({ directory, name }) => directory && (!lock.dependencies?.[name] || lock.dependencies[name].version !== `file:${directory}`))) {
+  if (lock.lockfileVersion === 2 && entries.some(({ directory, name }) => !lock.dependencies?.[name] || lock.dependencies[name].version !== `file:${directory}`)) {
     throw new Error('Incomplete npm v2 lockfile legacy workspace metadata');
   }
   return { rootManifest, entries, lock };
@@ -60,7 +61,7 @@ export const readRelease = (root) => {
       }
       if (JSON.stringify(locked[group] || {}) !== JSON.stringify(manifest[group] || {})) throw new Error(`Lockfile ${group} differs for ${name}`);
     }
-    if (directory && lock.lockfileVersion === 2) {
+    if (lock.lockfileVersion === 2) {
       for (const [dependency, range] of Object.entries(runtimeInternal(manifest))) {
         if (lock.dependencies[name].requires?.[dependency] !== range) throw new Error(`Lockfile internal dependency is missing or differs for ${name}`);
       }
@@ -69,9 +70,6 @@ export const readRelease = (root) => {
       }
     }
     precedingPackages.add(name);
-    for (const [dependency, range] of Object.entries(lock.dependencies?.[name]?.requires || {})) {
-      if (names.has(dependency) && range !== version) throw new Error(`Lockfile internal dependency version differs for ${name}`);
-    }
   }
   return { version, packages: entries.map(({ directory, name, manifest }) => ({ directory, name, version, dependencies: manifest.dependencies || {} })) };
 };
@@ -89,7 +87,7 @@ export const setReleaseVersion = (root, version) => {
       if (manifest[group]) lock.packages[directory][group] = structuredClone(manifest[group]);
       else delete lock.packages[directory][group];
     }
-    if (directory && lock.lockfileVersion === 2) {
+    if (lock.lockfileVersion === 2) {
       const externalRequires = Object.fromEntries(Object.entries(lock.dependencies[name].requires || {}).filter(([dependency]) => !names.has(dependency)));
       lock.dependencies[name].requires = { ...externalRequires, ...runtimeInternal(manifest) };
     }
@@ -127,9 +125,22 @@ const archiveHashes = (path) => {
 };
 const validFilename = (filename) => typeof filename === 'string' && /^[a-z0-9][a-z0-9._-]*\.tgz$/i.test(filename) && basename(filename) === filename;
 const assertCommit = (commit) => { if (typeof commit !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(commit)) throw new Error('A full source commit hash is required'); };
+// npm packs whatever `files` matches on disk, including untracked and git-ignored files
+// (the root .gitignore ignores every config.js) that the recorded source commit lacks.
+const assertTracked = (root, directory, name, files) => {
+  if (!Array.isArray(files) || files.some((file) => typeof file?.path !== 'string')) throw new Error(`Unexpected archive metadata for ${name}`);
+  const tracked = new Set(execFileSync('git', ['ls-files', '-z', '--', '.'], {
+    cwd: join(root, directory), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  }).split('\0'));
+  const untracked = files.map(({ path }) => path).filter((path) => path !== 'package.json' && !tracked.has(path));
+  if (untracked.length) throw new Error(`Release archive for ${name} would include files git does not track: ${untracked.join(', ')}`);
+};
 
-/** Produce local archives only. No lifecycle hooks, registry calls, tags, or publication. */
-export const packRelease = (root, destination, { commit } = {}) => {
+/**
+ * Produce local archives only. No lifecycle hooks, registry calls, tags, or publication.
+ * `requireTracked` (the pack CLI) refuses archives containing untracked or ignored files.
+ */
+export const packRelease = (root, destination, { commit, requireTracked = false } = {}) => {
   const release = readRelease(root);
   const sourceCommit = commit || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
   assertCommit(sourceCommit);
@@ -143,6 +154,7 @@ export const packRelease = (root, destination, { commit } = {}) => {
       }));
       const item = output[0];
       if (output.length !== 1 || item.name !== name || item.version !== version || !validFilename(item.filename)) throw new Error(`Unexpected archive metadata for ${name}`);
+      if (requireTracked) assertTracked(root, directory, name, item.files);
       const hashes = archiveHashes(join(destination, item.filename));
       if (hashes.integrity !== item.integrity) throw new Error(`Archive integrity mismatch for ${name}`);
       return { name, version, filename: item.filename, ...hashes };
@@ -156,9 +168,16 @@ export const packRelease = (root, destination, { commit } = {}) => {
   }
 };
 
-/** Verify the archive set and content before using a local release manifest. */
-export const readReleaseManifest = (path) => {
-  const manifest = parseJSON(path);
+/**
+ * Verify the archive set and content before using a local release manifest. A `sha256`
+ * recorded by the packing job pins the whole set, since the manifest holds every archive hash.
+ */
+export const readReleaseManifest = (path, { sha256 } = {}) => {
+  const bytes = readFileSync(path);
+  if (sha256 !== undefined && (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256) || createHash('sha256').update(bytes).digest('hex') !== sha256)) {
+    throw new Error('Release manifest differs from the packed manifest digest');
+  }
+  const manifest = JSON.parse(bytes.toString('utf8'));
   assertVersion(manifest.version);
   assertCommit(manifest.commit);
   if (!Array.isArray(manifest.packages) || manifest.packages.length !== packages.length) throw new Error('Invalid release manifest package set');
@@ -177,15 +196,33 @@ export const readReleaseManifest = (path) => {
   return manifest;
 };
 
+/**
+ * The files a GitHub release attaches: the manifest verified against its digest, the archives it lists and
+ * the npm verification evidence next to it. Nothing else in the directory is attached.
+ */
+export const releaseAssets = (path, { sha256 } = {}) => {
+  const manifest = readReleaseManifest(path, { sha256 });
+  const evidence = join(dirname(path), 'npm-verification.json');
+  if (!lstatSync(evidence, { throwIfNoEntry: false })?.isFile()) throw new Error('npm-verification.json must be a regular file next to the release manifest');
+  return [path, ...manifest.packages.map((item) => join(dirname(path), item.filename)), evidence];
+};
+
 const root = fileURLToPath(new URL('../', import.meta.url));
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntryPoint(import.meta.url)) {
   try {
     const [command, value] = process.argv.slice(2);
     if (command === 'version' && value) console.log(JSON.stringify(setReleaseVersion(root, value), null, 2));
     else if (command === 'check' && !value) console.log(JSON.stringify(readRelease(root), null, 2));
-    else if (command === 'pack' && value) console.log(JSON.stringify(packRelease(root, resolve(value)), null, 2));
-    else if (command === 'verify' && value) console.log(JSON.stringify(readReleaseManifest(resolve(value)), null, 2));
-    else throw new Error('Usage: node scripts/release-packages.js version <version> | check | pack <new-directory> | verify <manifest.json>');
+    else if (command === 'pack' && value) console.log(JSON.stringify(packRelease(root, resolve(value), { requireTracked: true }), null, 2));
+    else if (command === 'verify' && value) {
+      console.log(JSON.stringify(readReleaseManifest(resolve(value), { sha256: process.env.SIMFINITY_RELEASE_MANIFEST_SHA256 }), null, 2));
+    }
+    else if (command === 'assets' && value) {
+      // The upload list must never come from an unchecked manifest.
+      if (!process.env.SIMFINITY_RELEASE_MANIFEST_SHA256) throw new Error('Release assets require SIMFINITY_RELEASE_MANIFEST_SHA256, the packed manifest digest');
+      console.log(releaseAssets(resolve(value), { sha256: process.env.SIMFINITY_RELEASE_MANIFEST_SHA256 }).join('\n'));
+    }
+    else throw new Error('Usage: node scripts/release-packages.js version <version> | check | pack <new-directory> | verify <manifest.json> | assets <manifest.json>');
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

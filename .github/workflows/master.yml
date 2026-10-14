@@ -10,12 +10,18 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same pull request cancels its older run. Master pushes and manual runs
+# each get their own group and always complete.
+concurrency:
+  group: library-ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate GitHub Actions workflows
         # actionlint 1.7.12 predates GitHub's supported concurrency.queue property.
         # Keep this exact compatibility exception until the upstream parser supports it.
@@ -23,7 +29,7 @@ jobs:
           docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12
           -shellcheck= -pyflakes=
           -ignore 'unexpected key "queue" for "concurrency" section'
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
