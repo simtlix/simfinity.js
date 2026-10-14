@@ -131,6 +131,7 @@ const nestedPathOf = (nested) => {
 export const createMongoAdapter = (options) => {
   const integrity = createMongoIntegrity(options);
   let queries;
+  let executeStorage;
   let getRegistrations = () => [];
   const privateConnectionFields = new Map();
 
@@ -190,7 +191,7 @@ export const createMongoAdapter = (options) => {
       integrity.bind(binding);
       getRegistrations = binding.getRegistrations;
       queries = createMongoQueries(binding);
-      adapter.executeStorage = createStorageExecutor(queries, integrity);
+      executeStorage = createStorageExecutor(queries, integrity);
       adapter.buildQuery = queries.buildQuery;
       adapter.buildFilterGroupMatch = queries.buildFilterGroupMatch;
     },
@@ -226,6 +227,11 @@ export const createMongoAdapter = (options) => {
         }
         if (onModelCreated) onModelCreated(model);
       }, integrity.enabled ? { ...modelOptions, createCollection: false } : modelOptions);
+    },
+    // Keep the delegate present before bind so adapter decorators can copy it safely.
+    async executeStorage(...args) {
+      if (!executeStorage) throw new SimfinityError('MongoDB adapter must be bound to a runtime before storage operations', 'ADAPTER_NOT_BOUND', 500);
+      return executeStorage(...args);
     },
     storageBackend: 'mongodb',
     supportsObservedReads: true,

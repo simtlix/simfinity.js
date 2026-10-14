@@ -173,6 +173,31 @@ describe.skipIf(!uri)('registered data operations on MongoDB', () => {
       expect((await Model.findById('float-missing')).ratio).toBe(0.5);
     } finally { if (session.inTransaction()) await session.abortTransaction(); await session.endSession(); }
   });
+  test('spread-decorated adapters retain storage capabilities and caller transaction policy', async () => {
+    const base = createMongoAdapter();
+    const storageDelegate = base.executeStorage;
+    const policy = vi.fn((...args) => base.withTransaction(...args));
+    const decorated = { ...base, withTransaction: policy };
+    const instance = createRuntime(decorated); instance.preventCreatingCollection(true);
+    const Type = new GraphQLObjectType({ name: 'DecoratedStorageItem', fields: { id: { type: GraphQLID }, tenant: { type: GraphQLString }, title: { type: GraphQLString } },
+      extensions: { scope: { find({ args, context }) { args.tenant = { operator: 'EQ', value: context.tenant }; } } } });
+    instance.connect(Model, Type, 'decoratedItem', 'decoratedItems'); instance.createSchema();
+    const session = await connection.startSession(); session.startTransaction();
+    try {
+      await instance.execute('DecoratedStorageItem', 'save', { input: { tenant: 'decorated', title: 'before' } }, { session, storage: { id: 'decorated' } });
+      const changed = await instance.executeStorage('DecoratedStorageItem', { backend: 'mongodb', operation: 'updateOne', filter: { _id: 'decorated', title: 'before' }, update: { $set: { title: 'after' } } }, { session });
+      expect(changed.matchedCount).toBe(1);
+      const rows = await instance.executeStorage('DecoratedStorageItem', { backend: 'mongodb', operation: 'find' }, { session, context: { tenant: 'decorated' } });
+      expect(rows.map((row) => row.title)).toEqual(['after']);
+      expect(base.executeStorage).toBe(storageDelegate);
+      expect(decorated.executeStorage).toBe(storageDelegate);
+      expect(policy).toHaveBeenCalledTimes(1);
+      expect(policy.mock.calls[0][0]).toBe(session);
+      expect(session.inTransaction()).toBe(true);
+      await session.abortTransaction();
+      expect(await Model.findById('decorated')).toBeNull();
+    } finally { if (session.inTransaction()) await session.abortTransaction(); await session.endSession(); }
+  });
   test('rejects inactive and foreign-client sessions before any operation', async () => {
     const inactive = await connection.startSession();
     await expect(runtime.execute(typeName, 'find', {}, { session: inactive })).rejects.toMatchObject({ extensions: { code: 'ACTIVE_TRANSACTION_REQUIRED' } });
@@ -202,4 +227,10 @@ test('observer tracking failures cannot suppress native cursor cleanup', async (
   close.mockClear();
   await expect(cursor.close()).resolves.toBeUndefined();
   expect(close).toHaveBeenCalledTimes(1);
+});
+
+test('storage delegate rejects an adapter that has not been bound to a runtime', async () => {
+  const adapter = createMongoAdapter();
+  expect(adapter.executeStorage).toBeTypeOf('function');
+  await expect(adapter.executeStorage()).rejects.toMatchObject({ message: 'MongoDB adapter must be bound to a runtime before storage operations', extensions: { code: 'ADAPTER_NOT_BOUND' } });
 });
