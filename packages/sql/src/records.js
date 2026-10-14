@@ -10,8 +10,14 @@ const own = (data, key) => {
   return !Object.hasOwn(data, key) && value === Object.prototype[key] ? undefined : value;
 };
 
-export const createRecordStore = (models, database, query, plugin) => {
+/**
+ * `options.multiRowInserts: false` keeps one INSERT per owned row. Otherwise owned rows use multi-row
+ * inserts when the plugin has both `compileRecordBatch` and `maxRecordBatchValues`.
+ */
+export const createRecordStore = (models, database, query, plugin, { multiRowInserts } = {}) => {
   const { castId, encodeScalar, decodeScalar, createId, encodeEmbedded } = plugin.values;
+  const batchValues = multiRowInserts !== false && typeof plugin.compileRecordBatch === 'function'
+    && Number.isSafeInteger(plugin.maxRecordBatchValues) && plugin.maxRecordBatchValues > 0 ? plugin.maxRecordBatchValues : 0;
   const execute = (operation, session) => query(plugin.compileRecord(database, operation), session);
   const model = (name) => models.entities.find((item) => item.name === name);
   const table = (name) => database.tables.find((item) => item.name === name);
@@ -150,26 +156,62 @@ export const createRecordStore = (models, database, query, plugin) => {
   const insertRow = async (storage, data, session) => {
     return (await execute({ kind: 'insert', table: storage, data }, session)).rows[0];
   };
-  const persistOwned = async (storage, fields, ownerId, data, session, replace = false) => {
+  // Owned rows are queued in the order the per-row inserts ran, and each run of rows for one table with
+  // the same columns is sent as one multi-row INSERT of at most `maxRecordBatchValues` values. A run ends
+  // before a row of another table, before owned rows are deleted and before a validation error is thrown,
+  // so the database receives the same rows in the same order and an owner row precedes the rows it owns.
+  const createRowQueue = (session) => {
+    let pending = null;
+    const flush = async () => {
+      if (!pending) return;
+      const { table: storage, rows } = pending;
+      pending = null;
+      if (rows.length === 1) await insertRow(storage, rows[0], session);
+      else await query(plugin.compileRecordBatch(database, { kind: 'insertMany', table: storage, rows }), session);
+    };
+    const add = async (storage, row) => {
+      if (!batchValues) { await insertRow(storage, row, session); return; }
+      const keys = Object.keys(row);
+      const columns = keys.join('\0');
+      if (pending && (pending.table !== storage || pending.columns !== columns || (pending.rows.length + 1) * keys.length > batchValues)) await flush();
+      if (!pending) pending = { table: storage, columns, rows: [] };
+      pending.rows.push(row);
+    };
+    return { add, flush };
+  };
+  const persistOwnedRows = async (storage, fields, ownerId, data, session, replace, queue) => {
+    // Rows queued before a validation error reach the database first, as the per-row inserts did.
+    const validated = async (check) => {
+      try { return check(); } catch (error) { await queue.flush(); throw error; }
+    };
     for (const owned of children(storage)) {
       const field = fields.find((item) => item.name === owned.ownership.field);
       if (!Object.hasOwn(data, field.storageName)) continue;
-      if (replace) await execute({ kind: 'deleteOwned', table: owned, ownerId }, session);
+      if (replace) { await queue.flush(); await execute({ kind: 'deleteOwned', table: owned, ownerId }, session); }
       const value = data[field.storageName];
       if (value == null) continue;
-      if (field.list && !Array.isArray(value)) shapeError(field.name);
-      const entries = field.list ? value : [value];
+      const entries = await validated(() => {
+        if (field.list && !Array.isArray(value)) shapeError(field.name);
+        return field.list ? value : [value];
+      });
       for (let index = 0; index < entries.length; index++) {
         const entry = entries[index];
-        if (entry == null && (!field.list || field.itemRequired)) missing(`${field.name}[]`);
-        if (entry != null && (typeof entry !== 'object' || Array.isArray(entry))) shapeError(field.name);
-        const row = { __id: createId(), __owner_id: ownerId, ...columnValues(owned, field.fields, entry || {}, true, entry == null) };
+        const row = await validated(() => {
+          if (entry == null && (!field.list || field.itemRequired)) missing(`${field.name}[]`);
+          if (entry != null && (typeof entry !== 'object' || Array.isArray(entry))) shapeError(field.name);
+          return { __id: createId(), __owner_id: ownerId, ...columnValues(owned, field.fields, entry || {}, true, entry == null) };
+        });
         if (field.list) row.__position = index;
         if (owned.ownership.nullableItems) row.__item_present = entry != null;
-        await insertRow(owned, row, session);
-        if (entry) await persistOwned(owned, field.fields, row.__id, entry, session);
+        await queue.add(owned, row);
+        if (entry) await persistOwnedRows(owned, field.fields, row.__id, entry, session, false, queue);
       }
     }
+  };
+  const persistOwned = async (storage, fields, ownerId, data, session, replace = false) => {
+    const queue = createRowQueue(session);
+    await persistOwnedRows(storage, fields, ownerId, data, session, replace, queue);
+    await queue.flush();
   };
   const hydrateRows = async (name, rows, session) => {
     const entity = model(name);

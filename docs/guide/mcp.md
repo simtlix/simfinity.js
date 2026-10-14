@@ -16,7 +16,7 @@ The MongoDB facade retains MCP compatibility exports. For either database, the d
 The following examples import `@simtlix/simfinity-mcp`, which works with either adapter. In either application, install it from npm:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.9
+npm install @simtlix/simfinity-mcp@3.6.0
 ```
 
 Keep it at the same version as your other Simfinity packages. The archived MongoDB starter already includes its matching version for compatibility. The published MongoDB 3.0.1 release instead exports these functions from `@simtlix/simfinity-js`.
@@ -61,6 +61,8 @@ Here `schema.js` exports your already registered and built schema. The generated
 Generated inputs distinguish omission from explicit null: defaulted arguments use their GraphQL defaults when omitted, nullable fields and list items accept null, and non-null positions reject it. Input schemas are closed, and an argument the tool does not declare, such as a misspelled filter or a guessed `limit`, returns an `MCP_UNKNOWN_ARGUMENT` error that names the valid arguments; the tool does not run. With `count: true`, the result carries the total as `totalCount` next to the list.
 
 `maxResultBytes` also covers errors and partial data. Oversized query results are replaced by an actionable limit error. An oversized mutation result is not an error when the mutation succeeded, because the write already ran: the tool returns a `truncated` notice telling the agent whether calling it again would repeat the change, with the record's id when the id fits within the cap. Limit diagnostics and that notice are exempt from the cap. `limits` is validated when the tools are created; see [limits](/reference/mcp#limits).
+
+`limits` bound reads, not writes. Generated add and update tools accept nested collection inputs, and each nested `added`, `updated` or `deleted` entry runs inside the parent's transaction. On servers exposed to MCP clients, cap them with [`configureMutationLimits({ maxNestedOperations })`](/guide/mutations#limit-nested-collection-operations) at startup.
 
 ## Start a stdio server
 
@@ -138,7 +140,7 @@ For standalone in-process MCP, pass the plugin through `schemaPlugins`, as shown
 
 `schemaPlugins` invokes schema hooks only. It does not run every Envelop request hook; a plugin with request hooks gets a one-time console warning naming them. Each entry must be a plugin object, so pass `createAuthPlugin(permissions)`, not the factory; invalid entries, including a misspelled hook such as `onSchemaChanged` on a plugin without `onSchemaChange`, throw `MCP_INVALID_SCHEMA_PLUGIN` before any hook runs, and `false`, `null` and `undefined` entries are skipped. An asynchronous `onSchemaChange` is awaited before the server or HTTP handler is ready, and `generateMCPTools` calls wait for it. A schema containing types from another copy of the graphql module makes the auth plugin throw `TypeError` at this point. In remote mode, the remote GraphQL server enforces authorization using the credentials supplied in `execution.headers`.
 
-If a call is cancelled while its context factory is pending, GraphQL execution does not start. Cancellation cannot undo database work already started. Remote timeouts cover both the request and response-body reading; only queries may retry, and client cancellation, including during a retry backoff, rejects without retrying. Through the stateless HTTP handler, an MCP cancellation arrives as a separate request that cannot reach the call in flight, so only a closed HTTP connection cancels a call there.
+If a call is cancelled while its context factory is pending, GraphQL execution does not start. Cancellation cannot undo database work already started. Remote timeouts cover both the request and response-body reading; only queries may retry, and client cancellation, including during a retry backoff, rejects without retrying. Retry k waits `backoffMs × k`; set `retry.retryAfter: true` to honor a server's `Retry-After`, and `retry.jitter: true` to spread concurrent retries (see [remote execution](/reference/mcp#remote-execution)). Through the stateless HTTP handler, an MCP cancellation arrives as a separate request that cannot reach the call in flight, so only a closed HTTP connection cancels a call there.
 
 ## Choose the result shape
 
@@ -153,6 +155,15 @@ const generated = mcp.generateMCPTools(schema, {
       selection: 'id name year category',
     },
   },
+});
+```
+
+Nested collections, such as a series' seasons, are read with one query per returned row, up to 100 items each, and `limits` do not bound that work. For list-heavy agents, leave them out with `nestedCollections: 'none'`, globally or per tool in `toolOverrides`, or set `selectionDepth: 0`:
+
+```javascript
+const lean = mcp.generateMCPTools(schema, {
+  nestedCollections: 'none',
+  toolOverrides: { serie: { nestedCollections: 'all' } },
 });
 ```
 

@@ -343,6 +343,162 @@ describe('createRuntime', () => {
     ]);
   });
 
+  describe('input copies per transaction attempt', () => {
+    const createCopyFixture = ({ retry = false } = {}) => {
+      const adapter = createMemoryAdapter();
+      if (retry) configureSyntheticRetry(adapter);
+      const runtime = createRuntime(adapter);
+      const DetailType = new GraphQLObjectType({ name: 'RuntimeCopyDetail', fields: { note: { type: GraphQLString } } });
+      const ThingType = new GraphQLObjectType({
+        name: 'RuntimeCopyThing',
+        fields: {
+          id: { type: GraphQLID },
+          label: { type: GraphQLString },
+          details: { type: new GraphQLList(DetailType), extensions: { relation: { embedded: true } } },
+        },
+      });
+      const NoteInput = new GraphQLInputObjectType({ name: 'RuntimeCopyNoteInput', fields: { text: { type: GraphQLString } } });
+      const CustomInput = new GraphQLInputObjectType({
+        name: 'RuntimeCopyCustomInput', fields: { notes: { type: new GraphQLList(NoteInput) } },
+      });
+      const CustomOutput = new GraphQLObjectType({ name: 'RuntimeCopyCustomOutput', fields: { ok: { type: GraphQLString } } });
+      const seen = [];
+      runtime.addNoEndpointType(DetailType);
+      runtime.connect(null, ThingType, 'runtimeCopyThing', 'runtimeCopyThings', {
+        onSaving(record, args, session) {
+          seen.push({ attempt: session.attempt, label: args.label, notes: args.details.map(({ note }) => note) });
+          args.label = 'changed';
+          args.details[0].note = 'changed';
+          if (session.attempt === 1) throw new Error('synthetic retry');
+        },
+      });
+      runtime.registerMutation('runtimeCopyCustom', 'copies', CustomInput, CustomOutput, async (args, session) => {
+        seen.push({ attempt: session.attempt, notes: args.notes.map(({ text }) => text) });
+        args.notes[0].text = 'changed';
+        if (session.attempt === 1) throw new Error('synthetic retry');
+        return { ok: 'yes' };
+      });
+      const middleware = [];
+      runtime.use((params, next) => {
+        for (const run of middleware) run(params);
+        return next();
+      });
+      const schema = runtime.createSchema();
+      return {
+        seen,
+        onMiddleware: (run) => middleware.push(run),
+        run: (source, variableValues) => graphql({ schema, source, variableValues }),
+      };
+    };
+
+    // cloneInput reads an input object type's fields once per input object it copies. Calls are
+    // counted from the first middleware on, after graphql has validated and coerced the request.
+    const countCopies = async (fixture, source) => {
+      const getFields = vi.spyOn(GraphQLInputObjectType.prototype, 'getFields');
+      try {
+        let before = null;
+        fixture.onMiddleware(() => { before ??= getFields.mock.calls.length; });
+        const result = await fixture.run(source);
+        expect(result.errors).toBeUndefined();
+        return getFields.mock.calls.length - before;
+      } finally {
+        getFields.mockRestore();
+      }
+    };
+
+    test('a generated mutation copies each input object once on success and once more per retry', async () => {
+      // Four input objects: the input and three details.
+      const source = 'mutation { addruntimeCopyThing(input: { details: [{ note: "a" }, { note: "b" }, { note: "c" }] }) { id } }';
+      expect(await countCopies(createCopyFixture(), source)).toBe(4);
+      const retried = createCopyFixture({ retry: true });
+      expect(await countCopies(retried, source)).toBe(8);
+      expect(retried.seen).toEqual([
+        { attempt: 1, label: undefined, notes: ['a', 'b', 'c'] },
+        { attempt: 2, label: undefined, notes: ['a', 'b', 'c'] },
+      ]);
+    });
+
+    test('a custom mutation copies its input once on success and once more per retry', async () => {
+      // Three input objects: the input and two notes.
+      const source = 'mutation { runtimeCopyCustom(input: { notes: [{ text: "a" }, { text: "b" }] }) { ok } }';
+      expect(await countCopies(createCopyFixture(), source)).toBe(3);
+      const retried = createCopyFixture({ retry: true });
+      expect(await countCopies(retried, source)).toBe(6);
+      expect(retried.seen).toEqual([{ attempt: 1, notes: ['a', 'b'] }, { attempt: 2, notes: ['a', 'b'] }]);
+    });
+
+    test('a retried attempt starts from the input as middleware left it', async () => {
+      const fixture = createCopyFixture({ retry: true });
+      fixture.onMiddleware((params) => { params.args.input.label = 'middleware'; });
+      const result = await fixture.run('mutation { addruntimeCopyThing(input: { details: [{ note: "a" }] }) { id label } }');
+      expect(result.errors).toBeUndefined();
+      expect(fixture.seen).toEqual([
+        { attempt: 1, label: 'middleware', notes: ['a'] },
+        { attempt: 2, label: 'middleware', notes: ['a'] },
+      ]);
+    });
+
+    test('a later root field that reuses the input variable gets the request input', async () => {
+      const fixture = createCopyFixture({ retry: true });
+      const result = await fixture.run(`mutation($input: RuntimeCopyThingInput!, $custom: RuntimeCopyCustomInput!) {
+        first: addruntimeCopyThing(input: $input) { label details { note } }
+        second: addruntimeCopyThing(input: $input) { label details { note } }
+        third: runtimeCopyCustom(input: $custom) { ok }
+        fourth: runtimeCopyCustom(input: $custom) { ok }
+      }`, { input: { label: 'request', details: [{ note: 'a' }] }, custom: { notes: [{ text: 'a' }] } });
+      expect(result.errors).toBeUndefined();
+      expect(result.data.first).toEqual({ label: 'request', details: [{ note: 'a' }] });
+      expect(result.data.second).toEqual(result.data.first);
+      expect(fixture.seen).toEqual([
+        { attempt: 1, label: 'request', notes: ['a'] },
+        { attempt: 2, label: 'request', notes: ['a'] },
+        { attempt: 1, label: 'request', notes: ['a'] },
+        { attempt: 2, label: 'request', notes: ['a'] },
+        { attempt: 1, notes: ['a'] },
+        { attempt: 2, notes: ['a'] },
+        { attempt: 1, notes: ['a'] },
+        { attempt: 2, notes: ['a'] },
+      ]);
+    });
+  });
+
+  test('a retried transaction runs the middleware of nested collection children again, not the root middleware', async () => {
+    const adapter = createMemoryAdapter();
+    configureSyntheticRetry(adapter);
+    const runtime = createRuntime(adapter);
+    const KidType = new GraphQLObjectType({
+      name: 'RuntimeRetryKid',
+      fields: () => ({
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        mom: { type: MomType, extensions: { relation: { connectionField: 'mom' } } },
+      }),
+    });
+    const MomType = new GraphQLObjectType({
+      name: 'RuntimeRetryMom',
+      fields: () => ({
+        id: { type: GraphQLID },
+        kids: { type: new GraphQLList(KidType), extensions: { relation: { connectionField: 'mom' } } },
+      }),
+    });
+    const calls = [];
+    runtime.use((params, next) => {
+      calls.push(`${params.type.gqltype.name}:${params.operation}`);
+      return next();
+    });
+    runtime.connect(null, KidType, 'runtimeRetryKid', 'runtimeRetryKids', {
+      onSaving(record, args, session) { if (session.attempt === 1) throw new Error('synthetic retry'); },
+    });
+    runtime.connect(null, MomType, 'runtimeRetryMom', 'runtimeRetryMoms');
+    const result = await graphql({
+      schema: runtime.createSchema(),
+      source: 'mutation { addruntimeRetryMom(input: { kids: { added: [{ name: "a" }, { name: "b" }] } }) { id } }',
+    });
+    expect(result.errors).toBeUndefined();
+    // The first kid fails attempt 1; attempt 2 runs both kids' middleware again.
+    expect(calls).toEqual(['RuntimeRetryMom:save', 'RuntimeRetryKid:save', 'RuntimeRetryKid:save', 'RuntimeRetryKid:save']);
+  });
+
   test('builds Mongo paths for wrapped scalar and embedded lists', () => {
     const { ParentType } = createWrappedListFixture();
     const Model = createMongoModel(ParentType, null, { createCollection: false });

@@ -178,3 +178,129 @@ describe.skipIf(!uri)('PostgreSQL index-friendly filters', () => {
     expect(nodes(reference).filter((node) => node['Join Type'] === 'Left')).toEqual([]);
   });
 });
+
+describe.skipIf(!uri)('PostgreSQL index-served sorts and list aggregates', () => {
+  const namespace = `sorted_${randomUUID().replaceAll('-', '')}`;
+  let pool; let api; let types; let models; let database; let stored;
+  const fixture = () => {
+    const DateTime = new GraphQLScalarType({ name: 'DateTime', serialize: (value) => new Date(value).toISOString(), parseValue: (value) => new Date(value), parseLiteral: (node) => new Date(node.value) });
+    // Required columns with declared indexes, plus a nullable one, on a type without owned tables.
+    const Sorted = new GraphQLObjectType({ name: 'SortedItem', extensions: { indexes: [{ fields: ['rank'] }, { fields: ['at'] }, { fields: ['name'] }, { fields: ['score'] }] }, fields: {
+      id: { type: GraphQLID }, rank: { type: new GraphQLNonNull(GraphQLInt) }, at: { type: new GraphQLNonNull(DateTime) },
+      name: { type: new GraphQLNonNull(GraphQLString) }, score: { type: GraphQLFloat }, bucket: { type: GraphQLString },
+    } });
+    // The references store lines and their parts in owned tables.
+    const Maker = new GraphQLObjectType({ name: 'ListMaker', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+    const reference = { relation: { embedded: false } };
+    const Part = new GraphQLObjectType({ name: 'ListPart', fields: { x: { type: GraphQLInt }, maker: { type: Maker, extensions: reference } } });
+    const Line = new GraphQLObjectType({ name: 'ListLine', fields: {
+      label: { type: GraphQLString }, maker: { type: Maker, extensions: reference },
+      parts: { type: new GraphQLList(Part), extensions: { relation: { embedded: true } } },
+    } });
+    const Root = new GraphQLObjectType({ name: 'ListRoot', fields: {
+      id: { type: GraphQLID }, bucket: { type: GraphQLString }, lines: { type: new GraphQLList(Line), extensions: { relation: { embedded: true } } },
+    } });
+    return { Sorted, Maker, Part, Line, Root };
+  };
+  const explain = async (entity, args, settings, options) => {
+    const { text, values } = compileQuery(models, database, createQueryPlan(models, entity, args, options));
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const setting of settings) await client.query(`SET LOCAL ${setting}`);
+      const { rows: output } = await client.query(`EXPLAIN (FORMAT JSON) ${text}`, values.map(encodeParameter));
+      const plan = output[0]['QUERY PLAN'];
+      return (typeof plan === 'string' ? JSON.parse(plan) : plan)[0].Plan;
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  };
+  const nodes = (plan) => [plan, ...(plan.Plans || []).flatMap(nodes)];
+  const sortedIndex = (column) => {
+    const table = database.tables.find((item) => item.name === 'SortedItem');
+    return column === 'id' ? table.primaryKey.name : table.indexes.find((index) => index.columns.join() === column && !index.unique).name;
+  };
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: uri });
+    api = createPostgres({ pool, schema: namespace });
+    types = fixture();
+    api.connect(null, types.Sorted, 'sortedItem', 'sortedItems');
+    api.connect(null, types.Maker, 'listMaker', 'listMakers');
+    api.addNoEndpointType(types.Part);
+    api.addNoEndpointType(types.Line);
+    api.connect(null, types.Root, 'listRoot', 'listRoots');
+    api.createSchema();
+    await api.initializeDatabase();
+    models = describeModels(api.getRegistrations());
+    database = api.describeDatabase();
+    // Ties on rank and name, and a nullable score, so pages depend on the tiebreaker and null placement.
+    await pool.query(`INSERT INTO "${namespace}"."SortedItem" (rank, at, name, score, bucket)
+      SELECT g % 997, timestamptz '2020-01-01 00:00:00+00' + g * interval '1 hour', 'name-' || lpad((g % 1500)::text, 5, '0'),
+        CASE WHEN g % 3 = 0 THEN NULL ELSE (g * 7919) % 5000 END, 'bucket-' || (g % 7)
+      FROM generate_series(1, 6000) g`);
+    await pool.query(`ANALYZE "${namespace}"."SortedItem"`);
+    stored = (await pool.query(`SELECT id, rank, at, name, score FROM "${namespace}"."SortedItem"`)).rows;
+    const maker = await api.getModel(types.Maker).create({ name: 'maker' });
+    for (const [index, bucket] of ['a', 'a', 'b'].entries()) {
+      await api.getModel(types.Root).create({ bucket, lines: [
+        { label: `label-${index}`, maker: maker.id, parts: [{ x: index }, { x: index + 10 }] },
+        null,
+        { label: `other-${index}`, parts: [] },
+      ] });
+    }
+    await pool.query(`ANALYZE "${namespace}"."ListRoot", "${namespace}"."ListRoot__lines", "${namespace}"."ListRoot__lines__parts"`);
+  }, 60000);
+  afterAll(async () => {
+    if (pool) { await pool.query(`DROP SCHEMA IF EXISTS "${namespace}" CASCADE`); await pool.end(); }
+  });
+
+  // With sorting disabled, a plan keeps a Sort node only when no index can return the rows in order.
+  it('serves sorts on id and required indexed columns from an index', async () => {
+    const page = { page: 3, size: 10 };
+    for (const [column, order, filter] of [
+      ['id', 'ASC'], ['id', 'DESC'], ['rank', 'ASC'], ['rank', 'DESC'], ['rank', 'DESC', { rank: { operator: 'GTE', value: 900 } }],
+      ['at', 'DESC'], ['at', 'ASC'], ['name', 'ASC'], ['name', 'DESC'],
+    ]) {
+      const plan = await explain('SortedItem', { ...filter, sort: { terms: [{ field: column, order }] }, pagination: page }, ['enable_sort = off']);
+      const label = `${column} ${order}${filter ? ' filtered' : ''}: ${JSON.stringify(plan)}`;
+      expect(nodes(plan).filter((node) => node['Node Type'].includes('Sort')), label).toEqual([]);
+      expect(nodes(plan).some((node) => node['Index Name'] === sortedIndex(column)), label).toBe(true);
+    }
+    // A nullable column keeps MongoDB's null placement, which a default-order index cannot return.
+    for (const order of ['ASC', 'DESC']) {
+      const plan = await explain('SortedItem', { sort: { terms: [{ field: 'score', order }] }, pagination: page }, ['enable_sort = off']);
+      expect(nodes(plan).some((node) => node['Node Type'] === 'Sort'), JSON.stringify(plan)).toBe(true);
+    }
+  });
+
+  it('returns the same pages for required and nullable sorts with a unique tiebreaker', async () => {
+    const compare = (field, order) => (left, right) => {
+      const [a, b] = [left[field], right[field]].map((value) => (value instanceof Date ? value.getTime() : value));
+      if (a === b) return 0;
+      // Nulls first ascending and last descending, as on MongoDB.
+      if (a == null) return order === 'ASC' ? -1 : 1;
+      if (b == null) return order === 'ASC' ? 1 : -1;
+      return (a < b ? -1 : 1) * (order === 'ASC' ? 1 : -1);
+    };
+    for (const terms of [
+      [['rank', 'DESC'], ['id', 'ASC']], [['name', 'ASC'], ['id', 'DESC']], [['at', 'DESC']], [['score', 'ASC'], ['id', 'ASC']], [['score', 'DESC'], ['rank', 'ASC'], ['id', 'ASC']],
+    ]) {
+      const expected = [...stored].sort((left, right) => terms.reduce((result, [field, order]) => result || compare(field, order)(left, right), 0));
+      for (const page of [1, 4]) {
+        const records = await api.getModel(types.Sorted).find({ sort: { terms: terms.map(([field, order]) => ({ field, order })) }, pagination: { page, size: 40 } });
+        expect(records.map((record) => record.id), JSON.stringify(terms)).toEqual(expected.slice((page - 1) * 40, page * 40).map((row) => row.id));
+      }
+    }
+  });
+
+  it('scans an owned list once per root row for MIN and MAX', async () => {
+    const relations = (plan, tables) => nodes(plan).filter((node) => tables.includes(node['Relation Name']));
+    const aggregate = (path) => ({ aggregation: { groupId: 'bucket', facts: [{ path, operation: 'MIN', factName: 'min' }, { path, operation: 'MAX', factName: 'max' }] } });
+    const flat = await explain('ListRoot', aggregate('lines.label'), [], { mode: 'aggregate' });
+    expect(relations(flat, ['ListRoot__lines']), JSON.stringify(flat)).toHaveLength(1);
+    const nested = await explain('ListRoot', aggregate('lines.parts.x'), [], { mode: 'aggregate' });
+    expect(relations(nested, ['ListRoot__lines', 'ListRoot__lines__parts']), JSON.stringify(nested)).toHaveLength(3);
+  });
+});

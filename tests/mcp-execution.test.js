@@ -920,6 +920,269 @@ describe('MCP callTool remote execution', () => {
     }
   });
 
+  describe('Retry-After and jitter', () => {
+    const NOW = Date.parse('2026-10-13T12:00:00Z');
+    const failure = (status, retryAfter) => ({
+      ok: false,
+      status,
+      headers: new Headers(retryAfter === undefined ? {} : { 'retry-after': retryAfter }),
+      json: async () => ({}),
+    });
+    const httpFailure = (status) => ({
+      errors: [{ message: `GraphQL endpoint responded with HTTP ${status}`, extensions: { code: 'MCP_REMOTE_HTTP_ERROR', status } }],
+    });
+    let sends;
+    let randomSpy;
+
+    beforeEach(() => {
+      vi.useFakeTimers({ now: NOW });
+      sends = [];
+      randomSpy = vi.spyOn(Math, 'random');
+    });
+
+    afterEach(() => {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    });
+
+    // Each fetch records when it was sent, so the waits are the gaps between
+    // sends; the last response repeats.
+    const respond = (...responses) => {
+      fetchMock.mockImplementation(async () => {
+        sends.push(Date.now());
+        const next = responses[Math.min(sends.length, responses.length) - 1];
+        if (next instanceof Error) {
+          throw next;
+        }
+        return next;
+      });
+    };
+    const waits = () => sends.slice(1).map((sent, index) => sent - sends[index]);
+    const call = async (retry, name = 'item', args = { id: '9' }, extra = undefined) => {
+      const pending = remoteTools({ retry }).callTool(name, args, extra);
+      await vi.runAllTimersAsync();
+      return pending;
+    };
+    const payload = (response) => JSON.parse(response.content[0].text);
+
+    it('ignores Retry-After without the retryAfter opt-in (guard)', async () => {
+      respond(failure(503, '30'));
+      const failed = await call({ attempts: 3, backoffMs: 250 });
+      expect(waits()).toEqual([250, 500, 750]);
+      expect(payload(failed)).toEqual(httpFailure(503));
+
+      sends = [];
+      const data = { item: { id: '9', name: 'Recovered' } };
+      respond(failure(503, '30'), jsonResponse({ data }));
+      const recovered = await call({ attempts: 3, backoffMs: 250 });
+      expect(fetchMock).toHaveBeenCalledTimes(6);
+      expect(waits()).toEqual([250]);
+      expect(recovered.isError).toBe(false);
+      expect(recovered.structuredContent).toEqual(data);
+      expect(randomSpy).not.toHaveBeenCalled();
+    });
+
+    it('keeps the linear schedule with retryAfter: false and jitter: false (guard)', async () => {
+      respond(failure(429, '2'));
+      await call({
+        attempts: 3, backoffMs: 250, retryAfter: false, jitter: false,
+      });
+      expect(waits()).toEqual([250, 500, 750]);
+    });
+
+    it('stops retrying when Retry-After exceeds maxRetryAfterMs', async () => {
+      respond(failure(429, '30'));
+      const response = await call({ attempts: 3, backoffMs: 250, retryAfter: true });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(response.isError).toBe(true);
+      expect(payload(response)).toEqual(httpFailure(429));
+    });
+
+    it('waits for a delta-seconds Retry-After', async () => {
+      respond(failure(429, '2'));
+      const response = await call({ attempts: 3, backoffMs: 250, retryAfter: true });
+      expect(waits()).toEqual([2000, 2000, 2000]);
+      expect(payload(response)).toEqual(httpFailure(429));
+    });
+
+    it('honors an HTTP-date Retry-After, measured when the response arrives', async () => {
+      respond(failure(503, 'Tue, 13 Oct 2026 12:00:03 GMT'));
+      await call({ attempts: 3, backoffMs: 250, retryAfter: true });
+      expect(waits()).toEqual([3000, 500, 750]);
+    });
+
+    it.each([
+      ['an asctime', 'Tue Oct 13 12:00:03 2026', 'Tue, 13 Oct 2026 12:00:03 GMT', 3000],
+      ['a one-digit-day asctime', 'Sun Nov  1 12:00:03 2026', 'Sun, 01 Nov 2026 12:00:03 GMT', 19 * 86400000 + 3000],
+      ['an RFC 850', 'Tuesday, 13-Oct-26 12:00:03 GMT', 'Tue, 13 Oct 2026 12:00:03 GMT', 3000],
+    ])('reads %s Retry-After as GMT, waiting as long as the IMF-fixdate in any process time zone', async (label, date, imf, first) => {
+      const zone = process.env.TZ;
+      const offsets = new Set();
+      try {
+        for (const tz of ['Asia/Tokyo', 'America/Los_Angeles']) {
+          process.env.TZ = tz;
+          offsets.add(new Date(NOW).getTimezoneOffset());
+          const schedules = [];
+          for (const value of [imf, date]) {
+            vi.setSystemTime(NOW);
+            sends = [];
+            respond(failure(503, value));
+            await call({
+              attempts: 3, backoffMs: 250, retryAfter: true, maxRetryAfterMs: Infinity,
+            });
+            schedules.push(waits());
+          }
+          expect(schedules).toEqual([[first, 500, 750], [first, 500, 750]]);
+        }
+        // Both zones took effect and neither is GMT, where Date.parse would agree.
+        expect([...offsets].filter((offset) => offset !== 0)).toHaveLength(2);
+      } finally {
+        if (zone === undefined) {
+          delete process.env.TZ;
+        } else {
+          process.env.TZ = zone;
+        }
+      }
+    });
+
+    it('applies a Retry-After to the next retry only', async () => {
+      respond(failure(503, '2'), new TypeError('fetch failed'), failure(502), failure(503, '1'));
+      const response = await call({ attempts: 4, backoffMs: 250, retryAfter: true });
+      expect(waits()).toEqual([2000, 500, 750, 1000]);
+      expect(payload(response)).toEqual(httpFailure(503));
+    });
+
+    it('waits a 30 s Retry-After with retry.maxRetryAfterMs: 60000', async () => {
+      respond(failure(503, '30'));
+      await call({
+        attempts: 3, backoffMs: 250, retryAfter: true, maxRetryAfterMs: 60000,
+      });
+      expect(waits()).toEqual([30000, 30000, 30000]);
+    });
+
+    it('accepts a Retry-After equal to maxRetryAfterMs and stops above it', async () => {
+      respond(failure(503, '2'));
+      await call({
+        attempts: 1, backoffMs: 250, retryAfter: true, maxRetryAfterMs: '2000',
+      });
+      expect(waits()).toEqual([2000]);
+
+      sends = [];
+      respond(failure(503, '3'));
+      await call({
+        attempts: 1, backoffMs: 250, retryAfter: true, maxRetryAfterMs: 2000,
+      });
+      expect(sends).toHaveLength(1);
+    });
+
+    it('adds up to half the linear backoff as jitter', async () => {
+      randomSpy.mockReturnValue(0.5);
+      respond(failure(502));
+      await call({ attempts: 3, backoffMs: 250, jitter: true });
+      expect(waits()).toEqual([312, 625, 937]);
+
+      sends = [];
+      randomSpy.mockReturnValue(0);
+      respond(failure(502));
+      await call({ attempts: 3, backoffMs: 250, jitter: true });
+      expect(waits()).toEqual([250, 500, 750]);
+    });
+
+    it('adds the jitter to the longer of the backoff and the Retry-After', async () => {
+      randomSpy.mockReturnValue(0.5);
+      respond(failure(429, '2'));
+      await call({
+        attempts: 3, backoffMs: 250, retryAfter: true, jitter: true,
+      });
+      expect(waits()).toEqual([2062, 2125, 2187]);
+    });
+
+    it.each([
+      ['no headers', { ok: false, status: 503, json: async () => ({}) }],
+      ['a headers.get that throws', {
+        ok: false, status: 503, headers: { get() { throw new Error('no headers'); } }, json: async () => ({}),
+      }],
+      ['a non-string header value', {
+        ok: false, status: 503, headers: { get: () => 30 }, json: async () => ({}),
+      }],
+      ['Retry-After: soon', failure(503, 'soon')],
+      ['Retry-After: -1', failure(503, '-1')],
+      ['Retry-After: 1.5', failure(503, '1.5')],
+      ['Retry-After: 0', failure(503, '0')],
+      ['a past HTTP-date', failure(503, 'Tue, 13 Oct 2026 11:00:00 GMT')],
+      // Date.parse accepts these, but none is an HTTP-date.
+      ['Retry-After: May 2030', failure(503, 'May 2030')],
+      ['Retry-After: abc 2027', failure(503, 'abc 2027')],
+      ['an ISO 8601 date', failure(503, '2026-10-13T12:00:03Z')],
+      ['an impossible HTTP-date', failure(503, 'Sat, 31 Feb 2027 00:00:00 GMT')],
+    ])('falls back to the backoff for a response with %s (guard)', async (label, response) => {
+      respond(response);
+      const result = await call({ attempts: 3, backoffMs: 250, retryAfter: true });
+      expect(waits()).toEqual([250, 500, 750]);
+      expect(payload(result)).toEqual(httpFailure(503));
+    });
+
+    it('never retries a mutation or an HTTP 400 that sends Retry-After (guard)', async () => {
+      respond(failure(429, '1'));
+      const mutation = await call({ attempts: 3, backoffMs: 250, retryAfter: true }, 'addItem', { input: { name: 'x' } });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(payload(mutation)).toEqual(httpFailure(429));
+
+      respond(failure(400, '1'));
+      const rejected = await call({ attempts: 3, backoffMs: 250, retryAfter: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(payload(rejected)).toEqual(httpFailure(400));
+    });
+
+    it('rejects at once with the abort reason when cancelled during a Retry-After wait', async () => {
+      respond(failure(503, '5'));
+      const controller = new AbortController();
+      const pending = remoteTools({ retry: { attempts: 2, backoffMs: 1, retryAfter: true } })
+        .callTool('item', { id: '9' }, { signal: controller.signal });
+      const outcome = pending.then(() => 'resolved', (reason) => reason);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      controller.abort('stop');
+
+      expect(await outcome).toBe('stop');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('leaves no abort listener on a long-lived caller signal after Retry-After waits', async () => {
+      const { signal } = new AbortController();
+      respond(failure(503, '1'), jsonResponse({ data: { item: null } }));
+      for (let i = 0; i < 5; i += 1) {
+        sends = [];
+        expect((await call({ attempts: 1, backoffMs: 1, retryAfter: true }, 'item', { id: '9' }, { signal })).isError).toBe(false);
+        expect(waits()).toEqual([1000]);
+      }
+      expect(getEventListeners(signal, 'abort')).toHaveLength(0);
+    });
+  });
+
+  it('applies timeoutMs to each attempt when honoring Retry-After (guard)', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    try {
+      fetchMock.mockResolvedValueOnce({
+        ok: false, status: 503, headers: new Headers({ 'retry-after': '0' }), json: async () => ({}),
+      });
+      fetchMock.mockImplementationOnce((url, init) => new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+      }));
+
+      const response = await remoteTools({ timeoutMs: 30, retry: { attempts: 1, backoffMs: 1, retryAfter: true } })
+        .callTool('item', { id: '9' });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(timeoutSpy.mock.calls).toEqual([[30], [30]]);
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain('MCP_REMOTE_REQUEST_FAILED');
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
   // Node.js 19 and 20.0–20.2, inside the engines range, have no AbortSignal.any.
   describe('without AbortSignal.any', () => {
     let anyDescriptor;
@@ -2412,5 +2675,77 @@ describe('MCP callTool in-process execution', () => {
         .rejects.toMatchObject({ extensions: { code: 'MCP_CALL_CANCELLED' } });
       expect(itemCalls).toBe(callsBefore);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Prepared operations: each tool's operation is parsed and validated once
+// and executed per call. Results must equal graphql()'s, call after call.
+// ---------------------------------------------------------------------------
+
+describe('MCP in-process results equal graphql() results', () => {
+  const GreetingType = new GraphQLObjectType({
+    name: 'McpExecGreeting',
+    fields: { text: { type: GraphQLString } },
+  });
+  const greetSchema = new GraphQLSchema({
+    query: new GraphQLObjectType({
+      name: 'Query',
+      fields: {
+        greet: {
+          type: GreetingType,
+          args: { name: { type: GraphQLString, defaultValue: 'world' }, times: { type: GraphQLInt, defaultValue: 1 } },
+          resolve: (parent, args) => ({ text: `hello ${args.name}`.repeat(args.times) }),
+        },
+      },
+    }),
+  });
+  const EmptyType = new GraphQLObjectType({ name: 'McpExecEmpty', fields: {} });
+  const invalidSchema = new GraphQLSchema({
+    query: new GraphQLObjectType({
+      name: 'Query',
+      fields: { empty: { type: EmptyType, resolve: () => ({}) }, ping: { type: GraphQLString, resolve: () => 'pong' } },
+    }),
+  });
+
+  // The payload MCP builds from a GraphQL result: data, or errors with any
+  // partial data.
+  const expectedPayload = (result) => {
+    if (!result.errors) {
+      return result.data;
+    }
+    return result.data == null ? { errors: result.errors } : { errors: result.errors, data: result.data };
+  };
+
+  it.each([
+    ['a valid call', stubSchema, {}, 'item', { id: '9' }],
+    ['partial resolver errors', stubSchema, {}, 'pair', {}],
+    ['a variable coercion error', stubSchema, {}, 'item', { id: 5 }],
+    ['a missing required variable', stubSchema, {}, 'item', {}],
+    ['default variables', greetSchema, {}, 'greet', {}],
+    ['explicit variables', greetSchema, {}, 'greet', { name: 'MCP', times: 2 }],
+    ['validation errors of a selection override', stubSchema, { toolOverrides: { item: { selection: 'id nope' } } }, 'item', { id: '9' }],
+    ['a syntax error of a selection override', stubSchema, { toolOverrides: { item: { selection: '{ id ' } } }, 'item', { id: '9' }],
+    ['an invalid schema', invalidSchema, {}, 'ping', {}],
+  ])('returns graphql()\'s result for %s on every call', async (label, schema, options, name, args) => {
+    const { callTool, getOperation } = simfinity.generateMCPTools(schema, options);
+    const expected = JSON.parse(JSON.stringify(expectedPayload(await graphql({
+      schema, source: getOperation(name), variableValues: args, contextValue: {},
+    }))));
+
+    for (let i = 0; i < 3; i += 1) {
+      const response = await callTool(name, args);
+      expect(JSON.parse(response.content[0].text)).toEqual(expected);
+      expect(response.isError).toBe(Object.hasOwn(expected ?? {}, 'errors'));
+    }
+  });
+
+  it('keeps reporting the schema errors of an invalid schema without throwing (guard)', async () => {
+    const { callTool } = simfinity.generateMCPTools(invalidSchema);
+    for (const name of ['empty', 'ping', 'empty']) {
+      const response = await callTool(name, {});
+      expect(response.isError).toBe(true);
+      expect(JSON.parse(response.content[0].text).errors[0].message).toBe('Type McpExecEmpty must define one or more fields.');
+    }
   });
 });

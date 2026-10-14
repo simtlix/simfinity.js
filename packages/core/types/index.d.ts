@@ -323,6 +323,16 @@ export interface DatabaseAdapter<Model = any, Session = any> {
   getById(model: Model, id: any, session?: Session | null, options?: { projection?: Record<string, number>; plain?: boolean; lock?: boolean; requiredId?: any; context?: any }): any;
   /** Optional batch read: the records found for `ids`, in getById shape and any order. After a failure, the runtime reads each ID with getById. */
   getByIds?(model: Model, ids: any[], options?: { context?: any }): any;
+  /**
+   * Optional. Return true when a `getById` of `model` has no side effects (no query middleware or
+   * hooks that guard, count or change reads) and cannot fail where `update` or `delete` by the same
+   * ID would succeed: both reject a malformed ID with `NOT_VALID_ID` (400) as the read does, and
+   * return null for a missing record. The runtime may then skip a read whose result it does not use:
+   * the read before a delete without an `onDelete` hook, and, for a type with embedded fields, the
+   * read before an update that merges no embedded value and has neither `onUpdating` nor nested
+   * collection items. When it is absent or returns false, those reads run.
+   */
+  readByIdIsInert?(model: Model): boolean;
   prepareUpdate(set: Record<string, any>, unset: Record<string, string>): any;
   update(model: Model, id: any, changes: any, session?: Session): any;
   delete(model: Model, id: any, session?: Session): any;

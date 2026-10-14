@@ -94,6 +94,10 @@ export interface DatabaseTrigger {
   constraint: boolean;
   deferrable: boolean;
   initiallyDeferred: boolean;
+  /** Row events the trigger fires on; omitted means INSERT, UPDATE and DELETE. Only the `refreshTriggers: 'perRoot'` guard trigger sets it. */
+  events?: Array<'INSERT' | 'UPDATE' | 'DELETE'>;
+  /** A WHEN condition on the row; only the `refreshTriggers: 'perRoot'` guard trigger sets it. */
+  when?: string;
 }
 export interface DatabaseMaintenance {
   rootTable: string;
@@ -124,7 +128,7 @@ export interface DatabasePool {
  * Low-level describer for any registrations. `options.schema` defaults to `public`, not to the schema
  * of a configured runtime; pass the schema given to configure() or createPostgres().
  */
-export function describeDatabase(registrations: ModelRegistration[], options?: { schema?: string }): DatabaseDescription;
+export function describeDatabase(registrations: ModelRegistration[], options?: { schema?: string } & Pick<PostgresConfiguration, 'refreshTriggers' | 'ownerIndexes'>): DatabaseDescription;
 /** Describes the default module instance in its configured schema, after configure/connect/createSchema. */
 export function describeDatabase(): DatabaseDescription;
 /** Accepts a trusted description produced by describeDatabase. */
@@ -164,7 +168,31 @@ export interface PostgresModel {
   update(id: string, changes: Record<string, any>, options?: { session?: PostgresSession }): Promise<PostgresRecord | null>;
   delete(id: string, options?: { session?: PostgresSession }): Promise<PostgresRecord | null>;
 }
-export interface PostgresConfiguration { pool: PostgresPool; schema?: string }
+export interface PostgresConfiguration {
+  pool: PostgresPool;
+  schema?: string;
+  /** Defaults to true: the owned rows of an embedded list are inserted with multi-row INSERT statements. `false` keeps one INSERT per row. */
+  multiRowInserts?: boolean;
+  /**
+   * Defaults to false: sorts on `id` and required root fields omit the NULLS clause, so the primary key and declared
+   * indexes can return them in order. `true` keeps the explicit NULLS clause on every sort term, as 3.5.9 did.
+   */
+  explicitNullsOrder?: boolean;
+  /**
+   * Defaults to 'perRow', as 3.5.9: the deferred triggers of a root with owned tables or unique lists refresh its owned
+   * shape and unique keys once per changed row. 'perRoot' refreshes each changed root once per transaction while its
+   * guard trigger stays deferred, the default (under SET CONSTRAINTS ALL IMMEDIATE, once per changed row). It applies
+   * to roots created while it is set: initialization keeps each existing root on the layout its database has, and
+   * accepts both. An unknown value throws INVALID_DATABASE_SCHEMA (400) from createSchema or describeDatabase.
+   */
+  refreshTriggers?: 'perRow' | 'perRoot';
+  /**
+   * Defaults to 'all', as 3.5.9. 'minimal' does not create the (__owner_id) index of owned and guard tables, which their
+   * primary key or a unique index covers; keys tables keep theirs. Existing indexes are kept and accepted. An unknown
+   * value throws INVALID_DATABASE_SCHEMA (400) from createSchema or describeDatabase.
+   */
+  ownerIndexes?: 'all' | 'minimal';
+}
 export interface InitializationOptions { mode?: 'create' | 'validate' }
 export interface InitializationResult { mode: 'create' | 'validate'; created: string[] }
 export interface PostgresRuntime extends Runtime<PostgresModel, PostgresSession> {

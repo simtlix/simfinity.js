@@ -4,8 +4,12 @@ import { encodeScalar, storageTypes, invalidValue } from '../codecs.js';
 
 const unsupported = (message) => { throw new SimfinityError(message, 'UNSUPPORTED_QUERY', 400); };
 
-/** Compiles validated paths; all caller values are parameters, identifiers come from metadata. */
-export const compileQuery = (models, database, plan, extra = null) => {
+/**
+ * Compiles validated paths; all caller values are parameters, identifiers come from metadata.
+ * `configuration.explicitNullsOrder: true` keeps the NULLS clause on every sort term, as 3.5.9 did.
+ */
+export const compileQuery = (models, database, plan, extra = null, configuration = null) => {
+  const explicitNullsOrder = configuration?.explicitNullsOrder === true;
   const values = [];
   const joins = new Map();
   let serial = 0;
@@ -151,7 +155,12 @@ export const compileQuery = (models, database, plan, extra = null) => {
         }
         let sql = context.vector ? arrayFrom(context.vector, expression) : expression;
         if (type === 'text') sql = `(${sql}) COLLATE "pg_catalog"."C"`;
-        return { sql, field: identity ? { ...field, scalar: 'ID' } : field, type: dateNumeric ? 'double precision' : type, list: field.list || !!context.vector, vector: !!context.vector, dateNumeric, sortKey };
+        // A NOT NULL column of the root row has no nulls to place, so its sort needs no NULLS clause and a
+        // default-order btree (the primary key or a declared index) can return it in order. Joined and
+        // embedded paths can be NULL even for NOT NULL columns, so they keep the clause.
+        const notNull = !context.json && !context.vector && !field.list && context.alias === 't0'
+          && context.table.columns.find((item) => item.name === (identity ? 'id' : field.storageName))?.nullable === false;
+        return { sql, field: identity ? { ...field, scalar: 'ID' } : field, type: dateNumeric ? 'double precision' : type, list: field.list || !!context.vector, vector: !!context.vector, dateNumeric, sortKey, notNull };
       }
     }
     unsupported('Invalid query path');
@@ -226,6 +235,8 @@ export const compileQuery = (models, database, plan, extra = null) => {
     condition += ` AND ${col('t0', column.name)} = ${bind(extra.id, 'uuid')}`;
   }
   let select = 't0.*';
+  // List values that MIN and MAX facts read, each evaluated once per row in a lateral subquery.
+  const laterals = new Map();
   let group = '';
   const order = [];
   if (plan.mode === 'count') select = 'count(*) AS size';
@@ -243,7 +254,15 @@ export const compileQuery = (models, database, plan, extra = null) => {
       if (fact.operation === 'COUNT') operation = 'count(*)';
       else if (expression.list) {
         if (fact.operation === 'SUM' || fact.operation === 'AVG') operation = fact.operation === 'SUM' ? '0' : 'NULL';
-        else operation = `(array_agg(${expression.sql} ORDER BY ${helper('value_key', expression.sql, literal(expression.field.scalar))} ${fact.operation === 'MIN' ? 'ASC' : 'DESC'}) FILTER (WHERE ${expression.sql} IS NOT NULL AND ${expression.sql} <> 'null'::jsonb))[1]`;
+        else {
+          // The list value is a correlated subquery that the aggregate reads four times; MIN and MAX of the
+          // same path share one evaluation per row. OFFSET 0 keeps the planner from pulling the subquery up
+          // and copying the expression back, and a subquery without FROM keeps one row per root row.
+          const key = fact.path.join('.');
+          if (!laterals.has(key)) laterals.set(key, { alias: `f${laterals.size}`, sql: expression.sql });
+          const value = `${laterals.get(key).alias}.value`;
+          operation = `(array_agg(${value} ORDER BY ${helper('value_key', value, literal(expression.field.scalar))} ${fact.operation === 'MIN' ? 'ASC' : 'DESC'}) FILTER (WHERE ${value} IS NOT NULL AND ${value} <> 'null'::jsonb))[1]`;
+        }
       }
       else if (['SUM', 'AVG'].includes(fact.operation) && !['Int', 'Float'].includes(expression.field.scalar)) operation = fact.operation === 'SUM' ? '0' : 'NULL';
       else if (['MIN', 'MAX'].includes(fact.operation) && expression.type === 'boolean') operation = `${fact.operation === 'MIN' ? 'bool_and' : 'bool_or'}(${expression.sql})`;
@@ -263,9 +282,11 @@ export const compileQuery = (models, database, plan, extra = null) => {
     const expression = path(term.path, 'sort');
     const key = expression.sql;
     if (expression.sortKey) { order.push(`${expression.sortKey(term.order)} ${term.order} NULLS ${term.order === 'ASC' ? 'FIRST' : 'LAST'}`); continue; }
-    order.push(`${key} ${term.order} NULLS ${term.order === 'ASC' ? 'FIRST' : 'LAST'}`);
+    order.push(expression.notNull && !explicitNullsOrder ? `${key} ${term.order}` : `${key} ${term.order} NULLS ${term.order === 'ASC' ? 'FIRST' : 'LAST'}`);
   }
-  let text = `SELECT ${select} FROM ${qualified(database.schema, root.name)} t0 ${[...joins.values()].map((item) => item.sql).join(' ')} WHERE ${condition}${group}`;
+  // Laterals follow every join, so their expressions can read the root row and any joined alias.
+  const lateralSQL = [...laterals.values()].map((item) => ` CROSS JOIN LATERAL (SELECT ${item.sql} AS value OFFSET 0) ${item.alias}`).join('');
+  let text = `SELECT ${select} FROM ${qualified(database.schema, root.name)} t0 ${[...joins.values()].map((item) => item.sql).join(' ')}${lateralSQL} WHERE ${condition}${group}`;
   if (plan.mode === 'aggregate') text = `SELECT * FROM (${text}) aggregated`;
   if (order.length) text += ` ORDER BY ${order.join(', ')}`;
   if (plan.pagination) text += ` LIMIT ${bind(plan.pagination.limit, 'bigint')} OFFSET ${bind(plan.pagination.offset, 'bigint')}`;

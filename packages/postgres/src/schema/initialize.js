@@ -1,6 +1,7 @@
 import { SimfinityError } from '@simtlix/simfinity-core';
 import { identifier, qualified, generatedName } from './sql.js';
-import { createTableSQL, createForeignKeySQL, createIndexSQL, createFunctionSQL, createTriggerSQL } from './ddl.js';
+import { createTableSQL, createForeignKeySQL, createIndexSQL, createFunctionSQL, createTriggerSQL, triggerEvents } from './ddl.js';
+import { maintenanceLayouts, layoutOf, withLayouts } from './constraints.js';
 
 const mismatch = (object, reason) => {
   throw new SimfinityError(`Schema mismatch at ${object}: ${reason}. Apply an explicit migration before startup.`, 'SCHEMA_MISMATCH', 409);
@@ -43,19 +44,14 @@ export const normalizeExpression = (expression) => {
   return value;
 };
 
-const readTable = async (client, schema, name) => {
-  const { rows: relations } = await client.query(`SELECT c.oid, c.relkind, c.relpersistence, c.relrowsecurity, c.relforcerowsecurity
-    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2`, [schema, name]);
-  if (!relations.length) return null;
-  const relation = relations[0];
-  if (relation.relkind !== 'r' || relation.relpersistence !== 'p' || relation.relrowsecurity || relation.relforcerowsecurity) mismatch(`${schema}.${name}`, 'expected a persistent ordinary table without row security');
-  const { rows: columns } = await client.query(`SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type,
+// Catalog columns read for each managed relation, function and trigger.
+const relationColumns = 'c.oid, c.relkind, c.relpersistence, c.relrowsecurity, c.relforcerowsecurity';
+const columnRows = `a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type,
     NOT a.attnotnull AS nullable, pg_get_expr(d.adbin, d.adrelid) AS "default", a.attidentity, a.attgenerated,
     col.collname AS collation, ns.nspname AS collation_schema
     FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-    LEFT JOIN pg_collation col ON col.oid = a.attcollation LEFT JOIN pg_namespace ns ON ns.oid = col.collnamespace
-    WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, [relation.oid]);
-  const { rows: constraints } = await client.query(`SELECT c.conname AS name, c.contype AS type,
+    LEFT JOIN pg_collation col ON col.oid = a.attcollation LEFT JOIN pg_namespace ns ON ns.oid = col.collnamespace`;
+const constraintRows = `c.conname AS name, c.contype AS type,
     c.condeferrable AS deferrable, c.condeferred AS deferred, c.convalidated AS validated,
     COALESCE((to_jsonb(c)->>'conenforced')::boolean, true) AS enforced,
     c.confdeltype AS delete_action, c.confupdtype AS update_action, c.confmatchtype AS match_type, c.connoinherit AS no_inherit,
@@ -66,9 +62,8 @@ const readTable = async (client, schema, name) => {
       JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.num ORDER BY k.pos) AS columns,
     ARRAY(SELECT a.attname::text FROM unnest(c.confkey) WITH ORDINALITY k(num, pos)
       JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.num ORDER BY k.pos) AS target_columns
-    FROM pg_constraint c LEFT JOIN pg_class t ON t.oid = c.confrelid LEFT JOIN pg_namespace n ON n.oid = t.relnamespace
-    WHERE c.conrelid = $1`, [relation.oid]);
-  const { rows: indexes } = await client.query(`SELECT ic.relname AS name, i.indisprimary AS primary,
+    FROM pg_constraint c LEFT JOIN pg_class t ON t.oid = c.confrelid LEFT JOIN pg_namespace n ON n.oid = t.relnamespace`;
+const indexRows = `ic.relname AS name, i.indisprimary AS primary,
     i.indisunique AS unique, i.indnullsnotdistinct AS nulls_not_distinct, i.indisvalid AS valid, i.indisready AS ready,
     i.indimmediate AS immediate, am.amname AS method, i.indnatts = i.indnkeyatts AS no_include,
     i.indpred IS NULL AS no_predicate, i.indexprs IS NULL AS no_expression,
@@ -79,8 +74,86 @@ const readTable = async (client, schema, name) => {
     NOT EXISTS (SELECT 1 FROM unnest(i.indcollation) WITH ORDINALITY col(oid, pos)
       JOIN unnest(i.indkey) WITH ORDINALITY k(num, pos) USING(pos)
       JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.num WHERE col.oid <> a.attcollation) AS default_collation
-    FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid JOIN pg_am am ON am.oid = ic.relam WHERE i.indrelid = $1`, [relation.oid]);
+    FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid JOIN pg_am am ON am.oid = ic.relam`;
+const functionRows = `p.oid, pg_get_function_identity_arguments(p.oid) AS arguments,
+      pg_get_function_result(p.oid) AS returns, p.prosrc AS body, l.lanname AS language, p.provolatile AS volatility,
+      p.proconfig AS configuration, p.prosecdef, p.proisstrict, p.proleakproof, p.proparallel, p.prokind,
+      p.proretset, p.pronargdefaults, p.procost, p.prorows, p.prosupport::oid AS support
+      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang`;
+// `definition` and `function_text` locate a WHEN condition in pg_get_triggerdef (whenClause).
+const triggerRows = `t.tgtype, t.tgenabled, t.tgisinternal, t.tgdeferrable, t.tginitdeferred,
+      t.tgnargs, t.tgqual IS NULL AS no_when, t.tgattr::text AS columns, p.proname AS function, n.nspname AS function_schema,
+      p.pronargs, t.tgconstraint <> 0 AS constraint, t.tgconstrrelid::oid AS constraint_relation,
+      t.tgparentid::oid AS parent, c.condeferrable, c.condeferred, c.convalidated,
+      COALESCE((to_jsonb(c)->>'conenforced')::boolean, true) AS enforced,
+      t.tgoldtable, t.tgnewtable,
+      CASE WHEN t.tgqual IS NOT NULL THEN pg_get_triggerdef(t.oid) END AS definition, quote_ident(n.nspname) || '.' || quote_ident(p.proname) AS function_text
+      FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace n ON n.oid = p.pronamespace
+      LEFT JOIN pg_constraint c ON c.oid = t.tgconstraint`;
+const ordinaryTable = (schema, name, relation) => {
+  if (relation.relkind !== 'r' || relation.relpersistence !== 'p' || relation.relrowsecurity || relation.relforcerowsecurity) mismatch(`${schema}.${name}`, 'expected a persistent ordinary table without row security');
+};
+
+/** Re-reads one table, such as a table this run has just created. */
+const readTable = async (client, schema, name) => {
+  const { rows: relations } = await client.query(`SELECT ${relationColumns}
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2`, [schema, name]);
+  if (!relations.length) return null;
+  const relation = relations[0];
+  ordinaryTable(schema, name, relation);
+  const { rows: columns } = await client.query(`SELECT ${columnRows}
+    WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, [relation.oid]);
+  const { rows: constraints } = await client.query(`SELECT ${constraintRows}
+    WHERE c.conrelid = $1`, [relation.oid]);
+  const { rows: indexes } = await client.query(`SELECT ${indexRows} WHERE i.indrelid = $1`, [relation.oid]);
   return { columns, constraints, indexes };
+};
+
+/**
+ * Reads every managed relation, function and trigger in six statements, whatever the schema size. Names
+ * include both refresh-trigger layouts. Takes no table lock.
+ */
+const loadCatalog = async (client, schema, names) => {
+  const { rows: relations } = await client.query(`SELECT c.relname AS __name, ${relationColumns}
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = ANY ($2::text[])`, [schema, names.tables]);
+  const oids = relations.map((relation) => relation.oid);
+  const { rows: columns } = await client.query(`SELECT a.attrelid AS __relation, ${columnRows}
+    WHERE a.attrelid = ANY ($1::oid[]) AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attrelid, a.attnum`, [oids]);
+  const { rows: constraints } = await client.query(`SELECT c.conrelid AS __relation, ${constraintRows}
+    WHERE c.conrelid = ANY ($1::oid[])`, [oids]);
+  const { rows: indexes } = await client.query(`SELECT i.indrelid AS __relation, ${indexRows} WHERE i.indrelid = ANY ($1::oid[])`, [oids]);
+  const { rows: functions } = await client.query(`SELECT p.proname AS __name, ${functionRows}
+      WHERE n.nspname = $1 AND p.proname = ANY ($2::text[])`, [schema, names.functions]);
+  const { rows: triggers } = await client.query(`SELECT t.tgrelid AS __relation, t.tgname AS __name, ${triggerRows}
+      WHERE t.tgrelid = ANY ($1::oid[]) AND t.tgname = ANY ($2::text[])`, [oids, names.triggers]);
+  const group = (rows, key) => {
+    const map = new Map();
+    for (const { __relation: relation, __name: name, ...row } of rows) {
+      const id = key(relation, name);
+      if (!map.has(id)) map.set(id, []);
+      map.get(id).push(row);
+    }
+    return map;
+  };
+  const relationNames = new Map(relations.map((relation) => [relation.oid, relation.__name]));
+  const byRelation = (rows) => group(rows, (relation) => relation);
+  const tableColumns = byRelation(columns); const tableConstraints = byRelation(constraints); const tableIndexes = byRelation(indexes);
+  const functionsByName = group(functions, (relation, name) => name);
+  const triggersByName = group(triggers, (relation, name) => JSON.stringify([relationNames.get(relation), name]));
+  return {
+    tables: new Map(relations.map(({ __name: name, ...relation }) => [name, {
+      relation, columns: tableColumns.get(relation.oid) || [], constraints: tableConstraints.get(relation.oid) || [], indexes: tableIndexes.get(relation.oid) || [],
+    }])),
+    functions: (name) => functionsByName.get(name) || [],
+    triggers: (table, name) => triggersByName.get(JSON.stringify([table, name])) || [],
+  };
+};
+// The stored table, as readTable returns it, or null when it does not exist.
+const fromCatalog = (schema, name, catalog) => {
+  const entry = catalog.tables.get(name);
+  if (!entry) return null;
+  ordinaryTable(schema, name, entry.relation);
+  return { columns: entry.columns, constraints: entry.constraints, indexes: entry.indexes };
 };
 
 const validateBase = (schema, table, actual, triggers = []) => {
@@ -144,16 +217,16 @@ const legacyListIndexes = (schema, table, actual) => table.columns
     && !index.unique && !index.primary && index.method === 'btree' && same(index.columns, [column]) && index.no_predicate && index.no_expression))
   .map(({ name }) => `${identifier(schema)}.${identifier(name)}`);
 
-const ensureFunctions = async (client, description, mode, created) => {
+// Each pass walks the description in the same order and rejects drift of an existing object at the same
+// point: 'validate' also rejects a missing object, 'plan' records it without DDL, and 'create' creates it
+// and records it.
+const ensureFunctions = async (client, description, catalog, pass, missing, created) => {
   for (const fn of description.functions || []) {
-    const { rows } = await client.query(`SELECT p.oid, pg_get_function_identity_arguments(p.oid) AS arguments,
-      pg_get_function_result(p.oid) AS returns, p.prosrc AS body, l.lanname AS language, p.provolatile AS volatility,
-      p.proconfig AS configuration, p.prosecdef, p.proisstrict, p.proleakproof, p.proparallel, p.prokind,
-      p.proretset, p.pronargdefaults, p.procost, p.prorows, p.prosupport::oid AS support
-      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
-      WHERE n.nspname = $1 AND p.proname = $2`, [description.schema, fn.name]);
+    const rows = catalog.functions(fn.name);
     if (!rows.length) {
-      if (mode === 'validate') mismatch(`${description.schema}.${fn.name}`, 'function is missing');
+      if (pass === 'validate') mismatch(`${description.schema}.${fn.name}`, 'function is missing');
+      missing.push({ kind: 'function', name: fn.name });
+      if (pass === 'plan') continue;
       await client.query(createFunctionSQL(description.schema, fn));
       created.push(`function:${description.schema}.${fn.name}`);
       continue;
@@ -169,19 +242,25 @@ const ensureFunctions = async (client, description, mode, created) => {
   }
 };
 
-const ensureTriggers = async (client, description, mode, created) => {
+// pg_trigger.tgtype of an AFTER ... FOR EACH ROW trigger: the row bit plus one bit per event.
+const eventBits = { INSERT: 4, DELETE: 8, UPDATE: 16 };
+const triggerType = (trigger) => triggerEvents(trigger).reduce((type, event) => type + eventBits[event], 1);
+// pg_get_triggerdef renders `... FOR EACH ROW WHEN (<condition>) EXECUTE FUNCTION <function>()`.
+const whenClause = ({ definition, function_text: target }) => {
+  const head = ' FOR EACH ROW WHEN (';
+  const tail = `) EXECUTE FUNCTION ${target}()`;
+  if (!definition?.endsWith(tail)) return null;
+  const start = definition.lastIndexOf(head, definition.length - tail.length);
+  return start < 0 ? null : definition.slice(start + head.length, definition.length - tail.length);
+};
+
+const ensureTriggers = async (client, description, catalog, pass, missing, created) => {
   for (const trigger of description.triggers || []) {
-    const { rows } = await client.query(`SELECT t.tgtype, t.tgenabled, t.tgisinternal, t.tgdeferrable, t.tginitdeferred,
-      t.tgnargs, t.tgqual IS NULL AS no_when, t.tgattr::text AS columns, p.proname AS function, n.nspname AS function_schema,
-      p.pronargs, t.tgconstraint <> 0 AS constraint, t.tgconstrrelid::oid AS constraint_relation,
-      t.tgparentid::oid AS parent, c.condeferrable, c.condeferred, c.convalidated,
-      COALESCE((to_jsonb(c)->>'conenforced')::boolean, true) AS enforced,
-      t.tgoldtable, t.tgnewtable
-      FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace n ON n.oid = p.pronamespace
-      LEFT JOIN pg_constraint c ON c.oid = t.tgconstraint
-      WHERE t.tgrelid = to_regclass($1) AND t.tgname = $2`, [qualified(description.schema, trigger.table), trigger.name]);
+    const rows = catalog.triggers(trigger.table, trigger.name);
     if (!rows.length) {
-      if (mode === 'validate') mismatch(`${description.schema}.${trigger.name}`, 'trigger is missing');
+      if (pass === 'validate') mismatch(`${description.schema}.${trigger.name}`, 'trigger is missing');
+      missing.push({ kind: 'trigger', table: trigger.table, name: trigger.name });
+      if (pass === 'plan') continue;
       const collision = await client.query('SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass($1) AND conname = $2', [qualified(description.schema, trigger.table), trigger.name]);
       if (collision.rowCount) mismatch(`${description.schema}.${trigger.table}.${trigger.name}`, 'constraint name is already in use');
       await client.query(createTriggerSQL(description.schema, trigger));
@@ -189,8 +268,9 @@ const ensureTriggers = async (client, description, mode, created) => {
       continue;
     }
     const stored = rows[0];
-    if (stored.tgtype !== 29 || stored.tgenabled !== 'O' || stored.tgisinternal || stored.tgdeferrable !== trigger.deferrable
-      || stored.tginitdeferred !== trigger.initiallyDeferred || stored.tgnargs || !stored.no_when || stored.columns !== ''
+    if (stored.tgtype !== triggerType(trigger) || stored.tgenabled !== 'O' || stored.tgisinternal || stored.tgdeferrable !== trigger.deferrable
+      || stored.tginitdeferred !== trigger.initiallyDeferred || stored.tgnargs || stored.no_when !== !trigger.when
+      || (trigger.when && normalizeExpression(whenClause(stored)) !== normalizeExpression(trigger.when)) || stored.columns !== ''
       || stored.function !== trigger.function || stored.function_schema !== description.schema || stored.pronargs
       || stored.constraint !== trigger.constraint || stored.constraint_relation || stored.parent || stored.tgoldtable || stored.tgnewtable
       || (trigger.constraint && (!stored.condeferrable || !stored.condeferred || !stored.convalidated || !stored.enforced))) {
@@ -199,35 +279,168 @@ const ensureTriggers = async (client, description, mode, created) => {
   }
 };
 
-const backfill = async (client, description) => {
-  for (const table of description.tables) {
-    for (const check of table.checks) {
-      const invalid = await client.query(`SELECT 1 FROM ${qualified(description.schema, table.name)} WHERE NOT (${check.expression}) LIMIT 1`);
-      if (invalid.rowCount) mismatch(`${description.schema}.${table.name}.${check.name}`, 'existing data violates generated check');
+/** One pass over the description: schema, functions, tables, foreign keys and indexes, then triggers. */
+const traverse = async (client, description, catalog, pass, missing, created) => {
+  const { schema, tables } = description;
+  const legacy = [];
+  const namespace = await client.query('SELECT 1 FROM pg_namespace WHERE nspname = $1', [schema]);
+  if (!namespace.rowCount) {
+    if (pass === 'validate') mismatch(schema, 'schema is missing');
+    missing.push({ kind: 'schema' });
+    if (pass === 'plan') return legacy;
+    await client.query(`CREATE SCHEMA ${identifier(schema)}`);
+    created.push(`schema:${schema}`);
+  }
+  await ensureFunctions(client, description, catalog, pass, missing, created);
+  const actuals = new Map();
+  for (const table of tables) {
+    let actual = fromCatalog(schema, table.name, catalog);
+    if (!actual) {
+      if (pass === 'validate') mismatch(`${schema}.${table.name}`, 'table is missing');
+      missing.push({ kind: 'table', table: table.name });
+      // A table that does not exist has none of its foreign keys, indexes or triggers either.
+      if (pass === 'plan') continue;
+      await client.query(createTableSQL(schema, table));
+      created.push(`table:${schema}.${table.name}`);
+      actual = await readTable(client, schema, table.name);
+    }
+    validateBase(schema, table, actual, description.triggers);
+    actuals.set(table.name, actual);
+  }
+  for (const table of tables.filter((item) => actuals.has(item.name))) {
+    const actual = actuals.get(table.name);
+    for (const key of table.foreignKeys) {
+      const stored = actual.constraints.find((item) => item.name === key.name);
+      if (stored) validateForeignKey(schema, table, key, stored);
+      else {
+        if (pass === 'validate') mismatch(`${schema}.${table.name}.${key.name}`, 'foreign key is missing');
+        missing.push({ kind: 'foreignKey', table: table.name, name: key.name });
+        if (pass === 'plan') continue;
+        await client.query(createForeignKeySQL(schema, table, key));
+        created.push(`foreignKey:${schema}.${table.name}.${key.name}`);
+      }
+    }
+    for (const index of table.indexes) {
+      const stored = actual.indexes.find((item) => item.name === index.name);
+      if (stored) validateIndex(schema, table, index, stored);
+      else {
+        if (pass === 'validate') mismatch(`${schema}.${table.name}.${index.name}`, 'index is missing');
+        missing.push({ kind: 'index', table: table.name, name: index.name });
+        if (pass === 'plan') continue;
+        const collision = await client.query('SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2', [schema, index.name]);
+        if (collision.rowCount) mismatch(`${schema}.${index.name}`, 'relation name is already in use');
+        await client.query(createIndexSQL(schema, table, index));
+        created.push(`index:${schema}.${index.name}`);
+      }
+    }
+    for (const index of actual.indexes) {
+      if (index.unique && !index.primary && !table.indexes.some((item) => item.name === index.name)) mismatch(`${schema}.${table.name}.${index.name}`, 'unexpected unique index');
+    }
+    legacy.push(...legacyListIndexes(schema, table, actual));
+  }
+  await ensureTriggers(client, description, catalog, pass, missing, created);
+  return legacy;
+};
+
+// Names to read from the catalog: the description's, plus the refresh-trigger objects of both layouts.
+const catalogNames = (description, layouts) => {
+  const functions = new Set((description.functions || []).map((fn) => fn.name));
+  const triggers = new Set((description.triggers || []).map((trigger) => trigger.name));
+  for (const layout of layouts.values()) {
+    for (const objects of [layout.perRow, layout.perRoot]) {
+      for (const fn of objects.functions) functions.add(fn.name);
+      for (const trigger of objects.triggers) triggers.add(trigger.name);
     }
   }
-  // Existing keys can be stale when missing maintenance triggers are recreated.
-  // All managed tables are already locked; rebuild the complete derived key set
-  // before testing owners against one another. Rollback restores the old set.
-  for (const table of description.tables.filter((item) => item.uniqueKeys)) {
+  return { tables: description.tables.map((table) => table.name), functions: [...functions], triggers: [...triggers] };
+};
+
+// Each maintained root keeps the refresh-trigger layout its database already has: a function or trigger
+// that only one layout has, or a touch function with one layout's body. A root with neither, such as a
+// new one, gets the description's layout. Objects of both layouts in one root are drift.
+const resolveLayouts = (description, catalog, layouts) => {
+  const holds = (own, other) => own.functions.some((fn) => {
+    const twin = other.functions.find((item) => item.name === fn.name);
+    const stored = catalog.functions(fn.name);
+    return twin ? twin.body !== fn.body && stored.some((row) => row.body === fn.body) : stored.length > 0;
+  }) || own.triggers.some((trigger) => !other.triggers.some((item) => item.name === trigger.name && item.table === trigger.table)
+    && catalog.triggers(trigger.table, trigger.name).length > 0);
+  const choices = new Map();
+  for (const item of description.maintenance || []) {
+    const { perRow, perRoot } = layouts.get(item.rootTable);
+    const row = holds(perRow, perRoot);
+    const root = holds(perRoot, perRow);
+    if (row && root) mismatch(`${description.schema}.${item.rootTable}`, 'refresh triggers of two layouts are present');
+    const described = layoutOf(description, item);
+    const layout = row ? 'perRow' : root ? 'perRoot' : described;
+    if (layout !== described) choices.set(item.rootTable, layout);
+  }
+  return choices.size ? withLayouts(description, choices, layouts) : description;
+};
+
+// The maintained root a table belongs to: itself, the root of its ownership chain, or the root an
+// auxiliary (guard or keys) table serves.
+const rootOf = (description, name) => {
+  let table = description.tables.find((item) => item.name === name);
+  if (table?.auxiliary) return table.auxiliary.rootTable;
+  while (table?.ownership) table = description.tables.find((item) => item.name === table.ownership.ownerTable);
+  return table?.name;
+};
+// Keys can be stale only for roots whose maintenance objects are missing: guard and keys tables, the
+// validate and refresh functions, and the refresh triggers and their functions. A missing foreign key or
+// index validates existing rows itself when it is created, and checks only arrive with new tables.
+const staleRoots = (description, objects) => {
+  const maintenance = description.maintenance || [];
+  const maintained = new Set(maintenance.map((item) => item.rootTable));
+  const roots = new Set();
+  for (const object of objects) {
+    let root;
+    if (object.kind === 'table' || object.kind === 'trigger') root = rootOf(description, object.table);
+    else if (object.kind === 'function') {
+      const item = maintenance.find((entry) => entry.validateFunction === object.name || entry.refreshFunction === object.name);
+      const trigger = (description.triggers || []).find((entry) => entry.function === object.name);
+      root = item ? item.rootTable : trigger && rootOf(description, trigger.table);
+    }
+    if (maintained.has(root)) roots.add(root);
+  }
+  return roots;
+};
+// Rebuilding keys needs the rows of their root to stay still until commit: lock the existing tables of
+// those roots (root, owned, guard and keys tables) in one statement. Other DDL takes its own locks.
+const lockRoots = async (client, description, catalog, roots) => {
+  const names = description.tables.filter((table) => catalog.tables.has(table.name) && roots.has(rootOf(description, table.name)));
+  if (names.length) await client.query(`LOCK TABLE ${names.map((table) => qualified(description.schema, table.name)).join(', ')} IN SHARE ROW EXCLUSIVE MODE`);
+};
+
+const backfill = async (client, description, roots) => {
+  // The keys of these roots can be stale because maintenance objects were recreated. Their tables are
+  // locked; rebuild their complete derived key set before testing owners against one another. Rollback
+  // restores the old set.
+  for (const table of description.tables.filter((item) => item.uniqueKeys && roots.has(item.uniqueKeys.rootTable))) {
     await client.query(`DELETE FROM ${qualified(description.schema, table.name)}`);
   }
-  for (const item of description.maintenance || []) {
+  for (const item of (description.maintenance || []).filter((entry) => roots.has(entry.rootTable))) {
     await client.query(`INSERT INTO ${qualified(description.schema, item.guardTable)} (__owner_id)
       SELECT id FROM ${qualified(description.schema, item.rootTable)} ON CONFLICT (__owner_id) DO NOTHING`);
     await client.query(`SELECT ${qualified(description.schema, item.refreshFunction)}(id) FROM ${qualified(description.schema, item.rootTable)} ORDER BY id`);
   }
 };
 
-/** Create missing objects or validate an existing schema; never alter/drop existing storage. */
+/**
+ * Create missing objects or validate an existing schema; never alter/drop existing storage. The catalog is
+ * read in a fixed number of statements without table locks. Create mode changes nothing, and locks nothing,
+ * when nothing is missing; otherwise it locks only the tables of roots whose keys it must rebuild.
+ */
 export const initializeDatabase = async (pool, description, { mode = 'create' } = {}) => {
   if (!['create', 'validate'].includes(mode)) throw new SimfinityError(`Unknown initialization mode: ${mode}`, 'INVALID_INITIALIZATION_MODE', 400);
-  const { schema, tables } = description;
+  const { schema } = description;
   identifier(schema);
   if (schema.startsWith('pg_') || schema === 'information_schema') throw new SimfinityError('System schemas cannot be managed', 'INVALID_DATABASE_SCHEMA', 400);
+  const layouts = maintenanceLayouts(description);
+  const names = catalogNames(description, layouts);
   const client = await pool.connect();
   const created = [];
-  const legacy = [];
+  let legacy = [];
   let rollbackError;
   try {
     await client.query(mode === 'validate' ? 'BEGIN READ ONLY' : 'BEGIN');
@@ -235,56 +448,36 @@ export const initializeDatabase = async (pool, description, { mode = 'create' } 
     await client.query('SET LOCAL standard_conforming_strings = \'on\'');
     const version = await client.query('SELECT current_setting(\'server_version_num\')::integer AS version');
     if (version.rows[0].version < 150000) throw new SimfinityError('PostgreSQL 15 or later is required', 'UNSUPPORTED_DATABASE_VERSION', 400);
+    // Serializes initializers of this schema before anything is read.
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`simfinity:${schema}`]);
-    const namespace = await client.query('SELECT 1 FROM pg_namespace WHERE nspname = $1', [schema]);
-    if (!namespace.rowCount) {
-      if (mode === 'validate') mismatch(schema, 'schema is missing');
-      await client.query(`CREATE SCHEMA ${identifier(schema)}`);
-      created.push(`schema:${schema}`);
+    const inspected = await loadCatalog(client, schema, names);
+    if (mode === 'validate') legacy = await traverse(client, resolveLayouts(description, inspected, layouts), inspected, 'validate', [], created);
+    else {
+      // Inspect first, without table locks or DDL. Drift before the first missing object is reported as
+      // before; drift after one is left to the create pass, which reports what earlier versions did, such
+      // as a foreign key that existing rows violate.
+      const missing = [];
+      let planned;
+      try {
+        planned = resolveLayouts(description, inspected, layouts);
+        legacy = await traverse(client, planned, inspected, 'plan', missing, []);
+      } catch (error) {
+        if (!(error instanceof SimfinityError) || !missing.length) throw error;
+      }
+      if (missing.length) {
+        const roots = staleRoots(planned, missing);
+        await lockRoots(client, planned, inspected, roots);
+        const catalog = await loadCatalog(client, schema, names);
+        const effective = resolveLayouts(description, catalog, layouts);
+        const objects = [];
+        legacy = await traverse(client, effective, catalog, 'create', objects, created);
+        // A missing schema stops the plan early; its new tables need no lock. Lock any other root the
+        // plan did not reach, such as one whose objects an operator dropped meanwhile, before rebuilding.
+        const late = new Set([...staleRoots(effective, objects)].filter((root) => !roots.has(root)));
+        await lockRoots(client, effective, catalog, late);
+        if (roots.size || late.size) await backfill(client, effective, new Set([...roots, ...late]));
+      }
     }
-    await ensureFunctions(client, description, mode, created);
-    const catalog = new Map();
-    for (const table of tables) {
-      let actual = await readTable(client, schema, table.name);
-      if (!actual) {
-        if (mode === 'validate') mismatch(`${schema}.${table.name}`, 'table is missing');
-        await client.query(createTableSQL(schema, table));
-        created.push(`table:${schema}.${table.name}`);
-        actual = await readTable(client, schema, table.name);
-      }
-      if (mode === 'create') await client.query(`LOCK TABLE ${qualified(schema, table.name)} IN SHARE ROW EXCLUSIVE MODE`);
-      validateBase(schema, table, actual, description.triggers);
-      catalog.set(table.name, actual);
-    }
-    for (const table of tables) {
-      const actual = catalog.get(table.name);
-      for (const key of table.foreignKeys) {
-        const stored = actual.constraints.find((item) => item.name === key.name);
-        if (stored) validateForeignKey(schema, table, key, stored);
-        else {
-          if (mode === 'validate') mismatch(`${schema}.${table.name}.${key.name}`, 'foreign key is missing');
-          await client.query(createForeignKeySQL(schema, table, key));
-          created.push(`foreignKey:${schema}.${table.name}.${key.name}`);
-        }
-      }
-      for (const index of table.indexes) {
-        const stored = actual.indexes.find((item) => item.name === index.name);
-        if (stored) validateIndex(schema, table, index, stored);
-        else {
-          if (mode === 'validate') mismatch(`${schema}.${table.name}.${index.name}`, 'index is missing');
-          const collision = await client.query('SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2', [schema, index.name]);
-          if (collision.rowCount) mismatch(`${schema}.${index.name}`, 'relation name is already in use');
-          await client.query(createIndexSQL(schema, table, index));
-          created.push(`index:${schema}.${index.name}`);
-        }
-      }
-      for (const index of actual.indexes) {
-        if (index.unique && !index.primary && !table.indexes.some((item) => item.name === index.name)) mismatch(`${schema}.${table.name}.${index.name}`, 'unexpected unique index');
-      }
-      legacy.push(...legacyListIndexes(schema, table, actual));
-    }
-    await ensureTriggers(client, description, mode, created);
-    if (mode === 'create' && created.length) await backfill(client, description);
     await client.query('COMMIT');
     if (legacy.length) {
       console.warn(`Simfinity: PostgreSQL schema ${identifier(schema)} has btree indexes that earlier versions generated on [ID] list columns: ${legacy.join(', ')}. `

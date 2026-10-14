@@ -13,10 +13,10 @@ Version 3.3.0 also exposes a [driver-free SQL core and PostgreSQL plugin](./sql-
 
 ## Download and install
 
-[Download the v3.5.9 starters](/releases/simfinity-3.5.9-starters.zip), extract them, and install the PostgreSQL application from npm:
+[Download the v3.6.0 starters](/releases/simfinity-3.6.0-starters.zip), extract them, and install the PostgreSQL application from npm:
 
 ```sh
-cd simfinity-3.5.9-starters/postgres
+cd simfinity-3.6.0-starters/postgres
 npm install
 ```
 
@@ -68,11 +68,11 @@ The runtime fills the child's `serie` reference and commits the parent, child, c
 
 Call `createSchema()` before `initializeDatabase()` and await initialization before serving GraphQL operations.
 
-- `mode: 'create'` creates missing generated schemas, tables, indexes, functions, triggers, and constraints. It checks every existing managed object first and never replaces incompatible definitions. It may transactionally backfill generated uniqueness keys after validating existing rows.
+- `mode: 'create'` creates missing generated schemas, tables, indexes, functions, triggers, and constraints. It checks every existing managed object first, without table locks, and never replaces incompatible definitions. When it creates a root's maintenance objects, it rebuilds that root's uniqueness keys in the same transaction.
 - `mode: 'validate'` opens a read-only transaction and performs no DDL. Missing objects or drift raise `SCHEMA_MISMATCH`.
 - `preventCreatingCollection(true)` must be called before `createSchema()` when an instance must remain validation-only. An explicit create request is then rejected.
 
-Operations fail with `DATABASE_NOT_INITIALIZED` (503) until the first initialization succeeds. A rejected request, such as an unknown mode, leaves readiness as it was. A ready instance keeps serving while `initializeDatabase()` runs again, and any failed initialization makes operations fail until a later one succeeds. `create` mode locks the existing managed tables against writes until it commits, so use `mode: 'validate'` to check a live instance.
+Operations fail with `DATABASE_NOT_INITIALIZED` (503) until the first initialization succeeds. A rejected request, such as an unknown mode, leaves readiness as it was. A ready instance keeps serving while `initializeDatabase()` runs again, and any failed initialization makes operations fail until a later one succeeds. `create` mode locks no table when nothing is missing. When it creates objects, writers of the tables that it changes, of existing tables that a new foreign key references, or of roots whose keys it rebuilds wait until it commits, so use `mode: 'validate'` to check a live instance.
 
 Neither mode drops source data, alters existing columns, runs application data migrations, or continuously monitors later administrator changes. Evolve a deployed schema with an explicit operator-reviewed migration, then run validation at startup. Columns are matched by name, so their physical order does not matter, but the migration must bring every generated object, including generated functions, in line with the new schema; `simfinity.compileDatabaseSchema()` returns the DDL that the instance expects, for review.
 
@@ -111,7 +111,7 @@ Entity-reference FKs use `ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INI
 
 ## PostgreSQL storage rules
 
-PostgreSQL uses stronger physical constraints than generated Mongoose storage. Required persisted scalars and references become `NOT NULL`; UUID, scalar type, enum, embedded shape, list-item nullability, ownership consistency, and foreign keys are checked in the database. JSONB stores embedded subtrees with no references or unique fields. Reference-bearing and unique embedded trees use private owned tables, presence markers, owner guard rows, and deferred integrity triggers.
+PostgreSQL uses stronger physical constraints than generated Mongoose storage. Required persisted scalars and references become `NOT NULL`; UUID, scalar type, enum, embedded shape, list-item nullability, ownership consistency, and foreign keys are checked in the database. JSONB stores embedded subtrees with no references or unique fields. Reference-bearing and unique embedded trees use private owned tables, presence markers, owner guard rows, and deferred integrity triggers. By default those triggers refresh a root's owned shape and unique keys once per changed row; the opt-in `refreshTriggers: 'perRoot'` refreshes each changed root once per transaction while its guard trigger stays deferred, and `ownerIndexes: 'minimal'` leaves redundant owner indexes out of new tables. See [PostgreSQL options](/reference/api#postgresql-options) and the [upgrade notes](/resources/compatibility#postgresql-refresh-triggers-opt-in) before enabling them.
 
 `unique: true` uses PostgreSQL 15+ `NULLS NOT DISTINCT`. A nullable unique root value therefore permits at most one null. Embedded scalar/reference uniqueness and scalar-list multikey uniqueness use private typed keys: values may repeat within one root owner, while another root cannot claim the same value. Missing/null scalar leaves and missing/null/empty ancestor lists share one null key; an empty terminal scalar list contributes a distinct empty-array key. This behavior is stronger and broader than the indexes generated by the MongoDB facade.
 
@@ -132,7 +132,7 @@ Read the [detailed PostgreSQL storage and compatibility reference](../postgresql
 MCP is a separate package so PostgreSQL and core do not install its SDK chain. Install both the MCP package and SDK only when the application exposes tools:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.5.9 \
+npm install @simtlix/simfinity-mcp@3.6.0 \
   @modelcontextprotocol/sdk@^1.31.0
 ```
 

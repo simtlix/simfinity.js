@@ -1,5 +1,8 @@
 import {
-  graphql,
+  parse,
+  validate,
+  validateSchema,
+  execute,
   getNamedType,
   astFromValue,
   print,
@@ -344,26 +347,59 @@ const resolveArgDescription = (arg) => {
   return SIMFINITY_ARG_DOCS[arg.name];
 };
 
+const isDefType = (type) => type instanceof GraphQLInputObjectType || type instanceof GraphQLEnumType;
+
 /**
- * Build the MCP `inputSchema` (JSON Schema) for a single GraphQL field by
- * converting every argument with full fidelity (scalars, enums, input objects,
- * lists, non-null wrappers and recursive types via `$defs`/`$ref`). Argument and
- * type descriptions are propagated, with curated fallbacks for Simfinity's
- * synthetic filter/pagination/sort/aggregation arguments. Arguments with a
- * GraphQL default value carry a JSON Schema `default` and are never required.
- * The arguments object is closed (`additionalProperties: false`): GraphQL
- * silently drops undeclared variables, so a misspelled filter or a guessed
- * `limit` or `dryRun` would otherwise be ignored while the tool runs.
- * @param {import('graphql').GraphQLField} field
- * @returns {Object} JSON Schema describing the tool input
+ * A `$defs` registry shared by the tools of one buildToolDefinitions run. A
+ * def depends only on its own type's fields, so each input or enum type is
+ * converted once (ensureInputDef and ensureEnumDef skip names already in
+ * `shared`) and every tool that reaches it gets the same object. `collect`
+ * copies a type and the types its fields reach into one tool's `$defs` in
+ * the pre-order ensureInputDef produces (its placeholder puts a type's key
+ * before its fields' types), so each tool's serialized inputSchema is the
+ * one a per-tool map builds.
+ * @returns {{ shared: Object, collect: (type: import('graphql').GraphQLNamedType, defs: Object) => void }}
  */
-export const graphqlArgsToJSONSchema = (field) => {
+const createDefRegistry = () => {
+  const shared = Object.create(null);
+  const dependencies = new Map();
+  const dependenciesOf = (type) => {
+    let list = dependencies.get(type);
+    if (!list) {
+      list = type instanceof GraphQLInputObjectType
+        ? Object.values(type.getFields()).map((field) => getNamedType(field.type)).filter(isDefType)
+        : [];
+      dependencies.set(type, list);
+    }
+    return list;
+  };
+  const collect = (type, defs) => {
+    if (!isDefType(type) || Object.hasOwn(defs, type.name)) {
+      return;
+    }
+    defs[type.name] = shared[type.name];
+    for (const dependency of dependenciesOf(type)) {
+      collect(dependency, defs);
+    }
+  };
+  return { shared, collect };
+};
+
+/**
+ * Build a field's inputSchema with the defs of `registry`; see
+ * {@link graphqlArgsToJSONSchema}.
+ * @param {import('graphql').GraphQLField} field
+ * @param {{ shared: Object, collect: Function }} registry from {@link createDefRegistry}
+ * @returns {Object}
+ */
+const argsToJSONSchema = (field, registry) => {
   const defs = Object.create(null);
   const properties = {};
   const required = [];
 
   for (const arg of field.args || []) {
-    const { schema, isRequired } = typeToJSONSchema(arg.type, defs);
+    const { schema, isRequired } = typeToJSONSchema(arg.type, registry.shared);
+    registry.collect(getNamedType(arg.type), defs);
     let property = withDescription(schema, resolveArgDescription(arg));
     const hasDefault = arg.defaultValue !== undefined;
     if (hasDefault) {
@@ -389,8 +425,69 @@ export const graphqlArgsToJSONSchema = (field) => {
   return result;
 };
 
+/**
+ * Build the MCP `inputSchema` (JSON Schema) for a single GraphQL field by
+ * converting every argument with full fidelity (scalars, enums, input objects,
+ * lists, non-null wrappers and recursive types via `$defs`/`$ref`). Argument and
+ * type descriptions are propagated, with curated fallbacks for Simfinity's
+ * synthetic filter/pagination/sort/aggregation arguments. Arguments with a
+ * GraphQL default value carry a JSON Schema `default` and are never required.
+ * The arguments object is closed (`additionalProperties: false`): GraphQL
+ * silently drops undeclared variables, so a misspelled filter or a guessed
+ * `limit` or `dryRun` would otherwise be ignored while the tool runs. Every
+ * call returns new objects; generated tools share their `$defs` entries
+ * instead (see {@link createDefRegistry}).
+ * @param {import('graphql').GraphQLField} field
+ * @returns {Object} JSON Schema describing the tool input
+ */
+export const graphqlArgsToJSONSchema = (field) => argsToJSONSchema(field, createDefRegistry());
+
 const hasRequiredArgs = (field) => (field.args || [])
   .some((arg) => arg.type instanceof GraphQLNonNull && arg.defaultValue === undefined);
+
+const NESTED_COLLECTIONS = ['all', 'none'];
+
+/**
+ * Normalize a `nestedCollections` option: unset (undefined or null) means
+ * 'all', the 3.5.9 selection. Any value other than 'all' or 'none' throws
+ * MCP_INVALID_OPTIONS.
+ * @param {*} value
+ * @param {string} name option path, for the error message
+ * @returns {'all'|'none'}
+ */
+const normalizeNestedCollections = (value, name) => {
+  if (value == null) {
+    return 'all';
+  }
+  if (NESTED_COLLECTIONS.includes(value)) {
+    return value;
+  }
+  throw new SimfinityError(`${name} must be 'all' or 'none', got ${describeCap(value)}`, 'MCP_INVALID_OPTIONS', 500);
+};
+
+/**
+ * A nested collection: an object list field that takes a `pagination`
+ * argument. Core generates one for every non-embedded one-to-many relation
+ * and resolves it with one query per parent row; embedded lists take no
+ * arguments.
+ * @param {import('graphql').GraphQLField} field
+ * @returns {boolean}
+ */
+const isNestedCollection = (field) => isListType(field.type) && hasArg(field, 'pagination');
+
+/**
+ * Whether the selection set and the output schema expand an object field.
+ * @param {import('graphql').GraphQLField} field
+ * @param {import('graphql').GraphQLObjectType} fieldNamed the field's named type
+ * @param {number} depth remaining nesting depth
+ * @param {'all'|'none'} collections
+ * @param {Set<string>} visited already-expanded object type names
+ * @returns {boolean}
+ */
+const expandsObjectField = (field, fieldNamed, depth, collections, visited) => depth > 0
+  && !visited.has(fieldNamed.name)
+  && !hasRequiredArgs(field)
+  && !(collections === 'none' && isNestedCollection(field));
 
 /**
  * Auto-generate a GraphQL selection set string for a field's return type so MCP
@@ -398,13 +495,16 @@ const hasRequiredArgs = (field) => (field.args || [])
  * required arguments (`id` included) is selected; object fields are expanded
  * up to `depth` levels. Interface/union return types and object types with no
  * selectable leaves fall back to `__typename` so the generated document is
- * always statically valid. Cycles are avoided via the `visited` set.
+ * always statically valid. Cycles are avoided via the `visited` set. With
+ * `nestedCollections: 'none'`, nested collections (see
+ * {@link isNestedCollection}) are left out.
  * @param {import('graphql').GraphQLType} type return type of the field
  * @param {number} depth remaining nesting depth for object expansion
+ * @param {'all'|'none'} [collections] from {@link normalizeNestedCollections}
  * @param {Set<string>} visited already-expanded object type names
  * @returns {string} selection set (with leading space) or empty string for leaves
  */
-const buildSelectionSet = (type, depth, visited = new Set()) => {
+const buildSelectionSet = (type, depth, collections = 'all', visited = new Set()) => {
   const named = getNamedType(type);
   if (named instanceof GraphQLScalarType || named instanceof GraphQLEnumType) {
     return '';
@@ -425,9 +525,9 @@ const buildSelectionSet = (type, depth, visited = new Set()) => {
         lines.push(fieldName);
       }
     } else if (fieldNamed instanceof GraphQLObjectType) {
-      if (depth > 0 && !nextVisited.has(fieldNamed.name) && !hasRequiredArgs(field)) {
+      if (expandsObjectField(field, fieldNamed, depth, collections, nextVisited)) {
         // An object type always yields ' { ... }', at worst ' { __typename }'.
-        lines.push(`${fieldName}${buildSelectionSet(field.type, depth - 1, nextVisited)}`);
+        lines.push(`${fieldName}${buildSelectionSet(field.type, depth - 1, collections, nextVisited)}`);
       }
     }
   }
@@ -456,25 +556,27 @@ const normalizeSelection = (selection) => {
 /**
  * Build a JSON Schema describing a field's return type, mirroring the inclusion
  * rules of {@link buildSelectionSet} (scalars/enums always; object fields up to
- * `depth`; `__typename` fallback) so the schema matches what the tool actually
+ * `depth`, without nested collections under `nestedCollections: 'none'`;
+ * `__typename` fallback) so the schema matches what the tool actually
  * returns. Every nullable GraphQL position accepts `null` in the schema.
  * Scalars use the output mapping of {@link scalarToJSONSchema}. GraphQL type
  * and field descriptions are propagated.
  * @param {import('graphql').GraphQLType} type
  * @param {number} depth
+ * @param {'all'|'none'} [collections]
  * @param {Set<string>} visited
  * @returns {Object} JSON Schema for the return type
  */
-const returnTypeToSchema = (type, depth, visited = new Set()) => {
+const returnTypeToSchema = (type, depth, collections = 'all', visited = new Set()) => {
   if (type instanceof GraphQLNonNull) {
-    return unwrappedReturnTypeToSchema(type.ofType, depth, visited);
+    return unwrappedReturnTypeToSchema(type.ofType, depth, collections, visited);
   }
-  return nullableSchema(unwrappedReturnTypeToSchema(type, depth, visited));
+  return nullableSchema(unwrappedReturnTypeToSchema(type, depth, collections, visited));
 };
 
-function unwrappedReturnTypeToSchema(type, depth, visited) {
+function unwrappedReturnTypeToSchema(type, depth, collections, visited) {
   if (type instanceof GraphQLList) {
-    return { type: 'array', items: returnTypeToSchema(type.ofType, depth, visited) };
+    return { type: 'array', items: returnTypeToSchema(type.ofType, depth, collections, visited) };
   }
   if (type instanceof GraphQLScalarType) {
     return scalarToJSONSchema(type, { output: true });
@@ -495,15 +597,15 @@ function unwrappedReturnTypeToSchema(type, depth, visited) {
     if (fieldNamed instanceof GraphQLScalarType || fieldNamed instanceof GraphQLEnumType) {
       if (!hasRequiredArgs(field)) {
         properties[fieldName] = withDescription(
-          returnTypeToSchema(field.type, depth, nextVisited),
+          returnTypeToSchema(field.type, depth, collections, nextVisited),
           field.description,
         );
       }
     } else if (fieldNamed instanceof GraphQLObjectType) {
-      if (depth > 0 && !nextVisited.has(fieldNamed.name) && !hasRequiredArgs(field)) {
+      if (expandsObjectField(field, fieldNamed, depth, collections, nextVisited)) {
         // Never empty: an object schema has at least the __typename fallback.
         properties[fieldName] = withDescription(
-          returnTypeToSchema(field.type, depth - 1, nextVisited),
+          returnTypeToSchema(field.type, depth - 1, collections, nextVisited),
           field.description,
         );
       }
@@ -529,12 +631,13 @@ function unwrappedReturnTypeToSchema(type, depth, visited) {
  * @param {string} fieldName
  * @param {import('graphql').GraphQLField} field
  * @param {number} selectionDepth
+ * @param {'all'|'none'} [collections]
  * @returns {Object} JSON Schema describing the tool output
  */
-const buildOutputSchema = (fieldName, field, selectionDepth) => ({
+const buildOutputSchema = (fieldName, field, selectionDepth, collections = 'all') => ({
   type: 'object',
   properties: {
-    [fieldName]: returnTypeToSchema(field.type, selectionDepth),
+    [fieldName]: returnTypeToSchema(field.type, selectionDepth, collections),
   },
 });
 
@@ -869,6 +972,90 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
   }
 });
 
+/** Default `retry.maxRetryAfterMs`: the longest Retry-After a retry waits for. */
+const DEFAULT_MAX_RETRY_AFTER_MS = 10000;
+
+const HTTP_DATE_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const HTTP_DATE_MONTH = `(?<month>${HTTP_DATE_MONTHS.join('|')})`;
+const HTTP_DATE_DAY_NAME = '(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)';
+const HTTP_DATE_TIME = '(?<hour>\\d{2}):(?<minute>\\d{2}):(?<second>\\d{2})';
+
+/** The three HTTP-date grammars of RFC 9110 §5.6.7, which are case-sensitive and all in GMT. */
+const HTTP_DATE_FORMATS = [
+  // IMF-fixdate: Sun, 06 Nov 1994 08:49:37 GMT
+  new RegExp(`^${HTTP_DATE_DAY_NAME}, (?<day>\\d{2}) ${HTTP_DATE_MONTH} (?<year>\\d{4}) ${HTTP_DATE_TIME} GMT$`),
+  // rfc850-date: Sunday, 06-Nov-94 08:49:37 GMT
+  new RegExp(`^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (?<day>\\d{2})-${HTTP_DATE_MONTH}-(?<year>\\d{2}) ${HTTP_DATE_TIME} GMT$`),
+  // asctime-date: Sun Nov  6 08:49:37 1994
+  new RegExp(`^${HTTP_DATE_DAY_NAME} ${HTTP_DATE_MONTH} (?<day>\\d{2}| \\d) ${HTTP_DATE_TIME} (?<year>\\d{4})$`),
+];
+
+/**
+ * An HTTP-date as epoch milliseconds, or NaN when `text` is not one. Unlike
+ * Date.parse, it rejects other date-like text (such as "May 2030") and reads
+ * asctime as GMT rather than in the process time zone. A two-digit RFC 850
+ * year is the one with those digits from 49 years before to 50 years after
+ * the current year: a date more than 50 years ahead is in the past.
+ * @param {string} text
+ * @param {number} now
+ * @returns {number}
+ */
+const parseHTTPDate = (text, now) => {
+  const groups = HTTP_DATE_FORMATS.map((format) => format.exec(text)?.groups).find(Boolean);
+  if (!groups) {
+    return Number.NaN;
+  }
+  let year = Number(groups.year);
+  if (groups.year.length === 2) {
+    const current = new Date(now).getUTCFullYear();
+    year += current - (current % 100);
+    if (year > current + 50) {
+      year -= 100;
+    } else if (year <= current - 50) {
+      year += 100;
+    }
+  }
+  const day = Number(groups.day);
+  const [hour, minute, second] = [groups.hour, groups.minute, groups.second].map(Number);
+  const midnight = Date.UTC(year, HTTP_DATE_MONTHS.indexOf(groups.month), day);
+  // Second 60 is a leap second; other out-of-range values (31 Feb, 24:00:00) are invalid.
+  if (new Date(midnight).getUTCDate() !== day || hour > 23 || minute > 59 || second > 60) {
+    return Number.NaN;
+  }
+  return midnight + (hour * 3600 + minute * 60 + second) * 1000;
+};
+
+/**
+ * The wait a response's Retry-After header asks for, in milliseconds, or
+ * undefined when it has none or an invalid one. Delta-seconds and the three
+ * HTTP-date forms (IMF-fixdate, RFC 850 and asctime, all GMT) are accepted
+ * (RFC 9110 §10.2.3, §5.6.7); a date in the past asks for no wait. The
+ * header is read defensively, since an application fetch or a test stub may
+ * return a response without a usable `headers`.
+ * @param {Object} response
+ * @param {number} [now]
+ * @returns {number|undefined}
+ */
+const retryAfterMs = (response, now = Date.now()) => {
+  let value;
+  try {
+    value = response.headers && typeof response.headers.get === 'function'
+      ? response.headers.get('retry-after')
+      : null;
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const text = value.trim();
+  if (/^\d+$/.test(text)) {
+    return Number(text) * 1000;
+  }
+  const date = parseHTTPDate(text, now);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - now);
+};
+
 const remoteTransportError = (message, code, extra = {}) => ({
   errors: [{ message, extensions: { code, ...extra } }],
 });
@@ -1048,15 +1235,21 @@ const buildRemoteHeaders = (headers) => {
  * mapped to a GraphQL-shaped `{ errors }` result so they surface to the MCP
  * client as a regular `isError` tool result instead of an opaque exception.
  * Network errors, timeouts, HTTP 5xx and 429 are retried (queries only) when
- * `execution.retry` is configured. `endpoint`, `headers` and `timeoutMs` are
+ * `execution.retry` is configured. Retry k waits `backoffMs × k`. Two
+ * opt-ins change that: `retry.retryAfter: true` waits at least the
+ * Retry-After of a retried HTTP response (once, for the next retry) and ends
+ * the retries with that response's failure when it asks for more than
+ * `retry.maxRetryAfterMs`; `retry.jitter: true` adds a random wait of up to
+ * half of `backoffMs × k`. `endpoint`, `headers` and `timeoutMs` are
  * read on every call (see {@link buildRemoteHeaders} and
  * {@link normalizeTimeoutMs}); setup may have left their checks to it.
  * The caller's `signal` cancels the fetch, the body reading and a retry
- * backoff: the call then rejects with the abort reason, without retrying.
+ * wait: the call then rejects with the abort reason, without retrying.
  * @param {string} query
  * @param {Object} variables
  * @param {{ endpoint: string, headers?: Object|Iterable, timeoutMs?: number|string,
- *   retry?: { attempts?: number, backoffMs?: number } }} execution
+ *   retry?: { attempts?: number, backoffMs?: number, retryAfter?: boolean,
+ *   maxRetryAfterMs?: number, jitter?: boolean } }} execution
  * @param {{ signal?: AbortSignal, canRetry?: boolean }} [callOptions]
  * @returns {Promise<Object>} GraphQL response body (or synthesized errors)
  */
@@ -1071,13 +1264,30 @@ const executeRemote = async (query, variables, execution, { signal, canRetry } =
   const backoffMs = Number.isFinite(Number(retry.backoffMs)) && Number(retry.backoffMs) >= 0
     ? Number(retry.backoffMs)
     : 250;
+  // Opt-ins: any value other than true keeps the 3.5.9 schedule.
+  const honorRetryAfter = retry.retryAfter === true;
+  const jitter = retry.jitter === true;
+  // Unset, negative or non-numeric caps keep the default; Infinity means the timer limit.
+  const retryAfterCap = honorRetryAfter && retry.maxRetryAfterMs != null ? Number(retry.maxRetryAfterMs) : Number.NaN;
+  const maxRetryAfterMs = retryAfterCap >= 0
+    ? Math.min(retryAfterCap, MAX_REMOTE_TIMEOUT_MS)
+    : DEFAULT_MAX_RETRY_AFTER_MS;
   const timeoutMs = normalizeTimeoutMs(execution.timeoutMs);
   let lastFailure;
+  // The wait the previous attempt's Retry-After asked for, when honored.
+  let requested;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     if (attempt > 1) {
+      const base = backoffMs * (attempt - 1);
+      let delay = requested === undefined ? base : Math.max(base, requested);
+      // A Retry-After applies to the next retry only.
+      requested = undefined;
+      if (jitter) {
+        delay += Math.floor(Math.random() * (base / 2));
+      }
       // Outside the try on purpose: a cancellation rejects like an aborted fetch.
-      await sleep(backoffMs * (attempt - 1), signal);
+      await sleep(delay, signal);
     }
     const { signal: requestSignal, release } = combineAbortSignals([
       signal,
@@ -1114,6 +1324,14 @@ const executeRemote = async (query, variables, execution, { signal, canRetry } =
           { status: response.status },
         );
         if (response.status >= 500 || response.status === 429) {
+          if (honorRetryAfter) {
+            requested = retryAfterMs(response);
+            // The server will not be ready within the cap: the retries end
+            // with this failure instead of waiting.
+            if (requested !== undefined && requested > maxRetryAfterMs) {
+              return lastFailure;
+            }
+          }
           continue;
         }
         return lastFailure;
@@ -1387,8 +1605,8 @@ const normalizeSchemaPlugins = (schemaPlugins) => {
 /**
  * Apply Envelop-style schema plugins (e.g. simfinity's createAuthPlugin) to the
  * schema by invoking their `onSchemaChange` hooks. In a regular GraphQL server
- * Envelop fires these hooks at startup; standalone MCP servers execute via bare
- * `graphql()` and would otherwise silently skip resolver-wrapping plugins such
+ * Envelop fires these hooks at startup; standalone MCP servers execute with
+ * graphql-js directly and would otherwise silently skip resolver-wrapping plugins such
  * as field-level auth. MCP executes the schema it was given, so `replaceSchema`
  * accepts only that same schema (a no-op, as in Envelop) and otherwise throws
  * MCP_UNSUPPORTED_SCHEMA_REPLACEMENT.
@@ -1633,10 +1851,30 @@ const composeToolMiddleware = (middlewares, terminal) => {
   };
 };
 
-const limitErrorResult = (message, code, extensions) => ({
+const prettyJSON = (value) => JSON.stringify(value, null, 2);
+const compactJSON = (value) => JSON.stringify(value);
+
+/**
+ * The serializer of the text content block for a `textFormat` option: unset
+ * (undefined or null) or 'pretty' is the 3.5.9 pretty-printed JSON, 'compact'
+ * is JSON without whitespace. Any other value throws MCP_INVALID_OPTIONS.
+ * @param {*} textFormat
+ * @returns {(value: *) => string}
+ */
+const normalizeTextFormat = (textFormat) => {
+  if (textFormat == null || textFormat === 'pretty') {
+    return prettyJSON;
+  }
+  if (textFormat === 'compact') {
+    return compactJSON;
+  }
+  throw new SimfinityError(`textFormat must be 'pretty' or 'compact', got ${describeCap(textFormat)}`, 'MCP_INVALID_OPTIONS', 500);
+};
+
+const limitErrorResult = (stringify, message, code, extensions) => ({
   content: [{
     type: 'text',
-    text: JSON.stringify({ errors: [{ message, extensions: { code, ...extensions } }] }, null, 2),
+    text: stringify({ errors: [{ message, extensions: { code, ...extensions } }] }),
   }],
   isError: true,
 });
@@ -1832,10 +2070,12 @@ const oversizedMutationMessage = ({
  * @param {number} params.bytes size of the omitted result text
  * @param {number} params.maxResultBytes the configured cap, possibly
  *   fractional; the notice reports it rounded down
+ * @param {(value: *) => string} params.stringify serializer of the text
+ *   content block, from {@link normalizeTextFormat}
  * @returns {Object} CallToolResult
  */
 const oversizedMutationResult = ({
-  entry, name, result, isError, bytes, maxResultBytes,
+  entry, name, result, isError, bytes, maxResultBytes, stringify,
 }) => {
   const root = result.data !== null && typeof result.data === 'object' ? result.data[entry.fieldName] : undefined;
   // The outputSchema declares an integer, and a fractional cap is accepted.
@@ -1878,7 +2118,7 @@ const oversizedMutationResult = ({
       applied: true, message, resultBytes: bytes, maxResultBytes: cap,
     };
     return {
-      content: [{ type: 'text', text: JSON.stringify(structured, null, 2) }],
+      content: [{ type: 'text', text: stringify(structured) }],
       structuredContent: structured,
       isError: false,
       _meta: { truncated: true },
@@ -1892,7 +2132,24 @@ const oversizedMutationResult = ({
   if (compact !== undefined) {
     payload.data = { [entry.fieldName]: compact };
   }
-  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: true };
+  return { content: [{ type: 'text', text: stringify(payload) }], isError: true };
+};
+
+/**
+ * Parse and validate a tool's operation, as graphql() does on every call.
+ * @param {import('graphql').GraphQLSchema} schema a valid schema
+ * @param {string} source
+ * @returns {{ document: import('graphql').DocumentNode }|{ errors: Array }}
+ */
+const prepareOperation = (schema, source) => {
+  let document;
+  try {
+    document = parse(source);
+  } catch (syntaxError) {
+    return { errors: [syntaxError] };
+  }
+  const errors = validate(schema, document);
+  return errors.length > 0 ? { errors } : { document };
 };
 
 /**
@@ -1910,10 +2167,13 @@ const oversizedMutationResult = ({
  *   {@link normalizeToolMiddleware}
  * @param {Promise<void>|null} [params.ready] pending schemaPlugins
  *   installation that every call awaits before running
+ * @param {(value: *) => string} [params.stringify] serializer of the text
+ *   content block, from {@link normalizeTextFormat}
  * @returns {Function} async `(name, args, extra) => CallToolResult`
  */
 const createCallTool = ({
   schema, toolIndex, mode, execution, context, limits: callerLimits, toolMiddleware, ready,
+  stringify = prettyJSON,
 }) => {
   // Argument keys with a defined value that the caller sent, per call object
   // (middleware receives and hands the terminal the same object).
@@ -1940,7 +2200,7 @@ const createCallTool = ({
       ? sent.filter((key) => !entry.argNames.has(key) && Object.hasOwn(args, key) && args[key] !== undefined)
       : [];
     if (unknown.length) {
-      return limitErrorResult(unknownArgumentsMessage(call.name, unknown, entry.argNames), 'MCP_UNKNOWN_ARGUMENT');
+      return limitErrorResult(stringify, unknownArgumentsMessage(call.name, unknown, entry.argNames), 'MCP_UNKNOWN_ARGUMENT');
     }
     if (entry.hasPagination) {
       if (limits.defaultPagination && args.pagination == null) {
@@ -1949,6 +2209,7 @@ const createCallTool = ({
       const size = args.pagination ? args.pagination.size : undefined;
       if (limits.maxPageSize && typeof size === 'number' && size > limits.maxPageSize) {
         return limitErrorResult(
+          stringify,
           `pagination.size ${size} exceeds the maximum allowed page size ${limits.maxPageSize}. Request a smaller page.`,
           'MCP_PAGE_SIZE_EXCEEDED',
         );
@@ -1989,13 +2250,27 @@ const createCallTool = ({
       if (call.extra && call.extra.signal && call.extra.signal.aborted) {
         throw new SimfinityError(`MCP tool call cancelled: ${call.name}`, 'MCP_CALL_CANCELLED', 499);
       }
-      result = await graphql({
-        schema,
-        source: entry.operation,
-        variableValues: args,
-        contextValue,
-        rootValue,
-      });
+      // graphql()'s steps, in its order, except that the tool's constant
+      // operation is parsed and validated once instead of on every call. The
+      // schema is still validated per call (graphql-js caches that on the
+      // schema). The prepared operation lives on the tool's entry, which the
+      // per-request callTools of the HTTP handler share; the first call runs
+      // after `ready`, once schemaPlugins have wrapped the resolvers.
+      const schemaErrors = validateSchema(schema);
+      if (schemaErrors.length > 0) {
+        result = { errors: schemaErrors };
+      } else {
+        entry.prepared ??= prepareOperation(schema, entry.operation);
+        result = entry.prepared.errors
+          ? { errors: [...entry.prepared.errors] }
+          : await execute({
+            schema,
+            document: entry.prepared.document,
+            variableValues: args,
+            contextValue,
+            rootValue,
+          });
+      }
     }
 
     const isError = !!(result.errors && result.errors.length);
@@ -2015,18 +2290,19 @@ const createCallTool = ({
       // Keep partial results visible, subject to the same result-size cap.
       payload.data = result.data;
     }
-    const text = JSON.stringify(payload, null, 2);
+    const text = stringify(payload);
     if (limits.maxResultBytes) {
       const bytes = Buffer.byteLength(text, 'utf8');
       if (bytes > limits.maxResultBytes) {
         if (entry.kind === 'mutation') {
           return oversizedMutationResult({
-            entry, name: call.name, result, isError, bytes, maxResultBytes: limits.maxResultBytes,
+            entry, name: call.name, result, isError, bytes, maxResultBytes: limits.maxResultBytes, stringify,
           });
         }
         // Whole bytes, as in the mutation notice: a fractional cap allows
         // only results up to its integer part.
         return limitErrorResult(
+          stringify,
           `Result of ${bytes} bytes exceeds maxResultBytes (${Math.floor(limits.maxResultBytes)}). Narrow the query, lower selectionDepth or paginate.`,
           'MCP_RESULT_TOO_LARGE',
           // The total tells the agent how far to paginate.
@@ -2105,6 +2381,19 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
     throw new SimfinityError(`Invalid toolNamePrefix "${toolNamePrefix}": only letters, digits, underscore and hyphen are allowed`, 'MCP_INVALID_TOOL_NAME', 500);
   }
 
+  const nestedCollections = normalizeNestedCollections(options.nestedCollections, 'nestedCollections');
+  // Every override is checked, published or not, so a misspelled tool key
+  // or an excluded tool does not hide an invalid value.
+  if (toolOverrides !== null && typeof toolOverrides === 'object') {
+    for (const [key, override] of Object.entries(toolOverrides)) {
+      if (override != null) {
+        normalizeNestedCollections(override.nestedCollections, `toolOverrides.${key}.nestedCollections`);
+      }
+    }
+  }
+  // One $defs registry for every tool of this run (see createDefRegistry).
+  const defRegistry = createDefRegistry();
+
   const queryType = schema.getQueryType();
 
   const resolveEntityType = (op, fieldName, field) => {
@@ -2153,18 +2442,22 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
 
       const override = toolOverrides[toolName] || toolOverrides[fieldName] || {};
       const depth = override.selectionDepth ?? selectionDepth;
+      // The tool's own value wins; an explicit selection ignores both.
+      const collections = override.nestedCollections == null
+        ? nestedCollections
+        : normalizeNestedCollections(override.nestedCollections, `toolOverrides.${toolName}.nestedCollections`);
       const title = override.title || buildToolTitle(op, fieldName, entityType);
       const description = override.description || buildToolDescription(op, fieldName, field, entityType);
       const annotations = { ...buildAnnotations(op, title, field), ...(override.annotations || {}) };
       const selection = override.selection
         ? normalizeSelection(override.selection)
-        : buildSelectionSet(field.type, depth);
+        : buildSelectionSet(field.type, depth, collections);
 
       const tool = {
         name: toolName,
         title,
         description,
-        inputSchema: graphqlArgsToJSONSchema(field),
+        inputSchema: argsToJSONSchema(field, defRegistry),
         annotations,
         kind,
       };
@@ -2176,7 +2469,7 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
       // An explicit selection override makes the mirrored output schema
       // unreliable, so it is omitted rather than published wrong.
       if (!override.selection) {
-        tool.outputSchema = buildOutputSchema(fieldName, field, depth);
+        tool.outputSchema = buildOutputSchema(fieldName, field, depth, collections);
         if (countKey) {
           tool.outputSchema.properties[countKey] = countPropertySchema(countKey);
         }
@@ -2229,6 +2522,7 @@ const prepareMCPTools = (schema, options = {}) => {
   const { mode, execution } = resolveExecution(options.execution);
   const toolMiddleware = normalizeToolMiddleware(options.toolMiddleware);
   const limits = normalizeLimits(options.limits);
+  const stringify = normalizeTextFormat(options.textFormat);
   const { tools, toolIndex } = buildToolDefinitions(schema, options, limits);
   validateDefaultPagination(limits, toolIndex);
   const ready = mode === 'in-process' ? applySchemaPlugins(schema, options.schemaPlugins) : null;
@@ -2242,6 +2536,7 @@ const prepareMCPTools = (schema, options = {}) => {
     limits: options.limits,
     toolMiddleware,
     ready,
+    stringify,
   });
   const getOperation = (name) => {
     const entry = toolIndex[name];
@@ -2265,7 +2560,8 @@ const prepareMCPTools = (schema, options = {}) => {
  * @param {import('graphql').GraphQLSchema} schema schema returned by createSchema()
  * @param {Object} [options]
  * @param {{ mode?: 'in-process'|'remote', endpoint?: string, headers?: Object|Iterable,
- *   timeoutMs?: number, retry?: { attempts?: number, backoffMs?: number } }} [options.execution]
+ *   timeoutMs?: number, retry?: { attempts?: number, backoffMs?: number,
+ *   retryAfter?: boolean, maxRetryAfterMs?: number, jitter?: boolean } }} [options.execution]
  *   execution strategy. Defaults to in-process execution against `schema`.
  *   The remote `endpoint` is passed to fetch: a URL with a username or
  *   password throws MCP_INVALID_EXECUTION_CONFIG at setup (fetch rejects it
@@ -2283,8 +2579,13 @@ const prepareMCPTools = (schema, options = {}) => {
  *   either is not run at setup and a read that throws (an inherited getter
  *   or a Proxy whose token is not loaded yet) is checked per call. `retry` re-issues
  *   failed remote queries (never mutations) after transport failures, HTTP
- *   5xx or 429; client cancellation, including during a backoff, rejects
- *   without retrying.
+ *   5xx or 429; retry k waits `backoffMs × k` (default 250). Opt-ins:
+ *   `retryAfter: true` waits at least a retried response's Retry-After
+ *   (delta-seconds or HTTP-date) and, when it asks for more than
+ *   `maxRetryAfterMs` (default 10000), ends the retries with that failure;
+ *   `jitter: true` adds a random wait of up to half of `backoffMs × k`.
+ *   Client cancellation, including during a retry wait, rejects without
+ *   retrying.
  * @param {Object|Function} [options.context] GraphQL context value (or a
  *   `(extra) => context` factory) passed through to in-process execution.
  * @param {string|string[]} [options.include] only expose these tool/field names
@@ -2297,6 +2598,15 @@ const prepareMCPTools = (schema, options = {}) => {
  *   entity (return) type has one of these names.
  * @param {number} [options.selectionDepth=1] nesting depth for the auto-generated
  *   output selection set and output schema.
+ * @param {'all'|'none'} [options.nestedCollections='all'] 'none' leaves nested
+ *   collections (object list fields with a `pagination` argument, such as
+ *   core's non-embedded one-to-many relations, each read with one query per
+ *   returned row) out of the generated selection set and output schema.
+ *   Other values throw MCP_INVALID_OPTIONS.
+ * @param {'pretty'|'compact'} [options.textFormat='pretty'] JSON format of the
+ *   text content block of results, which `limits.maxResultBytes` measures:
+ *   pretty-printed, or 'compact' without whitespace. Other values throw
+ *   MCP_INVALID_OPTIONS.
  * @param {boolean} [options.includeId] deprecated and ignored: every scalar/enum
  *   field without required arguments, `id` included, is always selected, and
  *   an object type with none selects `__typename`.
@@ -2304,9 +2614,11 @@ const prepareMCPTools = (schema, options = {}) => {
  *   tool name (e.g. 'catalog_'), for disambiguating multiple servers.
  * @param {Object} [options.toolOverrides] per-tool overrides keyed by tool (or
  *   field) name: `{ description, title, annotations, selectionDepth,
- *   selection }` (a deprecated `includeId` is ignored). An explicit `selection`
- *   replaces the generated selection set (and omits the outputSchema, which
- *   could no longer be guaranteed accurate).
+ *   nestedCollections, selection }` (a deprecated `includeId` is ignored). A
+ *   tool's `nestedCollections` wins over the global one; every entry's value
+ *   is validated, whether or not its tool is published. An explicit `selection`
+ *   replaces the generated selection set, ignores `nestedCollections` (and
+ *   omits the outputSchema, which could no longer be guaranteed accurate).
  * @param {Function|Array<Function>} [options.toolMiddleware] koa-style
  *   `(call, next) => result` functions run around every tool execution;
  *   `call` is `{ name, args, extra, kind, operation }`. A single function is a
@@ -2512,9 +2824,9 @@ export const startStdioMCPServer = async (schema, options = {}) => {
  * `(req, extra) => context` for every call, where `req` is the Express request,
  * enabling per-request authentication (e.g. reading an Authorization header).
  * The SDK and its Streamable HTTP transport are loaded first, then
- * `transportOptions`, `execution`, `toolMiddleware`, `limits` and
- * `schemaPlugins` are validated, and asynchronous schemaPlugins hooks
- * awaited, before the handler is returned.
+ * `transportOptions`, `execution`, `toolMiddleware`, `limits`, `textFormat`,
+ * `nestedCollections` and `schemaPlugins` are validated, and asynchronous
+ * schemaPlugins hooks awaited, before the handler is returned.
  *
  * @param {import('graphql').GraphQLSchema} schema
  * @param {Object} [options] same options as {@link createMCPServer}; in HTTP mode
@@ -2555,6 +2867,7 @@ export const createHTTPMCPHandler = async (schema, options = {}) => {
   const { mode, execution } = resolveExecution(options.execution);
   const toolMiddleware = normalizeToolMiddleware(options.toolMiddleware);
   const limits = normalizeLimits(options.limits);
+  const stringify = normalizeTextFormat(options.textFormat);
   const { tools, toolIndex } = buildToolDefinitions(schema, options, limits);
   validateDefaultPagination(limits, toolIndex);
   if (mode === 'in-process') {
@@ -2587,6 +2900,7 @@ export const createHTTPMCPHandler = async (schema, options = {}) => {
         // Re-read per request, and by every call, as before.
         limits: options.limits,
         toolMiddleware,
+        stringify,
       });
       const server = newServerInstance(sdk, tools, callTool, options);
       const transport = new StreamableHTTPServerTransport({

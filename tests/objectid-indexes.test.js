@@ -212,4 +212,31 @@ describe('ObjectId Index Creation', () => {
     expect(indexSpy).toHaveBeenCalledWith({ department: 1 }); // relationship field
     expect(indexSpy).toHaveBeenCalledTimes(3);
   });
-}); 
+});
+
+describe('Top-level id index opt-out', () => {
+  beforeEach(() => {
+    simfinity.preventCreatingCollection(true);
+  });
+
+  // The documented 3.x recipe: generated models declare { id: 1 }, and onModelCreated removes it.
+  test('onModelCreated can remove the top-level id index declaration of a connect() type', () => {
+    const fields = () => ({
+      id: { type: GraphQLID },
+      name: { type: GraphQLString },
+      ownerId: { type: GraphQLID },
+    });
+    const KeptType = new GraphQLObjectType({ name: 'TestTypeKeepingRootIdIndex', fields });
+    const RemovedType = new GraphQLObjectType({ name: 'TestTypeWithoutRootIdIndex', fields });
+
+    simfinity.connect(null, KeptType, 'testTypeKeepingRootIdIndex', 'testTypesKeepingRootIdIndex');
+    simfinity.connect(null, RemovedType, 'testTypeWithoutRootIdIndex', 'testTypesWithoutRootIdIndex', null,
+      (model) => model.schema.removeIndex({ id: 1 }));
+    simfinity.createSchema();
+
+    const declared = (type) => simfinity.getModel(type).schema.indexes().map(([keys]) => keys);
+    expect(declared(KeptType)).toEqual(expect.arrayContaining([{ id: 1 }, { ownerId: 1 }]));
+    expect(declared(RemovedType)).not.toContainEqual({ id: 1 });
+    expect(declared(RemovedType)).toContainEqual({ ownerId: 1 });
+  });
+});

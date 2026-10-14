@@ -123,6 +123,14 @@ const model = simfinity.getModel(SerieType);
 const indexes = model.schema.indexes();
 ```
 
+Generated models also declare `{ id: 1 }` on the top-level `id` field. The record key is `_id`, and generated reads, filters, sorts, aggregations, relation lookups and MCP tools never use that index. To stop declaring it for a `connect()` type, remove it in `onModelCreated`, the sixth argument of `connect()`:
+
+```javascript
+simfinity.connect(null, SerieType, 'serie', 'series', controller, (model) => model.schema.removeIndex({ id: 1 }));
+```
+
+Types registered with `addNoEndpointType()` and generated supporting models have no `onModelCreated`. Mongoose `autoIndex` builds the index at startup on any process whose schema still declares it, so drop an existing one with `db.getCollection('Serie').dropIndex('id_1')` only once every process runs with the recipe, and expect `syncIndexes()` to drop it as soon as the recipe is in place. Keep the index when your code queries the stored `id`, or when a link is stored under `id`, as with `connectionField: 'id'`. Version 4.0 plans to stop declaring it by default and to remove the stored `id` path and the duplicate `$set.id` that generated updates write.
+
 This automatic traversal does not add indexes for arbitrary string/number fields or direct lists of scalar IDs. Supported `unique` flags are handled separately as described above. Supplied Mongoose models keep their own schemas and index definitions; use their native configuration for additional or composite indexes.
 
 PostgreSQL generates indexes and real foreign keys from its storage description instead. See [PostgreSQL storage and constraints](/postgresql) for its index declarations and initialization contract.

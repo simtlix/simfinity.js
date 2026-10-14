@@ -1,0 +1,60 @@
+{
+  "source": "Opt-in PostgreSQL descriptions added after 3.5.9: refreshTriggers 'perRoot' and ownerIndexes 'minimal'. The default description keeps postgres-3.2-schema.json; 'baselines' holds the default description of the fixtures that file does not cover, identical on 3.5.9. Every snapshot must differ from its default.",
+  "baselines": [
+    {
+      "name": "long-maintained-root",
+      "description": "189be1ccb92b6d75dbef73ab29a4f1521628fdda832865359ee649d65719009e",
+      "ddl": "b3bf36d204145c0cbd667ccf71509276a997cca6b646c183014860f589406516"
+    }
+  ],
+  "snapshots": [
+    {
+      "name": "relations",
+      "options": {
+        "refreshTriggers": "perRoot"
+      },
+      "description": "0f61ccecc2a09ba2343c8856147eb9b3bdf1ffdb8b24170e6b255bbbea297215",
+      "ddl": "469b7ff86d3f255819fb683adef245511949a24fa1ac21f19f0c8b83ea4f6e3e"
+    },
+    {
+      "name": "nested-null-unique-enum",
+      "options": {
+        "refreshTriggers": "perRoot"
+      },
+      "description": "cff8e7000f4ed6b060c6c23e89260fb395f1023b9b5c1fe02ab2f0960efd956c",
+      "ddl": "37d0f469fcd25660e06ba13a64042471b145024c5c6feb725ef59d20b3070889"
+    },
+    {
+      "name": "long-maintained-root",
+      "options": {
+        "refreshTriggers": "perRoot"
+      },
+      "description": "0ee02247090e06a61acfb3b6ea8d06c1d1a77f17471b60f28bcdc8101428fd5f",
+      "ddl": "fd9cff1b5e5c9250314510d413eaad6c02078a004d3a7b9444720f56d3bda1d2"
+    },
+    {
+      "name": "relations",
+      "options": {
+        "ownerIndexes": "minimal"
+      },
+      "description": "7f49636d5fd4cf7030fa95167b049e9879b01a284ab75987464ce97bc453c286",
+      "ddl": "69249e783d3fb0ab87a66b8ff254628fcdd7d56e4b1fc84dc1dea7c5a2d27b56"
+    },
+    {
+      "name": "nested-null-unique-enum",
+      "options": {
+        "ownerIndexes": "minimal"
+      },
+      "description": "dbb820d6c11cdf6e5827d7f0a1be365ec507ecdceb88a6459410ba234c1b8c5e",
+      "ddl": "d6bad36244bf7030ac5510b2f3934d0804cb2e935d0586385d70223da2fb24a8"
+    },
+    {
+      "name": "long-maintained-root",
+      "options": {
+        "ownerIndexes": "minimal"
+      },
+      "description": "fa6a3fd74aad073d6e4ccebc0d7f4332f25cdeed9c7299a5d5405d4ff9a7f00d",
+      "ddl": "782c0de1bced0b7c92e6558eea2f56bcf53b872c409f9a6a707c4892006b67f0"
+    }
+  ]
+}

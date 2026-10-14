@@ -25,6 +25,15 @@ export const bindPlugin = (plugin) => {
     if (typeof plugin[key] !== 'function') invalid(`SQL plugin ${key} must be a function`);
     bound[key] = plugin[key];
   }
+  // Optional multi-row inserts of owned rows: records batch them only when both members are present.
+  if (plugin.compileRecordBatch !== undefined) {
+    if (typeof plugin.compileRecordBatch !== 'function') invalid('SQL plugin compileRecordBatch must be a function');
+    bound.compileRecordBatch = plugin.compileRecordBatch;
+  }
+  if (plugin.maxRecordBatchValues !== undefined) {
+    if (!Number.isSafeInteger(plugin.maxRecordBatchValues) || plugin.maxRecordBatchValues < 1) invalid('SQL plugin maxRecordBatchValues must be a positive safe integer');
+    bound.maxRecordBatchValues = plugin.maxRecordBatchValues;
+  }
   for (const [group, names] of Object.entries(methods)) {
     const members = {};
     for (const key of names) {

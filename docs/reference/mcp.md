@@ -39,7 +39,7 @@ const result = await callTool('series', {
 
 `callTool(name, args = {}, extra)` accepts the published tool name. `extra` carries per-call metadata, including an optional `AbortSignal`. `getOperation(name)` returns the prebuilt GraphQL document.
 
-Input schemas accept explicit `null` at nullable arguments, input fields and list items. Non-null positions reject null, including opaque scalars; nullable `$ref` values use `anyOf` with a null alternative. Recursive input types retain shared `$defs`. Defaulted arguments are optional and generated variable defaults use GraphQL literals, including external enum names. Opaque scalar defaults without a literal representation use the field's default when the variable is omitted. Explicit null never substitutes for omission at non-null positions. Validated scalars, including chains built on other validated scalars, and custom scalars with a `baseScalarType` storage hint use the JSON type of their root scalar. `Date`, `DateTime` and `Time` roots carry a string `format` (`date`, `date-time` or `time`) as a hint for the value to send. A custom scalar's description is published unless the field or argument has its own.
+Input schemas accept explicit `null` at nullable arguments, input fields and list items. Non-null positions reject null, including opaque scalars; nullable `$ref` values use `anyOf` with a null alternative. Recursive input types retain shared `$defs`. Generated tools share one `$defs` entry object per input or enum type, so treat tool definitions as read-only and copy one, for example with `structuredClone()`, before changing it; `graphqlArgsToJSONSchema()` returns new objects on every call. Defaulted arguments are optional and generated variable defaults use GraphQL literals, including external enum names. Opaque scalar defaults without a literal representation use the field's default when the variable is omitted. Explicit null never substitutes for omission at non-null positions. Validated scalars, including chains built on other validated scalars, and custom scalars with a `baseScalarType` storage hint use the JSON type of their root scalar. `Date`, `DateTime` and `Time` roots carry a string `format` (`date`, `date-time` or `time`) as a hint for the value to send. A custom scalar's description is published unless the field or argument has its own.
 
 The arguments object of every input schema is closed with `additionalProperties: false`, so hosts that validate tool input reject an undeclared key before the call reaches the server. `callTool` rejects an undeclared key that the caller sent with an [`MCP_UNKNOWN_ARGUMENT`](#unknown-arguments) result, without executing the tool. Nested input objects are not closed in the schema; GraphQL already rejects their unknown fields.
 
@@ -64,10 +64,12 @@ Next to the root field, the output schema declares the optional keys MCP adds to
 | `include`, `exclude` | Unset | A name or array of raw GraphQL names, published tool names, or the categories `'query'` and `'mutation'`. Exclusion wins. |
 | `includeTypes`, `excludeTypes` | Unset | Filter by object return type name. Aggregate tools resolve their entity through their sibling list query. |
 | `toolNamePrefix` | `''` | Prefix published names; GraphQL field names remain unchanged. |
-| `selectionDepth` | `1` | Depth of automatically selected object relationships. |
+| `selectionDepth` | `1` | Depth of automatically selected object relationships. Each nested collection it reaches is read with one query per returned row; see `nestedCollections`. |
+| `nestedCollections` | `'all'` | `'none'` leaves nested collections, object list fields with a `pagination` argument such as non-embedded one-to-many relations, out of every generated selection and output schema. A tool's `toolOverrides` value wins. Other values throw `MCP_INVALID_OPTIONS` at setup. |
 | `includeId` | Ignored | Deprecated; it never changed the generated selection. Every scalar or enum field without required arguments, `id` included, is selected; an object type with none selects `__typename`. |
-| `toolOverrides` | `{}` | Per-tool title, description, annotations, selection depth, or explicit selection. |
+| `toolOverrides` | `{}` | Per-tool title, description, annotations, selection depth, nested collections, or explicit selection. |
 | `limits` | Unset | Pagination and serialized result-size controls, validated at setup. |
+| `textFormat` | `'pretty'` | JSON format of the text content block of results: `'pretty'`, indented by two spaces, or `'compact'`. `maxResultBytes` measures that text. Other values throw `MCP_INVALID_OPTIONS` at setup. |
 | `toolMiddleware` | Unset | A middleware function or array surrounding actual tool execution; validated and copied at setup. |
 | `context` | `{}` | In-process GraphQL context value or factory. |
 | `schemaPlugins` | Unset | Plugins whose `onSchemaChange` hook is invoked in in-process mode; validated before any hook runs, falsy entries skipped, a misspelling of `onSchemaChange` on a plugin that lacks it rejected, asynchronous hooks awaited. Typed as `EnvelopSchemaPlugin` or `SchemaPluginObject` entries, so Envelop and Yoga `Plugin` arrays and class instances compile, including ones with `call` or `apply` members; functions and promises do not. |
@@ -84,7 +86,7 @@ The `options` parameter is typed `GenerateMCPToolsInit` for `generateMCPTools`, 
 - `execution` also takes `MCPRemoteExecutionInit`. Its `headers` is an `MCPRemoteHeadersInit` (a plain object, a `Headers` instance, a `Map` or readonly `[name, value]` pairs), `null` or `false`. Its `timeoutMs` is a number, a numeric string, a bigint, `null` or `false`.
 - `limits` takes `MCPLimitsInit`, `null` or `false`. Caps are numbers, numeric strings, bigints, `null` or `false`, and `defaultPagination` may also be `null` or `false`.
 
-The option interfaces, `MCPLimits` and `MCPRemoteExecutionOptions` keep their 3.5.6 shapes, such as `headers?: Record<string, string>` and number caps, so code that reads options back, for example to rotate `execution.headers.authorization`, compiles unchanged. Annotate a variable with the option interface when you read it back. Pairs built in a separate variable need `as const`.
+The option interfaces, `MCPLimits` and `MCPRemoteExecutionOptions` keep the 3.5.6 shapes of their existing members, such as `headers?: Record<string, string>` and number caps, so code that reads options back, for example to rotate `execution.headers.authorization`, compiles unchanged. Later releases add only optional members, such as `nestedCollections` and `textFormat` (typed `MCPNestedCollections` and `MCPTextFormat`) and the `retry` opt-ins. Annotate a variable with the option interface when you read it back. Pairs built in a separate variable need `as const`.
 
 ### Tool classification
 
@@ -128,9 +130,9 @@ const generated = mcp.generateMCPTools(schema, {
 });
 ```
 
-Keys may use the published tool name or the original field name; a published-name override takes precedence. Supported properties are `title`, `description`, `annotations`, `selectionDepth`, and `selection`; a deprecated `includeId` is accepted and ignored. Annotation properties are merged over generated annotations.
+Keys may use the published tool name or the original field name; a published-name override takes precedence. Supported properties are `title`, `description`, `annotations`, `selectionDepth`, `nestedCollections` and `selection`; a deprecated `includeId` is accepted and ignored. Every entry's `nestedCollections` is validated at setup, whether or not its tool is published, so a misspelled key or an excluded tool does not hide an invalid value. Annotation properties are merged over generated annotations.
 
-`selection` accepts `id name` or `{ id name }`. It replaces the automatic selection and omits `outputSchema`. Ensure the selection is valid for the schema; invalid selections become GraphQL execution errors.
+`selection` accepts `id name` or `{ id name }`. It replaces the automatic selection, omits `outputSchema` and ignores `nestedCollections`. Ensure the selection is valid for the schema; invalid selections become GraphQL execution errors.
 
 ## Limits
 
@@ -146,7 +148,7 @@ const limits = {
 | --- | --- |
 | `maxPageSize` | Rejects `pagination.size` above the cap with `MCP_PAGE_SIZE_EXCEEDED`. |
 | `defaultPagination` | Injected when a tool has a pagination argument and the caller supplies none. Must be valid for the `pagination` argument type of every published tool; for Simfinity's `QLPagination`, provide both `page` and `size`. |
-| `maxResultBytes` | Caps pretty-printed UTF-8 JSON for successful `data` or the error payload `{ errors, data? }`. Oversized query payloads return `MCP_RESULT_TOO_LARGE`; an oversized mutation payload is replaced by the root ids and a notice, because the write already ran. |
+| `maxResultBytes` | Caps the UTF-8 text content block, pretty-printed JSON or compact JSON with `textFormat: 'compact'`, for successful `data` or the error payload `{ errors, data? }`. Oversized query payloads return `MCP_RESULT_TOO_LARGE`; an oversized mutation payload is replaced by the root ids and a notice, because the write already ran. |
 
 `limits` is validated when the executor, server or HTTP handler is created, before `schemaPlugins` run; invalid settings throw `MCP_INVALID_LIMITS`:
 
@@ -156,7 +158,7 @@ const limits = {
 
 `callTool` reads the `limits` object you passed on every call, and the HTTP handler reads `options.limits` again for every request, so later changes apply. A cap changed after setup to an invalid value makes calls reject with `MCP_INVALID_LIMITS`; a `defaultPagination` set after setup is injected without the type check.
 
-Configure positive bounds appropriate for your application. A page-size cap by itself does not add pagination to unpaginated calls; pair it with `defaultPagination` when you need bounded defaults. Result-size checking happens after execution, so it does not limit database work.
+Configure positive bounds appropriate for your application. A page-size cap by itself does not add pagination to unpaginated calls; pair it with `defaultPagination` when you need bounded defaults. Result-size checking happens after execution, so it does not limit database work. Neither does the page-size cap for nested collections: with the default `selectionDepth: 1`, each one is read with one query per returned row, up to 100 items or `configureQueryLimits()`'s `maxPageSize` when lower. Leave them out with `nestedCollections: 'none'` when agents list many records. `limits` do not bound nested collection writes either; cap them with [`configureMutationLimits`](/reference/api#configuremutationlimits).
 
 The size cap covers the logical payload, including errors, partial data and a counted list's `totalCount`. It excludes MCP envelope overhead, the duplicate `structuredContent`, and middleware-created results. Limit diagnostics (`MCP_RESULT_TOO_LARGE`, `MCP_PAGE_SIZE_EXCEEDED` and `MCP_UNKNOWN_ARGUMENT`) and the notice that replaces an oversized mutation result are exempt, so a tiny cap still produces an actionable result. The root id, or the id list, is returned next to that notice only when it fits within the cap. The cap does not limit remote downloads. See [oversized results](#oversized-results).
 
@@ -193,7 +195,7 @@ Pass one function or an array of functions. Every function runs, whatever its de
 
 ## Execution and context
 
-In-process execution calls GraphQL directly against the supplied schema. `context` may be an object or an async factory `(extra) => context`. For the HTTP handler, a factory is invoked as `(req, extra) => context`, which allows application authentication to populate context per call.
+In-process execution calls GraphQL directly against the supplied schema. Each tool's GraphQL operation is parsed and validated on its first in-process call and reused, while the schema is still validated on every call, so results and errors are those of `graphql()`. Do not change the schema's types after the tools are created; wrapping resolvers stays supported. `context` may be an object or an async factory `(extra) => context`. For the HTTP handler, a factory is invoked as `(req, extra) => context`, which allows application authentication to populate context per call.
 
 Generated tools receive your context object itself, on counted list calls too: its identity, class, private fields, own properties and in-place writes are those of the object you supply, and a factory may return `null`. Only a list tool whose field lacks core's `countSink` marker, such as a custom list query, sees a different object on counted calls; see [counted lists](#counted-lists).
 
@@ -217,7 +219,7 @@ const generated = mcp.generateMCPTools(schema, {
     endpoint: 'https://api.example.com/graphql',
     headers: { Authorization: `Bearer ${process.env.GRAPHQL_TOKEN}` },
     timeoutMs: 10000,
-    retry: { attempts: 2, backoffMs: 250 },
+    retry: { attempts: 2, backoffMs: 250, retryAfter: true, jitter: true },
   },
 });
 ```
@@ -239,7 +241,12 @@ The endpoint is passed to `fetch` as given, so it can also be a `URL` or `Reques
 
 `timeoutMs` limits each remote attempt through completion of response-body reading. It takes positive milliseconds: numeric strings and bigints are converted, fractions round up (`1500.5` waits 1501 ms), and values above 2147483647, the Node.js timer limit, are capped to it. Unset, `0`, `'0'`, `NaN`, `null`, `false` and `''` disable the timeout. `Infinity`, `'Infinity'`, negative numbers, `true`, blank or non-numeric strings such as `'5s'`, objects, arrays and functions throw `MCP_INVALID_EXECUTION_CONFIG` at setup. `timeoutMs` is read again on every call; a value changed after setup to an invalid one makes the call reject with `MCP_INVALID_EXECUTION_CONFIG`.
 
-`retry.attempts` counts additional attempts, with linear backoff of `backoffMs × retry number`; the default backoff is 250 ms. Only queries retry after network or body-read failures, timeouts, HTTP 429, or HTTP 5xx. Mutations are never retried by this transport. Client cancellation during fetch, body reading or a retry backoff rejects at once with the signal's abort reason, without another request. This holds for `callTool` with `extra.signal`, stdio and `createMCPServer` over a persistent transport. Through `createHTTPMCPHandler`, only a closed HTTP connection cancels a call; see [server and HTTP options](#server-and-http-options).
+`retry.attempts` counts additional attempts, with linear backoff of `backoffMs × retry number`; the default backoff is 250 ms. Two opt-ins change the wait, and only for exactly `true`:
+
+- `retryAfter: true` makes the next retry wait at least the `Retry-After` of a retried HTTP 429 or 5xx response, given as delta-seconds or an HTTP-date: an IMF-fixdate, or the obsolete RFC 850 and asctime forms, all read as GMT (RFC 9110 §5.6.7). A header that asks for more than `maxRetryAfterMs` (default 10000 ms, capped at 2147483647) ends the retries at once with that response's error. A missing or invalid header, including other date text such as an ISO 8601 date or `May 2030`, keeps the backoff. `maxRetryAfterMs` bounds each wait, not their total, so many attempts can exceed an MCP client's request timeout.
+- `jitter: true` adds a random wait of up to half of `backoffMs × k` to retry k, so concurrent callers spread their retries.
+
+ Only queries retry after network or body-read failures, timeouts, HTTP 429, or HTTP 5xx. Mutations are never retried by this transport. Client cancellation during fetch, body reading or a retry backoff rejects at once with the signal's abort reason, without another request. This holds for `callTool` with `extra.signal`, stdio and `createMCPServer` over a persistent transport. Through `createHTTPMCPHandler`, only a closed HTTP connection cancels a call; see [server and HTTP options](#server-and-http-options).
 
 Successful HTTP responses must contain object `data` or a nonempty `errors` array whose entries have string messages. If present, `data` must be an object or null, and null data requires errors. Empty or malformed errors arrays are invalid. Malformed JSON and invalid successful response shapes return `MCP_REMOTE_INVALID_RESPONSE` without retrying.
 
@@ -270,7 +277,7 @@ A successful call returns text JSON and structured data using the original Graph
 }
 ```
 
-`structuredContent` holds the GraphQL `data` plus the keys MCP adds next to the root field: `totalCount` on counted list calls, or, when an oversized mutation result is replaced, only the root ids and a `truncated` notice. These keys are `__totalCount` and `__truncated` when the root field itself is named `totalCount` or `truncated`. The text content is the same JSON.
+`structuredContent` holds the GraphQL `data` plus the keys MCP adds next to the root field: `totalCount` on counted list calls, or, when an oversized mutation result is replaced, only the root ids and a `truncated` notice. These keys are `__totalCount` and `__truncated` when the root field itself is named `totalCount` or `truncated`. The text content is the same JSON, pretty-printed by default; with `textFormat: 'compact'`, it carries no whitespace, as in `{"series":[]}`, which is about half the bytes for nested results. Error results and limit diagnostics follow the same format.
 
 Execution errors return `isError: true` and text containing `{ errors, data? }`. Partial GraphQL data is preserved when available and within `maxResultBytes`; `structuredContent` is omitted on errors.
 
@@ -365,6 +372,7 @@ A suggestion is given for a declared argument that matches the key ignoring lett
 | `MCP_MIDDLEWARE_ERROR` | Thrown during a call when middleware calls `next()` twice or the chain returns no result. |
 | `MCP_INVALID_MIDDLEWARE` | Invalid `toolMiddleware` configuration, including an empty slot in a sparse array; thrown at setup. |
 | `MCP_INVALID_SCHEMA_PLUGIN`, `MCP_UNSUPPORTED_SCHEMA_REPLACEMENT` | Invalid `schemaPlugins` configuration, including a misspelling of `onSchemaChange` on a plugin that lacks it, or a plugin replacing the schema; thrown at setup. |
+| `MCP_INVALID_OPTIONS` | A `textFormat` other than `'pretty'` or `'compact'`, or a `nestedCollections` other than `'all'` or `'none'`, globally or in any `toolOverrides` entry, published or not; thrown at setup, before `schemaPlugins` run. |
 | `MCP_INVALID_SCHEMA`, `MCP_INVALID_TOOL_NAME`, `MCP_INVALID_LIMITS` | Configuration or generation errors, thrown at setup. A `limits` cap changed after setup to an invalid value also makes calls reject with `MCP_INVALID_LIMITS`. |
 | `MCP_INVALID_EXECUTION_MODE`, `MCP_MISSING_ENDPOINT` | Invalid execution configuration. |
 | `MCP_INVALID_EXECUTION_CONFIG` | A remote `endpoint` with a username or password, or an invalid `headers` container or `timeoutMs`, thrown at setup; the message never quotes the endpoint. A `timeoutMs` changed after setup to an invalid value makes calls reject with it. |

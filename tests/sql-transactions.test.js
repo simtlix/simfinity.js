@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  GraphQLID, GraphQLInputObjectType, GraphQLNonNull, GraphQLObjectType, GraphQLString, graphql,
+  GraphQLID, GraphQLInputObjectType, GraphQLList, GraphQLNonNull, GraphQLObjectType, GraphQLString, graphql,
 } from 'graphql';
 import { createTransactions } from '../packages/sql/src/transactions.js';
+import { createSQLAdapter } from '../packages/sql/src/adapter.js';
 import { bindPlugin } from '../packages/sql/src/plugin.js';
+import { callDriver } from '../packages/sql/src/errors.js';
 import { createSQL, SimfinityError } from '../packages/sql/src/index.js';
 import { postgresPlugin } from '../packages/postgres/src/index.js';
 import { initializeDatabase } from '../packages/postgres/src/schema/initialize.js';
@@ -210,6 +212,88 @@ describe('SQL withTransaction session lifetime', () => {
   });
 });
 
+describe('SQL single-statement connections', () => {
+  it('runs the body on one acquired client without begin, commit or rollback', async () => {
+    const { client, log, driver, transactions } = fakePlugin();
+    const result = await transactions.withConnection(async (handle) => {
+      expect(transactions.clientOf(handle)).toBe(client);
+      return 'read';
+    });
+    expect(result).toBe('read');
+    expect(log).toEqual([]);
+    expect(driver.acquire).toHaveBeenCalledOnce();
+    expect(driver.begin).not.toHaveBeenCalled();
+    expect(driver.commit).not.toHaveBeenCalled();
+    expect(driver.rollback).not.toHaveBeenCalled();
+    expect(driver.release.mock.calls).toEqual([[client]]);
+  });
+
+  it('retries a confirmed abort without a rollback step and bounds the retries', async () => {
+    const { driver, transactions } = fakePlugin();
+    let attempts = 0;
+    expect(await transactions.withConnection(async () => {
+      if (++attempts === 1) throw Object.assign(new Error('serialization failure'), { retryable: true });
+      return 'second attempt';
+    })).toBe('second attempt');
+    expect(driver.acquire).toHaveBeenCalledTimes(2);
+    expect(driver.release).toHaveBeenCalledTimes(2);
+    const body = vi.fn(async () => { throw Object.assign(new Error('serialization failure'), { retryable: true }); });
+    await expect(transactions.withConnection(body)).rejects.toThrow('normalized: serialization failure');
+    expect(body).toHaveBeenCalledTimes(6);
+    expect(driver.rollback).not.toHaveBeenCalled();
+    expect(driver.begin).not.toHaveBeenCalled();
+  });
+
+  it('probes the connection with ROLLBACK after a failure it does not retry, and releases it without an error when the probe succeeds', async () => {
+    const { client, log, driver, transactions } = fakePlugin();
+    const body = vi.fn(() => callDriver(async () => { throw new Error('statement timeout'); }));
+    await expect(transactions.withConnection(body)).rejects.toThrow('normalized: statement timeout');
+    expect(body).toHaveBeenCalledOnce();
+    expect(log).toEqual(['ROLLBACK']);
+    expect(driver.begin).not.toHaveBeenCalled();
+    expect(driver.release.mock.calls).toEqual([[client]]);
+  });
+
+  it('neither probes nor discards the connection after an error raised before any statement', async () => {
+    const { client, log, driver, transactions } = fakePlugin();
+    const invalid = new SimfinityError('Expected a UUID identifier', 'NOT_VALID_ID', 400);
+    const body = vi.fn(async () => { throw invalid; });
+    await expect(transactions.withConnection(body)).rejects.toBe(invalid);
+    expect(body).toHaveBeenCalledOnce();
+    expect(log).toEqual([]);
+    expect(driver.rollback).not.toHaveBeenCalled();
+    expect(driver.release.mock.calls).toEqual([[client]]);
+  });
+
+  it.each([
+    ['rejected', (probeError) => async () => { throw probeError; }],
+    ['thrown synchronously', (probeError) => () => { throw probeError; }],
+  ])('releases the client with a %s probe error and reports the body error', async (label, probeWith) => {
+    const probeError = new Error('Connection terminated unexpectedly');
+    const { client, driver, transactions } = fakePlugin();
+    driver.rollback.mockImplementation(probeWith(probeError));
+    const body = vi.fn(() => callDriver(async () => { throw new Error('terminating connection due to administrator command'); }));
+    const failure = await transactions.withConnection(body).catch((error) => error);
+    expect(failure.message).toBe('normalized: terminating connection due to administrator command');
+    expect(failure.cause).not.toBe(probeError);
+    expect(body).toHaveBeenCalledOnce();
+    expect(driver.acquire).toHaveBeenCalledOnce();
+    expect(driver.release.mock.calls).toEqual([[client, probeError]]);
+  });
+
+  it('never accepts the connection handle as a transaction session', async () => {
+    const { transactions } = fakePlugin();
+    let connection;
+    await transactions.withConnection(async (handle) => {
+      connection = handle;
+      expect(() => transactions.requireSession(handle)).toThrow('active transaction');
+      await expect(transactions.withTransaction(handle, async () => 'joined')).rejects.toMatchObject({ extensions: expect.objectContaining({ code: 'INVALID_SESSION' }) });
+    });
+    // Late statements of a settled read fail like late statements of a finished transaction.
+    expect(() => transactions.clientOf(connection)).toThrow(expect.objectContaining({ extensions: expect.objectContaining({ code: 'INVALID_SESSION' }) }));
+  });
+});
+
 describe('SQL error classification', () => {
   // PostgreSQL's own classification and mapping over a fake connection.
   const postgres = () => {
@@ -340,6 +424,11 @@ describe('SQL runtime error propagation', () => {
     const Payment = new GraphQLObjectType({ name: 'ErrorPayment', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
     const controller = { onSaving: (record, args, session, context) => { if (Object.hasOwn(context, 'failure')) throw context.failure; } };
     api.connect(null, Payment, 'payment', 'payments', controller);
+    // The reference stores the invoice lines in an owned table, so reading an invoice takes several statements.
+    const Line = new GraphQLObjectType({ name: 'ErrorLine', fields: { payment: { type: Payment, extensions: { relation: { embedded: false } } } } });
+    const Invoice = new GraphQLObjectType({ name: 'ErrorInvoice', fields: { id: { type: GraphQLID }, lines: { type: new GraphQLList(Line), extensions: { relation: { embedded: true } } } } });
+    api.addNoEndpointType(Line);
+    api.connect(null, Invoice, 'invoice', 'invoices');
     const Input = new GraphQLInputObjectType({ name: 'ErrorChargeInput', fields: { title: { type: new GraphQLNonNull(GraphQLString) } } });
     api.registerMutation('charge', 'Charge', Input, Payment, async (args, session, context) => { throw context.failure; });
     const schema = api.createSchema();
@@ -426,10 +515,144 @@ describe('SQL runtime error propagation', () => {
       if (text.startsWith('SELECT')) throw failure;
       return answer(text, values);
     });
-    const result = await graphql({ schema, source: '{payments{id}}' });
+    const result = await graphql({ schema, source: '{invoices{id}}' });
     expect(result.errors).toHaveLength(1);
     expectMasked(result.errors[0], failure);
     expect(statements).toEqual(['BEGIN ISOLATION LEVEL REPEATABLE READ', 'ROLLBACK']);
+  });
+
+  it.each(connectionFailures)('masks %s in a single-statement find, keeping the driver error as the cause, and discards the connection', async (label, create) => {
+    const { api, client, schema, statements } = createRuntime();
+    await api.initializeDatabase();
+    const failure = create();
+    // The connection is gone, so the ROLLBACK that probes it fails too, and pg destroys a connection
+    // released with an error.
+    const closed = new Error('Client has encountered a connection error and is not queryable');
+    client.query.mockImplementation(async (text) => {
+      statements.push(text);
+      throw text === 'ROLLBACK' ? closed : failure;
+    });
+    const result = await graphql({ schema, source: '{payments{id}}' });
+    expect(result.errors).toHaveLength(1);
+    expectMasked(result.errors[0], failure);
+    expect(statements).toEqual([expect.stringMatching(/^SELECT /), 'ROLLBACK']);
+    expect(client.release.mock.calls).toEqual([[closed]]);
+  });
+});
+
+describe('SQL single-statement reads', () => {
+  const serverError = (code) => Object.assign(new Error(`server message for ${code}`), { code, severity: 'ERROR' });
+  // A pg.Pool stand-in that logs every statement its connections run and answers with no rows.
+  const createRuntime = (plugin = postgresPlugin) => {
+    const log = [];
+    const client = { query: vi.fn(async (text) => { log.push(text); return { rows: [], rowCount: 0, command: text.split(' ')[0] }; }), release: vi.fn() };
+    const pool = { connect: vi.fn(async () => client), query: vi.fn(async (text) => { log.push(`pool: ${text}`); return { rows: [{ size: 0 }], rowCount: 1 }; }) };
+    const api = createSQL({ plugin: { ...plugin({ pool, schema: 'app' }), initialize: async () => ({ mode: 'validate', created: [] }) } });
+    const Payment = new GraphQLObjectType({ name: 'ReadPayment', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+    const Line = new GraphQLObjectType({ name: 'ReadLine', fields: { payment: { type: Payment, extensions: { relation: { embedded: false } } } } });
+    const Invoice = new GraphQLObjectType({ name: 'ReadInvoice', fields: { id: { type: GraphQLID }, lines: { type: new GraphQLList(Line), extensions: { relation: { embedded: true } } } } });
+    api.connect(null, Payment, 'payment', 'payments');
+    api.addNoEndpointType(Line);
+    api.connect(null, Invoice, 'invoice', 'invoices');
+    const schema = api.createSchema();
+    return { api, client, log, pool, schema, types: { Payment, Invoice } };
+  };
+  const id = '00000000-0000-4000-8000-000000000001';
+  const run = async (schema, source, contextValue) => {
+    const result = await graphql({ schema, source, contextValue });
+    expect(result.errors).toBeUndefined();
+    return result.data;
+  };
+
+  it('reads a type without owned tables with one statement and no transaction', async () => {
+    const { api, client, log, pool, schema, types } = createRuntime();
+    await api.initializeDatabase();
+    for (const read of [
+      () => run(schema, '{payments{id}}'),
+      () => run(schema, `{payment(id:"${id}"){id}}`),
+      () => api.getModel(types.Payment).findById(id),
+      () => api.getModel(types.Payment).find({}),
+    ]) {
+      log.length = 0;
+      pool.connect.mockClear();
+      await read();
+      expect(log).toEqual([expect.stringMatching(/^SELECT .* FROM "app"\."ReadPayment"/)]);
+      expect(pool.connect).toHaveBeenCalledOnce();
+    }
+    expect(client.release.mock.calls.every(([error]) => error === undefined)).toBe(true);
+    // A counted page runs its count on the pool and its rows as one statement.
+    log.length = 0;
+    await run(schema, '{payments(pagination:{page:1,size:1,count:true}){id}}', {});
+    expect(log).toHaveLength(2);
+    expect(log.filter((text) => /^(BEGIN|COMMIT|ROLLBACK)/.test(text))).toEqual([]);
+  });
+
+  it('keeps one repeatable-read transaction for a type with owned tables, a session and a plugin without the capability', async () => {
+    const { api, log, schema, types } = createRuntime();
+    await api.initializeDatabase();
+    const transaction = ['BEGIN ISOLATION LEVEL REPEATABLE READ', expect.stringMatching(/^SELECT /), 'COMMIT'];
+    for (const source of ['{invoices{id}}', `{invoice(id:"${id}"){id}}`]) {
+      log.length = 0;
+      await run(schema, source);
+      expect(log).toEqual(transaction);
+    }
+    log.length = 0;
+    await api.withTransaction(null, (session) => api.getModel(types.Payment).findById(id, { session }));
+    expect(log).toEqual(transaction);
+    const capabilities = postgresPlugin().capabilities.filter((capability) => capability !== 'singleStatementReads');
+    const legacy = createRuntime((options) => ({ ...postgresPlugin(options), capabilities }));
+    await legacy.api.initializeDatabase();
+    for (const source of ['{payments{id}}', `{payment(id:"${id}"){id}}`]) {
+      legacy.log.length = 0;
+      await run(legacy.schema, source);
+      expect(legacy.log).toEqual(transaction);
+    }
+  });
+
+  it('retries a serialization failure of a single-statement read without a ROLLBACK step', async () => {
+    const { api, client, log, pool, schema } = createRuntime();
+    await api.initializeDatabase();
+    const answer = client.query.getMockImplementation();
+    let failures = 1;
+    client.query.mockImplementation(async (text, values) => {
+      const result = await answer(text, values);
+      if (failures > 0) { failures--; throw serverError('40001'); }
+      return result;
+    });
+    expect(await run(schema, '{payments{id}}')).toEqual({ payments: [] });
+    expect(log).toEqual([expect.stringMatching(/^SELECT /), expect.stringMatching(/^SELECT /)]);
+    expect(pool.connect).toHaveBeenCalledTimes(2);
+    expect(client.release.mock.calls).toEqual([[undefined], [undefined]]);
+    log.length = 0;
+    failures = Infinity;
+    const result = await graphql({ schema, source: '{payments{id}}' });
+    expect(result.errors[0]).toMatchObject({ message: 'Concurrent write could not be completed', extensions: { code: 'TRANSACTION_RETRY_EXCEEDED' } });
+    expect(log).toHaveLength(6);
+    expect(log.every((text) => text.startsWith('SELECT '))).toBe(true);
+  });
+
+  it('keeps the error precedence of reads with an invalid model handle', async () => {
+    const statements = [];
+    const failure = Object.assign(new Error('connect ECONNREFUSED 10.1.2.3:5432'), { code: 'ECONNREFUSED' });
+    const pool = { connect: vi.fn(async () => { throw failure; }), query: vi.fn() };
+    const adapter = createSQLAdapter({ ...postgresPlugin({ pool, schema: 'app' }), initialize: async () => ({ mode: 'validate', created: [] }) });
+    const Payment = new GraphQLObjectType({ name: 'PrecedencePayment', fields: { id: { type: GraphQLID } } });
+    adapter.prepare([{ gqltype: Payment, endpoint: true }]);
+    const model = adapter.createModel(Payment);
+    await adapter.initialize();
+    const forged = { name: Payment.name, gqltype: Payment };
+    // The database is down: the connection fails before the handle is checked, as in a transaction.
+    for (const read of [() => adapter.find(forged, Payment, {}, null), () => adapter.getById(forged, id, null), () => adapter.getById(undefined, id, null)]) {
+      await expect(read()).rejects.toMatchObject({ extensions: { code: 'DATABASE_ERROR' } });
+    }
+    // A foreign session is rejected before the handle is checked.
+    for (const read of [() => adapter.find(forged, Payment, {}, {}), () => adapter.getById(forged, id, {})]) {
+      await expect(read()).rejects.toMatchObject({ extensions: { code: 'INVALID_SESSION' } });
+    }
+    pool.connect.mockImplementation(async () => ({ query: async (text) => { statements.push(text); return { rows: [] }; }, release() {} }));
+    await expect(adapter.find(forged, Payment, {}, null)).rejects.toMatchObject({ extensions: { code: 'INVALID_MODEL' } });
+    expect(await adapter.find(model, Payment, {}, null)).toEqual([]);
+    expect(statements.filter((text) => text.startsWith('SELECT '))).toHaveLength(1);
   });
 });
 

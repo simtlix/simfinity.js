@@ -29,7 +29,9 @@ export interface MCPTool {
    * an undeclared key before the call reaches the server (and its
    * middleware); `callTool` rejects an undeclared key the caller sent with
    * MCP_UNKNOWN_ARGUMENT. Date/DateTime/Time scalars keep a string `format`
-   * here as a hint for the value to send.
+   * here as a hint for the value to send. Generated tools share one object
+   * per input or enum type in their `$defs`, so treat tool definitions as
+   * read-only and copy one (e.g. with structuredClone) before changing it.
    */
   inputSchema: JSONSchema;
   /**
@@ -70,11 +72,30 @@ export interface MCPRetryOptions {
   /** Number of retries after the initial attempt. */
   attempts?: number;
   /**
-   * Linear backoff base in milliseconds (delay = backoffMs * attemptIndex).
-   * Client cancellation (`extra.signal`) during a backoff rejects at once,
+   * Linear backoff base in milliseconds (default 250): retry k waits
+   * `backoffMs * k`, longer only with `retryAfter` or `jitter`. Client
+   * cancellation (`extra.signal`) during a retry wait rejects at once,
    * without another attempt.
    */
   backoffMs?: number;
+  /**
+   * Opt-in (default false). On a retried HTTP 429 or 5xx response, the next
+   * retry waits at least its `Retry-After` (delta-seconds or an HTTP-date).
+   * When it asks for more than `maxRetryAfterMs`, the retries end at once
+   * with that response's error.
+   */
+  retryAfter?: boolean;
+  /**
+   * Longest `Retry-After`, in milliseconds, that a retry waits for when
+   * `retryAfter` is true (default 10000, capped at 2147483647). It bounds
+   * each wait, not their total.
+   */
+  maxRetryAfterMs?: number;
+  /**
+   * Opt-in (default false). Adds a random wait of up to half of
+   * `backoffMs * k` to retry k, so concurrent callers spread their retries.
+   */
+  jitter?: boolean;
 }
 
 /** Execute operations in-process against the provided GraphQLSchema (default). */
@@ -159,6 +180,21 @@ export interface MCPRemoteExecutionInit extends Omit<MCPRemoteExecutionOptions, 
 /** Execution strategy: discriminated on `mode`. */
 export type MCPExecutionOptions = MCPInProcessExecutionOptions | MCPRemoteExecutionOptions;
 
+/**
+ * Which nested collections the generated selection set and output schema
+ * include. A nested collection is an object list field with a `pagination`
+ * argument, such as core's non-embedded one-to-many relations, which core
+ * reads with one query per returned row. 'all' (the default) includes them;
+ * 'none' leaves them out.
+ */
+export type MCPNestedCollections = 'all' | 'none';
+
+/**
+ * JSON format of the text content block of tool results: 'pretty' (the
+ * default, indented by two spaces) or 'compact' (no whitespace).
+ */
+export type MCPTextFormat = 'pretty' | 'compact';
+
 /** Per-tool override applied over the generated definition. */
 export interface MCPToolOverride {
   description?: string;
@@ -167,6 +203,12 @@ export interface MCPToolOverride {
   annotations?: MCPToolAnnotations;
   selectionDepth?: number;
   /**
+   * Overrides {@link GenerateMCPToolsOptions.nestedCollections} for this tool;
+   * ignored when `selection` is set. Validated (MCP_INVALID_OPTIONS) for
+   * every entry, whether or not its tool is published.
+   */
+  nestedCollections?: MCPNestedCollections;
+  /**
    * @deprecated Ignored. It never changed the generated selection: every
    * scalar/enum field without required arguments, `id` included, is selected.
    */
@@ -174,7 +216,7 @@ export interface MCPToolOverride {
   /**
    * Explicit GraphQL selection set replacing the generated one. Accepts
    * `'id title'` or `'{ id title }'`. Setting it omits the tool's
-   * `outputSchema`.
+   * `outputSchema` and ignores `nestedCollections`.
    */
   selection?: string;
 }
@@ -204,7 +246,8 @@ export interface MCPLimits {
     [key: string]: unknown;
   };
   /**
-   * Cap pretty-printed UTF-8 JSON for data (including `totalCount`) or
+   * Cap the UTF-8 text content block (pretty-printed JSON, or compact JSON
+   * with `textFormat: 'compact'`) of data (including `totalCount`) or
    * { errors, data? } with MCP_RESULT_TOO_LARGE; for a counted list that error
    * carries `extensions.totalCount`. Checking occurs after execution, so an
    * oversized mutation result is not an error when the mutation succeeded: it
@@ -375,8 +418,25 @@ export interface GenerateMCPToolsOptions {
   includeTypes?: string | string[];
   /** Never expose tools whose entity (return) type has one of these names. */
   excludeTypes?: string | string[];
-  /** Nesting depth for the auto-generated selection set and output schema. Default 1. */
+  /**
+   * Nesting depth for the auto-generated selection set and output schema.
+   * Default 1. Each nested collection it reaches is read with one query per
+   * returned row; see `nestedCollections`.
+   */
   selectionDepth?: number;
+  /**
+   * 'none' leaves nested collections out of every generated selection set
+   * and output schema (see {@link MCPNestedCollections}); a tool's
+   * `toolOverrides` value wins. Default 'all'. Other values throw
+   * MCP_INVALID_OPTIONS at setup.
+   */
+  nestedCollections?: MCPNestedCollections;
+  /**
+   * JSON format of the text content block of results, which
+   * `limits.maxResultBytes` measures. Default 'pretty'. Other values throw
+   * MCP_INVALID_OPTIONS at setup.
+   */
+  textFormat?: MCPTextFormat;
   /**
    * @deprecated Ignored. It never changed the generated selection: every
    * scalar/enum field without required arguments, `id` included, is selected,
@@ -542,8 +602,8 @@ export function startStdioMCPServer(
  * invoking `context` or `onError`: the handler is stateless, so there is no
  * standalone SSE stream and no session to terminate (MCP clients treat a 405
  * on GET as no server stream). The SDK and its transport load first; then
- * `transportOptions`, `execution`, `toolMiddleware`, `limits` and
- * `schemaPlugins` are validated, and asynchronous `schemaPlugins` hooks
+ * `transportOptions`, `execution`, `toolMiddleware`, `limits`, `textFormat`,
+ * `nestedCollections` and `schemaPlugins` are validated, and asynchronous `schemaPlugins` hooks
  * awaited, before the handler is returned; `options.limits` is read again
  * for every request and call.
  */

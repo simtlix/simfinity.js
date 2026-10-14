@@ -5,7 +5,7 @@ description: Opt into transactional reference checks and restrict-delete behavio
 
 # MongoDB reference integrity
 
-Available from **Simfinity 3.4.0**. Install `@simtlix/simfinity-js@3.5.9` and keep any directly installed Simfinity packages at the same version.
+Available from **Simfinity 3.4.0**. Install `@simtlix/simfinity-js@3.6.0` and keep any directly installed Simfinity packages at the same version.
 
 MongoDB applications can opt into transactional reference integrity when creating their adapter. The setting is fixed for that runtime. Queries, mutation inputs, scopes, authorization and MCP schemas keep their existing shape.
 
@@ -63,11 +63,11 @@ Checks are immediate within the transaction. Create the target before referencin
 
 ## Concurrent transactions
 
-After a save or update, the adapter checks the stored document, including controller changes, against its declared references. For each distinct target, it writes a fresh ObjectId to reserved storage field `_simfinityReferenceLock`. A target deletion modifies the same field before checking incoming references. These writes take MongoDB document locks until commit or abort.
+After a save or update, the adapter checks the stored document, including controller changes, against its declared references: it reads the document's `_id` and declared reference paths, then locks its distinct targets with one write per target collection, up to 1,000 targets per write. When a lock write covers several targets, one read in the transaction first confirms that they all exist, so a missing target fails with `REFERENCE_CONSTRAINT_VIOLATION` before that write; a conflict on a target of an earlier collection or an earlier batch of 1,000 still comes first. A single target keeps a single write. Each lock write stores a fresh ObjectId in the reserved storage field `_simfinityReferenceLock` of its targets. A target deletion modifies the same field before checking incoming references, with one existence query per referencing collection, the `$or` of its reference paths. These writes take MongoDB document locks until commit or abort.
 
 If a creation commits first, deletion rejects its reference. If deletion commits first, creation rejects its missing target. A transaction with an older snapshot conflicts with the target modification and must retry from a fresh transaction. A simple `exists()` read would not provide this guarantee.
 
-The reserved field is not part of GraphQL or mutation inputs and uses `select: false` on Mongoose models. Native collection reads/aggregations and backups can see it. Lock writes bypass domain hooks, timestamps and version counters. Concurrent writes that reference a popular target contend on that document; this adds reads, writes and possible retries.
+The reserved field is not part of GraphQL or mutation inputs and uses `select: false` on Mongoose models. Native collection reads/aggregations and backups can see it. Lock writes bypass domain hooks, timestamps and version counters. Concurrent writes that reference a popular target contend on that document; this adds reads, writes and possible retries. A guarded save or update adds one projected read and, per target collection, one lock write per batch of up to 1,000 targets, plus one existence read before each such write that covers several targets. Index every reference path of a supplied model: a delete's query of a collection with an unindexed path scans that collection, even when an indexed path would have found a reference. Generated models index all of them.
 
 Owned transactions use `readConcern: 'snapshot'` and `writeConcern: 'majority'`. Confirmed transient failures retry the complete mutation up to five times, each retry after a random delay of less than 10, 20, 40, 80 and 160 ms that starts once the failed attempt is aborted; uncertain commit results retry only commit. Controllers may therefore execute more than once. A write conflict still present after the last retry, such as a delete that keeps conflicting with a concurrent reference lock, fails with `TRANSACTION_RETRY_EXCEEDED` (409), with the driver error as `error.cause`. Keep external side effects in a transactional outbox; see [transaction boundaries](./mutations#transaction-boundaries).
 
@@ -92,7 +92,7 @@ try {
 }
 ```
 
-Healthy supplied sessions remain caller-owned: the adapter does not commit, end or retry them. **A reference violation or guarded-write error aborts even a supplied transaction**, so catching the error cannot commit an invalid preceding write. This includes normal Mongoose post-save/update hooks that throw after the database operation; the original error is preserved. An ambiguous/missing update result also aborts the supplied transaction; the generated update keeps its normal `NOT_VALID_ID` result for a nonexistent record. A malformed ID is rejected with `NOT_VALID_ID` (400): a direct `adapter.update()` or `adapter.delete()` call aborts the supplied transaction, while generated deletes, and updates of types with embedded fields, reject it during their initial read and leave the transaction active. Callers own any retry using a fresh transaction; a conflict in a supplied session is returned as the raw driver error with its `errorLabels`.
+Healthy supplied sessions remain caller-owned: the adapter does not commit, end or retry them. **A reference violation or guarded-write error aborts even a supplied transaction**, so catching the error cannot commit an invalid preceding write. This includes normal Mongoose post-save/update hooks that throw after the database operation; the original error is preserved. An ambiguous/missing update result also aborts the supplied transaction; the generated update keeps its normal `NOT_VALID_ID` result for a nonexistent record. A malformed ID is rejected with `NOT_VALID_ID` (400): a direct `adapter.update()` or `adapter.delete()` call aborts the supplied transaction, while a nested `updated` or `deleted` child, as in a `saveObject()` call that joins the transaction, rejects it during its child read and leaves the transaction active (generated root mutations always own their transaction). Callers own any retry using a fresh transaction; a conflict in a supplied session is returned as the raw driver error with its `errorLabels`.
 
 ## Existing databases and native writes
 

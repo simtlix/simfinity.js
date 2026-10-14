@@ -30,14 +30,15 @@ const types = {
   Singular: new GraphQLObjectType({ name: 'ConstraintSingular', fields: { entry: { type: Code, extensions: embedded } } }),
 };
 
-describe.skipIf(!uri)('database-enforced embedded constraints', () => {
+// Both refresh-trigger layouts enforce the same constraints.
+describe.skipIf(!uri).each([['perRow', undefined], ['perRoot', 'perRoot']])('database-enforced embedded constraints (%s refresh triggers)', (layout, refreshTriggers) => {
   let pool; let api; let schema; let db;
   const namespace = `constraints_${randomUUID().replaceAll('-', '')}`;
   const sqlTable = (name) => `"${namespace}"."${name}"`;
   const model = (name) => api.getModel(types[name]);
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: uri });
-    api = createPostgres({ pool, schema: namespace });
+    api = createPostgres({ pool, schema: namespace, refreshTriggers });
     for (const [name, gqltype] of Object.entries(types)) api.connect(null, gqltype, name.toLowerCase(), `${name.toLowerCase()}s`);
     for (const gqltype of [Code, Codes, Branch, Value, StrictValue]) api.addNoEndpointType(gqltype);
     schema = api.createSchema();
@@ -236,11 +237,13 @@ describe.skipIf(!uri)('database-enforced embedded constraints', () => {
   it('rebuilds stale keys from swapped sources and restores old keys on actual duplicate recovery failure', async () => {
     const a = await model('Native').create({ codes: ['a'] });
     const b = await model('Native').create({ codes: ['b'] });
-    const trigger = db.triggers.find((item) => item.table === 'ConstraintNative' && item.constraint);
+    // The root's deferred trigger: on the root table (perRow) or on its guard table (perRoot).
+    const guard = db.maintenance.find((item) => item.rootTable === 'ConstraintNative').guardTable;
+    const trigger = db.triggers.find((item) => [layout === 'perRow' ? 'ConstraintNative' : guard].includes(item.table) && item.constraint);
     const keys = sqlTable(db.tables.find((item) => item.uniqueKeys?.rootTable === 'ConstraintNative').name);
     const keyRows = async () => (await pool.query(`SELECT * FROM ${keys} ORDER BY __owner_id, kind, value`)).rows;
     const initialKeys = await keyRows();
-    await pool.query(`DROP TRIGGER "${trigger.name}" ON ${sqlTable('ConstraintNative')}`);
+    await pool.query(`DROP TRIGGER "${trigger.name}" ON ${sqlTable(trigger.table)}`);
     await pool.query(`UPDATE ${sqlTable('ConstraintNative')} SET codes = CASE WHEN id = $1 THEN ARRAY['b'] ELSE ARRAY['a'] END`, [a.id]);
     await expect(initializeDatabase(pool, db, { mode: 'validate' })).rejects.toMatchObject({ extensions: { code: 'SCHEMA_MISMATCH' } });
     expect(await keyRows()).toEqual(initialKeys);
@@ -249,11 +252,11 @@ describe.skipIf(!uri)('database-enforced embedded constraints', () => {
       { owner: a.id, value: 'b' }, { owner: b.id, value: 'a' },
     ].sort((left, right) => left.owner.localeCompare(right.owner)));
     const rebuiltKeys = await keyRows();
-    await pool.query(`DROP TRIGGER "${trigger.name}" ON ${sqlTable('ConstraintNative')}`);
+    await pool.query(`DROP TRIGGER "${trigger.name}" ON ${sqlTable(trigger.table)}`);
     await pool.query(`UPDATE ${sqlTable('ConstraintNative')} SET codes = ARRAY['duplicate']`);
     await expect(initializeDatabase(pool, db)).rejects.toMatchObject({ code: '23505' });
     expect(await keyRows()).toEqual(rebuiltKeys);
-    expect((await pool.query('SELECT 1 FROM pg_trigger WHERE tgrelid = $1::regclass AND tgname = $2', [sqlTable('ConstraintNative'), trigger.name])).rowCount).toBe(0);
+    expect((await pool.query('SELECT 1 FROM pg_trigger WHERE tgrelid = $1::regclass AND tgname = $2', [sqlTable(trigger.table), trigger.name])).rowCount).toBe(0);
     await pool.query(`UPDATE ${sqlTable('ConstraintNative')} SET codes = CASE WHEN id = $1 THEN ARRAY['b'] ELSE ARRAY['a'] END`, [a.id]);
     await initializeDatabase(pool, db);
     expect(await initializeDatabase(pool, db, { mode: 'validate' })).toEqual({ mode: 'validate', created: [] });
@@ -261,7 +264,7 @@ describe.skipIf(!uri)('database-enforced embedded constraints', () => {
 
   it('rolls back generated objects and unique-key backfill on preexisting duplicate owners', async () => {
     const name = `${namespace}_backfill`;
-    const description = describeDatabase([{ gqltype: types.Native }], { schema: name });
+    const description = describeDatabase([{ gqltype: types.Native }], { schema: name, refreshTriggers });
     const ddl = compileDatabaseSchema(description);
     await pool.query(ddl[0]);
     await pool.query(ddl.find((statement) => statement.startsWith(`CREATE TABLE "${name}"."ConstraintNative" (`)));
@@ -312,7 +315,7 @@ describe.skipIf(!uri)('database-enforced embedded constraints', () => {
   it('handles user columns named owner_id and quoted schemas without trigger variable capture', async () => {
     const name = `${namespace}_'"`;
     const Names = new GraphQLObjectType({ name: 'ConstraintNames', fields: { owner_id: { type: GraphQLString }, keys: { type: new GraphQLList(GraphQLString), extensions: unique } } });
-    const description = describeDatabase([{ gqltype: Names }], { schema: name });
+    const description = describeDatabase([{ gqltype: Names }], { schema: name, refreshTriggers });
     const quoted = `"${name.replaceAll('"', '""')}"`;
     try {
       await initializeDatabase(pool, description);
@@ -324,7 +327,7 @@ describe.skipIf(!uri)('database-enforced embedded constraints', () => {
 
   it('rolls back missing constraint infrastructure when existing owned values are incomplete', async () => {
     const name = `${namespace}_incomplete`;
-    const description = describeDatabase([{ gqltype: types.Singular }], { schema: name });
+    const description = describeDatabase([{ gqltype: types.Singular }], { schema: name, refreshTriggers });
     const ddl = compileDatabaseSchema(description);
     await pool.query(ddl[0]);
     const sourceTables = description.tables.filter((table) => !table.auxiliary);
@@ -339,7 +342,7 @@ describe.skipIf(!uri)('database-enforced embedded constraints', () => {
 
   it('exports safe function literals even when the caller disables standard-conforming strings', async () => {
     const name = `${namespace}_\\'`;
-    const description = describeDatabase([{ gqltype: types.Native }], { schema: name });
+    const description = describeDatabase([{ gqltype: types.Native }], { schema: name, refreshTriggers });
     const quoted = `"${name.replaceAll('"', '""')}"`;
     const client = await pool.connect();
     try {
@@ -357,7 +360,7 @@ describe.skipIf(!uri)('database-enforced embedded constraints', () => {
     const Target = new GraphQLObjectType({ name: 'ShapeTarget', fields: { value: { type: GraphQLString } } });
     const Item = new GraphQLObjectType({ name: 'ShapeItem', fields: { target: { type: Target, extensions: { relation: {} } } } });
     const Owner = new GraphQLObjectType({ name: 'ShapeOwner', fields: { items: { type: new GraphQLList(Item), extensions: embedded } } });
-    const description = describeDatabase([{ gqltype: Owner }], { schema: name });
+    const description = describeDatabase([{ gqltype: Owner }], { schema: name, refreshTriggers });
     expect(description.tables.some((table) => table.uniqueKeys)).toBe(false);
     const entries = `"${name}"."ShapeOwner__items"`;
     const [a, b] = await Promise.all([pool.connect(), pool.connect()]);

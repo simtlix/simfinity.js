@@ -321,6 +321,34 @@ describe('MCP execution boundaries', () => {
     expect(Buffer.byteLength(result.content[0].text)).toBe(18);
   });
 
+  it('accepts a payload exactly at its compact size with textFormat: \'compact\'', async () => {
+    const schema = makeSchema({ echo: { type: GraphQLString, resolve: () => 'ok' } });
+    const result = await generateMCPTools(schema, { textFormat: 'compact', limits: { maxResultBytes: 13 } }).callTool('echo');
+    expect(result.isError).toBe(false);
+    expect(result.content[0].text).toBe('{"echo":"ok"}');
+    expect(result.structuredContent).toEqual({ echo: 'ok' });
+  });
+
+  it.each([undefined, null, 'pretty'])('keeps the pretty-printed text with textFormat %j (guard)', async (textFormat) => {
+    const schema = makeSchema({ echo: { type: GraphQLString, resolve: () => 'ok' } });
+    const result = await generateMCPTools(schema, { textFormat }).callTool('echo');
+    expect(result.content[0].text).toBe('{\n  "echo": "ok"\n}');
+  });
+
+  it.each([
+    ['an unknown format', 'json', 'textFormat must be \'pretty\' or \'compact\', got "json"'],
+    ['a different case', 'Compact', 'textFormat must be \'pretty\' or \'compact\', got "Compact"'],
+    ['a boolean', true, 'textFormat must be \'pretty\' or \'compact\', got true'],
+    ['a number', 2, 'textFormat must be \'pretty\' or \'compact\', got 2'],
+  ])('rejects %s as textFormat with MCP_INVALID_OPTIONS before any schema plugin runs', (label, textFormat, message) => {
+    const spy = { onSchemaChange: vi.fn() };
+    const schema = makeSchema({ echo: { type: GraphQLString, resolve: () => 'ok' } });
+    expect(() => generateMCPTools(schema, { textFormat, schemaPlugins: [spy] })).toThrow(expect.objectContaining({
+      message, extensions: expect.objectContaining({ code: 'MCP_INVALID_OPTIONS' }),
+    }));
+    expect(spy.onSchemaChange).not.toHaveBeenCalled();
+  });
+
   it('preserves partial errors and data below the cap', async () => {
     const Payload = new GraphQLObjectType({
       name: 'McpContractSmallPayload',
@@ -672,6 +700,145 @@ describe('MCP totalCount and truncation notice contracts', () => {
   });
 });
 
+describe('MCP textFormat compact', () => {
+  const Pagination = new GraphQLInputObjectType({
+    name: 'McpContractTextPagination',
+    fields: { page: { type: GraphQLInt }, size: { type: GraphQLInt }, count: { type: GraphQLBoolean } },
+  });
+  const Child = new GraphQLObjectType({
+    name: 'McpContractTextChild',
+    fields: { id: { type: GraphQLString } },
+  });
+  const Row = new GraphQLObjectType({
+    name: 'McpContractTextRow',
+    fields: {
+      id: { type: GraphQLString },
+      note: { type: GraphQLString },
+      children: {
+        type: new GraphQLList(Child),
+        args: { pagination: { type: Pagination } },
+        resolve: () => [{ id: 'c1' }, { id: 'c2' }],
+      },
+    },
+  });
+  const Payload = new GraphQLObjectType({
+    name: 'McpContractTextPayload',
+    fields: {
+      good: { type: GraphQLString, resolve: () => 'ok' },
+      bad: { type: GraphQLString, resolve: () => { throw new Error('denied'); } },
+    },
+  });
+  const schema = makeSchema({
+    rows: {
+      type: new GraphQLList(Row),
+      args: { pagination: { type: Pagination } },
+      resolve: (parent, args, context) => {
+        if (args.pagination && args.pagination.count) context.count = 3;
+        return [{ id: 'r1', note: 'n' }, { id: 'r2', note: 'x'.repeat(200) }];
+      },
+    },
+    payload: { type: Payload, resolve: () => ({}) },
+  }, {
+    addRow: { type: Row, description: 'add', resolve: () => ({ id: 'r9', note: 'x'.repeat(2000) }) },
+  });
+  const strictValidator = (outputSchema) => new Ajv2020({ strict: false }).compile(outputSchema);
+  const isCompact = (text) => text === JSON.stringify(JSON.parse(text));
+  const call = (options, name, args = {}) => generateMCPTools(schema, { context: {}, ...options }).callTool(name, args);
+
+  it.each([
+    ['a success', {}, 'rows', {}],
+    ['a counted list', {}, 'rows', { pagination: { page: 1, size: 2, count: true } }],
+    ['GraphQL errors with partial data', {}, 'payload', {}],
+    ['MCP_PAGE_SIZE_EXCEEDED', { limits: { maxPageSize: 1 } }, 'rows', { pagination: { page: 1, size: 5 } }],
+    ['MCP_UNKNOWN_ARGUMENT', {}, 'rows', { bogus: 1 }],
+  ])('sends %s as compact JSON of the pretty-printed result', async (label, options, name, args) => {
+    const pretty = await call(options, name, args);
+    const compact = await call({ ...options, textFormat: 'compact' }, name, args);
+
+    expect(isCompact(compact.content[0].text)).toBe(true);
+    expect(compact.content[0].text).not.toBe(pretty.content[0].text);
+    expect(JSON.parse(compact.content[0].text)).toEqual(JSON.parse(pretty.content[0].text));
+    expect(compact.isError).toBe(pretty.isError);
+    expect(compact.structuredContent).toEqual(pretty.structuredContent);
+    expect(compact._meta).toEqual(pretty._meta);
+    if (args.pagination && args.pagination.count) {
+      expect(compact.content[0].text).toContain('"totalCount":3');
+    }
+  });
+
+  it('measures maxResultBytes on the compact text', async () => {
+    const full = await call({ textFormat: 'compact' }, 'rows');
+    const bytes = Buffer.byteLength(full.content[0].text);
+    expect(bytes).toBeLessThan(Buffer.byteLength((await call({}, 'rows')).content[0].text));
+
+    expect((await call({ textFormat: 'compact', limits: { maxResultBytes: bytes } }, 'rows')).isError).toBe(false);
+    const tooLarge = await call({ textFormat: 'compact', limits: { maxResultBytes: bytes - 1 } }, 'rows');
+    expect(isCompact(tooLarge.content[0].text)).toBe(true);
+    expect(JSON.parse(tooLarge.content[0].text)).toEqual({
+      errors: [{
+        message: `Result of ${bytes} bytes exceeds maxResultBytes (${bytes - 1}). Narrow the query, lower selectionDepth or paginate.`,
+        extensions: { code: 'MCP_RESULT_TOO_LARGE' },
+      }],
+    });
+  });
+
+  it('reports the compact size in the oversized mutation notice', async () => {
+    const response = await call({ textFormat: 'compact', limits: { maxResultBytes: 512 } }, 'addRow');
+    const fullBytes = Buffer.byteLength(JSON.stringify({
+      addRow: { id: 'r9', note: 'x'.repeat(2000), children: [{ id: 'c1' }, { id: 'c2' }] },
+    }));
+
+    expect(response.isError).toBe(false);
+    expect(isCompact(response.content[0].text)).toBe(true);
+    expect(JSON.parse(response.content[0].text)).toEqual(response.structuredContent);
+    expect(response.structuredContent.truncated).toMatchObject({ applied: true, resultBytes: fullBytes, maxResultBytes: 512 });
+  });
+
+  it('returns compact text and valid structuredContent over the SDK client', async () => {
+    const server = await createMCPServer(schema, { context: {}, textFormat: 'compact', nestedCollections: 'none' });
+    const client = new Client({ name: 'mcp-contract-compact-client', version: '1' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    resources.push(async () => { await client.close(); await server.close(); });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const { tools } = await client.listTools();
+    const outputSchema = tools.find((tool) => tool.name === 'rows').outputSchema;
+    expect(Object.keys(outputSchema.properties.rows.items.properties)).toEqual(['id', 'note']);
+
+    const wire = await client.callTool({ name: 'rows', arguments: { pagination: { page: 1, size: 2, count: true } } });
+
+    expect(wire.isError).toBe(false);
+    expect(wire.content[0].text).toBe(JSON.stringify(wire.structuredContent));
+    expect(wire.structuredContent).toEqual({ rows: [{ id: 'r1', note: 'n' }, { id: 'r2', note: 'x'.repeat(200) }], totalCount: 3 });
+    expect(strictValidator(outputSchema)(wire.structuredContent)).toBe(true);
+  });
+
+  it('serves compact text and the \'none\' selection through createHTTPMCPHandler over Streamable HTTP', async () => {
+    const handler = await createHTTPMCPHandler(schema, { context: {}, textFormat: 'compact', nestedCollections: 'none' });
+    const client = new Client({ name: 'mcp-contract-compact-http-client', version: '1' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(await listen((req, res) => {
+      let raw = '';
+      req.on('data', (chunk) => { raw += chunk; });
+      req.on('end', () => {
+        if (raw) req.body = JSON.parse(raw);
+        handler(req, res);
+      });
+    }))));
+    resources.unshift(() => client.close());
+
+    const { tools } = await client.listTools();
+    const outputSchema = tools.find((tool) => tool.name === 'rows').outputSchema;
+    expect(outputSchema.properties.rows.items.properties).not.toHaveProperty('children');
+
+    const listed = await client.callTool({ name: 'rows', arguments: {} });
+    expect(listed.content[0].text).toBe('{"rows":[{"id":"r1","note":"n"},{"id":"r2","note":"' + 'x'.repeat(200) + '"}]}');
+    expect(strictValidator(outputSchema)(listed.structuredContent)).toBe(true);
+    const rejected = await client.callTool({ name: 'rows', arguments: { bogus: 1 } });
+    expect(isCompact(rejected.content[0].text)).toBe(true);
+    expect(errorCode(rejected)).toBe('MCP_UNKNOWN_ARGUMENT');
+  });
+});
+
 describe('MCP remote response contracts', () => {
   const schema = makeSchema({ echo: { type: GraphQLString } }, { write: { type: GraphQLString } });
 
@@ -966,6 +1133,20 @@ describe('MCP stateless HTTP configuration', () => {
     })).rejects.toMatchObject({ extensions: { code } });
     expect(spy.onSchemaChange).not.toHaveBeenCalled();
     expect(valid.getQueryType().getFields().echo.resolve).toBe(original);
+  });
+
+  it.each([
+    ['textFormat', { textFormat: 'json' }],
+    ['nestedCollections', { nestedCollections: 'bounded' }],
+    ['toolOverrides nestedCollections of an unpublished tool', { toolOverrides: { missing: { nestedCollections: { pageSize: 5 } } } }],
+  ])('rejects an invalid %s with MCP_INVALID_OPTIONS when creating the handler, before any schema plugin runs', async (label, options) => {
+    const schema = makeSchema({ echo: { type: GraphQLString, resolve: () => 'open' } });
+    const original = schema.getQueryType().getFields().echo.resolve;
+    const spy = { onSchemaChange: vi.fn() };
+    await expect(createHTTPMCPHandler(schema, { ...options, schemaPlugins: [spy] }))
+      .rejects.toMatchObject({ extensions: { code: 'MCP_INVALID_OPTIONS' } });
+    expect(spy.onSchemaChange).not.toHaveBeenCalled();
+    expect(schema.getQueryType().getFields().echo.resolve).toBe(original);
   });
 
   it.each([

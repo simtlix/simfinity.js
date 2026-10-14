@@ -104,11 +104,11 @@ On MongoDB, an `UnknownTransactionCommitResult` retries only the commit, up to f
 
 Multiple root mutation fields in a GraphQL request are not one shared transaction. If a later field fails, an earlier field may already have committed. Use a custom mutation when a business operation needs a single transaction spanning several writes.
 
-Controllers, validators, and state actions can run again on a retry. Keep their database work on the supplied session and design external side effects separately from the transaction. See [controllers](./controllers#transactions-and-side-effects).
+Controllers, validators, state actions and the middleware of nested collection children can run again on a retry. Keep their database work on the supplied session and design external side effects separately from the transaction. See [controllers](./controllers#transactions-and-side-effects).
 
 ## Limit nested collection operations
 
-Each nested `added`, `updated` or `deleted` entry runs its own middleware, hooks and database writes inside the parent's transaction. A large nested input can therefore hold a long transaction. Cap it once at startup:
+Each nested `added`, `updated` or `deleted` entry runs its own middleware, hooks and database writes inside the parent's transaction. A large nested input can therefore hold a long transaction. Entries run one at a time: an `updated` or `deleted` entry first reads its child (locking the row on PostgreSQL), then writes it, and a retried transaction runs every entry again. Cap them once at startup, especially on servers exposed to MCP clients or other untrusted callers:
 
 ```javascript
 simfinity.configureMutationLimits({ maxNestedOperations: 100 });
