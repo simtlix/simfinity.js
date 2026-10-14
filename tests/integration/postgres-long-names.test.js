@@ -45,7 +45,10 @@ describe.skipIf(!uri)('PostgreSQL long names with the opt-in layouts', () => {
       { table: owned, name: db.triggers.find((trigger) => trigger.table === owned).name, constraint: false },
     ].sort(byTable));
     // Only the keys table keeps its (__owner_id) index.
-    const ownerIndexes = await pool.query('SELECT tablename AS table FROM pg_indexes WHERE schemaname = $1 AND indexdef LIKE \'CREATE INDEX % USING btree (__owner_id)\'', [schema]);
+    // Scope the catalog before deparsing/filtering definitions: other suites drop their own tables.
+    const ownerIndexes = await pool.query(`WITH scoped_indexes AS MATERIALIZED (
+      SELECT tablename, indexdef FROM pg_indexes WHERE schemaname = $1
+    ) SELECT tablename AS table FROM scoped_indexes WHERE indexdef LIKE 'CREATE INDEX % USING btree (__owner_id)'`, [schema]);
     expect(ownerIndexes.rows).toEqual([{ table: keys }]);
 
     const model = api.getModel(Root);
