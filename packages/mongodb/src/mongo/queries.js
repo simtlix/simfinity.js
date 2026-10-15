@@ -128,6 +128,49 @@ const identifierLeaf = (model, schemaPath, gqltype) => {
   return hasStoredIdentity(gqltype) || !schema.path(`${schemaPath}.id`) ? '_id' : 'id';
 };
 
+const DYNAMIC_STORAGE_TYPES = new Set(['Mixed', 'Map']);
+const appendPath = (prefix, leaf) => prefix ? `${prefix}.${leaf}` : leaf;
+
+const assertStoredPath = (model, path, allowNested = false) => {
+  const stored = model?.schema.path(path);
+  if (!stored && !(allowNested && model?.schema.nested[path])) {
+    throw filterError('Query field has no registered storage path', 'INVALID_FILTER_PATH');
+  }
+};
+
+const serverFieldName = (fields, part) => {
+  if (Object.hasOwn(fields, part)) return part;
+  return Object.keys(fields).find((key) => (
+    fields[key].extensions?.relation && getFieldStorageName(key, fields[key]) === part
+  ));
+};
+
+const resolveServerLeaf = ({ field, name, part, fieldType, model, schemaPath, mongoPath, parts, index }) => {
+  const relation = field.extensions?.relation;
+  const terminal = index === parts.length - 1;
+  if (relation && !relation.embedded) {
+    if (!terminal || getListShape(field.type)) {
+      throw filterError('Server queries cannot traverse nonembedded relations', 'INVALID_FILTER_PATH');
+    }
+    const leaf = getFieldStorageName(name, field);
+    assertStoredPath(model, appendPath(schemaPath, leaf));
+    return { mongoPath: appendPath(mongoPath, leaf) };
+  }
+  if (field.extensions?.queryPaths?.dynamic === true) {
+    const storage = model?.schema.path(appendPath(schemaPath, part));
+    const item = storage?.caster || storage;
+    if (!(fieldType instanceof GraphQLScalarType) || !DYNAMIC_STORAGE_TYPES.has(item?.instance)) {
+      throw filterError('Dynamic query paths require a scalar with registered Mixed or Map storage', 'INVALID_FILTER_PATH');
+    }
+    return { mongoPath: [mongoPath, ...parts.slice(index)].filter(Boolean).join('.') };
+  }
+  if (terminal && fieldType instanceof GraphQLObjectType) {
+    assertStoredPath(model, appendPath(schemaPath, part), true);
+    return { mongoPath: appendPath(mongoPath, part), structured: true };
+  }
+  return null;
+};
+
 // Resolve GraphQL paths and storage paths together; supplied models own ID casting.
 const resolveQueryPath = (gqltype, path, aggregationsIncluded, server = false) => {
   if (!server) assertValidFilterPath(path);
@@ -141,34 +184,21 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded, server = false) =
 
   for (const [index, part] of parts.entries()) {
     const fields = currentType.getFields();
-    const name = server && !Object.hasOwn(fields, part)
-      ? Object.keys(fields).find((key) => fields[key].extensions?.relation && getFieldStorageName(key, fields[key]) === part) : part;
+    const name = server ? serverFieldName(fields, part) : part;
     const field = Object.hasOwn(fields, name) ? fields[name] : null;
     if (!field) throw filterError(`Unknown query field: ${path}`, 'INVALID_FILTER_FIELD');
     const fieldType = getNamedType(field.type);
     const relation = field.extensions?.relation;
     if (server) {
       assertQueryField?.(currentType, name, field);
-      if (relation && !relation.embedded) {
-        if (index !== parts.length - 1 || getListShape(field.type)) throw filterError('Server queries cannot traverse nonembedded relations', 'INVALID_FILTER_PATH');
-        const leaf = getFieldStorageName(name, field);
-        if (!currentModel?.schema.path(schemaPath ? schemaPath + '.' + leaf : leaf)) throw filterError('Query field has no registered storage path', 'INVALID_FILTER_PATH');
-        return { mongoPath: mongoPath ? mongoPath + '.' + leaf : leaf };
-      }
-      if (field.extensions?.queryPaths?.dynamic === true) {
-        const storage = currentModel?.schema.path(schemaPath ? schemaPath + '.' + part : part);
-        const item = storage?.caster || storage;
-        if (!(fieldType instanceof GraphQLScalarType) || !['Mixed', 'Map'].includes(item?.instance)) throw filterError('Dynamic query paths require a scalar with registered Mixed or Map storage', 'INVALID_FILTER_PATH');
-        return { mongoPath: [mongoPath, ...parts.slice(index)].filter(Boolean).join('.') };
-      }
+      const leaf = resolveServerLeaf({
+        field, name, part, fieldType, model: currentModel,
+        schemaPath, mongoPath, parts, index,
+      });
+      if (leaf) return leaf;
     }
     if (fieldType instanceof GraphQLObjectType) {
       if (index === parts.length - 1) {
-        if (server) {
-          const stored = schemaPath ? schemaPath + '.' + part : part;
-          if (!currentModel?.schema.path(stored) && !currentModel?.schema.nested[stored]) throw filterError('Query field has no registered storage path', 'INVALID_FILTER_PATH');
-          return { mongoPath: mongoPath ? mongoPath + '.' + part : part, structured: true };
-        }
         throw filterError(`Query path must end in a scalar field: ${path}`, 'INVALID_FILTER_PATH');
       }
       if (!relation || relation.embedded) {
@@ -199,7 +229,7 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded, server = false) =
       if (index !== parts.length - 1) throw filterError(`Cannot traverse scalar field in ${path}`, 'INVALID_FILTER_PATH');
       const leaf = part === 'id' ? identifierLeaf(currentModel, schemaPath, currentType) : part;
       const storagePath = schemaPath ? `${schemaPath}.${leaf}` : leaf;
-      if (server && !currentModel?.schema.path(storagePath)) throw filterError('Query field has no registered storage path', 'INVALID_FILTER_PATH');
+      if (server) assertStoredPath(currentModel, storagePath);
       return {
         mongoPath: mongoPath ? `${mongoPath}.${leaf}` : leaf,
         schemaType: currentModel?.schema?.path(storagePath),

@@ -6,16 +6,21 @@ import { createMongoModel } from './models.js';
 import { createMongoQueries } from './queries.js';
 import { withMongoTransaction } from './transactions.js';
 import { readMongoPipeline } from './cursor.js';
+import { SERVER_READ_OPTION_NAMES } from './read-options.js';
 import { createStorageExecutor, validateMongoSession, validateStorageOptions } from './storage.js';
 import { createMongoIntegrity } from './integrity.js';
 import {
   castModelId, castObjectId, castPathValue, invalidId, isQueryKeyCastFailure, mapIdCastError,
 } from './ids.js';
 
+const SERVER_READ_OPTIONS = new Set(SERVER_READ_OPTION_NAMES);
+const CONDITIONAL_QUERY_OPTIONS = { sanitizeFilter: false, strictQuery: false };
+
 const validateServerReadOptions = (options) => {
-  const allowed = ['batchSize', 'collation', 'hint', 'maxTimeMS', 'timeoutMS', 'timeoutMode', 'signal', 'allowDiskUse', 'readConcern'];
   for (const key of Object.keys(options || {})) {
-    if (!allowed.includes(key)) throw new SimfinityError('Unsupported server read option: ' + key, 'INVALID_FILTER_VALUE', 400);
+    if (!SERVER_READ_OPTIONS.has(key)) {
+      throw new SimfinityError('Unsupported server read option: ' + key, 'INVALID_FILTER_VALUE', 400);
+    }
   }
 };
 
@@ -137,6 +142,14 @@ const nestedPathOf = (nested) => {
 
 export const createMongoAdapter = (options) => {
   const integrity = createMongoIntegrity(options);
+  // Each supplied database gets a private model namespace on its existing client.
+  // Only the database owner opens/closes that client. Schema-only runtimes remain disconnected.
+  const namespace = options && Object.hasOwn(options, 'database') ? new mongoose.Mongoose() : null;
+  const connection = namespace ? namespace.createConnection() : mongoose.connection;
+  const database = options?.database;
+  const modelConnection = database
+    ? connection.setClient(database.client).useDb(database.databaseName)
+    : connection;
   let queries;
   let executeStorage;
   let getRegistrations = () => [];
@@ -233,15 +246,21 @@ export const createMongoAdapter = (options) => {
           model.schema.index({ [fieldName]: 1 });
         }
         if (onModelCreated) onModelCreated(model);
-      }, integrity.enabled ? { ...modelOptions, createCollection: false } : modelOptions);
+      }, { ...modelOptions, connection: modelConnection, storage: options?.models?.[gqltype.name], ...(integrity.enabled ? { createCollection: false } : {}) });
     },
     // Keep the delegate present before bind so adapter decorators can copy it safely.
     async executeStorage(...args) {
-      if (!executeStorage) throw new SimfinityError('MongoDB adapter must be bound to a runtime before storage operations', 'ADAPTER_NOT_BOUND', 500);
+      if (!executeStorage) {
+        throw new SimfinityError(
+          'MongoDB adapter must be bound to a runtime before storage operations', 'ADAPTER_NOT_BOUND', 500,
+        );
+      }
       return executeStorage(...args);
     },
     compileServerQuery(gqltype, query, operation) {
-      if (!queries) throw new SimfinityError('MongoDB adapter must be bound to a runtime before queries', 'ADAPTER_NOT_BOUND', 500);
+      if (!queries) {
+        throw new SimfinityError('MongoDB adapter must be bound to a runtime before queries', 'ADAPTER_NOT_BOUND', 500);
+      }
       return queries.compileServerQuery(gqltype, query, operation);
     },
     storageBackend: 'mongodb',
@@ -250,7 +269,9 @@ export const createMongoAdapter = (options) => {
     validateStorageOptions(Model, gqltype, operation, storage) {
       return validateStorageOptions(Model, gqltype, operation, storage, integrity);
     },
-    setRecordIdentity(Model, record, id) { record._id = castModelId(Model, id); },
+    setRecordIdentity(Model, record, id) {
+      record._id = castModelId(Model, id);
+    },
     // Relation inputs and batch keys: only an ObjectId or its hex form, never a newly minted one.
     castId: castObjectId,
     initialize: integrity.initialize,
@@ -306,7 +327,9 @@ export const createMongoAdapter = (options) => {
       integrity.assertReady();
       const observation = observer || options?.queryObserver?.();
       if (observation || readOptions) {
-        if (!hasNoQueryHooks(Model, ['findOne'])) throw new SimfinityError('Observed by-ID reads require a model without findOne hooks', 'UNSUPPORTED_CAPABILITY', 400);
+        if (!hasNoQueryHooks(Model, ['findOne'])) {
+          throw new SimfinityError('Observed by-ID reads require a model without findOne hooks', 'UNSUPPORTED_CAPABILITY', 400);
+        }
         const predicates = [{ _id: castModelId(Model, id) }];
         if (requiredId != null) predicates.push({ _id: castModelId(Model, requiredId) });
         if (storage?.filter) predicates.push(storage.filter);
@@ -315,9 +338,15 @@ export const createMongoAdapter = (options) => {
         pipeline.push({ $limit: 1 });
         return readMongoPipeline(Model, pipeline, { ...readOptions, session }, observation).then((rows) => rows[0] || null);
       }
-      let query = withSession(storage?.filter ? Model.findOne({ $and: [{ _id: id }, storage.filter] }, projection, { sanitizeFilter: false, strictQuery: false })
-        : requiredId == null ? Model.findById(id, projection)
-        : Model.findOne({ $and: [{ _id: requiredId }, { _id: id }] }, projection), session);
+      let query;
+      if (storage?.filter) {
+        query = Model.findOne({ $and: [{ _id: id }, storage.filter] }, projection, { ...CONDITIONAL_QUERY_OPTIONS });
+      } else if (requiredId != null) {
+        query = Model.findOne({ $and: [{ _id: requiredId }, { _id: id }] }, projection);
+      } else {
+        query = Model.findById(id, projection);
+      }
+      query = withSession(query, session);
       if (plain) query = query.lean();
       return mapQueryIdCastErrors(query);
     },
@@ -339,36 +368,41 @@ export const createMongoAdapter = (options) => {
       return Object.keys(unset).length > 0 ? { ...set, $unset: unset } : set;
     },
     prepareStorageUpdate(update, storage) {
-      let changes = update;
-      if (storage?.increments) {
-        const set = {}, operators = {};
-        for (const [key, value] of Object.entries(update)) {
-          if (key.startsWith('$')) operators[key] = value;
-          else set[key] = value;
+      if (!storage?.increments) return update;
+      const set = {};
+      const operators = {};
+      for (const [key, value] of Object.entries(update)) {
+        if (key.startsWith('$')) {
+          operators[key] = value;
+        } else {
+          set[key] = value;
         }
-        for (const key of Object.keys(storage.increments)) {
-          if (Object.hasOwn(set, key) || Object.values(operators).some((fields) => Object.hasOwn(fields, key))) {
-            throw new SimfinityError('Increment overlaps a generated update field', 'INVALID_STORAGE_OPERATION', 400);
-          }
-        }
-        changes = { ...operators, ...(Object.keys(set).length ? { $set: set } : {}), $inc: storage.increments };
       }
-      return changes;
+      const changedFields = [set, ...Object.values(operators)];
+      for (const key of Object.keys(storage.increments)) {
+        if (changedFields.some((fields) => Object.hasOwn(fields, key))) {
+          throw new SimfinityError('Increment overlaps a generated update field', 'INVALID_STORAGE_OPERATION', 400);
+        }
+      }
+      if (Object.keys(set).length) operators.$set = set;
+      return { ...operators, $inc: storage.increments };
     },
     update(Model, id, update, session, storage) {
       if (integrity.enabled) return integrity.updateRecord(Model, id, update, session);
-      return mapQueryIdCastErrors(withSession(storage?.filter !== undefined
-        ? Model.findOneAndUpdate({ $and: [{ _id: id }, storage.filter] }, update, { new: true, sanitizeFilter: false, strictQuery: false })
-        : Model.findByIdAndUpdate(id, update, { new: true }), session), mapIdCastError);
+      const query = storage?.filter !== undefined
+        ? Model.findOneAndUpdate({ $and: [{ _id: id }, storage.filter] }, update, { ...CONDITIONAL_QUERY_OPTIONS, new: true })
+        : Model.findByIdAndUpdate(id, update, { new: true });
+      return mapQueryIdCastErrors(withSession(query, session), mapIdCastError);
     },
     delete(Model, id, session, storage) {
       if (integrity.enabled) {
         integrity.assertWrite(Model, session);
         return integrity.deleteRecord(Model, id, session);
       }
-      return mapQueryIdCastErrors(withSession(storage?.filter !== undefined
-        ? Model.findOneAndDelete({ $and: [{ _id: id }, storage.filter] }, { sanitizeFilter: false, strictQuery: false })
-        : Model.findByIdAndDelete(id), session));
+      const query = storage?.filter !== undefined
+        ? Model.findOneAndDelete({ $and: [{ _id: id }, storage.filter] }, { ...CONDITIONAL_QUERY_OPTIONS })
+        : Model.findByIdAndDelete(id);
+      return mapQueryIdCastErrors(withSession(query, session));
     },
     async find(Model, gqltype, args, session, { requiredId, readOptions, observer, serverPlan } = {}) {
       integrity.assertReady();

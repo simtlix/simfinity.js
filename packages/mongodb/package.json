@@ -17,8 +17,7 @@
   },
   "peerDependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
-    "graphql": "^16.11.0",
-    "mongoose": "^8.24.2"
+    "graphql": "^16.11.0"
   },
   "peerDependenciesMeta": {
     "@modelcontextprotocol/sdk": {
@@ -30,7 +29,8 @@
   },
   "dependencies": {
     "@simtlix/simfinity-core": "3.6.0",
-    "@simtlix/simfinity-mcp": "3.6.0"
+    "@simtlix/simfinity-mcp": "3.6.0",
+    "mongoose": "^8.24.2"
   },
   "files": [
     "src",

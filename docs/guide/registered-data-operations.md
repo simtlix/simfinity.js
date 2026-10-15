@@ -19,6 +19,48 @@ const row = await runtime.execute('Item', 'update', {
 });
 ```
 
+## Database and model ownership
+
+Applications can install only `@simtlix/simfinity-js`; Mongoose is an internal
+adapter dependency. `openMongoDatabase(uri, options)` opens an independent owner
+and returns `{ database, close }`. Pass that database unchanged to
+`createMongoAdapter({ database, models })`. Closing one owner does not close other
+owners, and adapters borrowing the handle never close it. Omit `database` for the
+existing default-connection behavior; pass `null` for schema-only construction.
+
+```js
+const owner = await openMongoDatabase(uri);
+const runtime = createRuntime(createMongoAdapter({
+  database: owner.database,
+  models: {
+    Item: { collection: 'items', fields: { _id: 'objectId', title: 'string', version: 'number' } },
+  },
+}));
+runtime.connect(null, ItemType, 'item', 'items');
+runtime.createSchema();
+// Use runtime.execute(...) for registered entity operations.
+// On application shutdown:
+await owner.close();
+```
+
+Storage metadata describes persisted fields independently of public GraphQL fields.
+It supports identifiers, strings, dates, numbers, booleans and opaque maps/arrays.
+Declared models disable automatic collection/index creation, version keys and object
+minimization; deployment migrations remain responsible for physical indexes.
+`strict` defaults to `true` and also accepts `'throw'`. Without `models`, the existing
+GraphQL-to-model generation is unchanged. `mongoId`, `isMongoId` and
+`serializeMongoValue` provide identifier/JSON conversion without importing Mongoose.
+
+`MongoTransactionPolicy(() => owner.database.client)` owns bounded command
+transactions. `runOwned(work)` uses snapshot reads and majority writes, retries
+confirmed transient aborts within one deadline, and retries only commit after an
+uncertain commit. Exhaustion reports `TRANSACTION_OUTCOME_UNKNOWN`; business work
+is never replayed after uncertainty. `runAdopted(session, work)` checks active
+same-client ownership without commit, abort or cleanup. Optional `afterRollback`,
+`commit` and `unknownCommit` hooks attach application settlement and telemetry;
+they must preserve the transaction outcome. The existing generated-write transaction
+policy remains the default unless the consumer installs this command policy on its adapter.
+
 ## Generated lifecycle
 
 `execute(typeName, operation, args, options)` accepts `save`, `update`, `delete`,
@@ -59,16 +101,6 @@ transaction, controller or write execution; they never become an ID-only mutatio
 Backend storage options fail with `UNSUPPORTED_CAPABILITY` on adapters without that
 capability and on Mongo transactional-reference-integrity mode.
 
-## Registered custom operations
-
-`executeMutation(name, input, { context, session })` runs registered custom-mutation
-middleware (`custom_mutation`, with `entry`) and the same transaction callback as the
-generated custom mutation. With an input model it coerces GraphQL input and uses the
-existing retry-input copies. Without an input model it preserves the exact input,
-context and session identities, including Buffer/provider request objects. The
-selected adapter owns transaction semantics; an ingress-only adapter can deliberately
-provide caller-owned execution without retries. Missing names fail with
-`UNREGISTERED_OPERATION`. No captured resolver, schema inclusion or fake info is needed.
 
 ## Trusted Mongo capabilities
 
@@ -117,6 +149,8 @@ Observers expose `beforeFetch()` (every physical initialize/getMore, including e
 batches), `beforeRead()`, `onRows(batch)` (the entire fetched batch before another
 fetch), and `track(promise)` (pending fetch, read and cleanup). Hooks may throw to
 stop work; error cleanup closes the cursor while preserving the primary read error.
+Cleanup is awaited even when tracking fails. If reading succeeds but closing fails,
+the close error is propagated. Early iterator return follows the same cleanup policy.
 A tracking callback failure can stop a read but can never suppress native close.
 A caller can count rows, apply weighted measurements to count/group projections and
 track/drain outstanding work without patching model collections or driver methods.

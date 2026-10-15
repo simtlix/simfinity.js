@@ -1,3 +1,4 @@
+import type mongoose from 'mongoose';
 /**
  * Type declarations for @simtlix/simfinity-js.
  *
@@ -120,7 +121,30 @@ declare module '@simtlix/simfinity-core' {
   interface StorageCapabilities { mongodb: MongoStorageRequest }
 }
 
+/** Storage handles stay in infrastructure; domain APIs use strings and plain values. */
+export interface MongoDatabase extends mongoose.mongo.Db {}
+export interface MongoSession extends mongoose.mongo.ClientSession {}
+export type MongoDocument = mongoose.mongo.Document;
+export interface MongoIdentifier extends mongoose.Types.ObjectId {}
+export type MongoStoredDocument = mongoose.mongo.WithId<MongoDocument>;
+export type MongoFilter = mongoose.mongo.Filter<MongoDocument>;
+export type MongoChanges = mongoose.mongo.UpdateFilter<MongoDocument>;
+export interface MongoStorageDefinition {
+  collection: string;
+  fields: Record<string, 'id' | 'objectId' | 'date' | 'text' | 'string' | 'boolean' | 'bool' | 'number' | 'int' | 'long' | 'double' | 'decimal' | 'map' | 'object' | 'array'>;
+  strict?: boolean | 'throw';
+}
+/** Opens a dedicated database; the returned close function owns only this connection. */
+export function openMongoDatabase(uri: string, options?: { dbName?: string; serverSelectionTimeoutMS?: number; monitorCommands?: boolean }): Promise<{ database: MongoDatabase; close(): Promise<void> }>;
+/** Adapter-owned ObjectId allocation/casting. Invalid input throws before persistence. */
+export function mongoId(value?: string): MongoIdentifier;
+export function isMongoId(value: unknown): boolean;
+export function serializeMongoValue(value: unknown): unknown;
 export interface MongoAdapterOptions {
+  /** A supplied database is borrowed. Null creates a disconnected schema-only namespace. */
+  database?: MongoDatabase | null;
+  /** Optional storage metadata for opaque scalars and existing collection layouts. */
+  models?: Record<string, MongoStorageDefinition>;
   /** Fixed at adapter creation. Defaults to off; transactional mode requires initialize(). */
   referentialIntegrity?: 'off' | 'transactional';
   /** Optional observer for generated list/count/aggregate reads. */
@@ -361,3 +385,28 @@ export function buildFilterGroupMatch(
   aggregationsIncluded: Record<string, any>,
   depth?: number,
 ): Promise<any>;
+
+/** Driver lifecycle is owned by the Mongo adapter; consumers pass the handle unchanged. */
+export interface TransactionSession {
+  readonly client?: unknown;
+  inTransaction(): boolean;
+  startTransaction(options: { readConcern: { level: 'snapshot' }; writeConcern: { w: 'majority' }; readPreference: 'primary'; maxCommitTimeMS: number }): void;
+  commitTransaction(): Promise<void>;
+  abortTransaction(): Promise<void>;
+  endSession(): Promise<void>;
+}
+export interface TransactionPolicyOptions {
+  businessTimeoutMs?: number;
+  maximumCommitAttempts?: number;
+  now?: () => number;
+  afterRollback?: (error: unknown) => Promise<void>;
+  commit?: (work: () => Promise<void>, attempt: number) => Promise<void>;
+  unknownCommit?: (error: unknown) => Error;
+}
+/** Own/reuse transactions with bounded retries; never replay an uncertain commit. */
+export class MongoTransactionPolicy<Session extends TransactionSession = MongoSession> {
+  constructor(client: () => { startSession(): Session }, options?: TransactionPolicyOptions);
+  assertBorrowed(session: unknown): asserts session is Session;
+  runAdopted<T>(session: unknown, work: (session: Session) => T | Promise<T>): Promise<T>;
+  runOwned<T>(work: (session: Session) => T | Promise<T>, options?: { businessTimeoutMs?: number }): Promise<T>;
+}

@@ -49,3 +49,6 @@ export {
   startStdioMCPServer,
   createHTTPMCPHandler,
 } from './mcp.js';
+
+export { openMongoDatabase, mongoId, isMongoId, serializeMongoValue } from './mongo/database.js';
+export { MongoTransactionPolicy } from './mongo/transaction-policy.js';

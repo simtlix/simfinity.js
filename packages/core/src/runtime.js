@@ -2754,89 +2754,202 @@ function formatArgs(argsArray) {
 const registered = (typeName) => {
   const type = typesDict.types[typeName];
   if (!type?.endpoint || !type.model || !type.inputType) {
-    throw new SimfinityError('Entity must be registered and its schema initialized', 'UNREGISTERED_ENTITY', 400);
+    throw new SimfinityError(
+      'Entity must be registered and its schema initialized',
+      'UNREGISTERED_ENTITY',
+      400,
+    );
   }
   return type;
 };
-const execute = async (typeName, operation, args = {}, options = {}) => {
-  const type = registered(typeName);
-  const { context, session } = options;
-  let { storage } = options;
-  if (options.query !== undefined || ['stream', 'page'].includes(operation)) {
-    if (!['find', 'count', 'stream', 'page'].includes(operation) || !adapter.compileServerQuery || typeof adapter[operation] !== 'function') {
-      throw new SimfinityError('Server queries are unsupported for this operation/backend', 'UNSUPPORTED_CAPABILITY', 400);
+const SERVER_QUERY_OPERATIONS = new Set(['find', 'count', 'stream', 'page']);
+const EXPLICIT_QUERY_OPERATIONS = new Set(['stream', 'page']);
+const FIND_SCOPE_OPERATIONS = new Set(['count', 'stream', 'page']);
+const REGISTERED_READ_OPERATIONS = new Set([...SERVER_QUERY_OPERATIONS, 'get_by_id', 'aggregate']);
+const REGISTERED_WRITE_OPERATIONS = new Set([
+  operations.SAVE,
+  operations.UPDATE,
+  operations.DELETE,
+]);
+const STORAGE_READ_OPERATIONS = new Set(['find', 'aggregate', 'stream']);
+
+const validateServerExecution = (type, operation, args, options) => {
+  const serverQuery = options.query !== undefined || EXPLICIT_QUERY_OPERATIONS.has(operation);
+  if (serverQuery) {
+    const supported =
+      SERVER_QUERY_OPERATIONS.has(operation) &&
+      adapter.compileServerQuery &&
+      typeof adapter[operation] === 'function';
+    if (!supported) {
+      throw new SimfinityError(
+        'Server queries are unsupported for this operation/backend',
+        'UNSUPPORTED_CAPABILITY',
+        400,
+      );
     }
-    if (options.query === undefined || Object.keys(args).length) throw new SimfinityError('Server queries require an explicit query and empty generated arguments', 'INVALID_FILTER_VALUE', 400);
+    if (options.query === undefined || Object.keys(args).length) {
+      throw new SimfinityError(
+        'Server queries require an explicit query and empty generated arguments',
+        'INVALID_FILTER_VALUE',
+        400,
+      );
+    }
+    // Validate before middleware/side effects, then compile the middleware's final
+    // query again at the execution boundary.
     adapter.compileServerQuery(type.gqltype, options.query, operation);
   }
   if ((options.readOptions || options.observer) && !adapter.supportsObservedReads) {
-    throw new SimfinityError('Observed reads are unsupported by this backend', 'UNSUPPORTED_CAPABILITY', 400);
+    throw new SimfinityError(
+      'Observed reads are unsupported by this backend',
+      'UNSUPPORTED_CAPABILITY',
+      400,
+    );
   }
-  if (session && adapter.validateSession) adapter.validateSession(type.model, session);
-  if (storage) {
-    if (!adapter.validateStorageOptions) throw new SimfinityError('Storage write options are unsupported by this backend', 'UNSUPPORTED_CAPABILITY', 400);
-    storage = adapter.validateStorageOptions(type.model, type.gqltype, operation, storage) || storage;
+  if (options.session && adapter.validateSession) {
+    adapter.validateSession(type.model, options.session);
   }
-  const mutation = [operations.SAVE, operations.UPDATE, operations.DELETE].includes(operation);
-  if (mutation) {
-    const inputType = operation === operations.UPDATE ? typesDictForUpdate.types[typeName].inputType : type.inputType;
-    const params = { type, operation, context, args: operation === operations.DELETE
-      ? { id: coerceInputValue(args.id, new GraphQLNonNull(GraphQLID)) }
-      : { input: coerceInputValue(args.input, new GraphQLNonNull(inputType)) } };
-    await executeMiddleware(params);
-    return executeOperation(type.model, type.gqltype, type.controller,
-      operation === operations.DELETE ? params.args.id : params.args.input,
-      operation, null, session, context, inputType, storage);
+};
+
+const registeredStorageOptions = (type, operation, storage) => {
+  if (!storage) {
+    return storage;
   }
-  if (!['find', 'count', 'stream', 'page', 'get_by_id', 'aggregate'].includes(operation)) {
-    throw new SimfinityError('Unsupported registered operation', 'INVALID_OPERATION', 400);
+  if (!adapter.validateStorageOptions) {
+    throw new SimfinityError(
+      'Storage write options are unsupported by this backend',
+      'UNSUPPORTED_CAPABILITY',
+      400,
+    );
   }
-  if (operation === 'get_by_id') {
-    const params = { type, args: { id: coerceInputValue(args.id, new GraphQLNonNull(GraphQLID)) }, operation, context };
-    await executeMiddleware(params);
-    if (!getScope(type.gqltype, operation)) return adapter.getById(type.model, params.args.id, session, { context, readOptions: options.readOptions, observer: options.observer });
-    const queryArgs = { id: { operator: 'EQ', value: params.args.id } };
-    await executeScope({ ...params, args: queryArgs });
-    const rows = await adapter.find(type.model, type.gqltype, queryArgs, session, { context, readOptions: options.readOptions, observer: options.observer });
-    return rows[0] || null;
+  return adapter.validateStorageOptions(type.model, type.gqltype, operation, storage) || storage;
+};
+
+const executeRegisteredWrite = async (typeName, type, operation, args, options, storage) => {
+  const { context, session } = options;
+  const inputType =
+    operation === operations.UPDATE ? typesDictForUpdate.types[typeName].inputType : type.inputType;
+  const deleting = operation === operations.DELETE;
+  const coerced = deleting
+    ? { id: coerceInputValue(args.id, new GraphQLNonNull(GraphQLID)) }
+    : { input: coerceInputValue(args.input, new GraphQLNonNull(inputType)) };
+  const params = { type, operation, context, args: coerced };
+  await executeMiddleware(params);
+  const input = deleting ? params.args.id : params.args.input;
+  return executeOperation(
+    type.model,
+    type.gqltype,
+    type.controller,
+    input,
+    operation,
+    null,
+    session,
+    context,
+    inputType,
+    storage,
+  );
+};
+
+const executeRegisteredById = async (type, args, session, readOptions) => {
+  const operation = 'get_by_id';
+  const params = {
+    type,
+    operation,
+    context: readOptions.context,
+    args: { id: coerceInputValue(args.id, new GraphQLNonNull(GraphQLID)) },
+  };
+  await executeMiddleware(params);
+  if (!getScope(type.gqltype, operation)) {
+    return adapter.getById(type.model, params.args.id, session, readOptions);
   }
+  const queryArgs = { id: { operator: 'EQ', value: params.args.id } };
+  await executeScope({ ...params, args: queryArgs });
+  const rows = await adapter.find(type.model, type.gqltype, queryArgs, session, readOptions);
+  return rows[0] || null;
+};
+
+const executeRegisteredQuery = async (type, operation, args, options, readOptions) => {
   const queryArgs = { ...args };
-  const scopeOperation = ['count', 'stream', 'page'].includes(operation) ? 'find' : operation;
+  const scopeOperation = FIND_SCOPE_OPERATIONS.has(operation) ? 'find' : operation;
   const joinedScopes = inspectClientPaths(type.gqltype, queryArgs, scopeOperation);
-  const params = { type, args: queryArgs, operation: options.query !== undefined ? operation : scopeOperation, context,
-    ...(options.query !== undefined ? { query: options.query } : {}) };
+  const serverQuery = options.query !== undefined;
+  const params = {
+    type,
+    args: queryArgs,
+    context: options.context,
+    operation: serverQuery ? operation : scopeOperation,
+  };
+  if (serverQuery) {
+    params.query = options.query;
+  }
   await executeMiddleware(params);
   await executeScope({ ...params, operation: scopeOperation });
   await applyJoinedScopes(joinedScopes, params);
-  const serverPlan = options.query !== undefined ? adapter.compileServerQuery(type.gqltype, params.query, operation) : undefined;
-  return adapter[operation](type.model, type.gqltype, params.args, session, { context, readOptions: options.readOptions, observer: options.observer, ...(serverPlan ? { serverPlan } : {}) });
+  const executionOptions = { ...readOptions };
+  if (serverQuery) {
+    executionOptions.serverPlan = adapter.compileServerQuery(type.gqltype, params.query, operation);
+  }
+  return adapter[operation](
+    type.model,
+    type.gqltype,
+    params.args,
+    options.session,
+    executionOptions,
+  );
+};
+
+// Server entry point for the generated lifecycle, without captured resolvers.
+const execute = async (typeName, operation, args = {}, options = {}) => {
+  const type = registered(typeName);
+  validateServerExecution(type, operation, args, options);
+  const storage = registeredStorageOptions(type, operation, options.storage);
+  if (REGISTERED_WRITE_OPERATIONS.has(operation)) {
+    return executeRegisteredWrite(typeName, type, operation, args, options, storage);
+  }
+  if (!REGISTERED_READ_OPERATIONS.has(operation)) {
+    throw new SimfinityError('Unsupported registered operation', 'INVALID_OPERATION', 400);
+  }
+  const readOptions = {
+    context: options.context,
+    readOptions: options.readOptions,
+    observer: options.observer,
+  };
+  if (operation === 'get_by_id') {
+    return executeRegisteredById(type, args, options.session, readOptions);
+  }
+  return executeRegisteredQuery(type, operation, args, options, readOptions);
 };
 
 // Explicit backend capability, private to server code. The adapter owns its fixed operation
 // vocabulary and validation; no callback, collection name or model can be supplied by callers.
-const executeMutation = async (name, input, { context, session } = {}) => {
-  const mutation = Object.hasOwn(registeredMutations, name) && registeredMutations[name];
-  if (!mutation) throw new SimfinityError('Unregistered custom mutation', 'UNREGISTERED_OPERATION', 400);
-  const args = { input: mutation.inputModel ? coerceInputValue(input, new GraphQLNonNull(mutation.inputModel)) : input };
-  const params = { args, operation: operations.CUSTOM_MUTATION, entry: name, context };
-  await executeMiddleware(params);
-  return executeRegisteredMutation(params.args.input, mutation.callback, context, session, mutation.inputModel);
-};
-
 const executeStorage = async (typeName, request, options = {}) => {
   const type = registered(typeName);
   if (!adapter.executeStorage || request?.backend !== adapter.storageBackend) {
-    throw new SimfinityError('Storage capability is unsupported by this backend', 'UNSUPPORTED_CAPABILITY', 400);
+    throw new SimfinityError(
+      'Storage capability is unsupported by this backend',
+      'UNSUPPORTED_CAPABILITY',
+      400,
+    );
   }
-  if (options.session && adapter.validateSession) adapter.validateSession(type.model, options.session);
-  const params = { type, args: { request }, operation: 'storage.' + request.operation, context: options.context };
+  if (options.session && adapter.validateSession) {
+    adapter.validateSession(type.model, options.session);
+  }
+  const params = {
+    type,
+    args: { request },
+    operation: 'storage.' + request.operation,
+    context: options.context,
+  };
   await executeMiddleware(params);
   const queryArgs = {};
-  if (['find', 'aggregate', 'stream'].includes(request.operation)) {
+  if (STORAGE_READ_OPERATIONS.has(request.operation)) {
     await executeScope({ type, args: queryArgs, operation: 'find', context: options.context });
   }
-  return adapter.executeStorage(type.model, type.gqltype, params.args.request,
-    { session: options.session, context: options.context, queryArgs, observer: options.observer });
+  return adapter.executeStorage(type.model, type.gqltype, params.args.request, {
+    session: options.session,
+    context: options.context,
+    queryArgs,
+    observer: options.observer,
+  });
 };
 
   if (adapter.bind) {
@@ -2859,7 +2972,6 @@ const executeStorage = async (typeName, request, options = {}) => {
     saveObject,
     execute,
     executeStorage,
-    executeMutation,
     preventCreatingCollection,
   };
 };

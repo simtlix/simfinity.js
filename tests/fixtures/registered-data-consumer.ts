@@ -5,7 +5,6 @@ const runtime = createRuntime(createMongoAdapter());
 runtime.configureIntrospection({ fieldExtensions: false });
 const options: ExecuteOptions = { storage: { nulls: 'preserve', filter: { version: 1 }, increments: { version: 1 } }, observer: { onRows(rows) { void rows; } } };
 void runtime.execute('Item', 'update', { input: { id: 'a', title: null } }, options);
-void runtime.executeMutation('ingress', Buffer.from('request'), { context: {} });
 const request: MongoStorageRequest = { backend: 'mongodb', operation: 'findOneAndUpdate', filter: { version: 1 }, update: { $inc: { version: 1 } }, options: { returnDocument: 'after' } };
 void runtime.executeStorage('Item', request);
 void runtime.executeStorage('Item', { backend: 'mongodb', operation: 'stream', pipeline: [] }, { observer: { beforeFetch() {} } });

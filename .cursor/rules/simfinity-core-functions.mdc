@@ -121,4 +121,14 @@ The extension remains global. Newly constructed schemas collect the metadata typ
 
 ## Registered server query dialects
 
+Keep the server execution stages explicit: capability validation, mutation input
+coercion, by-ID reads and scoped collection reads have separate helpers in the
+runtime. In Mongo, `query-values.js` owns inert BSON copying and per-query budgets;
+`query-regex.js` owns literal patterns; `server-query.js` owns predicate parsing and
+lowering. `storage-validation.js` validates specialized write operands,
+`storage-options.js` validates generated-write options and numeric guards, and
+`storage.js` dispatches the validated backend primitive. Read-option vocabulary
+lives in `read-options.js`. Cursor cleanup has one error-precedence policy in
+`cursor.js`; do not reintroduce empty catches or per-call option/operator lists.
+
 `runtime.execute` accepts the Mongo server query dialect for find/count/stream/page via `options.query`, with empty caller-generated arguments. Middleware sees and may edit `params.query`; the runtime validates it again, applies the normal find scope, and calls the normal adapter read compiler. `assertQueryField` is shared by generated path inspection and the bound Mongo query resolver. Mongo's `server-query.js` parses bounded structured predicates and reconstructs them; it never forwards raw filters or calls executeStorage. `queryPaths: { dynamic: true }` is a server-only opt-in on Mixed/Map-backed scalar fields. Keep declared fields, stored identity/reference aliases, queryability checks, scopes, explicit windows and cursor observations intact. Page uses one compiler-owned facet. See `docs/guide/registered-data-operations.md` for the exact grammar, limits, errors and hook restrictions. Do not broaden the public GraphQL filter syntax as a side effect of server compatibility.

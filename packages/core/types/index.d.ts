@@ -259,10 +259,6 @@ export interface Runtime<Model = any, Session = any> {
    * @remarks Native primitives skip generated validators/controllers; authorize in middleware.
    */
   executeStorage<Result = unknown>(typeName: string, request: StorageRequest, options?: Omit<ExecuteOptions<Session>, 'storage' | 'readOptions'>): Promise<Result>;
-  /** Invoke a custom mutation through middleware and its adapter transaction lifecycle.
-   * @throws UNREGISTERED_OPERATION for unknown names; preserves opaque input identity without an input model.
-   */
-  executeMutation<Result = unknown>(name: string, input?: unknown, options?: Pick<ExecuteOptions<Session>, 'context' | 'session'>): Promise<Result>;
   configureQueryLimits(options?: { maxPageSize?: number }): void;
   /**
    * Process-wide; calling it without options restores the unlimited default. Invalid options,
