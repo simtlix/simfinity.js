@@ -56,11 +56,8 @@ For tooling that locates the package, use `require.resolve('@simtlix/simfinity-j
 
 - [MongoDB quick start](https://simtlix.github.io/simfinity.js/guide/getting-started.html)
 - [API reference](https://simtlix.github.io/simfinity.js/reference/api.html)
+- [Registered data operations](https://simtlix.github.io/simfinity.js/guide/registered-data-operations.html)
 - [Database comparison](https://simtlix.github.io/simfinity.js/guide/databases.html)
 - [MCP integration](https://simtlix.github.io/simfinity.js/guide/mcp.html)
 - [Complete library documentation](https://github.com/simtlix/simfinity.js#readme)
 - [Aggregation examples](./AGGREGATION_EXAMPLE.md)
-
-The Mongo adapter supports registered conditional writes, explicit atomic and projection capabilities, and physical cursor observation. See the [registered data operations guide](https://simtlix.github.io/simfinity.js/guide/registered-data-operations.html). Native capabilities are private server infrastructure and do not claim SQL portability.
-
-Ordinary Mongo-shaped server filters can use the registered `execute` find/count/stream/page query dialect, with explicit windows and registration-controlled dynamic paths. See the registered data operations guide linked above; caller pipelines remain specialized capabilities.

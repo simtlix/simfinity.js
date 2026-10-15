@@ -37,9 +37,3 @@ Importing the runtime installs Simfinity's `__Field.extensions` introspection fi
 The package also exports the `auth`, `validators`, `scalars`, and `plugins` helper namespaces alongside `createValidatedScalar`, `SimfinityError`, `InternalServerError`, `UnauthenticatedError` and `ForbiddenError` (the same classes as `auth.UnauthenticatedError` and `auth.ForbiddenError`), `buildErrorFormatter`, `configureQueryLimits`, `configureMutationLimits`, `QLOperator`, `QLSort`, and `QLValue`. `buildErrorFormatter` returns a `GraphQLError` whose `originalError` is the classified Simfinity error. Database packages reuse these exports so helpers, errors, and globally named GraphQL types retain one identity.
 
 The same helpers are available from the `@simtlix/simfinity-core/auth`, `/auth/errors`, `/auth/expressions`, `/auth/rules`, `/plugins`, `/scalars` and `/validators` subpaths, each with TypeScript declarations whose types match the root namespaces. `moduleResolution` `node16`, `nodenext` and `bundler` read them through the export map, and `node10` through `typesVersions`. The `internal/*` subpaths are not public API and have no declarations.
-
-Programmatic server consumers can use runtime.execute() and backend-declared runtime.executeStorage(). See the [registered data operations guide](https://simtlix.github.io/simfinity.js/guide/registered-data-operations.html). These APIs use runtime middleware; schema resolver authorization wrappers do not run.
-
-Call the named `configureIntrospection({ fieldExtensions: false })` export before constructing schemas when standard introspection is required; the runtime method is an alias.
-
-Ordinary Mongo-shaped server filters can use the registered `execute` find/count/stream/page query dialect, with explicit windows and registration-controlled dynamic paths. See the registered data operations guide linked above; caller pipelines remain specialized capabilities.
