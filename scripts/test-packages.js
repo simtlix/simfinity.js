@@ -158,7 +158,7 @@ const quotedUnion = (names) => names.map((name) => `'${name}'`).join(' | ');
 // explicit `export` in types/index.d.ts and an entry here.
 const coreRootValues = [
   'ForbiddenError', 'InternalServerError', 'QLOperator', 'QLSort', 'QLValue', 'SimfinityError',
-  'UnauthenticatedError', 'auth', 'buildErrorFormatter', 'configureMutationLimits', 'configureQueryLimits',
+  'UnauthenticatedError', 'auth', 'buildErrorFormatter', 'configureIntrospection', 'configureMutationLimits', 'configureQueryLimits',
   'createQueryPlan', 'createRuntime', 'createValidatedScalar', 'describeModels', 'paginationStages',
   'plugins', 'resolveModelPath', 'scalars', 'validators',
 ];
