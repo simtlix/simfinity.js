@@ -2,7 +2,7 @@
 
 Run the same barbershop booking app with either MongoDB or PostgreSQL. Both backends demonstrate generated GraphQL operations, relationships, query scopes, JWT authorization, controllers, state machines, and MCP tools. A shared Next.js frontend provides customer booking, an owner dashboard, and administration screens.
 
-These are independent, private npm applications in the Simfinity monorepo, each with its own manifest and lockfile. Both backends install released Simfinity runtime packages at exactly **3.5.9** from npm; the frontend uses the published GraphQL client. They are outside the `packages/*` workspaces and are not published with the libraries.
+These are independent, private npm applications in the Simfinity monorepo, each with its own manifest and lockfile. Both backends install released Simfinity runtime packages at exactly **3.7.0** from npm; the frontend uses the published GraphQL client. They are outside the `packages/*` workspaces and are not published with the libraries.
 
 ## Start with Docker
 
@@ -100,7 +100,7 @@ Bookings and reviews keep the records they reference. The barbershop's owner can
 
 Only bookings and reviews are checked. On MongoDB, the owner can still delete a shop that has no bookings or reviews but still has services, service categories, professionals, bundles or favorites; those keep its ID too. PostgreSQL's foreign keys refuse that delete.
 
-Clients cannot read other clients' bookings, so the booking page asks `bookingAvailability` for taken times. It requires a signed-in user and returns only the start time, end time and professional ID of confirmed bookings for an approved shop and date, in clock order; `professionalId` narrows it to the ranges that block that professional. `excludeBookingId` leaves out one booking when the signed-in user is its client; other bookings are never left out. A malformed `barbershopId` or `excludeBookingId` returns `NOT_VALID_ID` from both APIs. When the API rejects the chosen time, the page explains why, reloads the taken times and returns to the time step. Simfinity 3.5.9 registers custom mutations but not custom queries, so this read-only operation is a mutation. It is also an MCP tool.
+Clients cannot read other clients' bookings, so the booking page asks `bookingAvailability` for taken times. It requires a signed-in user and returns only the start time, end time and professional ID of confirmed bookings for an approved shop and date, in clock order; `professionalId` narrows it to the ranges that block that professional. `excludeBookingId` leaves out one booking when the signed-in user is its client; other bookings are never left out. A malformed `barbershopId` or `excludeBookingId` returns `NOT_VALID_ID` from both APIs. When the API rejects the chosen time, the page explains why, reloads the taken times and returns to the time step. Simfinity 3.7.0 registers custom mutations but not custom queries, so this read-only operation is a mutation. It is also an MCP tool.
 
 ```graphql
 mutation BusyTimes {
@@ -323,7 +323,7 @@ The scopes preserve caller filters and intersect them with server restrictions. 
 
 The catalog scopes (services, service categories, professionals, bundles and reviews) and the owner branch of the booking scope restrict through the `barbershop` relation. They use `barbershop.state` = `APPROVED` for anonymous callers and clients, and `barbershop.owner.id` = the caller for owners; the barbershop scope applies the same terms to the shop itself. The database applies the restriction in the same query that reads the records. Simfinity runs a scope for every parent row of a nested list and for every referenced record it resolves, so a scope must not load shop IDs itself. Earlier versions did, which added barbershop queries per row: for example, 401 barbershop reads for one nested catalog page with 106 shops on PostgreSQL. Referenced records whose type has a `get_by_id` scope are still read with one query per reference. The [MongoDB README](mongodb/README.md#application-layout) describes what the owner path costs there.
 
-**Reference integrity differs:** PostgreSQL FKs reject an embedded reference to a nonexistent service and roll back the mutation. The MongoDB example uses the default integrity mode and can store that reference and resolve it to null on reads; Mongoose references are not foreign keys. The matrix checks this difference explicitly. Since 3.4.0, Simfinity offers an opt-in [transactional Mongo integrity adapter](../../docs/guide/mongodb-integrity.md); the MongoDB example does not enable it, so the matrix expects the dangling reference on 3.5.9 too.
+**Reference integrity differs:** PostgreSQL FKs reject an embedded reference to a nonexistent service and roll back the mutation. The MongoDB example uses the default integrity mode and can store that reference and resolve it to null on reads; Mongoose references are not foreign keys. The matrix checks this difference explicitly. Since 3.4.0, Simfinity offers an opt-in [transactional Mongo integrity adapter](../../docs/guide/mongodb-integrity.md); the MongoDB example does not enable it, so the matrix expects the dangling reference on 3.7.0 too.
 
 These tests exercise login, scopes, booking rules and availability, and MCP against a real backend and create test records. The HTTP contract also covers:
 
@@ -357,7 +357,7 @@ npm run test:security --prefix examples/barber/postgres
 npm run test:security --prefix examples/barber/frontend
 ```
 
-Use Node.js 24 and the committed lockfiles. The MongoDB example requires Mongoose `^8.24.2`; both backends require Multer `^2.3.0` and GraphQL Yoga `^5.24.4`; Vitest and its browser/coverage packages require `^4.1.11`; the frontend requires Next.js `^16.3.8`. These minima exclude the reviewed vulnerable direct versions. The backends consume the exact released Simfinity 3.5.9 packages, whose MCP integration requires the `@modelcontextprotocol/sdk` peer at `^1.31.0`; both backend lockfiles resolve 1.32.1.
+Use Node.js 24 and the committed lockfiles. The MongoDB example requires Mongoose `^8.24.2`; both backends require Multer `^2.3.0` and GraphQL Yoga `^5.24.4`; Vitest and its browser/coverage packages require `^4.1.11`; the frontend requires Next.js `^16.3.8`. These minima exclude the reviewed vulnerable direct versions. The backends consume the exact released Simfinity 3.7.0 packages, whose MCP integration requires the `@modelcontextprotocol/sdk` peer at `^1.31.0`; both backend lockfiles resolve 1.32.1.
 
 The backend lockfiles also include the security fixes in `@graphql-tools/utils` 12.0.3, `@fastify/busboy` 3.2.2, `proxy-addr` 2.0.8 and `source-map-js` 1.2.2. The frontend uses patched `sharp` 0.35.5 and `source-map-js` 1.2.2, plus a temporary dependency override for Next.js linting described in its [security notes](frontend/README.md#verification). Preserve these fixes when refreshing dependencies and run all three application audits before merging.
 
@@ -365,6 +365,8 @@ The upgrade from 3.3.0 left database selection, seeding, the generated PostgreSQ
 
 - Envelop's `useErrorHandler` passes `{ errors, context, phase }`, not an error, so the server logs each entry of `errors` through `buildErrorFormatter(console.error)` instead of passing the formatter to `useErrorHandler`. Given that object, the formatter now logs only `Unexpected error value`, without the errors; see [error formatting](../../docs/resources/compatibility.md#error-formatting). Each logged error now shows its own message and code.
 - `/mcp` is mounted with `app.all`, so the handler answers methods other than `POST` with `405` and `Allow: POST`; with `app.post`, Express returned `404`, which MCP clients report as a transport error. See the [MCP Streamable HTTP handler](../../docs/resources/compatibility.md#mcp-streamable-http-handler) notes.
+
+The upgrade from 3.5.9 to 3.7.0 needed no change to application code. Both backends keep the same GraphQL schema and MCP tools and answer with the same data and error codes, while sending fewer database reads and statements, as the [MongoDB](mongodb/README.md#application-layout) and [PostgreSQL](postgres/README.md#storage-and-native-apis) READMEs describe. Both backends leave 3.7.0's opt-in [batched collection reads](../../docs/guide/relationships.md#batched-collection-reads) (`batchedCollections`) off: on list pages of about a dozen shops with their collections, batching returned the same results with up to about 5 times fewer database calls but was not consistently faster on a local database, and the MongoDB backend would first need its own adapter and runtime instead of the package-root one.
 
 ## Stop or reset one stack
 

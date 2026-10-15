@@ -1,6 +1,6 @@
 # Barber MongoDB backend
 
-An independent, private application using `@simtlix/simfinity-js@3.5.9`, Mongoose, Express, and GraphQL Yoga. It installs released packages from npm and is outside the monorepo's library workspaces. Use the [Barber quick start](../README.md) to run the complete Docker stack with the shared frontend.
+An independent, private application using `@simtlix/simfinity-js@3.7.0`, Mongoose, Express, and GraphQL Yoga. It installs released packages from npm and is outside the monorepo's library workspaces. Use the [Barber quick start](../README.md) to run the complete Docker stack with the shared frontend.
 
 ## Host development
 
@@ -78,6 +78,8 @@ Integration checks use the configured `MONGO` deployment and create and remove t
 
 `database.js` owns Mongoose connection and shutdown. `application.js` registers entities and builds the GraphQL schema, and exports `mcpOptions`, the MCP options that HTTP `/mcp`, `mcp:stdio` and the tests share; the HTTP server, seeds, and MCP transport reuse that initialization. Native model operations use Mongoose APIs and sessions.
 
+The upgrade from 3.5.9 to 3.7.0 needed no code change and left the GraphQL SDL, MCP tools, responses, stored data and errors unchanged. Generated mutations skip reads whose result they do not use, so state actions and nested updated or deleted children send fewer `find` commands; root updates and deletes keep the reads they made on 3.5.9, because `protect()` gives every type `onUpdating` and `onDelete`. The app uses the package-root runtime of `@simtlix/simfinity-js`, so reference integrity stays in its default mode and collection fields keep one read per parent: 3.7.0's opt-in batched collection reads need an adapter created with `createMongoAdapter({ batchedCollections: true })` and a runtime of the app's own. See the 3.6.0 and 3.7.0 [upgrade notes](../../../docs/resources/compatibility.md).
+
 | Location | Responsibility |
 | --- | --- |
 | `types/{entity}.js` | GraphQL fields, relationships, and registration. |
@@ -94,7 +96,7 @@ MongoDB has no foreign keys, so `auth/ownership.js` refuses, with `RESOURCE_IN_U
 
 Owner reads restrict through `barbershop.owner.id`, which joins the shop's `owner` to the user collection; the barbershop scope uses `owner.id` on the shop itself. MongoDB, unlike PostgreSQL's foreign key, allows deleting a user who still owns shops. After that, the owner path no longer matches those shops. That user's still-valid token is anonymous on GraphQL and rejected on `/mcp` anyway, so it sees only the `APPROVED` public catalog. This stricter visibility is intended; earlier versions matched the raw `owner` field.
 
-Simfinity 3.5.9's MongoDB adapter adds one `$lookup` per relation hop before the `$match`. On owner reads, `barbershop.owner.id` therefore adds a `$lookup` into the user collection for every candidate booking or catalog document, and owner barbershop reads add one too. Measured at about 5,000 bookings, as medians from earlier versions to this one:
+Simfinity's MongoDB adapter adds one `$lookup` per relation hop before the `$match`, in 3.7.0 as in 3.5.9. On owner reads, `barbershop.owner.id` therefore adds a `$lookup` into the user collection for every candidate booking or catalog document, and owner barbershop reads add one too. Measured with Simfinity 3.5.9 at about 5,000 bookings, as medians from earlier versions to this one:
 
 - unfiltered owner booking list: 105 → 146 ms;
 - `bookings_aggregate` without filters: 103 → 144 ms;
