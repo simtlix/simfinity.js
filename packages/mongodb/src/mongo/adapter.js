@@ -15,6 +15,12 @@ import {
 
 const SERVER_READ_OPTIONS = new Set(SERVER_READ_OPTION_NAMES);
 const CONDITIONAL_QUERY_OPTIONS = { sanitizeFilter: false, strictQuery: false };
+const RETURN_UPDATED_DOCUMENT = { new: true };
+
+// Keep identity separate so a conditional predicate cannot replace it.
+const matchIdAndFilter = (id, filter) => ({
+  $and: [{ _id: id }, filter],
+});
 
 const validateServerReadOptions = (options) => {
   for (const key of Object.keys(options || {})) {
@@ -340,7 +346,11 @@ export const createMongoAdapter = (options) => {
       }
       let query;
       if (storage?.filter) {
-        query = Model.findOne({ $and: [{ _id: id }, storage.filter] }, projection, { ...CONDITIONAL_QUERY_OPTIONS });
+        query = Model.findOne(
+          matchIdAndFilter(id, storage.filter),
+          projection,
+          { ...CONDITIONAL_QUERY_OPTIONS },
+        );
       } else if (requiredId != null) {
         query = Model.findOne({ $and: [{ _id: requiredId }, { _id: id }] }, projection);
       } else {
@@ -389,9 +399,16 @@ export const createMongoAdapter = (options) => {
     },
     update(Model, id, update, session, storage) {
       if (integrity.enabled) return integrity.updateRecord(Model, id, update, session);
-      const query = storage?.filter !== undefined
-        ? Model.findOneAndUpdate({ $and: [{ _id: id }, storage.filter] }, update, { ...CONDITIONAL_QUERY_OPTIONS, new: true })
-        : Model.findByIdAndUpdate(id, update, { new: true });
+      let query;
+      if (storage?.filter === undefined) {
+        query = Model.findByIdAndUpdate(id, update, { ...RETURN_UPDATED_DOCUMENT });
+      } else {
+        query = Model.findOneAndUpdate(
+          matchIdAndFilter(id, storage.filter),
+          update,
+          { ...CONDITIONAL_QUERY_OPTIONS, ...RETURN_UPDATED_DOCUMENT },
+        );
+      }
       return mapQueryIdCastErrors(withSession(query, session), mapIdCastError);
     },
     delete(Model, id, session, storage) {
@@ -399,9 +416,15 @@ export const createMongoAdapter = (options) => {
         integrity.assertWrite(Model, session);
         return integrity.deleteRecord(Model, id, session);
       }
-      const query = storage?.filter !== undefined
-        ? Model.findOneAndDelete({ $and: [{ _id: id }, storage.filter] }, { ...CONDITIONAL_QUERY_OPTIONS })
-        : Model.findByIdAndDelete(id);
+      let query;
+      if (storage?.filter === undefined) {
+        query = Model.findByIdAndDelete(id);
+      } else {
+        query = Model.findOneAndDelete(
+          matchIdAndFilter(id, storage.filter),
+          { ...CONDITIONAL_QUERY_OPTIONS },
+        );
+      }
       return mapQueryIdCastErrors(withSession(query, session));
     },
     async find(Model, gqltype, args, session, { requiredId, readOptions, observer, serverPlan } = {}) {
