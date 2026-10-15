@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import mongoose from 'mongoose';
 import { GraphQLID, GraphQLObjectType, GraphQLString } from 'graphql';
 import { createRuntime, QLValue } from '../packages/core/src/index.js';
@@ -79,6 +79,9 @@ describe.skipIf(!uri)('registered ordinary server queries', () => {
       if (params.context?.change) params.query = query(params.context.change);
       await next();
     });
+  });
+  beforeEach(async () => {
+    events.length = 0;
     await Model.deleteMany({});
     await Model.collection.insertMany([
       { _id: 'missing', tenant: 'one', name: 'A+B', sort: 'stored', data: {} },
@@ -437,7 +440,7 @@ describe.skipIf(!uri)('registered ordinary server queries', () => {
     }
   });
 
-  test('complete compiled paging, projection, count and a single observed stream exceed 100 rows', async () => {
+  const seedPageRecords = async () => {
     await Model.insertMany(
       Array.from({ length: 201 }, (_, i) => ({
         _id: 'page-' + String(i).padStart(3, '0'),
@@ -445,6 +448,10 @@ describe.skipIf(!uri)('registered ordinary server queries', () => {
         name: 'page',
       })),
     );
+  };
+
+  test('complete compiled paging, projection, count and a single observed stream exceed 100 rows', async () => {
+    await seedPageRecords();
     const filter = { name: 'page' };
     expect(await run(filter, { window: { limit: 200 } })).toHaveLength(200);
     expect(await run({ _id: 'page-200' })).toHaveLength(1);
@@ -526,6 +533,7 @@ describe.skipIf(!uri)('registered ordinary server queries', () => {
   });
 
   test('page selects items and total together before paging in one command', async () => {
+    await seedPageRecords();
     const aggregate = vi.spyOn(Model.collection, 'aggregate');
     const onRows = vi.fn();
     try {
@@ -564,6 +572,7 @@ describe.skipIf(!uri)('registered ordinary server queries', () => {
   });
 
   test('bounded membership supports 50001 authorized candidates independently of logical complexity', async () => {
+    await seedPageRecords();
     const ids = Array.from({ length: 50000 }, (_, index) => 'absent-' + index);
     ids.push('page-200');
     expect((await run({ _id: { $in: ids } })).map((row) => row._id)).toEqual(['page-200']);

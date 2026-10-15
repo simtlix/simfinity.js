@@ -123,11 +123,16 @@ The extension remains global. Newly constructed schemas collect the metadata typ
 
 Keep the server execution stages explicit: capability validation, mutation input
 coercion, by-ID reads and scoped collection reads have separate helpers in the
-runtime. In Mongo, `query-values.js` owns inert BSON copying and per-query budgets;
-`query-regex.js` owns literal patterns; `server-query.js` owns predicate parsing and
-lowering. `storage-validation.js` validates specialized write operands,
-`storage-options.js` validates generated-write options and numeric guards, and
-`storage.js` dispatches the validated backend primitive. Read-option vocabulary
+`registered-operations.js` module, wired to the runtime lifecycle. `null-values.js`
+shares explicit-null handling between generated saves and updates. In Mongo,
+`query-values.js` owns inert BSON copying and per-query budgets; `query-regex.js`
+owns literal patterns. `server-query.js` walks predicates and lowers parsed terms;
+`query-operators.js` declares operator handlers, `query-shape.js` validates windows,
+sorts and projections, and `server-query-paths.js` resolves registered path policies.
+`storage-validation.js` validates specialized write operands; `storage-options.js`
+validates generated-write options and delegates numeric predicates to
+`increment-guards.js`. `storage.js` declares payload, validator and execution together
+for each backend primitive. Read-option vocabulary
 lives in `read-options.js`. Cursor cleanup has one error-precedence policy in
 `cursor.js`; do not reintroduce empty catches or per-call option/operator lists.
 

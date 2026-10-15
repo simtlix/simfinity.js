@@ -3,7 +3,7 @@ import { describeModels, SimfinityError } from '@simtlix/simfinity-core';
 import { withMongoTransaction } from './transactions.js';
 import { castModelId, mapIdCastError } from './ids.js';
 
-const ADAPTER_OPTIONS = new Set(['referentialIntegrity', 'database', 'models']);
+const ADAPTER_OPTIONS = new Set(['referentialIntegrity', 'database', 'models', 'queryObserver']);
 const LOCK_FIELD = '_simfinityReferenceLock';
 // Distinct target ids per startup-audit query and per lock write, and ids the audit remembers per target.
 const AUDIT_BATCH_SIZE = 1000;
@@ -30,7 +30,7 @@ const valuesAt = (value, path) => {
 export const createMongoIntegrity = (options = {}) => {
   if (!options || typeof options !== 'object' || Array.isArray(options)
     || Object.keys(options).some((key) => !ADAPTER_OPTIONS.has(key))) {
-    throw invalid('Expected Mongo adapter options with referentialIntegrity, database or models');
+    throw invalid('Expected Mongo adapter options with referentialIntegrity, database, models or queryObserver');
   }
   const mode = options.referentialIntegrity === undefined ? 'off' : options.referentialIntegrity;
   if (!['off', 'transactional'].includes(mode)) {

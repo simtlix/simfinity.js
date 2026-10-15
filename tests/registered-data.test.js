@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import mongoose from 'mongoose';
 import {
   GraphQLFloat,
@@ -72,6 +72,17 @@ describe.skipIf(!uri)('registered data operations on MongoDB', () => {
       await next();
     });
     runtime.createSchema();
+  });
+  beforeEach(async () => {
+    await Model.deleteMany({});
+    await Model.insertMany([
+      { _id: 'a', tenant: 'one', title: 'A', version: 1 },
+      { _id: 'b', tenant: 'two', title: 'B', version: 2 },
+      { _id: 'c', tenant: 'one', title: 'C', version: 3 },
+    ]);
+    events.length = 0;
+    hooks.length = 0;
+    transaction.mockClear();
   });
   afterAll(async () => {
     await connection?.dropDatabase();
@@ -229,11 +240,6 @@ describe.skipIf(!uri)('registered data operations on MongoDB', () => {
     }
   });
   test('compiler queries and trusted projections retain scope and stream batches', async () => {
-    await Model.insertMany([
-      { _id: 'a', tenant: 'one', title: 'A', version: 1 },
-      { _id: 'b', tenant: 'two', title: 'B', version: 2 },
-      { _id: 'c', tenant: 'one', title: 'C', version: 3 },
-    ]);
     const context = { tenant: 'one' };
     const rows = await runtime.execute(
       typeName,

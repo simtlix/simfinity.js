@@ -21,8 +21,9 @@ const row = await runtime.execute('Item', 'update', {
 
 ## Database and model ownership
 
-Applications can install only `@simtlix/simfinity-js`; Mongoose is an internal
-adapter dependency. `openMongoDatabase(uri, options)` opens an independent owner
+Mongoose remains a required peer dependency (`^8.24.2`) of
+`@simtlix/simfinity-js`. Connection ownership does not change that shared-installation
+contract. Applications can use the following APIs without importing Mongoose directly. `openMongoDatabase(uri, options)` opens an independent owner
 and returns `{ database, close }`. Pass that database unchanged to
 `createMongoAdapter({ database, models })`. Closing one owner does not close other
 owners, and adapters borrowing the handle never close it. Omit `database` for the

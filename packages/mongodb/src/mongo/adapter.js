@@ -3,6 +3,7 @@ import { SimfinityError } from '@simtlix/simfinity-core';
 import { getListShape, normalizeConnectionField } from '@simtlix/simfinity-core/internal/relation-storage';
 
 import { createMongoModel } from './models.js';
+import { modelConnectionFor } from './database.js';
 import { createMongoQueries } from './queries.js';
 import { withMongoTransaction } from './transactions.js';
 import { readMongoPipeline } from './cursor.js';
@@ -16,6 +17,11 @@ import { prepareStorageUpdate } from './storage-update.js';
 import {
   castModelId, castObjectId, castPathValue, invalidId, isQueryKeyCastFailure, mapIdCastError,
 } from './ids.js';
+
+const collectionCreationOptions = (integrity) => {
+  if (integrity.enabled) return { createCollection: false };
+  return {};
+};
 
 const SERVER_READ_OPTIONS = new Set(SERVER_READ_OPTION_NAMES);
 
@@ -159,14 +165,7 @@ const nestedPathOf = (nested) => {
 
 export const createMongoAdapter = (options) => {
   const integrity = createMongoIntegrity(options);
-  // Each supplied database gets a private model namespace on its existing client.
-  // Only the database owner opens/closes that client. Schema-only runtimes remain disconnected.
-  const namespace = options && Object.hasOwn(options, 'database') ? new mongoose.Mongoose() : null;
-  const connection = namespace ? namespace.createConnection() : mongoose.connection;
-  const database = options?.database;
-  const modelConnection = database
-    ? connection.setClient(database.client).useDb(database.databaseName)
-    : connection;
+  const modelConnection = modelConnectionFor(options);
   let queries;
   let executeStorage;
   let getRegistrations = () => [];
@@ -263,7 +262,12 @@ export const createMongoAdapter = (options) => {
           model.schema.index({ [fieldName]: 1 });
         }
         if (onModelCreated) onModelCreated(model);
-      }, { ...modelOptions, connection: modelConnection, storage: options?.models?.[gqltype.name], ...(integrity.enabled ? { createCollection: false } : {}) });
+      }, {
+        ...modelOptions,
+        connection: modelConnection,
+        storage: options?.models?.[gqltype.name],
+        ...collectionCreationOptions(integrity),
+      });
     },
     // Keep the delegate present before bind so adapter decorators can copy it safely.
     async executeStorage(...args) {

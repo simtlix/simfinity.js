@@ -1,5 +1,6 @@
 import { GraphQLInt, GraphQLFloat, getNullableType } from 'graphql';
 import { SimfinityError } from '@simtlix/simfinity-core';
+import { incrementGuard } from './increment-guards.js';
 import {
   assertStorageDocument,
   assertStorageFilter,
@@ -10,8 +11,6 @@ const STORAGE_OPTIONS = new Set(['filter', 'increments', 'nulls', 'id']);
 const MUTATIONS = new Set(['save', 'update', 'delete']);
 const NUMERIC_SCHEMA_TYPES = new Set(['Number', 'Decimal128']);
 const NUMERIC_SCALARS = new Set([GraphQLInt, GraphQLFloat]);
-const INT_MIN = -(2 ** 31);
-const INT_MAX = 2 ** 31 - 1;
 
 export const validateMongoSession = (Model, session) => {
   if (session.client !== Model.db.getClient()) {
@@ -48,34 +47,6 @@ const incrementScalar = (Model, gqltype, path, amount) => {
     throw invalidStorage('Increment does not match its declared numeric scalar');
   }
   return scalar;
-};
-
-// Reject invalid results in the atomic predicate, before an adopted transaction
-// could commit them. Missing numeric fields start at zero; null does not.
-const incrementGuard = (path, amount, scalar) => {
-  const integer = scalar === GraphQLInt;
-  const min = integer ? INT_MIN : -Number.MAX_VALUE;
-  const max = integer ? INT_MAX : Number.MAX_VALUE;
-  const range = {
-    $type: 'number',
-    $gte: integer ? Math.max(min, min - amount) : min,
-    $lte: integer ? Math.min(max, max - amount) : max,
-  };
-  const storedValue = '$' + path;
-  // Expression $mod retains fractions; query $mod truncates doubles. Float
-  // bounds test Mongo's actual addition because subtraction can round.
-  const result = integer
-    ? { $eq: [{ $mod: [storedValue, 1] }, 0] }
-    : {
-        $let: {
-          vars: { sum: { $add: [storedValue, amount] } },
-          in: { $and: [{ $gte: ['$$sum', min] }, { $lte: ['$$sum', max] }] },
-        },
-      };
-  const numeric = {
-    $and: [{ [path]: range }, { $expr: { $cond: [{ $isNumber: storedValue }, result, false] } }],
-  };
-  return { $or: [{ [path]: { $exists: false } }, numeric] };
 };
 
 const incrementGuards = (Model, gqltype, operation, increments) => {

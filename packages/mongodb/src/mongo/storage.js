@@ -6,25 +6,68 @@ import {
   assertStorageFilter,
   assertStoragePipeline,
   invalidStorage,
-  storageWriteValidators,
+  assertFilteredUpdate,
+  assertReplacement,
+  assertDeletion,
+  assertBulkWrite,
+  assertInsertMany,
 } from './storage-validation.js';
 
 export { validateMongoSession, validateStorageOptions } from './storage-options.js';
 
-const READ_OPERATIONS = new Set(['find', 'aggregate', 'stream']);
 const BASE_REQUEST_FIELDS = ['backend', 'operation', 'options'];
-const REQUEST_FIELDS = {
-  find: ['filter'],
-  aggregate: ['filter', 'pipeline'],
-  stream: ['filter', 'pipeline'],
-  updateOne: ['filter', 'update'],
-  updateMany: ['filter', 'update'],
-  replaceOne: ['filter', 'replacement'],
-  findOneAndUpdate: ['filter', 'update'],
-  findOneAndDelete: ['filter'],
-  deleteMany: ['filter'],
-  insertMany: ['documents'],
-  bulkWrite: ['operations'],
+const UPDATE_FIELDS = ['filter', 'update'];
+const PIPELINE_FIELDS = ['filter', 'pipeline'];
+
+// Payload, validation and execution are declared together for each capability.
+const STORAGE_OPERATIONS = {
+  find: { fields: ['filter'] },
+  aggregate: { fields: PIPELINE_FIELDS },
+  stream: { fields: PIPELINE_FIELDS },
+  updateOne: {
+    fields: UPDATE_FIELDS,
+    validate: assertFilteredUpdate,
+    execute: (collection, request, options) =>
+      collection.updateOne(request.filter, request.update, options),
+  },
+  updateMany: {
+    fields: UPDATE_FIELDS,
+    validate: assertFilteredUpdate,
+    execute: (collection, request, options) =>
+      collection.updateMany(request.filter, request.update, options),
+  },
+  replaceOne: {
+    fields: ['filter', 'replacement'],
+    validate: assertReplacement,
+    execute: (collection, request, options) =>
+      collection.replaceOne(request.filter, request.replacement, options),
+  },
+  findOneAndUpdate: {
+    fields: UPDATE_FIELDS,
+    validate: assertFilteredUpdate,
+    execute: (collection, request, options) =>
+      collection.findOneAndUpdate(request.filter, request.update, options),
+  },
+  findOneAndDelete: {
+    fields: ['filter'],
+    validate: assertDeletion,
+    execute: (collection, request, options) => collection.findOneAndDelete(request.filter, options),
+  },
+  deleteMany: {
+    fields: ['filter'],
+    validate: assertDeletion,
+    execute: (collection, request, options) => collection.deleteMany(request.filter, options),
+  },
+  insertMany: {
+    fields: ['documents'],
+    validate: assertInsertMany,
+    execute: (collection, request, options) => collection.insertMany(request.documents, options),
+  },
+  bulkWrite: {
+    fields: ['operations'],
+    validate: assertBulkWrite,
+    execute: (collection, request, options) => collection.bulkWrite(request.operations, options),
+  },
 };
 const COMMON_OPTIONS = [
   'projection',
@@ -62,18 +105,18 @@ const OPTION_RULES = {
   },
 };
 
-const validateRequest = (request) => {
+const validateRequest = (request, definition) => {
   const { operation } = request;
-  if (!Object.hasOwn(REQUEST_FIELDS, operation)) {
+  if (!definition) {
     throw invalidStorage('Unsupported MongoDB storage operation');
   }
-  const fields = new Set([...BASE_REQUEST_FIELDS, ...REQUEST_FIELDS[operation]]);
+  const fields = new Set([...BASE_REQUEST_FIELDS, ...definition.fields]);
   for (const key of Object.keys(request)) {
     if (!fields.has(key)) {
       throw invalidStorage('Unsupported request field: ' + key);
     }
   }
-  const allowed = READ_OPERATIONS.has(operation) ? READ_OPTIONS : WRITE_OPTIONS;
+  const allowed = definition.execute ? WRITE_OPTIONS : READ_OPTIONS;
   for (const key of Object.keys(request.options || {})) {
     if (!allowed.has(key)) {
       throw invalidStorage('Unsupported MongoDB option: ' + key);
@@ -98,30 +141,14 @@ const readStorage = async (queries, Model, gqltype, request, queryArgs, options,
   return readMongoPipeline(Model, pipeline, options, observer, request.operation === 'stream');
 };
 
-// Each entry is one native call. No caller effects or callbacks are replayed.
-const WRITE_EXECUTORS = {
-  updateOne: (collection, request, options) =>
-    collection.updateOne(request.filter, request.update, options),
-  updateMany: (collection, request, options) =>
-    collection.updateMany(request.filter, request.update, options),
-  replaceOne: (collection, request, options) =>
-    collection.replaceOne(request.filter, request.replacement, options),
-  findOneAndUpdate: (collection, request, options) =>
-    collection.findOneAndUpdate(request.filter, request.update, options),
-  findOneAndDelete: (collection, request, options) =>
-    collection.findOneAndDelete(request.filter, options),
-  deleteMany: (collection, request, options) => collection.deleteMany(request.filter, options),
-  insertMany: (collection, request, options) => collection.insertMany(request.documents, options),
-  bulkWrite: (collection, request, options) => collection.bulkWrite(request.operations, options),
-};
-
 // Server-only backend primitives use registered models and pre-encoded BSON.
 // They preserve middleware/scopes, but do not run generated entity controllers.
 export const createStorageExecutor =
   (queries, integrity) =>
   async (Model, gqltype, request, { session, queryArgs, observer }) => {
     const { operation } = request;
-    const write = Object.hasOwn(WRITE_EXECUTORS, operation);
+    const definition = Object.hasOwn(STORAGE_OPERATIONS, operation) && STORAGE_OPERATIONS[operation];
+    const write = Boolean(definition?.execute);
     if (integrity.enabled && write) {
       throw new SimfinityError(
         'Native primitives cannot bypass transactional reference integrity',
@@ -133,13 +160,13 @@ export const createStorageExecutor =
     if (session) {
       validateMongoSession(Model, session);
     }
-    validateRequest(request);
+    validateRequest(request, definition);
 
     const options = { ...request.options, session };
     if (!write) {
       return readStorage(queries, Model, gqltype, request, queryArgs, options, observer);
     }
 
-    storageWriteValidators[operation](Model, request);
-    return WRITE_EXECUTORS[operation](Model.collection, request, options);
+    definition.validate(Model, request);
+    return definition.execute(Model.collection, request, options);
   };

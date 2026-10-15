@@ -183,10 +183,21 @@ const copyLiteralObject = (value, budget, depth) => {
   return result;
 };
 
-const copyLiteralValue = (value, budget, depth) => {
-  if (value === null || typeof value === 'boolean') {
-    return value;
+const copyLiteralArray = (value, budget, depth) => {
+  if (value.length > MAX_LITERAL_VALUES) {
+    invalidQuery('Server query has too many literal values', 'FILTER_DEPTH_EXCEEDED');
   }
+  return queryArray(value).map((item) => copyQueryLiteral(item, budget, depth + 1));
+};
+
+const BSON_LITERAL_COPIERS = new Map([
+  [Date.prototype, copyDate],
+  [mongoose.Types.ObjectId.prototype, copyObjectId],
+  [Buffer.prototype, copyBinary],
+]);
+
+const copyLiteralValue = (value, budget, depth) => {
+  if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'string' && value.length <= MAX_LITERAL_STRING_LENGTH) {
     budget.chargeBytes(Buffer.byteLength(value));
     return value;
@@ -195,28 +206,12 @@ const copyLiteralValue = (value, budget, depth) => {
     budget.chargeBytes(NUMBER_BYTES);
     return value;
   }
-  if (!value || typeof value !== 'object') {
-    return copyLiteralObject(value, budget, depth);
-  }
+  if (!value || typeof value !== 'object') return copyLiteralObject(value, budget, depth);
 
-  // Check the prototype before reading array length or BSON properties: proxies
-  // and overridden accessors must not run while inspecting caller-owned data.
-  const prototype = queryPrototype(value);
-  if (prototype === Date.prototype) {
-    return copyDate(value, budget);
-  }
-  if (prototype === mongoose.Types.ObjectId.prototype) {
-    return copyObjectId(value, budget);
-  }
-  if (prototype === Buffer.prototype) {
-    return copyBinary(value, budget);
-  }
-  if (Array.isArray(value)) {
-    if (value.length > MAX_LITERAL_VALUES) {
-      invalidQuery('Server query has too many literal values', 'FILTER_DEPTH_EXCEEDED');
-    }
-    return queryArray(value).map((item) => copyQueryLiteral(item, budget, depth + 1));
-  }
+  // Inspect prototypes before array length/BSON properties, without executing proxies.
+  const copyBson = BSON_LITERAL_COPIERS.get(queryPrototype(value));
+  if (copyBson) return copyBson(value, budget);
+  if (Array.isArray(value)) return copyLiteralArray(value, budget, depth);
   return copyLiteralObject(value, budget, depth);
 };
 

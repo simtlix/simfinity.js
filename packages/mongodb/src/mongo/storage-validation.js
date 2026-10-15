@@ -141,15 +141,15 @@ const assertUpdate = (Model, update) => {
   }
 };
 
-const assertFilteredUpdate = (Model, request) => {
+export const assertFilteredUpdate = (Model, request) => {
   assertStorageFilter(Model, request.filter);
   assertUpdate(Model, request.update);
 };
-const assertReplacement = (Model, request) => {
+export const assertReplacement = (Model, request) => {
   assertStorageFilter(Model, request.filter);
   assertStorageDocument(Model, request.replacement);
 };
-const assertDeletion = (Model, request) => assertStorageFilter(Model, request.filter);
+export const assertDeletion = (Model, request) => assertStorageFilter(Model, request.filter);
 const BULK_VALIDATORS = {
   insertOne: (Model, request) => assertStorageDocument(Model, request.document),
   updateOne: assertFilteredUpdate,
@@ -163,7 +163,7 @@ const assertBatch = (value, name) => {
     throw invalidStorage(`${name} must be a nonempty array`);
   }
 };
-const assertBulkWrite = (Model, request) => {
+export const assertBulkWrite = (Model, request) => {
   assertBatch(request.operations, 'operations');
   for (const operation of request.operations) {
     const keys = Object.keys(operation);
@@ -174,21 +174,10 @@ const assertBulkWrite = (Model, request) => {
     BULK_VALIDATORS[name](Model, operation[name]);
   }
 };
-const assertInsertMany = (Model, request) => {
+export const assertInsertMany = (Model, request) => {
   assertBatch(request.documents, 'documents');
   request.documents.forEach((document) => assertStorageDocument(Model, document));
 };
-export const storageWriteValidators = {
-  updateOne: assertFilteredUpdate,
-  updateMany: assertFilteredUpdate,
-  replaceOne: assertReplacement,
-  findOneAndUpdate: assertFilteredUpdate,
-  findOneAndDelete: assertDeletion,
-  deleteMany: assertDeletion,
-  insertMany: assertInsertMany,
-  bulkWrite: assertBulkWrite,
-};
-
 const inspectProjection = (value) => {
   if (!value || typeof value !== 'object') {
     return;

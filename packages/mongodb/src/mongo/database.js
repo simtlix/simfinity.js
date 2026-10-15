@@ -29,3 +29,12 @@ export const serializeMongoValue = (value) => {
   }
   return value;
 };
+
+/** Bind models to a borrowed client, or retain the legacy default connection. */
+export const modelConnectionFor = (options) => {
+  if (!options || !Object.hasOwn(options, 'database')) return mongoose.connection;
+  const namespace = new mongoose.Mongoose();
+  const connection = namespace.createConnection();
+  if (!options.database) return connection;
+  return connection.setClient(options.database.client).useDb(options.database.databaseName);
+};

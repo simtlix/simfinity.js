@@ -15,6 +15,7 @@ import {
 import { castObjectId } from './ids.js';
 import { resolveStorageScalar } from './models.js';
 import { buildReadStages } from './pipeline-stages.js';
+import { assertStoredPath, serverFieldName, resolveServerLeaf } from './server-query-paths.js';
 import { parseServerQuery, lowerServerPredicate } from './server-query.js';
 
 const getEffectiveTypeName = (type) => (
@@ -127,49 +128,6 @@ const identifierLeaf = (model, schemaPath, gqltype) => {
   const schema = model?.schema;
   if (!schema?.path(`${schemaPath}._id`)) return 'id';
   return hasStoredIdentity(gqltype) || !schema.path(`${schemaPath}.id`) ? '_id' : 'id';
-};
-
-const DYNAMIC_STORAGE_TYPES = new Set(['Mixed', 'Map']);
-const appendPath = (prefix, leaf) => prefix ? `${prefix}.${leaf}` : leaf;
-
-const assertStoredPath = (model, path, allowNested = false) => {
-  const stored = model?.schema.path(path);
-  if (!stored && !(allowNested && model?.schema.nested[path])) {
-    throw filterError('Query field has no registered storage path', 'INVALID_FILTER_PATH');
-  }
-};
-
-const serverFieldName = (fields, part) => {
-  if (Object.hasOwn(fields, part)) return part;
-  return Object.keys(fields).find((key) => (
-    fields[key].extensions?.relation && getFieldStorageName(key, fields[key]) === part
-  ));
-};
-
-const resolveServerLeaf = ({ field, name, part, fieldType, model, schemaPath, mongoPath, parts, index }) => {
-  const relation = field.extensions?.relation;
-  const terminal = index === parts.length - 1;
-  if (relation && !relation.embedded) {
-    if (!terminal || getListShape(field.type)) {
-      throw filterError('Server queries cannot traverse nonembedded relations', 'INVALID_FILTER_PATH');
-    }
-    const leaf = getFieldStorageName(name, field);
-    assertStoredPath(model, appendPath(schemaPath, leaf));
-    return { mongoPath: appendPath(mongoPath, leaf) };
-  }
-  if (field.extensions?.queryPaths?.dynamic === true) {
-    const storage = model?.schema.path(appendPath(schemaPath, part));
-    const item = storage?.caster || storage;
-    if (!(fieldType instanceof GraphQLScalarType) || !DYNAMIC_STORAGE_TYPES.has(item?.instance)) {
-      throw filterError('Dynamic query paths require a scalar with registered Mixed or Map storage', 'INVALID_FILTER_PATH');
-    }
-    return { mongoPath: [mongoPath, ...parts.slice(index)].filter(Boolean).join('.') };
-  }
-  if (terminal && fieldType instanceof GraphQLObjectType) {
-    assertStoredPath(model, appendPath(schemaPath, part), true);
-    return { mongoPath: appendPath(mongoPath, part), structured: true };
-  }
-  return null;
 };
 
 // Resolve GraphQL paths and storage paths together; supplied models own ID casting.
@@ -483,7 +441,8 @@ const buildFilterQuery = async (input, gqltype) => {
   if (input.sort != null || input.pagination != null) {
     throw new SimfinityError('Storage scopes must contain filters; provide sorting and pagination on the operation', 'INVALID_SCOPE', 400);
   }
-  const pipeline = [], lookups = {};
+  const pipeline = [];
+  const lookups = {};
   const match = await collectFiltersAndLookups(input, gqltype, pipeline, lookups, 'find');
   if (match) pipeline.push(match);
   const aliases = Object.keys(lookups);
@@ -494,21 +453,24 @@ const buildFilterQuery = async (input, gqltype) => {
 const compileServerQuery = (gqltype, query, operation) => parseServerQuery(query, operation,
   (path) => resolveQueryPath(gqltype, path, {}, true));
 
-const buildQuery = async (input, gqltype, isCount, serverPlan) => {
-  if (serverPlan) {
-    const stages = await buildFilterQuery(input, gqltype);
-    stages.push({ $match: lowerServerPredicate(serverPlan.where) });
-    if (isCount) return [...stages, { $count: 'size' }];
-    const items = buildReadStages({
-      sort: serverPlan.sort,
-      skip: serverPlan.window.skip,
-      limit: serverPlan.window.limit,
-      projection: serverPlan.projection,
-    });
-    return serverPlan.operation === 'page'
-      ? [...stages, { $facet: { items, count: [{ $count: 'total' }] } }]
-      : [...stages, ...items];
+const buildServerQuery = async (input, gqltype, isCount, plan) => {
+  const stages = await buildFilterQuery(input, gqltype);
+  stages.push({ $match: lowerServerPredicate(plan.where) });
+  if (isCount) return [...stages, { $count: 'size' }];
+  const items = buildReadStages({
+    sort: plan.sort,
+    skip: plan.window.skip,
+    limit: plan.window.limit,
+    projection: plan.projection,
+  });
+  if (plan.operation === 'page') {
+    return [...stages, { $facet: { items, count: [{ $count: 'total' }] } }];
   }
+  return [...stages, ...items];
+};
+
+const buildQuery = async (input, gqltype, isCount, serverPlan) => {
+  if (serverPlan) return buildServerQuery(input, gqltype, isCount, serverPlan);
   const aggregateClauses = [];
   const aggregationsIncluded = {};
   const paging = paginationStages(input.pagination, true);
