@@ -105,7 +105,7 @@ export const validateStorageOptions = (Model, gqltype, operation, storage, integ
   if (storage.nulls !== undefined && storage.nulls !== 'preserve') throw invalid('Only preserve null semantics are supported');
   if (!['save', 'update', 'delete'].includes(operation)) throw invalid('Storage options require a mutation');
   if (storage.id !== undefined && operation !== 'save') throw invalid('A storage identity is only supported on save');
-  if (storage.filter) {
+  if (storage.filter !== undefined) {
     if (operation === 'save') throw invalid('Save does not accept a conditional filter');
     assertFilter(Model, storage.filter);
   }
@@ -143,7 +143,7 @@ export const validateStorageOptions = (Model, gqltype, operation, storage, integ
       guards.push({ $or: [{ [path]: { $exists: false } }, numeric] });
     }
   }
-  return guards.length ? { ...storage, filter: { $and: [...(storage.filter ? [storage.filter] : []), ...guards] } } : storage;
+  return guards.length ? { ...storage, filter: { $and: [...(storage.filter !== undefined ? [storage.filter] : []), ...guards] } } : storage;
 };
 
 export const createStorageExecutor = (queries, integrity) => async (Model, gqltype, request, { session, queryArgs, observer }) => {

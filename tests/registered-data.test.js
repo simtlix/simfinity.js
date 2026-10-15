@@ -7,7 +7,7 @@ import { observeMongoCursor } from '../packages/mongodb/src/mongo/cursor.js';
 
 const uri = process.env.SIMFINITY_TEST_MONGODB_URI;
 describe.skipIf(!uri)('registered data operations on MongoDB', () => {
-  let connection, Model, runtime, other;
+  let connection, Model, runtime, other, transaction;
   const events = [], hooks = [];
   const typeName = 'RegisteredDataItem';
   beforeAll(async () => {
@@ -16,7 +16,9 @@ describe.skipIf(!uri)('registered data operations on MongoDB', () => {
     await Model.deleteMany({});
     const type = new GraphQLObjectType({ name: typeName, fields: { id: { type: GraphQLID }, tenant: { type: GraphQLString }, title: { type: GraphQLString }, version: { type: GraphQLInt }, ratio: { type: GraphQLFloat } },
       extensions: { scope: { find({ args, context }) { if (context?.tenant) args.tenant = { operator: 'EQ', value: context.tenant }; if (context?.pageScope) args.pagination = { page: 1, size: 1 }; } } } });
-    runtime = createRuntime(createMongoAdapter());
+    const adapter = createMongoAdapter();
+    transaction = vi.fn((...args) => adapter.withTransaction(...args));
+    runtime = createRuntime({ ...adapter, withTransaction: transaction });
     runtime.preventCreatingCollection(true);
     runtime.connect(Model, type, 'registeredDataItem', 'registeredDataItems', { onSaving() { hooks.push('save'); }, onUpdating() { hooks.push('update'); } });
     runtime.use(async ({ type: registered, operation }, next) => { events.push([registered.gqltype.name, operation]); await next(); });
@@ -35,6 +37,40 @@ describe.skipIf(!uri)('registered data operations on MongoDB', () => {
     await session.abortTransaction(); await session.endSession();
     expect(await Model.findById('string-key')).toBeNull();
     expect(hooks).toEqual(expect.arrayContaining(['save', 'update']));
+  });
+  test.each(['update', 'delete'])('malformed conditional filters reject before %s transactions, controllers or writes', async (operation) => {
+    const id = 'invalid-filter-' + operation;
+    await Model.create({ _id: id, tenant: 'one', title: 'before', version: 1 });
+    transaction.mockClear();
+    const hookCount = hooks.length;
+    const update = vi.spyOn(Model.collection, 'findOneAndUpdate');
+    const remove = vi.spyOn(Model.collection, 'findOneAndDelete');
+    try {
+      for (const filter of [null, false, 0, '', true, 1, 'version', NaN, 1n, Symbol('filter'), () => ({}), []]) {
+        const args = operation === 'update' ? { input: { id, title: 'after' } } : { id };
+        await expect(runtime.execute(typeName, operation, args, { storage: { filter } })).rejects.toMatchObject({ extensions: { code: 'INVALID_STORAGE_OPERATION' } });
+      }
+      expect(transaction).not.toHaveBeenCalled(); expect(hooks).toHaveLength(hookCount);
+      expect(update).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
+      expect(await Model.collection.findOne({ _id: id })).toMatchObject({ title: 'before', version: 1 });
+    } finally { update.mockRestore(); remove.mockRestore(); await Model.deleteOne({ _id: id }); }
+  });
+  test('conditional writes preserve omitted and undefined filters, empty predicates and full CAS', async () => {
+    for (const storage of [{}, { filter: undefined }, { filter: {} }]) {
+      await Model.create({ _id: 'filter-control', title: 'before', version: 1 });
+      try {
+        expect((await runtime.execute(typeName, 'update', { input: { id: 'filter-control', title: 'after' } }, { storage })).title).toBe('after');
+        expect((await runtime.execute(typeName, 'delete', { id: 'filter-control' }, { storage }))._id).toBe('filter-control');
+      } finally { await Model.deleteOne({ _id: 'filter-control' }); }
+    }
+    await Model.create({ _id: 'filter-control', tenant: 'one', title: 'before', version: 1 });
+    try {
+      const args = { input: { id: 'filter-control', title: 'after' } };
+      await expect(runtime.execute(typeName, 'update', args, { storage: { filter: { tenant: 'other', version: 1 } } })).rejects.toMatchObject({ extensions: { code: 'NOT_VALID_ID' } });
+      expect(await runtime.execute(typeName, 'delete', { id: 'filter-control' }, { storage: { filter: { tenant: 'one', version: 2 } } })).toBeNull();
+      expect((await runtime.execute(typeName, 'update', args, { storage: { filter: { tenant: 'one', version: 1 }, increments: { version: 1 } } })).version).toBe(2);
+      expect((await runtime.execute(typeName, 'delete', { id: 'filter-control' }, { storage: { filter: { tenant: 'one', version: 2 } } }))._id).toBe('filter-control');
+    } finally { await Model.deleteOne({ _id: 'filter-control' }); }
   });
   test('compiler queries and trusted projections retain scope and stream batches', async () => {
     await Model.insertMany([{ _id: 'a', tenant: 'one', title: 'A', version: 1 }, { _id: 'b', tenant: 'two', title: 'B', version: 2 }, { _id: 'c', tenant: 'one', title: 'C', version: 3 }]);

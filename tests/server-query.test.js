@@ -147,6 +147,19 @@ describe.skipIf(!uri)('registered ordinary server queries', () => {
     finally { await Model.collection.deleteOne({ _id: 'nul-control' }); }
   });
 
+  test('$size rejects values outside signed int32 before physical access and accepts both bounds', async () => {
+    const aggregate = vi.spyOn(Model.collection, 'aggregate');
+    try {
+      for (const value of [2147483648, Number.MAX_SAFE_INTEGER, -1, 0.5]) {
+        await expect(run({ 'data.list': { $size: value } })).rejects.toMatchObject({ extensions: { code: 'INVALID_FILTER_VALUE' } });
+      }
+      expect(aggregate).not.toHaveBeenCalled();
+      expect((await run({ 'data.list': { $size: 0 } })).map((row) => row._id)).toEqual(['null']);
+      expect(await run({ 'data.list': { $size: 2147483647 } })).toEqual([]);
+      expect(aggregate).toHaveBeenCalledTimes(2);
+    } finally { aggregate.mockRestore(); }
+  });
+
   test('complete compiled paging, projection, count and a single observed stream exceed 100 rows', async () => {
     await Model.insertMany(Array.from({ length: 201 }, (_, i) => ({ _id: 'page-' + String(i).padStart(3, '0'), tenant: 'one', name: 'page' })));
     const filter = { name: 'page' };

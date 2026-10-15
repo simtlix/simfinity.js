@@ -357,7 +357,7 @@ export const createMongoAdapter = (options) => {
     },
     update(Model, id, update, session, storage) {
       if (integrity.enabled) return integrity.updateRecord(Model, id, update, session);
-      return mapQueryIdCastErrors(withSession(storage?.filter
+      return mapQueryIdCastErrors(withSession(storage?.filter !== undefined
         ? Model.findOneAndUpdate({ $and: [{ _id: id }, storage.filter] }, update, { new: true, sanitizeFilter: false, strictQuery: false })
         : Model.findByIdAndUpdate(id, update, { new: true }), session), mapIdCastError);
     },
@@ -366,7 +366,7 @@ export const createMongoAdapter = (options) => {
         integrity.assertWrite(Model, session);
         return integrity.deleteRecord(Model, id, session);
       }
-      return mapQueryIdCastErrors(withSession(storage?.filter
+      return mapQueryIdCastErrors(withSession(storage?.filter !== undefined
         ? Model.findOneAndDelete({ $and: [{ _id: id }, storage.filter] }, { sanitizeFilter: false, strictQuery: false })
         : Model.findByIdAndDelete(id), session));
     },

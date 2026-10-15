@@ -146,7 +146,7 @@ export const parseServerQuery = (query, operation, resolve) => {
         if (typeof operand !== 'boolean') fail('$exists requires a boolean');
         result.push({ operator, value: operand });
       } else if (operator === '$size') {
-        if (!Number.isSafeInteger(operand) || operand < 0) fail('$size requires a nonnegative integer');
+        if (!Number.isSafeInteger(operand) || operand < 0 || operand > 2147483647) fail('$size requires an integer from 0 through 2147483647');
         result.push({ operator, value: operand });
       } else if (operator === '$type') {
         if (!types.has(operand)) fail('Unsupported BSON type');

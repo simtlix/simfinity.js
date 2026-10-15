@@ -51,6 +51,11 @@ values finite, even in adopted transactions. A range miss has the same NOT_VALID
 conflict behavior as any conditional update. Opaque/custom scalars are rejected.
 A conditional update that matches nothing throws `NOT_VALID_ID` as generated updates
 do; conditional deletion returns null. Native matched counts are available below.
+An omitted `storage.filter` means no additional predicate; JavaScript callers may
+also supply `undefined` with the same behavior.
+An empty object is a valid predicate. Other non-object values (including `null`,
+`false`, `0` and `''`) and arrays reject with `INVALID_STORAGE_OPERATION` before
+transaction, controller or write execution; they never become an ID-only mutation.
 Backend storage options fail with `UNSUPPORTED_CAPABILITY` on adapters without that
 capability and on Mongo transactional-reference-integrity mode.
 
@@ -246,7 +251,8 @@ remain literal data, never expressions.
 
 - Implicit equality and `$eq`, `$ne`, `$lt`, `$lte`, `$gt`, `$gte`.
 - `$in`, `$nin`, `$all`, including empty arrays and null members with Mongo semantics.
-- `$exists` boolean, `$size` nonnegative integer, and `$type` aliases `string`,
+- `$exists` boolean, `$size` integer from 0 through 2147483647 inclusive (Mongo's
+  nonnegative signed 32-bit range), and `$type` aliases `string`,
   `number`, `double`, `int`, `long`, `decimal`, `date`, `objectId`, `bool`, `object`,
   `array`, `null`, `binData`. Numeric type codes and other aliases reject.
 - Document `$and`, `$or`, `$nor` with nonempty lists; field `$not` with an operator
