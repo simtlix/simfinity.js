@@ -2690,7 +2690,7 @@ A supplied model may also use another connection, such as one from `mongoose.cre
 
 ### Programmatic Data Access
 
-Registered server callers can use `runtime.execute` for CRUD through the generated lifecycle and for scoped find/count/stream/page queries with explicit windows. Mongo-specific atomic operations and projections use the separate `runtime.executeStorage` capability, which does not promise generated write-controller parity. See the [registered data operations guide](docs/guide/registered-data-operations.md) for contracts, cursor observation and introspection configuration.
+Registered server callers can use `runtime.execute` for generated CRUD, scoped lists, counts and aggregations. See the [registered data operations guide](docs/guide/registered-data-operations.md) for conditional writes, read observation and connection ownership.
 
 Access data programmatically outside of GraphQL:
 

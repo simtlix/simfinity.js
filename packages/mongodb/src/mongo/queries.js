@@ -14,9 +14,6 @@ import {
 
 import { castObjectId } from './ids.js';
 import { resolveStorageScalar } from './models.js';
-import { buildReadStages } from './pipeline-stages.js';
-import { assertStoredPath, serverFieldName, resolveServerLeaf } from './server-query-paths.js';
-import { parseServerQuery, lowerServerPredicate } from './server-query.js';
 
 const getEffectiveTypeName = (type) => (
   type instanceof GraphQLScalarType ? resolveStorageScalar(type).name : type.name
@@ -29,7 +26,7 @@ const isGraphQLisoDate = (typeName) => (
 // GraphQL reserves `__` names, so these aliases never replace a stored field.
 const LOOKUP_ALIAS_PREFIX = '__sf_l';
 
-export const createMongoQueries = ({ getModel, getRegistrations, assertQueryField }) => {
+export const createMongoQueries = ({ getModel, getRegistrations }) => {
 // One alias per relation path for each query build, keyed by the build's `included` accumulator.
 const lookupAliases = new WeakMap();
 
@@ -131,10 +128,9 @@ const identifierLeaf = (model, schemaPath, gqltype) => {
 };
 
 // Resolve GraphQL paths and storage paths together; supplied models own ID casting.
-const resolveQueryPath = (gqltype, path, aggregationsIncluded, server = false) => {
-  if (!server) assertValidFilterPath(path);
+const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
+  assertValidFilterPath(path);
   const parts = path.split('.');
-  if (server && parts[0] === '_id') parts[0] = 'id';
   let currentType = gqltype;
   let currentModel = getModel(gqltype);
   let mongoPath = '';
@@ -142,24 +138,12 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded, server = false) =
   const aggregateClauses = {};
 
   for (const [index, part] of parts.entries()) {
-    const fields = currentType.getFields();
-    const name = server ? serverFieldName(fields, part) : part;
-    const field = Object.hasOwn(fields, name) ? fields[name] : null;
+    const field = Object.hasOwn(currentType.getFields(), part) ? currentType.getFields()[part] : null;
     if (!field) throw filterError(`Unknown query field: ${path}`, 'INVALID_FILTER_FIELD');
     const fieldType = getNamedType(field.type);
     const relation = field.extensions?.relation;
-    if (server) {
-      assertQueryField?.(currentType, name, field);
-      const leaf = resolveServerLeaf({
-        field, name, part, fieldType, model: currentModel,
-        schemaPath, mongoPath, parts, index,
-      });
-      if (leaf) return leaf;
-    }
     if (fieldType instanceof GraphQLObjectType) {
-      if (index === parts.length - 1) {
-        throw filterError(`Query path must end in a scalar field: ${path}`, 'INVALID_FILTER_PATH');
-      }
+      if (index === parts.length - 1) throw filterError(`Query path must end in a scalar field: ${path}`, 'INVALID_FILTER_PATH');
       if (!relation || relation.embedded) {
         mongoPath = mongoPath ? `${mongoPath}.${part}` : part;
         schemaPath = schemaPath ? `${schemaPath}.${part}` : part;
@@ -188,7 +172,6 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded, server = false) =
       if (index !== parts.length - 1) throw filterError(`Cannot traverse scalar field in ${path}`, 'INVALID_FILTER_PATH');
       const leaf = part === 'id' ? identifierLeaf(currentModel, schemaPath, currentType) : part;
       const storagePath = schemaPath ? `${schemaPath}.${leaf}` : leaf;
-      if (server) assertStoredPath(currentModel, storagePath);
       return {
         mongoPath: mongoPath ? `${mongoPath}.${leaf}` : leaf,
         schemaType: currentModel?.schema?.path(storagePath),
@@ -435,42 +418,7 @@ const buildSortClause = (sortTerms, gqltype, aggregateClauses, aggregationsInclu
   return { $sort: sortExpressions };
 };
 
-// Private storage capabilities need authorization filters without generated list pagination.
-// Compile the same filter/lookups and clean up only aliases this compiler introduced.
-const buildFilterQuery = async (input, gqltype) => {
-  if (input.sort != null || input.pagination != null) {
-    throw new SimfinityError('Storage scopes must contain filters; provide sorting and pagination on the operation', 'INVALID_SCOPE', 400);
-  }
-  const pipeline = [];
-  const lookups = {};
-  const match = await collectFiltersAndLookups(input, gqltype, pipeline, lookups, 'find');
-  if (match) pipeline.push(match);
-  const aliases = Object.keys(lookups);
-  if (aliases.length) pipeline.push({ $unset: aliases });
-  return pipeline;
-};
-
-const compileServerQuery = (gqltype, query, operation) => parseServerQuery(query, operation,
-  (path) => resolveQueryPath(gqltype, path, {}, true));
-
-const buildServerQuery = async (input, gqltype, isCount, plan) => {
-  const stages = await buildFilterQuery(input, gqltype);
-  stages.push({ $match: lowerServerPredicate(plan.where) });
-  if (isCount) return [...stages, { $count: 'size' }];
-  const items = buildReadStages({
-    sort: plan.sort,
-    skip: plan.window.skip,
-    limit: plan.window.limit,
-    projection: plan.projection,
-  });
-  if (plan.operation === 'page') {
-    return [...stages, { $facet: { items, count: [{ $count: 'total' }] } }];
-  }
-  return [...stages, ...items];
-};
-
-const buildQuery = async (input, gqltype, isCount, serverPlan) => {
-  if (serverPlan) return buildServerQuery(input, gqltype, isCount, serverPlan);
+const buildQuery = async (input, gqltype, isCount) => {
   const aggregateClauses = [];
   const aggregationsIncluded = {};
   const paging = paginationStages(input.pagination, true);
@@ -555,5 +503,5 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
   return aggregateClauses;
 };
 
-  return { buildQuery, buildFilterQuery, buildFilterGroupMatch, buildAggregationQuery, compileServerQuery };
+  return { buildQuery, buildFilterGroupMatch, buildAggregationQuery };
 };

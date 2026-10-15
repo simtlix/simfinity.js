@@ -1,6 +1,5 @@
-// Server queries own their shape. Only cursor/execution controls may accompany
-// a compiled plan; storage projections may additionally supply shaping options.
-export const SERVER_READ_OPTION_NAMES = [
+// Supported execution and projection options for observed generated reads.
+const EXECUTION_OPTIONS = [
   'batchSize',
   'collation',
   'hint',
@@ -12,7 +11,7 @@ export const SERVER_READ_OPTION_NAMES = [
   'readConcern',
 ];
 export const READ_OPTION_NAMES = [
-  ...SERVER_READ_OPTION_NAMES,
+  ...EXECUTION_OPTIONS,
   'projection',
   'sort',
   'skip',

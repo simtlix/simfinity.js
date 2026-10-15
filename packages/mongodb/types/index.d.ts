@@ -1,4 +1,3 @@
-import type mongoose from 'mongoose';
 /**
  * Type declarations for @simtlix/simfinity-js.
  *
@@ -14,7 +13,6 @@ import type {
   GraphQLOutputType,
 } from 'graphql';
 import type {
-  ReadObserver,
   DatabaseAdapter,
   MutationLimitsOptions,
   RuntimeRegistration,
@@ -50,105 +48,9 @@ export type {
 } from '@simtlix/simfinity-core';
 export * from '@simtlix/simfinity-mcp';
 export { default as mcp } from '@simtlix/simfinity-mcp';
-
-export type MongoStorageDocument = Record<string, unknown>;
-export interface MongoReadOptions {
-  projection?: MongoStorageDocument;
-  sort?: Record<string, 1 | -1>;
-  skip?: number;
-  limit?: number;
-  batchSize?: number;
-  collation?: MongoStorageDocument;
-  hint?: string | MongoStorageDocument;
-  maxTimeMS?: number;
-  timeoutMS?: number;
-  timeoutMode?: 'cursorLifetime' | 'iteration';
-  signal?: AbortSignal;
-  allowDiskUse?: boolean;
-  readConcern?: MongoStorageDocument;
-}
-export interface MongoWriteOptions {
-  collation?: MongoStorageDocument;
-  hint?: string | MongoStorageDocument;
-  maxTimeMS?: number;
-  timeoutMS?: number;
-  signal?: AbortSignal;
-  upsert?: boolean;
-  returnDocument?: 'before' | 'after';
-  includeResultMetadata?: boolean;
-  projection?: MongoStorageDocument;
-  sort?: Record<string, 1 | -1>;
-  arrayFilters?: MongoStorageDocument[];
-  ordered?: boolean;
-}
-export type MongoUpdate = MongoStorageDocument | MongoStorageDocument[];
-export type MongoBulkOperation =
-  | { insertOne: { document: MongoStorageDocument } }
-  | { updateOne: { filter: MongoStorageDocument; update: MongoUpdate; upsert?: boolean; arrayFilters?: MongoStorageDocument[]; collation?: MongoStorageDocument } }
-  | { updateMany: { filter: MongoStorageDocument; update: MongoUpdate; upsert?: boolean; arrayFilters?: MongoStorageDocument[]; collation?: MongoStorageDocument } }
-  | { replaceOne: { filter: MongoStorageDocument; replacement: MongoStorageDocument; upsert?: boolean; collation?: MongoStorageDocument } }
-  | { deleteOne: { filter: MongoStorageDocument; collation?: MongoStorageDocument } }
-  | { deleteMany: { filter: MongoStorageDocument; collation?: MongoStorageDocument } };
-export type MongoStorageRequest = { backend: 'mongodb' } & (
-  | { operation: 'find'; filter?: MongoStorageDocument; options?: MongoReadOptions }
-  | { operation: 'aggregate' | 'stream'; pipeline: MongoStorageDocument[]; filter?: MongoStorageDocument; options?: MongoReadOptions }
-  | { operation: 'updateOne' | 'updateMany' | 'findOneAndUpdate'; filter: MongoStorageDocument; update: MongoUpdate; options?: MongoWriteOptions }
-  | { operation: 'replaceOne'; filter: MongoStorageDocument; replacement: MongoStorageDocument; options?: MongoWriteOptions }
-  | { operation: 'findOneAndDelete' | 'deleteMany'; filter: MongoStorageDocument; options?: MongoWriteOptions }
-  | { operation: 'insertMany'; documents: MongoStorageDocument[]; options?: Pick<MongoWriteOptions, 'ordered' | 'timeoutMS'> }
-  | { operation: 'bulkWrite'; operations: MongoBulkOperation[]; options?: Pick<MongoWriteOptions, 'ordered' | 'timeoutMS'> }
-);
-/** Strict, server-only stored-value filters. Unsupported operators reject at runtime. */
-export interface MongoCountQuery {
-  dialect: 'mongodb';
-  filter?: Record<string, unknown>;
-}
-export interface MongoFindQuery extends MongoCountQuery {
-  window: { skip?: number; limit: number; unbounded?: never } | { unbounded: true; skip?: never; limit?: never };
-  sort?: Record<string, 1 | -1>;
-  projection?: Record<string, 0 | 1>;
-}
-export interface MongoPageQuery extends MongoCountQuery {
-  window: { skip?: number; limit: number };
-  sort?: Record<string, 1 | -1>;
-  projection?: Record<string, 0 | 1>;
-}
-/** Field extension opt-in; only registered Mixed/Map storage accepts dynamic traversal. */
-export interface MongoQueryPaths { dynamic: true }
-
-declare module '@simtlix/simfinity-core' {
-  interface ServerQueryCapabilities { mongodb: { find: MongoFindQuery; count: MongoCountQuery; stream: MongoFindQuery; page: MongoPageQuery } }
-  interface StorageCapabilities { mongodb: MongoStorageRequest }
-}
-
-/** Storage handles stay in infrastructure; domain APIs use strings and plain values. */
-export interface MongoDatabase extends mongoose.mongo.Db {}
-export interface MongoSession extends mongoose.mongo.ClientSession {}
-export type MongoDocument = mongoose.mongo.Document;
-export interface MongoIdentifier extends mongoose.Types.ObjectId {}
-export type MongoStoredDocument = mongoose.mongo.WithId<MongoDocument>;
-export type MongoFilter = mongoose.mongo.Filter<MongoDocument>;
-export type MongoChanges = mongoose.mongo.UpdateFilter<MongoDocument>;
-export interface MongoStorageDefinition {
-  collection: string;
-  fields: Record<string, 'id' | 'objectId' | 'date' | 'text' | 'string' | 'boolean' | 'bool' | 'number' | 'int' | 'long' | 'double' | 'decimal' | 'map' | 'object' | 'array'>;
-  strict?: boolean | 'throw';
-}
-/** Opens a dedicated database; the returned close function owns only this connection. */
-export function openMongoDatabase(uri: string, options?: { dbName?: string; serverSelectionTimeoutMS?: number; monitorCommands?: boolean }): Promise<{ database: MongoDatabase; close(): Promise<void> }>;
-/** Adapter-owned ObjectId allocation/casting. Invalid input throws before persistence. */
-export function mongoId(value?: string): MongoIdentifier;
-export function isMongoId(value: unknown): boolean;
-export function serializeMongoValue(value: unknown): unknown;
 export interface MongoAdapterOptions {
-  /** A supplied database is borrowed. Null creates a disconnected schema-only namespace. */
-  database?: MongoDatabase | null;
-  /** Optional storage metadata for opaque scalars and existing collection layouts. */
-  models?: Record<string, MongoStorageDefinition>;
   /** Fixed at adapter creation. Defaults to off; transactional mode requires initialize(). */
   referentialIntegrity?: 'off' | 'transactional';
-  /** Optional observer for generated list/count/aggregate reads. */
-  queryObserver?: () => ReadObserver | undefined;
 }
 /**
  * In the default 'off' mode, withTransaction(null, callback) without a model, as custom mutations
@@ -159,6 +61,9 @@ export interface MongoAdapterOptions {
  * connection.
  */
 export interface MongoAdapter extends DatabaseAdapter {
+  /** Query builders are available after the adapter is bound by createRuntime. */
+  buildQuery: typeof buildQuery;
+  buildFilterGroupMatch: typeof buildFilterGroupMatch;
   readonly referentialIntegrity: 'off' | 'transactional';
   /**
    * Accepts only an ObjectId or a 24-character hexadecimal string, normalized to lowercase, and
@@ -386,27 +291,5 @@ export function buildFilterGroupMatch(
   depth?: number,
 ): Promise<any>;
 
-/** Driver lifecycle is owned by the Mongo adapter; consumers pass the handle unchanged. */
-export interface TransactionSession {
-  readonly client?: unknown;
-  inTransaction(): boolean;
-  startTransaction(options: { readConcern: { level: 'snapshot' }; writeConcern: { w: 'majority' }; readPreference: 'primary'; maxCommitTimeMS: number }): void;
-  commitTransaction(): Promise<void>;
-  abortTransaction(): Promise<void>;
-  endSession(): Promise<void>;
-}
-export interface TransactionPolicyOptions {
-  businessTimeoutMs?: number;
-  maximumCommitAttempts?: number;
-  now?: () => number;
-  afterRollback?: (error: unknown) => Promise<void>;
-  commit?: (work: () => Promise<void>, attempt: number) => Promise<void>;
-  unknownCommit?: (error: unknown) => Error;
-}
-/** Own/reuse transactions with bounded retries; never replay an uncertain commit. */
-export class MongoTransactionPolicy<Session extends TransactionSession = MongoSession> {
-  constructor(client: () => { startSession(): Session }, options?: TransactionPolicyOptions);
-  assertBorrowed(session: unknown): asserts session is Session;
-  runAdopted<T>(session: unknown, work: (session: Session) => T | Promise<T>): Promise<T>;
-  runOwned<T>(work: (session: Session) => T | Promise<T>, options?: { businessTimeoutMs?: number }): Promise<T>;
-}
+/** Observe physical fetches on a caller-owned native cursor; does not execute or authorize queries. */
+export function observeMongoCursor<T>(cursor: T, observer?: import('@simtlix/simfinity-core').ReadObserver): T;

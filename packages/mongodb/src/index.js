@@ -50,5 +50,4 @@ export {
   createHTTPMCPHandler,
 } from './mcp.js';
 
-export { openMongoDatabase, mongoId, isMongoId, serializeMongoValue } from './mongo/database.js';
-export { MongoTransactionPolicy } from './mongo/transaction-policy.js';
+export { observeMongoCursor } from './mongo/cursor.js';

@@ -158,7 +158,7 @@ const quotedUnion = (names) => names.map((name) => `'${name}'`).join(' | ');
 // explicit `export` in types/index.d.ts and an entry here.
 const coreRootValues = [
   'ForbiddenError', 'InternalServerError', 'QLOperator', 'QLSort', 'QLValue', 'SimfinityError',
-  'UnauthenticatedError', 'auth', 'buildErrorFormatter', 'configureIntrospection', 'configureMutationLimits', 'configureQueryLimits',
+  'UnauthenticatedError', 'auth', 'buildErrorFormatter', 'configureMutationLimits', 'configureQueryLimits',
   'createQueryPlan', 'createRuntime', 'createValidatedScalar', 'describeModels', 'paginationStages',
   'plugins', 'resolveModelPath', 'scalars', 'validators',
 ];
@@ -1271,8 +1271,7 @@ const cases = [
     archives: ({ core, mcp, mongo }) => [core, mcp, mongo],
     source: mongoSource,
     types: mongoTypes,
-    extraTypes: { 'legacy.ts': mongoLegacyTypes, 'legacy-auth-plugins.ts': mongoLegacyAuthPluginsTypes,
-      'registered-data.ts': readFileSync(join(root, 'tests/fixtures/registered-data-consumer.ts'), 'utf8') },
+    extraTypes: { 'legacy.ts': mongoLegacyTypes, 'legacy-auth-plugins.ts': mongoLegacyAuthPluginsTypes },
     // The legacy deep-import declarations sit next to the shims: NodeNext, Node16 and Bundler find
     // them through the exports map, Node10 by path, and their core subpath imports through core's
     // typesVersions.

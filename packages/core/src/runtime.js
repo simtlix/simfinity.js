@@ -2734,7 +2734,7 @@ function formatArgs(argsArray) {
   return graphqlArgs;
 }
 
-const { execute, executeStorage } = createRegisteredOperations({
+const { execute } = createRegisteredOperations({
   adapter,
   getRegistration: (name) => typesDict.types[name],
   getUpdateInputType: (name) => typesDictForUpdate.types[name].inputType,
@@ -2765,7 +2765,6 @@ const { execute, executeStorage } = createRegisteredOperations({
     registerMutation,
     saveObject,
     execute,
-    executeStorage,
     preventCreatingCollection,
   };
 };

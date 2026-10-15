@@ -3,12 +3,10 @@ import { SimfinityError } from '@simtlix/simfinity-core';
 import { getListShape, normalizeConnectionField } from '@simtlix/simfinity-core/internal/relation-storage';
 
 import { createMongoModel } from './models.js';
-import { modelConnectionFor } from './database.js';
 import { createMongoQueries } from './queries.js';
 import { withMongoTransaction } from './transactions.js';
 import { readMongoPipeline } from './cursor.js';
-import { SERVER_READ_OPTION_NAMES } from './read-options.js';
-import { createStorageExecutor, validateMongoSession, validateStorageOptions } from './storage.js';
+import { validateMongoSession, validateStorageOptions } from './storage-options.js';
 import { createMongoIntegrity } from './integrity.js';
 import {
   buildRecordReadPipeline, createRecordRead, createRecordUpdate, createRecordDelete,
@@ -17,21 +15,6 @@ import { prepareStorageUpdate } from './storage-update.js';
 import {
   castModelId, castObjectId, castPathValue, invalidId, isQueryKeyCastFailure, mapIdCastError,
 } from './ids.js';
-
-const collectionCreationOptions = (integrity) => {
-  if (integrity.enabled) return { createCollection: false };
-  return {};
-};
-
-const SERVER_READ_OPTIONS = new Set(SERVER_READ_OPTION_NAMES);
-
-const validateServerReadOptions = (options) => {
-  for (const key of Object.keys(options || {})) {
-    if (!SERVER_READ_OPTIONS.has(key)) {
-      throw new SimfinityError('Unsupported server read option: ' + key, 'INVALID_FILTER_VALUE', 400);
-    }
-  }
-};
 
 const withSession = (query, session) => (session ? query.session(session) : query);
 
@@ -165,9 +148,7 @@ const nestedPathOf = (nested) => {
 
 export const createMongoAdapter = (options) => {
   const integrity = createMongoIntegrity(options);
-  const modelConnection = modelConnectionFor(options);
   let queries;
-  let executeStorage;
   let getRegistrations = () => [];
   const privateConnectionFields = new Map();
 
@@ -227,7 +208,6 @@ export const createMongoAdapter = (options) => {
       integrity.bind(binding);
       getRegistrations = binding.getRegistrations;
       queries = createMongoQueries(binding);
-      executeStorage = createStorageExecutor(queries, integrity);
       adapter.buildQuery = queries.buildQuery;
       adapter.buildFilterGroupMatch = queries.buildFilterGroupMatch;
     },
@@ -262,29 +242,8 @@ export const createMongoAdapter = (options) => {
           model.schema.index({ [fieldName]: 1 });
         }
         if (onModelCreated) onModelCreated(model);
-      }, {
-        ...modelOptions,
-        connection: modelConnection,
-        storage: options?.models?.[gqltype.name],
-        ...collectionCreationOptions(integrity),
-      });
+      }, integrity.enabled ? { ...modelOptions, createCollection: false } : modelOptions);
     },
-    // Keep the delegate present before bind so adapter decorators can copy it safely.
-    async executeStorage(...args) {
-      if (!executeStorage) {
-        throw new SimfinityError(
-          'MongoDB adapter must be bound to a runtime before storage operations', 'ADAPTER_NOT_BOUND', 500,
-        );
-      }
-      return executeStorage(...args);
-    },
-    compileServerQuery(gqltype, query, operation) {
-      if (!queries) {
-        throw new SimfinityError('MongoDB adapter must be bound to a runtime before queries', 'ADAPTER_NOT_BOUND', 500);
-      }
-      return queries.compileServerQuery(gqltype, query, operation);
-    },
-    storageBackend: 'mongodb',
     supportsObservedReads: true,
     validateSession: validateMongoSession,
     validateStorageOptions(Model, gqltype, operation, storage) {
@@ -346,7 +305,7 @@ export const createMongoAdapter = (options) => {
     },
     getById(Model, id, session, { projection, plain, requiredId, storage, readOptions, observer } = {}) {
       integrity.assertReady();
-      const observation = observer || options?.queryObserver?.();
+      const observation = observer;
       if (observation || readOptions) {
         return readObservedRecord(Model, id, session, {
           projection, requiredId, storage, readOptions, observer: observation,
@@ -388,41 +347,29 @@ export const createMongoAdapter = (options) => {
       const query = createRecordDelete(Model, id, storage);
       return mapQueryIdCastErrors(withSession(query, session));
     },
-    async find(Model, gqltype, args, session, { requiredId, readOptions, observer, serverPlan } = {}) {
+    async find(Model, gqltype, args, session, { requiredId, readOptions, observer } = {}) {
       integrity.assertReady();
-      const pipeline = await queries.buildQuery(args, gqltype, false, serverPlan);
-      if (serverPlan) validateServerReadOptions(readOptions);
+      const pipeline = await queries.buildQuery(args, gqltype, false);
       // Mongoose does not cast aggregation stages, so cast the key type here, without setters.
       if (requiredId != null) pipeline.unshift({ $match: { _id: castModelId(Model, requiredId) } });
-      const observation = observer || options?.queryObserver?.();
+      const observation = observer;
       if (observation || readOptions) return readMongoPipeline(Model, pipeline, { ...readOptions, session }, observation);
       if (pipeline.length === 0) return withSession(Model.find({}), session);
       return withSession(Model.aggregate(pipeline), session);
     },
-    async count(Model, gqltype, args, session, { readOptions, observer, serverPlan } = {}) {
+    async count(Model, gqltype, args, session, { readOptions, observer } = {}) {
       integrity.assertReady();
-      const pipeline = await queries.buildQuery(args, gqltype, true, serverPlan);
-      if (serverPlan) validateServerReadOptions(readOptions);
-      const observation = observer || options?.queryObserver?.();
+      const pipeline = await queries.buildQuery(args, gqltype, true);
+      const observation = observer;
       const result = observation || readOptions
         ? await readMongoPipeline(Model, pipeline, { ...readOptions, session }, observation)
         : await withSession(Model.aggregate(pipeline), session);
       return result[0] ? result[0].size : 0;
     },
-    async page(Model, gqltype, args, session, read = {}) {
-      const rows = await adapter.find(Model, gqltype, args, session, read);
-      return { items: rows[0]?.items || [], totalCount: rows[0]?.count?.[0]?.total || 0 };
-    },
-    async stream(Model, gqltype, args, session, { readOptions, observer, serverPlan } = {}) {
-      integrity.assertReady();
-      validateServerReadOptions(readOptions);
-      const pipeline = await queries.buildQuery(args, gqltype, false, serverPlan);
-      return readMongoPipeline(Model, pipeline, { ...readOptions, session }, observer || options?.queryObserver?.(), true);
-    },
     async aggregate(Model, gqltype, args, session, { readOptions, observer } = {}) {
       integrity.assertReady();
       const pipeline = await queries.buildAggregationQuery(args, gqltype, args.aggregation);
-      const observation = observer || options?.queryObserver?.();
+      const observation = observer;
       if (observation || readOptions) return readMongoPipeline(Model, pipeline, { ...readOptions, session }, observation);
       return withSession(Model.aggregate(pipeline), session);
     },
