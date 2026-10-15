@@ -2105,6 +2105,20 @@ const readEachChildAlone = (type, group, waiters) => {
   }
 };
 
+// Whether a batch result holds one list per parent, in order, of records of that parent. Every index is
+// checked, holes included, since Array.prototype.every skips empty slots.
+const listsMatchParents = (lists, parents, connection) => {
+  if (!Array.isArray(lists) || lists.length !== parents.length) return false;
+  for (let index = 0; index < lists.length; index++) {
+    const records = Object.hasOwn(lists, index) ? lists[index] : undefined;
+    if (!Array.isArray(records)) return false;
+    for (let position = 0; position < records.length; position++) {
+      if (!Object.hasOwn(records, position) || !belongsToParent(records[position], connection, parents[index].key)) return false;
+    }
+  }
+  return true;
+};
+
 const readChildren = async (type, group, parents, context) => {
   const { connection } = group;
   if (parents.length === 1) {
@@ -2135,9 +2149,7 @@ const readChildren = async (type, group, parents, context) => {
     parents.forEach(({ waiters }) => readEachChildAlone(type, group, waiters));
     return;
   }
-  if (!Array.isArray(lists) || lists.length !== parents.length
-    || !lists.every((records, index) => Array.isArray(records)
-      && records.every((record) => belongsToParent(record, connection, parents[index].key)))) {
+  if (!listsMatchParents(lists, parents, connection)) {
     warnOnce(type.gqltype, 'findChildrenBatch', 'Configuration issue: adapter.findChildrenBatch did not return one '
       + `list of ${type.gqltype.name} records per parent ID, in parentIds order; the fields it read were read one `
       + 'parent at a time.');

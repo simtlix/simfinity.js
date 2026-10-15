@@ -1172,6 +1172,22 @@ describe('batched collection reads (#165)', () => {
       ['one list too many', (lists) => [...lists, []]],
       ['an entry that is not an array', 'entry'],
       ['records of another parent', 'leak'],
+      // Array.prototype.every skips holes, so these must be checked index by index.
+      ['a hole in place of a list', (lists) => {
+        const sparse = [...lists];
+        delete sparse[sparse.findIndex((records) => records.length > 0)];
+        return sparse;
+      }],
+      ['a hole in place of a record', (lists) => {
+        const sparse = lists.map((records) => [...records]);
+        delete sparse[sparse.findIndex((records) => records.length > 0)][0];
+        return sparse;
+      }],
+      ['a preallocated list filled only for some parents', (lists) => {
+        const sparse = new Array(lists.length);
+        lists.forEach((records, index) => { if (index % 2 === 0) sparse[index] = records; });
+        return sparse;
+      }],
     ])('a result with %s is reported once and read per field', async (label, shape) => {
       const warn = silenceWarnings();
       const { batched } = await expectEquivalent('{ lcauthors { id books { id } } }', { fixture: { shape } });

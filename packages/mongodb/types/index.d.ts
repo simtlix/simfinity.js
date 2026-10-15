@@ -65,7 +65,7 @@ export interface MongoAdapterOptions {
    * time, as 3.6.0 did. Fixed at adapter creation; a value other than a boolean throws
    * `INVALID_MONGO_ADAPTER_OPTIONS` (400).
    */
-  batchedCollections?: boolean;
+  batchedCollections?: boolean | undefined;
   /**
    * Parents per batched aggregate command, an integer from 1 to 100; defaults to 5. A command runs
    * its parents' sub-pipelines one after another, and the commands of one batch run concurrently, so
@@ -73,7 +73,7 @@ export interface MongoAdapterOptions {
    * `batchedCollections: true`. Fixed at adapter creation; another value throws
    * `INVALID_MONGO_ADAPTER_OPTIONS` (400).
    */
-  collectionBatchSize?: number;
+  collectionBatchSize?: number | undefined;
 }
 /**
  * In the default 'off' mode, withTransaction(null, callback) without a model, as custom mutations

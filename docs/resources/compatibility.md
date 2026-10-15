@@ -41,7 +41,7 @@ The next release can read generated collection fields in batches, opt-in on both
 
 - **By default:** the bundled adapters read each collection field per parent, as in 3.6.0; the runtime batches only for an adapter that defines `findChildrenBatch`.
 - **Opt-in:** `batchedCollections: true`, for PostgreSQL in `createPostgres(options)`, `postgresPlugin(options)` or `configure()`, and for MongoDB in `createMongoAdapter()`, with `collectionBatchSize`.
-- **Opt-out:** for a custom adapter instance, `adapter.findChildrenBatch = undefined`.
+- **Opt-out:** for a custom adapter instance, `adapter.findChildrenBatch = undefined`. The batch members, and `SQLPlugin.compileChildrenQuery`, `compileRecordBatch` and `maxRecordBatchValues`, are declared with `| undefined`, so that assignment and `{ ...plugin, compileRecordBatch: undefined }` also compile under `exactOptionalPropertyTypes`.
 - **TypeScript:** `@simtlix/simfinity-mcp` re-exports core's `EnvelopSchemaPlugin`, and `createAuthPlugin` returns the new `AuthSchemaPlugin`.
 
 ### Collection reads

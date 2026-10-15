@@ -190,7 +190,7 @@ export interface PostgresConfiguration {
    * and on a page that does not hold all of them, other such rows can fill it. Any value other than `true` keeps the
    * default.
    */
-  batchedCollections?: boolean;
+  batchedCollections?: boolean | undefined;
   /**
    * Defaults to 'perRow', as 3.5.9: the deferred triggers of a root with owned tables or unique lists refresh its owned
    * shape and unique keys once per changed row. 'perRoot' refreshes each changed root once per transaction while its

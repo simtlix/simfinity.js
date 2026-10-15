@@ -363,7 +363,7 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * are reported once per type with `console.warn`. To keep per-parent reads for a model or field,
    * return false from `batchesChildren`.
    */
-  findChildrenBatch?(model: Model, type: GraphQLObjectType, connectionField: string, parentIds: any[], args: any, options?: { context?: any }): any[][] | PromiseLike<any[][]>;
+  findChildrenBatch?: ((model: Model, type: GraphQLObjectType, connectionField: string, parentIds: any[], args: any, options?: { context?: any }) => any[][] | PromiseLike<any[][]>) | undefined;
   /**
    * Optional, synchronous. Return false to read the children of `model` through `connectionField`
    * with one `findChildren` call per field, as an adapter without `findChildrenBatch` does: at once,
@@ -374,7 +374,7 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * have hooks or settings that a batched read would bypass. When it is absent, the runtime batches
    * every read it can.
    */
-  batchesChildren?(model: Model, type: GraphQLObjectType, connectionField: string): boolean;
+  batchesChildren?: ((model: Model, type: GraphQLObjectType, connectionField: string) => boolean) | undefined;
 }
 export function createRuntime<Model = any, Session = any>(adapter: DatabaseAdapter<Model, Session>): Runtime<Model, Session>;
 

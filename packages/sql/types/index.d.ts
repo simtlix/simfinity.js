@@ -204,7 +204,7 @@ export interface SQLConfiguration {
    * `compileQuery`, reads the collection fields of many parents that share their arguments with one statement per 100
    * parents, after the statement's `setup`; any other value keeps the default.
    */
-  batchedCollections?: boolean;
+  batchedCollections?: boolean | undefined;
 }
 /**
  * Plugins receive only `create`, `validate` or no mode. Before calling the plugin, a runtime that allows creation rejects
@@ -277,16 +277,16 @@ export interface SQLPlugin<
    * its `compileQuery` property is this plugin's `compileQuery`; otherwise, and when it is absent, each parent's
    * children are read with `compileQuery`. A value that is not a function throws INVALID_SQL_PLUGIN (400).
    */
-  compileChildrenQuery?: SQLChildrenQueryCompiler<Configuration, Description, Id>;
+  compileChildrenQuery?: SQLChildrenQueryCompiler<Configuration, Description, Id> | undefined;
   /** The operation's table is the physical metadata from describeSchema. */
   compileRecord(description: Description, operation: SQLRecordOperation<Description['tables'][number], Id>): SQLStatement;
   /**
    * Optional, with `maxRecordBatchValues`: one statement that inserts every row of the operation. The runtime
    * sends a single row through `compileRecord` instead.
    */
-  compileRecordBatch?(description: Description, operation: SQLInsertManyOperation<Description['tables'][number]>): SQLStatement;
+  compileRecordBatch?: ((description: Description, operation: SQLInsertManyOperation<Description['tables'][number]>) => SQLStatement) | undefined;
   /** Positive safe integer: the most values (rows times columns) one `compileRecordBatch` statement carries. */
-  maxRecordBatchValues?: number;
+  maxRecordBatchValues?: number | undefined;
   values: SQLValueCodec<Id>;
   driver: SQLDriver<Configuration, Client, Result>;
 }

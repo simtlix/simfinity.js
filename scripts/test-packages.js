@@ -1442,9 +1442,40 @@ export * from '@simtlix/simfinity-js/src/auth/index.js';
 export * from '@simtlix/simfinity-js/src/plugins.js';
 export type { EnvelopSchemaPlugin } from '@simtlix/simfinity-core/plugins';`;
 
+// The documented \`undefined\` opt-outs must also compile under exactOptionalPropertyTypes, where an optional
+// member that does not include \`undefined\` in its type rejects an explicit \`undefined\` (TS2412, TS2375).
+const coreExactOptionalTypes = `import type { DatabaseAdapter } from '@simtlix/simfinity-core';
+declare const adapter: DatabaseAdapter;
+adapter.findChildrenBatch = undefined;
+adapter.batchesChildren = undefined;
+const copy: DatabaseAdapter = { ...adapter, findChildrenBatch: undefined, batchesChildren: undefined };
+void copy;`;
+
+const sqlExactOptionalTypes = `import type { SQLConfiguration, SQLPlugin } from '@simtlix/simfinity-sql';
+declare const plugin: SQLPlugin;
+const copy: SQLPlugin = { ...plugin, compileChildrenQuery: undefined, compileRecordBatch: undefined, maxRecordBatchValues: undefined };
+const configuration: SQLConfiguration = { batchedCollections: undefined };
+void [copy, configuration];`;
+
+const postgresExactOptionalTypes = `import { Pool } from 'pg';
+import { createPostgres, postgresPlugin } from '@simtlix/simfinity-postgres';
+const pool = new Pool();
+const plugin: ReturnType<typeof postgresPlugin> = {
+  ...postgresPlugin({ pool }), compileChildrenQuery: undefined, compileRecordBatch: undefined, maxRecordBatchValues: undefined,
+};
+const runtime = createPostgres({ pool, batchedCollections: undefined });
+void [plugin, runtime];`;
+
+const mongoExactOptionalTypes = `import { createMongoAdapter } from '@simtlix/simfinity-js';
+const adapter = createMongoAdapter({ batchedCollections: true, collectionBatchSize: undefined });
+adapter.findChildrenBatch = undefined;
+adapter.batchesChildren = undefined;
+void createMongoAdapter({ batchedCollections: undefined });`;
+
 const cases = [
   {
     name: 'core',
+    exactOptionalTypes: { 'exact-optional.ts': coreExactOptionalTypes },
     archives: ({ core }) => [core],
     source: coreSource,
     types: coreTypes,
@@ -1461,6 +1492,7 @@ const cases = [
   },
   {
     name: 'sql',
+    exactOptionalTypes: { 'exact-optional.ts': sqlExactOptionalTypes },
     archives: ({ core, sql }) => [core, sql],
     source: sqlSource,
     types: sqlTypes,
@@ -1469,6 +1501,7 @@ const cases = [
   },
   {
     name: 'postgres',
+    exactOptionalTypes: { 'exact-optional.ts': postgresExactOptionalTypes },
     archives: ({ core, sql, postgres }) => [core, sql, postgres],
     source: postgresSource,
     types: postgresTypes,
@@ -1499,6 +1532,7 @@ const cases = [
   },
   {
     name: 'mongo',
+    exactOptionalTypes: { 'exact-optional.ts': mongoExactOptionalTypes },
     archives: ({ core, mcp, mongo }) => [core, mcp, mongo],
     source: mongoSource,
     types: mongoTypes,
@@ -1573,6 +1607,27 @@ try {
         run(process.execPath, ['node_modules/typescript/bin/tsc', '--project', 'tsconfig.json'], cwd);
       } catch (error) {
         error.message = `${testCase.name} (moduleResolution ${moduleResolution}): ${error.message}`;
+        throw error;
+      }
+    }
+    if (testCase.exactOptionalTypes) {
+      for (const [file, source] of Object.entries(testCase.exactOptionalTypes)) writeFileSync(join(cwd, file), source);
+      writeFileSync(join(cwd, 'tsconfig.exact.json'), JSON.stringify({
+        compilerOptions: {
+          strict: true,
+          exactOptionalPropertyTypes: true,
+          target: 'ES2022',
+          module: 'NodeNext',
+          moduleResolution: 'NodeNext',
+          noEmit: true,
+          skipLibCheck: false,
+        },
+        include: Object.keys(testCase.exactOptionalTypes),
+      }));
+      try {
+        run(process.execPath, ['node_modules/typescript/bin/tsc', '--project', 'tsconfig.exact.json'], cwd);
+      } catch (error) {
+        error.message = `${testCase.name} (exactOptionalPropertyTypes): ${error.message}`;
         throw error;
       }
     }
