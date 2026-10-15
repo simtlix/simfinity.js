@@ -16,6 +16,7 @@ export type {
   AuthPluginOptions,
   AuthRule,
   AuthRuleFunction,
+  AuthSchemaPlugin,
   EntityController,
   EnvelopSchemaPlugin,
   FieldValidations,
@@ -178,6 +179,18 @@ export interface PostgresConfiguration {
    * indexes can return them in order. `true` keeps the explicit NULLS clause on every sort term, as 3.5.9 did.
    */
   explicitNullsOrder?: boolean;
+  /**
+   * Defaults to false: each generated collection field is read with its own statement, as 3.6.0 did. `true` reads the
+   * collection fields of many parents that share their arguments with one statement per 100 parents, a UNION ALL of
+   * each parent's own statement with its parent ID as a parameter of its own, so PostgreSQL plans each parent's rows
+   * for that parent's ID. A batch runs in one repeatable-read transaction, each of its statements right after
+   * `SET LOCAL jit = off`, because the batch's plan can cross jit_above_cost when no per-parent plan does.
+   * Each parent gets the same rows as before when its order is total, such as a sort that ends in `id`; PostgreSQL
+   * does not promise an order for unsorted rows and rows with equal sort keys, which can then come in another order,
+   * and on a page that does not hold all of them, other such rows can fill it. Any value other than `true` keeps the
+   * default.
+   */
+  batchedCollections?: boolean;
   /**
    * Defaults to 'perRow', as 3.5.9: the deferred triggers of a root with owned tables or unique lists refresh its owned
    * shape and unique keys once per changed row. 'perRoot' refreshes each changed root once per transaction while its

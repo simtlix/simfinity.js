@@ -28,6 +28,19 @@ The facade registers generated models on your application's default Mongoose ins
 
 Mongoose 8.24.2 or later within version 8 is required to exclude the update-casting prototype-pollution vulnerability. Existing applications should update Mongoose and their dependency lockfile, then run `npm audit`; upgrading Simfinity does not refresh every transitive dependency already locked by the application.
 
+## Optional batched collection reads
+
+Generated collection fields read one parent at a time by default. With `batchedCollections: true`, the adapter reads the collection fields of many parents that share their arguments with aggregate commands of up to `collectionBatchSize` parents each (an integer from 1 to 100, default 5), sent concurrently:
+
+```javascript
+import { createMongoAdapter, createRuntime } from '@simtlix/simfinity-js';
+
+const adapter = createMongoAdapter({ batchedCollections: true }); // collectionBatchSize: 5
+const simfinity = createRuntime(adapter);
+```
+
+Each parent's own pipeline (filters, sort and page) runs as one sub-pipeline: the first is the command's pipeline and the others are `$unionWith` stages. Like `referentialIntegrity`, the option needs your own adapter and runtime; the package-root runtime (`simfinity.connect()` and the rest) keeps one read per parent. Children of models with `aggregate` middleware, their own `aggregate` static, a discriminator child model or a wrapped `Model.collection.aggregate`, reads inside a `transactionAsyncLocalStorage` transaction, and adapter copies or overrides of `findChildren` keep one read per parent. A command runs its sub-pipelines one after another, so fewer commands can come with a slower single request, and command monitoring, query settings and `$queryStats` see the new command shape: read the [upgrade notes](https://simtlix.github.io/simfinity.js/resources/compatibility.html#upgrade-notes-for-the-next-release) before enabling it. Invalid values throw `INVALID_MONGO_ADAPTER_OPTIONS` (400).
+
 ## Optional transactional reference integrity
 
 Choose the mode once when creating an adapter; the default remains `'off'`:

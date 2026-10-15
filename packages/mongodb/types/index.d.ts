@@ -33,6 +33,7 @@ export type {
   AuthPluginOptions,
   AuthRule,
   AuthRuleFunction,
+  AuthSchemaPlugin,
   EnvelopSchemaPlugin,
   FieldValidations,
   FieldValidator,
@@ -51,6 +52,28 @@ export { default as mcp } from '@simtlix/simfinity-mcp';
 export interface MongoAdapterOptions {
   /** Fixed at adapter creation. Defaults to off; transactional mode requires initialize(). */
   referentialIntegrity?: 'off' | 'transactional';
+  /**
+   * Opt in to batched collection reads; defaults to false. When true, the adapter defines
+   * `findChildrenBatch` and `batchesChildren`, so the runtime reads the generated collection fields
+   * of one request that share a related type, a connection field and their arguments with aggregate
+   * commands of up to `collectionBatchSize` parents each, run concurrently. Each parent's own
+   * pipeline (filters, sort and page) runs as one sub-pipeline of a command, in a `$unionWith` stage
+   * after the first. Children of models with aggregate middleware, their own `aggregate` static, a
+   * discriminator key or a wrapped `collection.aggregate`, reads inside a Mongoose
+   * `transactionAsyncLocalStorage` transaction, and adapter copies or overrides of `findChildren`
+   * keep one read per parent. When false, the adapter has neither member and reads one parent at a
+   * time, as 3.6.0 did. Fixed at adapter creation; a value other than a boolean throws
+   * `INVALID_MONGO_ADAPTER_OPTIONS` (400).
+   */
+  batchedCollections?: boolean;
+  /**
+   * Parents per batched aggregate command, an integer from 1 to 100; defaults to 5. A command runs
+   * its parents' sub-pipelines one after another, and the commands of one batch run concurrently, so
+   * a larger value sends fewer commands at the cost of a longer command. Only used with
+   * `batchedCollections: true`. Fixed at adapter creation; another value throws
+   * `INVALID_MONGO_ADAPTER_OPTIONS` (400).
+   */
+  collectionBatchSize?: number;
 }
 /**
  * In the default 'off' mode, withTransaction(null, callback) without a model, as custom mutations
@@ -58,7 +81,8 @@ export interface MongoAdapterOptions {
  * client, no model is compiled on it or on its useDb() descendants, and every model of the bound
  * runtime's registrations uses one MongoDB client: then it opens it on that client. A supplied
  * session or model is used as is. In transactional mode it uses the first protected model's
- * connection.
+ * connection. With `batchedCollections: true` the adapter also has the optional `DatabaseAdapter`
+ * members `findChildrenBatch` and `batchesChildren`; without it, it has neither.
  */
 export interface MongoAdapter extends DatabaseAdapter {
   readonly referentialIntegrity: 'off' | 'transactional';

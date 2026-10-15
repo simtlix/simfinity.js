@@ -191,6 +191,8 @@ This table covers intentional core errors; GraphQL coercion and backend drivers 
 
 Backend transaction errors: `TRANSACTION_RETRY_EXCEEDED` (409, `Concurrent write could not be completed`) means a transaction owned by Simfinity could not complete because of a concurrent write: on MongoDB, a `WriteConflict` still present after its retries; on PostgreSQL, a serialization failure or deadlock that it does not retry again. On both, the driver error is `error.cause`, which `error.getCause?.()` also returns. Both backends wait a short random delay before each of up to five retries. The whole operation was rolled back, so the client can retry the request. It is a `SimfinityError`, not an `InternalServerError`, so the masking callback above keeps its message. A transaction you supply receives the driver's error instead, and you own its retries. MongoDB's transactional reference integrity adds its own codes; see [MongoDB reference integrity](/guide/mongodb-integrity#errors).
 
+MongoDB adapter options: `createMongoAdapter()` throws `INVALID_MONGO_ADAPTER_OPTIONS` (400) for a `batchedCollections` that is not a boolean, or a `collectionBatchSize` that is not an integer from 1 to 100, and `INVALID_MONGO_INTEGRITY_CONFIGURATION` (400) for an unknown option name or `referentialIntegrity` value; see [createMongoAdapter](/reference/api#createmongoadapter).
+
 ## PostgreSQL database errors
 
 PostgreSQL runtimes report database failures as `SimfinityError`s without SQL or constraint details. The driver error is available as `error.cause`, which `error.getCause()` also returns. It is not enumerable, so `JSON.stringify()`, object spread and GraphQL responses leave it out; log it on the server when you need the details.

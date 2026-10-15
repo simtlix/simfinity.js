@@ -5,6 +5,11 @@ import { createRecordStore } from './records.js';
 import { createTransactions } from './transactions.js';
 import { callDriver, isRetryableFailure, normalizeFailure } from './errors.js';
 
+// Distinct parents per batched children statement, whatever the runtime's maximum page size, so one statement's
+// cost, and its text when it repeats a per-parent statement for each parent, stays within the range of the per-parent
+// statements it replaces.
+const CHILDREN_BATCH_SIZE = 100;
+
 export const createSQLAdapter = (sourcePlugin) => {
   const plugin = bindPlugin(sourcePlugin);
   const { castId, createId } = plugin.values;
@@ -64,6 +69,72 @@ export const createSQLAdapter = (sourcePlugin) => {
   const read = (name, session, body, lock = false) => (singleStatementReads && !session && !lock && !snapshotEntities.has(name)
     ? transactions.withConnection(body)
     : transactions.withTransaction(session, body));
+  const inverseField = (entity, connectionField) => {
+    const field = entity.fields.find((item) => item.name === connectionField || item.storageName === connectionField);
+    if (!field || field.kind !== 'reference') throw new SimfinityError('Invalid inverse connection field', 'INVALID_MODEL', 400);
+    return field;
+  };
+  const findChildren = safe((model, gqltype, connectionField, parentId, args, session) => {
+    const entity = models.entities.find((item) => item.name === nameOf(model));
+    const field = inverseField(entity, connectionField);
+    return read(entity.name, session, (transaction) => execute(model, gqltype, args, transaction, 'find', { column: field.storageName, id: castId(parentId) }));
+  });
+  // Statements a children statement asks to run before it, in its transaction. A plugin bug, not a database error, so
+  // it is a plain error: the runtime reports it once and reads each parent alone.
+  const setupOf = (statement) => {
+    const setup = statement?.setup ?? [];
+    if (!Array.isArray(setup) || setup.some((item) => typeof item?.text !== 'string')) throw new TypeError(`${plugin.displayName} compileChildrenQuery returned setup that is not a list of statements`);
+    return setup;
+  };
+  // The children of many parents for one set of arguments, read as findChildren reads each of them: one statement
+  // per CHILDREN_BATCH_SIZE distinct parents, each running every parent's find statement as compileQuery compiles
+  // it, then one hydration of every child, which loads the owned rows of all of them with one statement per owned
+  // table. Like findChildren, it runs on one connection without a transaction when the type has no owned tables,
+  // and otherwise in one repeatable-read transaction. A statement with `setup` statements, such as settings that last
+  // until the end of a transaction, always runs in one transaction, right after its setup. Invalid IDs, models and
+  // arguments fail before a connection is taken. It resolves to one fresh list per entry of parentIds, in order;
+  // duplicate IDs share their records.
+  const findChildrenBatch = safe(async (model, gqltype, connectionField, parentIds, args) => {
+    const name = nameOf(model);
+    const field = inverseField(models.entities.find((item) => item.name === name), connectionField);
+    const keys = parentIds.map((id) => castId(id));
+    const ids = [...new Set(keys)];
+    if (!ids.length) return [];
+    const plan = createQueryPlan(models, name, args, { mode: 'find' });
+    const chunks = [];
+    for (let start = 0; start < ids.length; start += CHILDREN_BATCH_SIZE) {
+      const chunk = ids.slice(start, start + CHILDREN_BATCH_SIZE);
+      const statement = plugin.compileChildrenQuery(models, database, plan, { column: field.storageName, ids: chunk }, configured);
+      chunks.push({ start, size: chunk.length, statement, setup: setupOf(statement) });
+    }
+    const body = async (connection) => {
+      const rows = [];
+      const owners = [];
+      for (const { start, size, statement, setup } of chunks) {
+        for (const item of setup) await query(item, connection);
+        const result = await query(statement, connection);
+        for (const row of result.rows) {
+          const position = Number(row[statement.parentColumn]);
+          if (!Number.isSafeInteger(position) || position < 1 || position > size) throw new SimfinityError(`${plugin.displayName} returned a child row without its parent`, 'DATABASE_ERROR', 500);
+          owners.push(start + position - 1);
+          rows.push(row);
+        }
+      }
+      // Hydration keeps only the entity's fields, so the parent position column does not reach the records.
+      const hydrated = await records.hydrateRows(name, rows, connection);
+      const byParent = ids.map(() => []);
+      hydrated.forEach((record, index) => byParent[owners[index]].push(record));
+      return byParent;
+    };
+    const lists = await (chunks.some((chunk) => chunk.setup.length) ? transactions.withTransaction(null, body) : read(name, null, body));
+    const byId = new Map(ids.map((id, index) => [id, lists[index]]));
+    return keys.map((key) => [...byId.get(key)]);
+  });
+  // Batched reads reproduce this adapter's own findChildren. A copy or an override whose findChildren is another
+  // function reads each parent with it.
+  function batchesChildren() {
+    return this?.findChildren === findChildren;
+  }
   const adapter = {
     configure(value) {
       if (configured || prepared) throw new SimfinityError(`${plugin.displayName} configuration is already bound`, 'DATABASE_ALREADY_CONFIGURED', 409);
@@ -92,6 +163,14 @@ export const createSQLAdapter = (sourcePlugin) => {
       snapshotEntities = new Set(database.tables.filter((table) => table.ownership).map((table) => table.ownership.ownerTable));
       records = createRecordStore(models, database, query, plugin, { multiRowInserts: configured?.multiRowInserts });
       prepared = true;
+      // Batched collection reads are opt-in: only `batchedCollections: true`, with a plugin whose compileChildrenQuery
+      // is paired with its compileQuery, defines these members. Otherwise the adapter has neither, so the runtime
+      // reads each collection field with findChildren, at once, as 3.6.0 did. The configuration cannot change once
+      // prepared.
+      if (configured?.batchedCollections === true && plugin.compileChildrenQuery) {
+        adapter.findChildrenBatch = findChildrenBatch;
+        adapter.batchesChildren = batchesChildren;
+      }
     },
     createModel(gqltype, onModelCreated) {
       const model = {
@@ -128,12 +207,7 @@ export const createSQLAdapter = (sourcePlugin) => {
     find: safe((model, gqltype, args, session, { requiredId } = {}) => read(model?.name, session, (transaction) => execute(model, gqltype, args, transaction, 'find', requiredId == null ? null : { column: 'id', id: castId(requiredId) }))),
     count: safe((model, gqltype, args, session) => execute(model, gqltype, args, session, 'count')),
     aggregate: safe((model, gqltype, args, session) => execute(model, gqltype, args, session, 'aggregate')),
-    findChildren: safe((model, gqltype, connectionField, parentId, args, session) => {
-      const entity = models.entities.find((item) => item.name === nameOf(model));
-      const field = entity.fields.find((item) => item.name === connectionField || item.storageName === connectionField);
-      if (!field || field.kind !== 'reference') throw new SimfinityError('Invalid inverse connection field', 'INVALID_MODEL', 400);
-      return read(entity.name, session, (transaction) => execute(model, gqltype, args, transaction, 'find', { column: field.storageName, id: castId(parentId) }));
-    }),
+    findChildren,
     async initialize(options = {}) {
       if (!prepared) throw new SimfinityError('Create the GraphQL schema before initializing storage', 'SCHEMA_NOT_CREATED', 500);
       // Requests rejected before storage is touched keep the current readiness.

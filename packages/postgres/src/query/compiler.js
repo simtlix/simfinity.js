@@ -4,11 +4,65 @@ import { encodeScalar, storageTypes, invalidValue } from '../codecs.js';
 
 const unsupported = (message) => { throw new SimfinityError(message, 'UNSUPPORTED_QUERY', 400); };
 
+// Alias of each per-parent statement in the batched children statement. The per-parent statement only uses t<n>,
+// f<n> and short subquery aliases, so it never shadows this one.
+const CHILDREN = 'simfinity_children';
+// Stands for the parent's parameter in the per-parent statement that compileChildrenQuery repeats once per parent.
+// Compiled statements carry no NUL character, which PostgreSQL rejects in statement text: caller values are
+// parameters and identifiers and literals come from GraphQL names.
+const PARENT = '\u0000';
+// Runs before each batched children statement, in its transaction; SET LOCAL ends with that transaction, so the
+// connection goes back to the pool with the server's JIT setting.
+const CHILDREN_SETUP = 'SET LOCAL jit = off';
+
 /**
  * Compiles validated paths; all caller values are parameters, identifiers come from metadata.
  * `configuration.explicitNullsOrder: true` keeps the NULLS clause on every sort term, as 3.5.9 did.
  */
-export const compileQuery = (models, database, plan, extra = null, configuration = null) => {
+export const compileQuery = (models, database, plan, extra = null, configuration = null) => compileSelect(models, database, plan, extra, configuration, false);
+
+// A result column for the batched statement that no column of the child table has. Planning rejects storage names
+// that start with `__`, and generated root columns end in `_state` or `_present`, so the loop only guards a
+// description built by hand.
+const freeColumn = (table, name, taken = []) => {
+  let column = name;
+  while (taken.includes(column) || table.columns.some((item) => item.name === column)) column = `_${column}`;
+  return column;
+};
+
+/**
+ * The find statement of each parent in `extra.ids`, in one statement: a UNION ALL with one branch per ID, in
+ * order. Each branch is the statement compileQuery returns for `{ column, id }`, with the same filters, joins,
+ * ORDER BY, LIMIT and OFFSET, and with that ID as a parameter of its own, so PostgreSQL plans every branch for its
+ * own parent, with the statistics of that value, as it plans the per-parent statement. The other parameters, such
+ * as filter values and the page, are shared by every branch. Each branch tags its rows with the 1-based position of
+ * its parent ID, in `parentColumn`, and with their row number in the order its statement returns them: the
+ * statement always has a LIMIT, so PostgreSQL keeps it a subquery and never merges it into the branch. The outer
+ * ORDER BY on both returns each parent's rows together, in position order, and in its statement's order, which a
+ * Parallel Append would not keep.
+ * Values are the per-parent statement's values without the parent ID, then one uuid per parent ID.
+ * Its `setup` turns JIT compilation off for the transaction the SQL adapter runs it in: the plan of up to 100
+ * branches costs about as much as the per-parent plans together, so it can cross jit_above_cost when none of them
+ * does, and JIT then compiles every branch's expressions, which can take longer than running the statement.
+ */
+export const compileChildrenQuery = (models, database, plan, extra, configuration = null) => {
+  if (plan?.mode !== 'find' || !plan.pagination) unsupported('Only paginated find queries read children in batches');
+  if (!Array.isArray(extra?.ids) || !extra.ids.length) unsupported('Batched children reads require parent IDs');
+  const { text, values } = compileSelect(models, database, plan, { column: extra.column, id: null }, configuration, true);
+  const [before, after, ...rest] = text.split(PARENT);
+  if (after === undefined || rest.length) unsupported('Invalid batched children statement');
+  const root = database.tables.find((item) => item.name === plan.entity);
+  const parentColumn = freeColumn(root, '__simfinity_parent');
+  const ordinalColumn = freeColumn(root, '__simfinity_ordinal', [parentColumn]);
+  const branches = extra.ids.map((id, index) => `SELECT ${index + 1}::integer AS ${q(parentColumn)}, row_number() OVER () AS ${q(ordinalColumn)}, ${CHILDREN}.* FROM (${before}$${values.length + index + 1}::uuid${after}) ${CHILDREN}`);
+  return { text: `${branches.join(' UNION ALL ')} ORDER BY ${q(parentColumn)}, ${q(ordinalColumn)}`, values: [...values, ...extra.ids], parentColumn, setup: [{ text: CHILDREN_SETUP, values: [] }] };
+};
+// The compileQuery whose per-parent statements compileChildrenQuery reproduces. bindPlugin binds the children
+// compiler only for a plugin whose compileQuery is this one, so a plugin copy that overrides compileQuery reads
+// each parent with its own compileQuery.
+Object.defineProperty(compileChildrenQuery, 'compileQuery', { value: compileQuery });
+
+const compileSelect = (models, database, plan, extra, configuration, batched) => {
   const explicitNullsOrder = configuration?.explicitNullsOrder === true;
   const values = [];
   const joins = new Map();
@@ -232,7 +286,7 @@ export const compileQuery = (models, database, plan, extra = null, configuration
   if (extra) {
     const column = root.columns.find((item) => item.name === extra.column);
     if (!column || column.type !== 'uuid') unsupported('Invalid inverse connection field');
-    condition += ` AND ${col('t0', column.name)} = ${bind(extra.id, 'uuid')}`;
+    condition += ` AND ${col('t0', column.name)} = ${batched ? PARENT : bind(extra.id, 'uuid')}`;
   }
   let select = 't0.*';
   // List values that MIN and MAX facts read, each evaluated once per row in a lateral subquery.

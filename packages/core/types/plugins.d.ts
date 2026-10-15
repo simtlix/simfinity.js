@@ -4,7 +4,7 @@
  */
 import { plugins } from './index.js';
 
-export type { AuthPluginOptions, EnvelopSchemaPlugin, PermissionSchema } from './index.js';
+export type { AuthPluginOptions, AuthSchemaPlugin, EnvelopSchemaPlugin, PermissionSchema } from './index.js';
 // The /auth declaration itself, as the runtime re-exports that binding, so the two subpaths can be
 // re-exported together.
 export { createAuthPlugin } from './auth/index.js';

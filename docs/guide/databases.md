@@ -17,6 +17,7 @@ Both adapters generate the same GraphQL operation names and input shapes from th
 | Generated identity | MongoDB ObjectId, exposed as GraphQL `ID` | UUID, exposed as GraphQL `ID` |
 | Single references and one-to-many | Mongoose references and generated resolvers | UUID reference columns with real foreign keys; inverse collections use the child's FK |
 | Referential integrity | Optional [transactional adapter enforcement](./mongodb-integrity), default off | Native database FKs |
+| [Batched collection reads](./relationships#batched-collection-reads) | Opt-in with `createMongoAdapter({ batchedCollections: true })` | Opt-in with `batchedCollections: true` in `createPostgres()` or `configure()` |
 | Many-to-many | Explicit link entity | Explicit link table with a foreign key for each reference |
 | Embedded objects/lists | Embedded documents | JSONB for ordinary embedded trees; private owned tables for trees with references or unique fields |
 | Native model access | Mongoose Model, documents and sessions | `PostgresModel`, plain records and PostgreSQL sessions |

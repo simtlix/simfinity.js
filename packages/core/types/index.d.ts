@@ -340,6 +340,41 @@ export interface DatabaseAdapter<Model = any, Session = any> {
   count(model: Model, type: GraphQLObjectType, args: any, session?: Session | null): Promise<number> | number;
   aggregate(model: Model, type: GraphQLObjectType, args: any, session?: Session | null): any;
   findChildren(model: Model, type: GraphQLObjectType, connectionField: string, parentId: any, args: any, session?: Session | null): any;
+  /**
+   * Optional batch form of `findChildren` for generated collection fields. The runtime calls it as
+   * an adapter method (`this` is the adapter) only when `batchesChildren` does not return false, and
+   * checks both members on every read. Within one request (a GraphQL context object), it groups the
+   * collection reads of one related type and connection storage field whose effective arguments
+   * (after middleware, the scope and joined scopes) hold the same plain data and are requested
+   * before the promise jobs queued so far have run, and calls this method with 2 to 100 distinct
+   * parent IDs: each one the raw ID the first of its fields read, never null, and one that `castId`
+   * accepts without changing its string form. A group with one distinct parent calls `findChildren`
+   * instead. `args` is a copy the method may change; it holds only plain data and dates, and its
+   * pagination is valid. `options.context` is the request context; the runtime passes no session.
+   *
+   * Return, or resolve to, one array per parent ID, in `parentIds` order, each holding exactly the
+   * records, order and page that `findChildren(model, type, connectionField, parentIds[i], args, null)`
+   * returns for that parent; the result must not depend on `options.context`. Records should show
+   * their parent under `connectionField` (or the connection field's GraphQL name), as `findChildren`
+   * records do, or not show one. Fields that read the same parent share its records, each with its
+   * own array. After a rejection or throw, or a result of another shape (not an array, another
+   * length, an entry that is not an array, or a record that shows another parent), each field reads
+   * alone with `findChildren`; a failure other than a `SimfinityError` and a result of another shape
+   * are reported once per type with `console.warn`. To keep per-parent reads for a model or field,
+   * return false from `batchesChildren`.
+   */
+  findChildrenBatch?(model: Model, type: GraphQLObjectType, connectionField: string, parentIds: any[], args: any, options?: { context?: any }): any[][] | PromiseLike<any[][]>;
+  /**
+   * Optional, synchronous. Return false to read the children of `model` through `connectionField`
+   * with one `findChildren` call per field, as an adapter without `findChildrenBatch` does: at once,
+   * with the arguments object the field built. The runtime calls it as an adapter method on every
+   * read that could join a batch. Return false whenever `findChildrenBatch` would not reproduce
+   * `this.findChildren`, such as when `this.findChildren` is not the adapter's own function (a copy
+   * or an `Object.assign` override that changes how children are read), or for a model whose reads
+   * have hooks or settings that a batched read would bypass. When it is absent, the runtime batches
+   * every read it can.
+   */
+  batchesChildren?(model: Model, type: GraphQLObjectType, connectionField: string): boolean;
 }
 export function createRuntime<Model = any, Session = any>(adapter: DatabaseAdapter<Model, Session>): Runtime<Model, Session>;
 
@@ -363,13 +398,32 @@ export function configureQueryLimits(options?: { maxPageSize?: number }): void;
 export function configureMutationLimits(options?: MutationLimitsOptions): void;
 export function paginationStages(pagination: { page: number; size: number } | null | undefined, withDefault: boolean): Array<{ $skip: number } | { $limit: number }>;
 
-/** Envelop-style schema plugin used by the shared authorization helpers. */
+/**
+ * Envelop-style schema plugin, as MCP `schemaPlugins` accepts it; `createAuthPlugin` returns the
+ * narrower {@link AuthSchemaPlugin}. `@simtlix/simfinity-mcp` re-exports this declaration, so
+ * `export *` of both packages exports one `EnvelopSchemaPlugin`.
+ */
 export interface EnvelopSchemaPlugin {
+  /**
+   * Wraps resolvers in place. MCP `schemaPlugins` awaits a returned promise; Envelop and Yoga do
+   * not, so plugins shared with them should install synchronously.
+   */
+  onSchemaChange?: (payload: {
+    schema: GraphQLSchema;
+    replaceSchema: (schema: GraphQLSchema) => void;
+  }) => void | Promise<void>;
+  [key: string]: unknown;
+}
+
+/**
+ * What `createAuthPlugin` returns: an {@link EnvelopSchemaPlugin} whose hook wraps the resolvers
+ * synchronously and returns nothing.
+ */
+export interface AuthSchemaPlugin extends EnvelopSchemaPlugin {
   onSchemaChange?: (payload: {
     schema: GraphQLSchema;
     replaceSchema: (schema: GraphQLSchema) => void;
   }) => void;
-  [key: string]: unknown;
 }
 
 /** A single field validator (throws SimfinityError VALIDATION_ERROR on failure). */
@@ -505,7 +559,7 @@ export const auth: {
    * `onSchemaChange` throws TypeError, before wrapping any field, when a schema type was created
    * by another copy of the graphql module.
    */
-  createAuthPlugin(permissions: PermissionSchema, options?: AuthPluginOptions): EnvelopSchemaPlugin;
+  createAuthPlugin(permissions: PermissionSchema, options?: AuthPluginOptions): AuthSchemaPlugin;
   /** @deprecated Use createAuthPlugin instead. graphql-middleware compatible middleware. */
   createAuthMiddleware(
     permissions: PermissionSchema,
@@ -575,7 +629,7 @@ export const auth: {
 
 /** GraphQL server plugins: auth plugin factory plus count-extension plugins. */
 export const plugins: {
-  createAuthPlugin(permissions: PermissionSchema, options?: AuthPluginOptions): EnvelopSchemaPlugin;
+  createAuthPlugin(permissions: PermissionSchema, options?: AuthPluginOptions): AuthSchemaPlugin;
   /** Apollo Server plugin that copies `contextValue.count` into `extensions.count`. */
   apolloCountPlugin(): {
     requestDidStart(): Promise<{

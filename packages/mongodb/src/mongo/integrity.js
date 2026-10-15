@@ -26,10 +26,13 @@ const valuesAt = (value, path) => {
   return valuesAt(value[path[0]], path.slice(1));
 };
 
+// createMongoAdapter's options: the adapter reads the collection batching ones.
+const ADAPTER_OPTIONS = ['referentialIntegrity', 'batchedCollections', 'collectionBatchSize'];
+
 export const createMongoIntegrity = (options = {}) => {
   if (!options || typeof options !== 'object' || Array.isArray(options)
-    || Object.keys(options).some((key) => key !== 'referentialIntegrity')) {
-    throw invalid('Expected Mongo adapter options with referentialIntegrity');
+    || Object.keys(options).some((key) => !ADAPTER_OPTIONS.includes(key))) {
+    throw invalid('Expected Mongo adapter options among referentialIntegrity, batchedCollections and collectionBatchSize');
   }
   const mode = options.referentialIntegrity === undefined ? 'off' : options.referentialIntegrity;
   if (!['off', 'transactional'].includes(mode)) {

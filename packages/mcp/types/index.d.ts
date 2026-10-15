@@ -1,4 +1,5 @@
 import type { GraphQLField, GraphQLSchema } from 'graphql';
+import type { EnvelopSchemaPlugin } from '@simtlix/simfinity-core';
 
 /** Loose JSON Schema fragment (draft 2020-12 keywords as plain properties). */
 export type JSONSchema = Record<string, unknown>;
@@ -184,7 +185,8 @@ export type MCPExecutionOptions = MCPInProcessExecutionOptions | MCPRemoteExecut
  * Which nested collections the generated selection set and output schema
  * include. A nested collection is an object list field with a `pagination`
  * argument, such as core's non-embedded one-to-many relations, which core
- * reads with one query per returned row. 'all' (the default) includes them;
+ * reads with one query per returned row, or per batch of rows with an
+ * adapter that batches collection reads. 'all' (the default) includes them;
  * 'none' leaves them out.
  */
 export type MCPNestedCollections = 'all' | 'none';
@@ -362,26 +364,11 @@ export type MCPContextFactory = (extra?: MCPCallExtra) => unknown;
 /** GraphQL context factory for the HTTP handler (invoked per request with the Express request). */
 export type MCPHTTPContextFactory = (req: any, extra?: MCPCallExtra) => unknown;
 
-/**
- * Envelop-style plugin; only the `onSchemaChange` hook is invoked (in-process
- * mode, once before serving). Other recognized hooks (`on*`, `instrumentation`,
- * `requestDidStart`, `serverWillStart`) are ignored with a one-time warning;
- * without `onSchemaChange`, a misspelling of it is rejected with
- * MCP_INVALID_SCHEMA_PLUGIN.
- */
-export interface EnvelopSchemaPlugin {
-  /**
-   * Wrap resolvers in place. A returned promise is awaited before tools run
-   * (Envelop and Yoga do not await it, so shared plugins should install
-   * synchronously).
-   */
-  onSchemaChange?: (payload: {
-    schema: GraphQLSchema;
-    /** No-op for the same schema; any other schema throws MCP_UNSUPPORTED_SCHEMA_REPLACEMENT. */
-    replaceSchema: (schema: GraphQLSchema) => void;
-  }) => void | Promise<void>;
-  [key: string]: unknown;
-}
+// The Envelop-style plugin type is the declaration of @simtlix/simfinity-core, re-exported rather
+// than declared again, so `export *` of this package together with the core root, `/auth`,
+// `/plugins` or a database package exports one `EnvelopSchemaPlugin`. How MCP applies it is
+// described on `GenerateMCPToolsOptions.schemaPlugins`.
+export type { EnvelopSchemaPlugin };
 
 /**
  * Any other plugin object accepted by `schemaPlugins`, such as an Envelop or
@@ -421,7 +408,8 @@ export interface GenerateMCPToolsOptions {
   /**
    * Nesting depth for the auto-generated selection set and output schema.
    * Default 1. Each nested collection it reaches is read with one query per
-   * returned row; see `nestedCollections`.
+   * returned row, or per batch of rows with an adapter that batches
+   * collection reads; see `nestedCollections`.
    */
   selectionDepth?: number;
   /**
@@ -469,9 +457,15 @@ export interface GenerateMCPToolsOptions {
    * getter whose name starts with `onSchema`, or is at most two edits away
    * from `onSchemaChange`, ignoring case, such as `onSchemaChanged` or
    * `onSchemChange`) throws MCP_INVALID_SCHEMA_PLUGIN. Validation does not
-   * invoke getters other than `onSchemaChange`. Asynchronous hooks are
-   * awaited by the server and HTTP factories; `generateMCPTools` calls wait
-   * for them and reject if one fails.
+   * invoke getters other than `onSchemaChange`. Only `onSchemaChange` is
+   * invoked, once before serving; other recognized hooks (`on*`,
+   * `instrumentation`, `requestDidStart`, `serverWillStart`) are ignored with
+   * a one-time warning. The hook's `replaceSchema` is a no-op for the same
+   * schema; any other schema throws MCP_UNSUPPORTED_SCHEMA_REPLACEMENT.
+   * Asynchronous hooks are awaited by the server and HTTP factories;
+   * `generateMCPTools` calls wait for them and reject if one fails. Envelop
+   * and Yoga do not await them, so plugins shared with them should install
+   * synchronously.
    */
   schemaPlugins?: Array<EnvelopSchemaPlugin | SchemaPluginObject | false | null | undefined>;
 }

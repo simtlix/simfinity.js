@@ -53,6 +53,37 @@ const hasNoQueryHooks = (Model, operations) => hasNoHooks(Model.schema?.s?.hooks
 // getById reads through `findOne` and getByIds through `find`.
 const batchesFindOne = (Model) => hasNoQueryHooks(Model, ['find', 'findOne']);
 
+// Batched collection reads (findChildrenBatch), opt in with `batchedCollections`. Each parent's own
+// findChildren pipeline runs as one sub-pipeline of an aggregate command, the first as the command's
+// pipeline and the others in $unionWith stages, at most `collectionBatchSize` parents per command;
+// the commands of one call run concurrently. A command runs its sub-pipelines one after another.
+const DEFAULT_COLLECTION_BATCH_SIZE = 5;
+const MAX_COLLECTION_BATCH_SIZE = 100;
+// Sub-pipeline bytes per command, well below MongoDB's 16 MiB command limit.
+const COLLECTION_COMMAND_BYTES = 8 * 1024 * 1024;
+const invalidAdapterOption = (message) => new SimfinityError(message, 'INVALID_MONGO_ADAPTER_OPTIONS', 400);
+const readCollectionBatching = (options) => {
+  const { batchedCollections = false, collectionBatchSize = DEFAULT_COLLECTION_BATCH_SIZE } = options ?? {};
+  if (typeof batchedCollections !== 'boolean') throw invalidAdapterOption('batchedCollections must be true or false');
+  if (!Number.isSafeInteger(collectionBatchSize) || collectionBatchSize < 1 || collectionBatchSize > MAX_COLLECTION_BATCH_SIZE) {
+    throw invalidAdapterOption(`collectionBatchSize must be an integer from 1 to ${MAX_COLLECTION_BATCH_SIZE}`);
+  }
+  return { enabled: batchedCollections, parentsPerCommand: collectionBatchSize };
+};
+
+// Mongoose applies aggregate middleware, a model's own aggregate static (schema.static, loadClass, or
+// a model from another Mongoose copy), a discriminator's key and a wrapper of the model's
+// collection.aggregate to the command's pipeline only, never to $unionWith sub-pipelines, so such
+// models read their children one parent at a time.
+const batchesAggregate = (Model) => Model?.aggregate === mongoose.Model.aggregate
+  && hasNoHooks(Model.hooks, ['aggregate']) && hasNoHooks(Model.schema?.s?.hooks, ['aggregate'])
+  && !(Model.schema?.discriminatorMapping && !Model.schema.discriminatorMapping.isRoot)
+  && Model.collection != null && !Object.hasOwn(Model.collection, 'aggregate');
+// MongoDB rejects $unionWith in a multi-document transaction, and the rejection aborts the
+// transaction. Inside connection.transaction() with Mongoose's transactionAsyncLocalStorage, an
+// aggregate without a session joins the transaction.
+const inTransactionStore = (Model) => Model?.db?.base?.transactionAsyncLocalStorage?.getStore()?.session != null;
+
 // The statics that getById, update and delete call, directly or through each other.
 const BY_ID_STATICS = ['findById', 'findOne', 'findByIdAndUpdate', 'findOneAndUpdate', 'findByIdAndDelete', 'findOneAndDelete'];
 // Mongoose's automatic ObjectId setter only changes document assignments, never query filters.
@@ -128,6 +159,7 @@ const nestedPathOf = (nested) => {
 
 export const createMongoAdapter = (options) => {
   const integrity = createMongoIntegrity(options);
+  const collectionBatching = readCollectionBatching(options);
   let queries;
   let getRegistrations = () => [];
   const privateConnectionFields = new Map();
@@ -346,6 +378,71 @@ export const createMongoAdapter = (options) => {
       return withSession(Model.aggregate(pipeline), session);
     },
   };
+
+  // Without the option the adapter has neither batching member, so the runtime reads each
+  // collection field with findChildren, as 3.6.0 did.
+  if (collectionBatching.enabled) {
+    const ownFindChildren = adapter.findChildren;
+    // Why `self` (the adapter the runtime called) cannot batch the children of `Model`, or null. A
+    // batch reproduces only this adapter's own findChildren, so a copy or an override of findChildren
+    // reads one parent at a time with that findChildren.
+    const declineReason = (self, Model, session) => {
+      if (self?.findChildren !== ownFindChildren) return 'its findChildren is not the adapter\'s own';
+      if (!batchesAggregate(Model)) {
+        return 'its aggregate reads have middleware, an own aggregate static, a discriminator or a wrapped collection.aggregate';
+      }
+      if (session != null || inTransactionStore(Model)) return 'it reads in a session or a transaction';
+      return null;
+    };
+    adapter.batchesChildren = function batchesChildren(Model) {
+      return declineReason(this, Model, null) === null;
+    };
+    // One array per parent ID, in order, each equal to findChildren's result for that parent. It
+    // declines by throwing before any command, and fails as a whole, never with partial results.
+    adapter.findChildrenBatch = async function findChildrenBatch(Model, gqltype, connectionField, parentIds, args, batchOptions) {
+      integrity.assertReady();
+      const reason = declineReason(this, Model, batchOptions?.session);
+      if (reason) throw new Error(`${Model?.modelName} reads children one parent at a time: ${reason}`);
+      const pipeline = await queries.buildQuery(args, gqltype);
+      const schemaType = Model.schema.path(connectionField);
+      const lists = parentIds.map(() => []);
+      const subPipelines = [];
+      parentIds.forEach((parentId, index) => {
+        let parentKey;
+        try {
+          parentKey = castPathValue(schemaType, parentId);
+        } catch (error) {
+          // As in findChildren: a parent key that the connection path cannot cast has no children.
+          if (error?.extensions?.code === 'NOT_VALID_ID') return;
+          throw error;
+        }
+        // Wrapping each row, instead of adding a field, cannot collide with a stored field.
+        subPipelines.push([{ $match: { [connectionField]: parentKey } }, ...pipeline, { $replaceWith: { i: index, d: '$$ROOT' } }]);
+      });
+      if (subPipelines.length === 0) return lists;
+      const parentsPerCommand = Math.max(1, Math.min(collectionBatching.parentsPerCommand,
+        Math.floor(COLLECTION_COMMAND_BYTES / mongoose.mongo.BSON.calculateObjectSize({ pipeline: subPipelines[0] }))));
+      const limit = pipeline.findLast((stage) => Object.hasOwn(stage, '$limit'))?.$limit;
+      const coll = Model.collection.collectionName;
+      const commands = [];
+      for (let start = 0; start < subPipelines.length; start += parentsPerCommand) {
+        const [first, ...others] = subPipelines.slice(start, start + parentsPerCommand);
+        const command = Model.aggregate([...first, ...others.map((subPipeline) => ({ $unionWith: { coll, pipeline: subPipeline } }))]);
+        // One more than the rows the command can return, so that its first batch closes the cursor.
+        if (Number.isSafeInteger(limit)) command.option({ batchSize: limit * (others.length + 1) + 1 });
+        commands.push(command);
+      }
+      // Every command settles before a failure is reported, so per-parent reads that follow it do not
+      // overlap the remaining commands.
+      const outcomes = await Promise.allSettled(commands);
+      const failure = outcomes.find(({ status }) => status === 'rejected');
+      if (failure) throw failure.reason;
+      for (const { value: rows } of outcomes) {
+        for (const { i, d } of rows) lists[i].push(d);
+      }
+      return lists;
+    };
+  }
 
   Object.defineProperty(adapter, 'referentialIntegrity', { value: integrity.mode, enumerable: true });
   return adapter;

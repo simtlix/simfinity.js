@@ -8,6 +8,7 @@ export type {
   AuthPluginOptions,
   AuthRule,
   AuthRuleFunction,
+  AuthSchemaPlugin,
   EnvelopSchemaPlugin,
   PermissionSchema,
   PolicyExpression,

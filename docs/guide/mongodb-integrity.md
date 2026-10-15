@@ -108,7 +108,7 @@ Custom Mongoose middleware must preserve the transaction session and operation i
 
 | Code | Meaning |
 | --- | --- |
-| `INVALID_MONGO_INTEGRITY_CONFIGURATION` | Invalid option, unsupported model/registry, conflicting field, missing collection, connection or key configuration. |
+| `INVALID_MONGO_INTEGRITY_CONFIGURATION` | Invalid option, unsupported model/registry, conflicting field, missing collection, connection or key configuration. Invalid `batchedCollections` or `collectionBatchSize` values throw `INVALID_MONGO_ADAPTER_OPTIONS` instead. |
 | `MONGO_INTEGRITY_NOT_INITIALIZED` | Protected operations attempted before successful initialization. |
 | `MONGO_TRANSACTIONS_REQUIRED` | The server cannot run the required transactions. |
 | `MONGO_INTEGRITY_TRANSACTION_OPTIONS` | A supplied transaction lacks snapshot/majority options. |

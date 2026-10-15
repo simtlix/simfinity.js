@@ -7,8 +7,8 @@ import {
 } from 'graphql';
 import * as simfinity from '../packages/mongodb/src/index.js';
 
-// Opt in with a disposable replica-set URI. Only this suite's three collections
-// in its own per-process database are cleared; no shared database is dropped.
+// Opt in with a disposable replica-set URI. The suite works in its own per-process database
+// and drops only that database afterwards; no shared database is touched.
 const uri = process.env.SIMFINITY_TEST_MONGODB_URI;
 const parentController = {};
 const childController = {};
@@ -102,6 +102,8 @@ describe.skipIf(!uri)('Mutation transactions against a MongoDB replica set', () 
     if (ChildModel) await ChildModel.deleteMany({});
     if (CustomConnectionModel) await CustomConnectionModel.deleteMany({});
     if (customConnection) await customConnection.close();
+    // The per-process database name is this suite's own, so dropping it leaks nothing between runs.
+    if (mongoose.connection.readyState === 1) await mongoose.connection.db.dropDatabase();
     await mongoose.disconnect();
   });
 

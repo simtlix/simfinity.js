@@ -20,6 +20,8 @@ const plugin = simfinity.plugins.createAuthPlugin(permissions, {
 
 This is the same factory exposed as `simfinity.auth.createAuthPlugin`. It wraps schema resolvers through the Envelop `onSchemaChange` hook. See [authorization](/guide/authorization) for permission maps, rule helpers, and the generated `RootQueryType` name.
 
+In TypeScript, `createAuthPlugin` returns `AuthSchemaPlugin`, an `EnvelopSchemaPlugin` whose hook is synchronous. Both types are exported by core, its `/auth` and `/plugins` subpaths and the database packages, and `EnvelopSchemaPlugin` also by `@simtlix/simfinity-mcp`. `EnvelopSchemaPlugin`'s hook is typed `void | Promise<void>` because MCP `schemaPlugins` awaits a promise; Envelop and Yoga do not.
+
 `defaultPolicy` accepts only `'ALLOW'` or `'DENY'` (the default). Invalid permission maps, configured rules, or policy ASTs throw `TypeError` when the plugin is created. Default policy applies only to fields without an exact or wildcard entry.
 
 The examples below import an already initialized `schema` from your application. For PostgreSQL, await storage initialization before exporting it; see the [PostgreSQL quick start](/guide/postgresql).
