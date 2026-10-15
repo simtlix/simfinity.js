@@ -217,9 +217,9 @@ Version 3.6.0 reduces the reads, statements, lock writes and round trips of gene
 
 Each new regression test was checked to fail on 3.5.9 and to pass with the change; tests labeled as guards pass on both.
 
-## Next release: batched collection reads and one EnvelopSchemaPlugin
+## 3.7.0: batched collection reads and one EnvelopSchemaPlugin
 
-The next release can read generated collection fields in batches, opt-in on PostgreSQL and MongoDB, and makes `@simtlix/simfinity-mcp` re-export core's `EnvelopSchemaPlugin`. The rows below record the resulting contract; see the [upgrade notes](resources/compatibility.md#upgrade-notes-for-the-next-release) for the changes applications can observe. The evidence is in the repository's `tests/` and `scripts/test-packages.js`.
+Version 3.7.0 can read generated collection fields in batches, opt-in on PostgreSQL and MongoDB, and makes `@simtlix/simfinity-mcp` re-export core's `EnvelopSchemaPlugin`. The rows below record the resulting contract; see the [upgrade notes](resources/compatibility.md#upgrade-to-3-7-0) for the changes applications can observe. The evidence is in the repository's `tests/` and `scripts/test-packages.js`.
 
 | Behavior | Decision | Executable evidence |
 | --- | --- | --- |
