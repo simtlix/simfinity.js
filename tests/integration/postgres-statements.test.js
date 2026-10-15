@@ -56,6 +56,7 @@ describe.skipIf(!uri)('PostgreSQL statements per operation', () => {
     expect(result.errors, source).toBeUndefined();
     return result.data;
   };
+  const booksWithChapters = '{stmtbooks(sort:{terms:[{field:"title",order:ASC}]}){title author{name} chapters(sort:{terms:[{field:"position",order:ASC}]}){title}}}';
   const addOrder = 'mutation($input:StmtOrderInput!){addstmtorder(input:$input){id code lines{label quantity author{id} parts{name}}}}';
   const updateOrder = 'mutation($input:StmtOrderInputForUpdate!){updatestmtorder(input:$input){id lines{label quantity}}}';
 
@@ -71,10 +72,16 @@ describe.skipIf(!uri)('PostgreSQL statements per operation', () => {
     // The opt-out, through the factory options and through configure(), on the same storage.
     const perRow = await start(createPostgres({ pool: recording, schema: namespace, multiRowInserts: false }), 'validate');
     const configured = createPostgres();
-    configured.configure({ pool: recording, schema: namespace, multiRowInserts: false, explicitNullsOrder: true });
+    configured.configure({ pool: recording, schema: namespace, multiRowInserts: false, explicitNullsOrder: true, batchedCollections: false });
     const legacy = await start(configured, 'validate');
     const explicit = await start(createPostgres({ pool: recording, schema: namespace, explicitNullsOrder: true }), 'validate');
-    runtimes = { defaults, perRow, legacy, explicit };
+    const perParent = await start(createPostgres({ pool: recording, schema: namespace, batchedCollections: false }), 'validate');
+    // The opt-in, through the factory options and through configure().
+    const batched = await start(createPostgres({ pool: recording, schema: namespace, batchedCollections: true }), 'validate');
+    const configuredBatched = createPostgres();
+    configuredBatched.configure({ pool: recording, schema: namespace, batchedCollections: true });
+    const batchedByConfigure = await start(configuredBatched, 'validate');
+    runtimes = { defaults, perRow, legacy, explicit, perParent, batched, batchedByConfigure };
   }, 30000);
   beforeEach(async () => {
     const tables = runtimes.defaults.api.describeDatabase().tables.map((table) => `"${namespace}"."${table.name}"`);
@@ -104,14 +111,63 @@ describe.skipIf(!uri)('PostgreSQL statements per operation', () => {
     expect(log).toHaveLength(2);
     expect(transactions()).toEqual([]);
 
-    // One list statement, one batched author read and one statement per collection field.
+    // One list statement, one batched author read and one statement per collection field, as 3.6.0.
     reset();
-    const data = await ok(defaults, '{stmtbooks(sort:{terms:[{field:"title",order:ASC}]}){title author{name} chapters(sort:{terms:[{field:"position",order:ASC}]}){title}}}');
+    const data = await ok(defaults, booksWithChapters);
     expect(data.stmtbooks).toHaveLength(20);
     expect(data.stmtbooks[3]).toEqual({ title: 'Book 03', author: { name: 'Ada' }, chapters: [{ title: 'Chapter 3' }] });
     expect(log).toHaveLength(22);
+    expect(log.filter((text) => text.includes('simfinity_parent'))).toEqual([]);
     expect(transactions()).toEqual([]);
     expect(connects).toBe(22);
+  });
+
+  it('reads each collection field with its own statement by default and with batchedCollections: false, from the factory options or configure()', async () => {
+    const { defaults } = runtimes;
+    const author = await defaults.api.getModel(defaults.types.Author).create({ name: 'Ada' });
+    for (let index = 0; index < 20; index++) {
+      const book = await defaults.api.getModel(defaults.types.Book).create({ title: `Book ${String(index).padStart(2, '0')}`, author: author.id });
+      await defaults.api.getModel(defaults.types.Chapter).create({ title: `Chapter ${index}`, position: 1, book: book.id });
+    }
+    reset();
+    const expected = await ok(defaults, booksWithChapters);
+    const statements = [...log].sort();
+    for (const runtime of [runtimes.perParent, runtimes.legacy]) {
+      reset();
+      expect(await ok(runtime, booksWithChapters)).toEqual(expected);
+      // As 3.6.0: one list statement, one batched author read and one statement per collection field; the same
+      // statements as the default sends, except for the NULLS clauses that legacy's explicitNullsOrder keeps.
+      expect(log).toHaveLength(22);
+      if (runtime === runtimes.perParent) expect([...log].sort()).toEqual(statements);
+      expect(transactions()).toEqual([]);
+      expect(connects).toBe(22);
+    }
+  });
+
+  it('reads the chapters of every book with one statement with batchedCollections: true, in a transaction with JIT off', async () => {
+    const { defaults } = runtimes;
+    const author = await defaults.api.getModel(defaults.types.Author).create({ name: 'Ada' });
+    for (let index = 0; index < 20; index++) {
+      const book = await defaults.api.getModel(defaults.types.Book).create({ title: `Book ${String(index).padStart(2, '0')}`, author: author.id });
+      await defaults.api.getModel(defaults.types.Chapter).create({ title: `Chapter ${index}`, position: 1, book: book.id });
+    }
+    reset();
+    const expected = await ok(defaults, booksWithChapters);
+    for (const runtime of [runtimes.batched, runtimes.batchedByConfigure]) {
+      reset();
+      expect(await ok(runtime, booksWithChapters)).toEqual(expected);
+      // One list statement, one batched author read, then the chapters of the 20 books with one statement, in one
+      // repeatable-read transaction right after SET LOCAL jit = off: 6 statements instead of 22.
+      expect(log).toEqual([
+        expect.stringMatching(/^SELECT t0\.\* FROM /),
+        expect.stringMatching(/^SELECT t0\.\* FROM /),
+        'BEGIN ISOLATION LEVEL REPEATABLE READ',
+        'SET LOCAL jit = off',
+        expect.stringMatching(/^SELECT 1::integer AS "__simfinity_parent", row_number\(\) OVER \(\) AS "__simfinity_ordinal", simfinity_children\.\* FROM \(SELECT t0\.\* FROM .* UNION ALL SELECT 20::integer AS "__simfinity_parent", .* ORDER BY "__simfinity_parent", "__simfinity_ordinal"$/),
+        'COMMIT',
+      ]);
+      expect(connects).toBe(3);
+    }
   });
 
   it('keeps one repeatable-read transaction for a read that loads owned rows', async () => {

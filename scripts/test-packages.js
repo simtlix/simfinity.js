@@ -95,8 +95,8 @@ const coreSubpaths = {
       'isPolicyExpression', 'requireAuth', 'requirePermission', 'requireRole', 'resolvePath',
     ],
     types: [
-      'AuthPluginOptions', 'AuthRule', 'AuthRuleFunction', 'EnvelopSchemaPlugin', 'PermissionSchema',
-      'PolicyExpression', 'TypePermissions',
+      'AuthPluginOptions', 'AuthRule', 'AuthRuleFunction', 'AuthSchemaPlugin', 'EnvelopSchemaPlugin',
+      'PermissionSchema', 'PolicyExpression', 'TypePermissions',
     ],
     errorClasses: ['ForbiddenError', 'UnauthenticatedError'],
     defaultExport: 'namespace',
@@ -128,7 +128,7 @@ const coreSubpaths = {
   plugins: {
     namespace: 'plugins',
     values: ['apolloCountPlugin', 'createAuthPlugin', 'default', 'envelopCountPlugin'],
-    types: ['AuthPluginOptions', 'EnvelopSchemaPlugin', 'PermissionSchema'],
+    types: ['AuthPluginOptions', 'AuthSchemaPlugin', 'EnvelopSchemaPlugin', 'PermissionSchema'],
     defaultExport: 'namespace',
   },
   scalars: {
@@ -558,6 +558,43 @@ const inert: boolean | undefined = inertAdapter.readByIdIsInert?.({ name: 'Typed
 // @ts-expect-error readByIdIsInert returns a boolean.
 const looseInert: DatabaseAdapter<Model, Session> = { ...adapter, readByIdIsInert: () => 'yes' };
 void [inert, looseInert];
+// The batched collection members are optional too: the literal above compiles without them.
+const batching: DatabaseAdapter<Model, Session> = {
+  ...adapter,
+  async findChildrenBatch(model, type, connectionField, parentIds, args, options) {
+    void [model.name, type.name, connectionField.length, args, options?.context];
+    return parentIds.map(() => []);
+  },
+  batchesChildren(model, type, connectionField) {
+    return this.findChildren === adapter.findChildren && model.name.length > 0 && type.name.length > 0 && connectionField.length > 0;
+  },
+};
+const syncBatching: DatabaseAdapter<Model, Session> = { ...adapter, findChildrenBatch: (model, type, field, ids) => ids.map(() => [{ id: 1 }]) };
+const lists = batching.findChildrenBatch?.({ name: 'A' }, null as any, 'author', ['a1'], {});
+const eligible: boolean | undefined = batching.batchesChildren?.({ name: 'A' }, null as any, 'author');
+// @ts-expect-error findChildrenBatch returns arrays.
+const loose: DatabaseAdapter<Model, Session> = { ...adapter, findChildrenBatch: () => 'rows' };
+// @ts-expect-error findChildrenBatch returns one list per parent ID, not one flat list of records.
+const flatLists: DatabaseAdapter<Model, Session> = { ...adapter, findChildrenBatch: () => [{ id: 1 }] };
+// @ts-expect-error findChildrenBatch resolves to one list per parent ID, not one flat list of records.
+const flatPromise: DatabaseAdapter<Model, Session> = { ...adapter, findChildrenBatch: async () => [{ id: 1 }] };
+// @ts-expect-error parentIds is an array.
+const wrongIds = batching.findChildrenBatch?.({ name: 'A' }, null as any, 'author', 'a1', {});
+// @ts-expect-error batchesChildren is synchronous and returns a boolean.
+const asyncPredicate: DatabaseAdapter<Model, Session> = { ...adapter, batchesChildren: async () => true };
+void [lists, eligible, loose, flatLists, flatPromise, wrongIds, asyncPredicate, syncBatching, createRuntime(batching)];
+// The exact member types, so a declaration that widens to \`any\` or to one flat list fails.
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+type BatchRead = NonNullable<DatabaseAdapter<Model, Session>['findChildrenBatch']>;
+type BatchPredicate = NonNullable<DatabaseAdapter<Model, Session>['batchesChildren']>;
+const batchMembers: {
+  readParameters: Equals<Parameters<BatchRead>, [model: Model, type: GraphQLObjectType, connectionField: string, parentIds: any[], args: any, options?: { context?: any }]>;
+  readResult: Equals<ReturnType<BatchRead>, any[][] | PromiseLike<any[][]>>;
+  optionalRead: Equals<typeof lists, any[][] | PromiseLike<any[][]> | undefined>;
+  predicateParameters: Equals<Parameters<BatchPredicate>, [model: Model, type: GraphQLObjectType, connectionField: string]>;
+  predicateResult: Equals<ReturnType<BatchPredicate>, boolean>;
+} = { readParameters: true, readResult: true, optionalRead: true, predicateParameters: true, predicateResult: true };
+void batchMembers;
 const runtime = createRuntime(adapter);
 const type = new GraphQLObjectType({ name: 'TypedCoreBook', fields: { title: { type: GraphQLString } } });
 runtime.connect(null, type, 'typedCoreBook', 'typedCoreBooks');
@@ -748,10 +785,82 @@ const sharedAuthPlugin: {
 } = { auth: true, plugins: true, same: true };
 void sharedAuthPlugin;`;
 
+// EnvelopSchemaPlugin has one declaration, core's, which every package exports. Its hook may return a
+// promise, which MCP awaits; createAuthPlugin returns AuthSchemaPlugin, an EnvelopSchemaPlugin whose
+// hook returns nothing. Needs Core (the root types), auth, plugins and GraphQLSchema in scope.
+const envelopSchemaPluginShape = `type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+type SchemaHook = NonNullable<Core.EnvelopSchemaPlugin['onSchemaChange']>;
+type AuthSchemaHook = NonNullable<Core.AuthSchemaPlugin['onSchemaChange']>;
+const schemaPluginShape: {
+  payload: Equals<Parameters<SchemaHook>, [{ schema: GraphQLSchema; replaceSchema: (schema: GraphQLSchema) => void }]>;
+  result: Equals<ReturnType<SchemaHook>, void | Promise<void>>;
+  authPayload: Equals<Parameters<AuthSchemaHook>, Parameters<SchemaHook>>;
+  authResult: Equals<ReturnType<AuthSchemaHook>, void>;
+  authPlugin: Equals<ReturnType<typeof auth.createAuthPlugin>, Core.AuthSchemaPlugin>;
+  pluginsAuthPlugin: Equals<ReturnType<typeof plugins.createAuthPlugin>, Core.AuthSchemaPlugin>;
+} = { payload: true, result: true, authPayload: true, authResult: true, authPlugin: true, pluginsAuthPlugin: true };
+declare const schemaPayload: Parameters<SchemaHook>[0];
+// The auth plugin is an EnvelopSchemaPlugin, and calling its hook yields no promise.
+const authAsEnvelop: Core.EnvelopSchemaPlugin = auth.createAuthPlugin({});
+const installed: void | undefined = plugins.createAuthPlugin({}).onSchemaChange?.(schemaPayload);
+const asyncPlugin: Core.EnvelopSchemaPlugin = { async onSchemaChange({ schema }) { void schema; } };
+// @ts-expect-error onSchemaChange returns nothing or a promise; a returned schema would be discarded.
+const discarded: Core.EnvelopSchemaPlugin = { onSchemaChange: ({ schema }) => schema };
+// The upgrade notes' call-site and class breaks: a core-typed hook's result is not void, so call it as a
+// statement or await it, and a class that implements the interface cannot return a value from it.
+declare const corePlugin: Core.EnvelopSchemaPlugin;
+// @ts-expect-error The hook may return a promise, so its result does not fit a void sink.
+const voidResult: void = corePlugin.onSchemaChange?.(schemaPayload);
+const installAll = async (list: Core.EnvelopSchemaPlugin[]) => { for (const each of list) await each.onSchemaChange?.(schemaPayload); };
+class Tracker implements Core.EnvelopSchemaPlugin {
+  [key: string]: unknown;
+  readonly seen = new Set<GraphQLSchema>();
+  // @ts-expect-error A class that implements EnvelopSchemaPlugin cannot return a value from its hook.
+  onSchemaChange = ({ schema }: Parameters<SchemaHook>[0]) => this.seen.add(schema);
+}
+void [schemaPluginShape, authAsEnvelop, installed, asyncPlugin, discarded, voidResult, installAll, Tracker];`;
+
+// Core's own consumer: the shape under every module resolution.
+const coreSchemaPluginTypes = `import type * as Core from '@simtlix/simfinity-core';
+import { auth, plugins } from '@simtlix/simfinity-core';
+import type { GraphQLSchema } from 'graphql';
+${envelopSchemaPluginShape}`;
+
+// MCP re-exports core's EnvelopSchemaPlugin declaration, so \`export *\` of the MCP package together
+// with the core root, /auth and /plugins exports one EnvelopSchemaPlugin instead of reporting TS2308.
+const mcpBarrelTypes = `import type * as Core from '@simtlix/simfinity-core';
+import type * as Mcp from '@simtlix/simfinity-mcp';
+import { auth, plugins } from '@simtlix/simfinity-core';
+import type { GraphQLSchema } from 'graphql';
+export * from '@simtlix/simfinity-mcp';
+export * from '@simtlix/simfinity-core';
+export * from '@simtlix/simfinity-core/auth';
+export * from '@simtlix/simfinity-core/plugins';
+${envelopSchemaPluginShape}
+const oneEnvelopSchemaPlugin: Equals<Mcp.EnvelopSchemaPlugin, Core.EnvelopSchemaPlugin> = true;
+void oneEnvelopSchemaPlugin;`;
+
+// The database package roots re-export core's declarations, so they can be re-exported together with
+// core's /auth and /plugins.
+const databaseBarrelTypes = (name) => `import type * as Core from '@simtlix/simfinity-core';
+import type * as Database from '${name}';
+export * from '${name}';
+export * from '@simtlix/simfinity-core/auth';
+export * from '@simtlix/simfinity-core/plugins';
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+const sameSchemaPlugins: {
+  envelop: Equals<Database.EnvelopSchemaPlugin, Core.EnvelopSchemaPlugin>;
+  auth: Equals<Database.AuthSchemaPlugin, Core.AuthSchemaPlugin>;
+  createAuthPlugin: Equals<ReturnType<typeof Database.auth.createAuthPlugin>, Core.AuthSchemaPlugin>;
+} = { envelop: true, auth: true, createAuthPlugin: true };
+void sameSchemaPlugins;`;
+
 const sqlTypes = `import {
   createSQL,
   planRelationalSchema,
   type SQLCapability,
+  type SQLChildrenQueryCompiler,
+  type SQLChildrenStatement,
   type SQLCompiledQuery,
   type SQLConfiguration,
   type SQLDatabaseDescription,
@@ -766,7 +875,7 @@ const sqlTypes = `import {
   type ItemValidators,
   validators,
 } from '@simtlix/simfinity-sql';
-import { describeModels, type ItemValidators as CoreItemValidators } from '@simtlix/simfinity-core';
+import { describeModels, type ItemValidators as CoreItemValidators, type QueryPlan } from '@simtlix/simfinity-core';
 import { GraphQLID, GraphQLObjectType, GraphQLString } from 'graphql';
 type Configuration = { schema: string; token: string };
 type Client = { active: boolean };
@@ -840,6 +949,39 @@ const batchPlugin: SQLPlugin<Configuration, Client, Description> = {
   },
   maxRecordBatchValues: 1000,
 };
+// A batched children compiler names the compileQuery it reproduces; a 3.6.0-shaped plugin compiles without it.
+function compileChildren(models: SQLModelDescription, description: Description, query: QueryPlan, extra: { column: string; ids: string[] }, configuration?: Configuration | null): SQLChildrenStatement {
+  return { text: query.mode + ':' + extra.column, values: [configuration?.token, description.dialect, models.entities.length, extra.ids], parentColumn: 'parent' };
+}
+compileChildren.compileQuery = batchPlugin.compileQuery;
+const childrenPlugin: SQLPlugin<Configuration, Client, Description> = { ...batchPlugin, compileChildrenQuery: compileChildren };
+const childrenCompiler: SQLChildrenQueryCompiler<Configuration, Description> | undefined = childrenPlugin.compileChildrenQuery;
+const pairedQuery = childrenCompiler?.compileQuery;
+// The pairing member has exactly the type of the plugin's compileQuery, so retyping it to \`any\` fails.
+const pairing: {
+  compileQuery: Equals<NonNullable<SQLChildrenQueryCompiler<Configuration, Description>['compileQuery']>, SQLPlugin<Configuration, Client, Description>['compileQuery']>;
+  optional: Equals<typeof pairedQuery, SQLPlugin<Configuration, Client, Description>['compileQuery'] | undefined>;
+  statement: Equals<ReturnType<SQLChildrenQueryCompiler<Configuration, Description>>, SQLChildrenStatement>;
+} = { compileQuery: true, optional: true, statement: true };
+// @ts-expect-error compileQuery is a function.
+const wrongPair: number | undefined = childrenCompiler?.compileQuery;
+void [pairing, wrongPair];
+const collections: SQLConfiguration = { schema: 'x', batchedCollections: false };
+// @ts-expect-error A batched children statement names its parent column.
+const noParentColumn: SQLPlugin<Configuration, Client, Description> = { ...batchPlugin, compileChildrenQuery: () => ({ text: 'children' }) };
+// @ts-expect-error compileChildrenQuery is a function.
+const notAFunction: SQLPlugin<Configuration, Client, Description> = { ...batchPlugin, compileChildrenQuery: 'SELECT' };
+// @ts-expect-error batchedCollections is a boolean.
+const badCollections: SQLConfiguration = { batchedCollections: 'no' };
+void [childrenPlugin, pairedQuery, collections, noParentColumn, notAFunction, badCollections];
+// Optional statements to run before a children statement, in its transaction; a readonly list is accepted.
+const setupList: readonly SQLStatement[] = Object.freeze([{ text: 'SET LOCAL jit = off' }, { text: 'SET LOCAL x = 1', values: [] }]);
+const withSetup: SQLChildrenStatement = { text: 'children', parentColumn: 'parent', setup: setupList };
+const setupType: Equals<SQLChildrenStatement['setup'], readonly SQLStatement[] | null | undefined> = true;
+const nullSetup: SQLChildrenStatement = { text: 'children', parentColumn: 'parent', setup: null };
+// @ts-expect-error Setup holds statements, not SQL text.
+const textSetup: SQLChildrenStatement = { text: 'children', parentColumn: 'parent', setup: ['SET LOCAL jit = off'] };
+void [withSetup, setupType, nullSetup, textSetup];
 const singleStatement: SQLCapability = 'singleStatementReads';
 const sqlConfiguration: SQLConfiguration = { schema: 'x', multiRowInserts: false };
 // @ts-expect-error The batch value limit is a number.
@@ -877,7 +1019,7 @@ const sameItemValidators: Equals<ItemValidators, CoreItemValidators> = true;
 void [capability, scalar, description, badOperation, badPlugin, scopes, itemRules, tagRules, sameItemValidators];`;
 
 const postgresTypes = `import { Pool, type PoolClient } from 'pg';
-import { createSQL } from '@simtlix/simfinity-sql';
+import { createSQL, type SQLChildrenQueryCompiler, type SQLStatement } from '@simtlix/simfinity-sql';
 import {
   auth,
   configure,
@@ -948,6 +1090,23 @@ createPostgres().configure({ pool, explicitNullsOrder: false, multiRowInserts: t
 const pgPlugin = postgresPlugin(pgOptions);
 const batchLimit: number | undefined = pgPlugin.maxRecordBatchValues;
 const batchCompiler = pgPlugin.compileRecordBatch;
+const collectionOptions: PostgresConfiguration = { pool, schema: 'app', batchedCollections: false };
+createPostgres(collectionOptions);
+createPostgres().configure({ pool, batchedCollections: true });
+const childrenCompiler = postgresPlugin(collectionOptions).compileChildrenQuery;
+const pairedCompileQuery = childrenCompiler?.compileQuery;
+// The plugin's children compiler and its pairing member have exact types, so retyping either to \`any\` fails.
+const pgPairing: {
+  compiler: Equals<typeof childrenCompiler, SQLChildrenQueryCompiler<PostgresConfiguration, DatabaseDescription> | undefined>;
+  compileQuery: Equals<typeof pairedCompileQuery, ReturnType<typeof postgresPlugin>['compileQuery'] | undefined>;
+} = { compiler: true, compileQuery: true };
+// @ts-expect-error compileQuery is a function.
+const wrongPairPg: number | undefined = pairedCompileQuery;
+// @ts-expect-error batchedCollections is a boolean.
+const badCollectionsPg: PostgresConfiguration = { pool, batchedCollections: 'no' };
+// The PostgreSQL children statement carries the setup that turns JIT off for its transaction.
+const pgSetup: Equals<ReturnType<NonNullable<typeof childrenCompiler>>['setup'], readonly SQLStatement[] | null | undefined> = true;
+void [childrenCompiler, pairedCompileQuery, badCollectionsPg, pgPairing, wrongPairPg, pgSetup];
 const layoutOptions: PostgresConfiguration = { pool, schema: 'app', refreshTriggers: 'perRoot', ownerIndexes: 'minimal' };
 createPostgres(layoutOptions);
 createPostgres().configure({ pool, refreshTriggers: 'perRow', ownerIndexes: 'all' });
@@ -983,12 +1142,21 @@ const mongoTypes = `import {
   scalars,
   validators,
   type AuthRuleFunction,
+  type AuthSchemaPlugin,
+  type EnvelopSchemaPlugin,
   type GeneratedMCPTools,
+  type MongoAdapter,
+  type MongoAdapterOptions,
   type MutationLimitsOptions,
   type TypeScopes,
   type ItemValidators,
 } from '@simtlix/simfinity-js';
-import type { ItemValidators as CoreItemValidators } from '@simtlix/simfinity-core';
+import type {
+  AuthSchemaPlugin as CoreAuthSchemaPlugin,
+  DatabaseAdapter as CoreDatabaseAdapter,
+  EnvelopSchemaPlugin as CoreEnvelopSchemaPlugin,
+  ItemValidators as CoreItemValidators,
+} from '@simtlix/simfinity-core';
 import { GraphQLObjectType, GraphQLString } from 'graphql';
 const runtime = createRuntime(createMongoAdapter());
 const protectedAdapter = createMongoAdapter({ referentialIntegrity: 'transactional' });
@@ -1017,8 +1185,35 @@ type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B
 const itemRules: ItemValidators = [validators.maxLength('Tag', 20), null];
 const tagRules = validators.arrayLength('Tags', 10, itemRules);
 const sameItemValidators: Equals<ItemValidators, CoreItemValidators> = true;
+const sameSchemaPlugins: {
+  envelop: Equals<EnvelopSchemaPlugin, CoreEnvelopSchemaPlugin>;
+  auth: Equals<AuthSchemaPlugin, CoreAuthSchemaPlugin>;
+  createAuthPlugin: Equals<ReturnType<typeof auth.createAuthPlugin>, CoreAuthSchemaPlugin>;
+} = { envelop: true, auth: true, createAuthPlugin: true };
+// Batched collection reads are an adapter option; the adapter declares the optional members only.
+const plain: MongoAdapter = createMongoAdapter();
+const integrity: MongoAdapter = createMongoAdapter({ referentialIntegrity: 'transactional' });
+const options: MongoAdapterOptions = { batchedCollections: true, collectionBatchSize: 10 };
+const batching = createMongoAdapter(options);
+const both = createMongoAdapter({ referentialIntegrity: 'off', batchedCollections: false });
+const lists = batching.findChildrenBatch?.({}, null as any, 'author', ['a'], {}, { context: {} });
+const eligible: boolean | undefined = batching.batchesChildren?.({}, null as any, 'author');
+const double: MongoAdapter = { ...plain, findChildrenBatch: undefined, batchesChildren: undefined };
+// @ts-expect-error batchedCollections is a boolean.
+const wrongFlag = createMongoAdapter({ batchedCollections: 'yes' });
+// @ts-expect-error collectionBatchSize is a number.
+const wrongSize = createMongoAdapter({ batchedCollections: true, collectionBatchSize: '5' });
+// @ts-expect-error findChildrenBatch is optional on MongoAdapter.
+batching.findChildrenBatch({}, null as any, 'author', ['a'], {});
+// MongoAdapter inherits core's optional members unchanged.
+const mongoBatchMembers: {
+  read: Equals<MongoAdapter['findChildrenBatch'], CoreDatabaseAdapter['findChildrenBatch']>;
+  predicate: Equals<MongoAdapter['batchesChildren'], CoreDatabaseAdapter['batchesChildren']>;
+  lists: Equals<typeof lists, any[][] | PromiseLike<any[][]> | undefined>;
+} = { read: true, predicate: true, lists: true };
 void [registrations, inputType, formatted, internal, rule, email, scalarName, countPlugin, generated, protection, ready, scopes];
-void [itemRules, tagRules, sameItemValidators];`;
+void [itemRules, tagRules, sameItemValidators, sameSchemaPlugins];
+void [integrity, both, lists, eligible, double, wrongFlag, wrongSize, createRuntime(batching), mongoBatchMembers];`;
 
 // MongoDB's legacy deep imports of public API and their aliases: each value and type export has
 // exactly the type of the core subpath or root member it re-exports, so a missing sibling
@@ -1224,13 +1419,72 @@ const sharedAuthPlugin: {
 } = { auth: true, plugins: true, same: true };
 void sharedAuthPlugin;`;
 
+// The legacy MCP deep import re-exports @simtlix/simfinity-mcp, and so core's EnvelopSchemaPlugin: it
+// can be re-exported with the legacy auth and plugins deep imports, and before the package root.
+const mongoLegacyMcpBarrel = (other) => `import type * as Core from '@simtlix/simfinity-core';
+import type * as LegacyMcp from '@simtlix/simfinity-js/src/mcp.js';
+import type * as Other from '${other}';
+import { auth, plugins } from '@simtlix/simfinity-core';
+import type { GraphQLSchema } from 'graphql';
+export * from '@simtlix/simfinity-js/src/mcp.js';
+export * from '${other}';
+${envelopSchemaPluginShape}
+const oneEnvelopSchemaPlugin: {
+  legacyMcp: Equals<LegacyMcp.EnvelopSchemaPlugin, Core.EnvelopSchemaPlugin>;
+  other: Equals<Other.EnvelopSchemaPlugin, Core.EnvelopSchemaPlugin>;
+  otherAuth: Equals<Other.AuthSchemaPlugin, Core.AuthSchemaPlugin>;
+} = { legacyMcp: true, other: true, otherAuth: true };
+void oneEnvelopSchemaPlugin;`;
+
+// The 3.5.9 workaround, an explicit re-export next to the conflicting \`export *\` lines, still compiles.
+const mongoLegacyMcpWorkaroundTypes = `export * from '@simtlix/simfinity-js/src/mcp.js';
+export * from '@simtlix/simfinity-js/src/auth/index.js';
+export * from '@simtlix/simfinity-js/src/plugins.js';
+export type { EnvelopSchemaPlugin } from '@simtlix/simfinity-core/plugins';`;
+
+// The documented \`undefined\` opt-outs must also compile under exactOptionalPropertyTypes, where an optional
+// member that does not include \`undefined\` in its type rejects an explicit \`undefined\` (TS2412, TS2375).
+const coreExactOptionalTypes = `import type { DatabaseAdapter } from '@simtlix/simfinity-core';
+declare const adapter: DatabaseAdapter;
+adapter.findChildrenBatch = undefined;
+adapter.batchesChildren = undefined;
+const copy: DatabaseAdapter = { ...adapter, findChildrenBatch: undefined, batchesChildren: undefined };
+void copy;`;
+
+const sqlExactOptionalTypes = `import type { SQLConfiguration, SQLPlugin } from '@simtlix/simfinity-sql';
+declare const plugin: SQLPlugin;
+const copy: SQLPlugin = { ...plugin, compileChildrenQuery: undefined, compileRecordBatch: undefined, maxRecordBatchValues: undefined };
+const configuration: SQLConfiguration = { batchedCollections: undefined };
+void [copy, configuration];`;
+
+const postgresExactOptionalTypes = `import { Pool } from 'pg';
+import { createPostgres, postgresPlugin } from '@simtlix/simfinity-postgres';
+const pool = new Pool();
+const plugin: ReturnType<typeof postgresPlugin> = {
+  ...postgresPlugin({ pool }), compileChildrenQuery: undefined, compileRecordBatch: undefined, maxRecordBatchValues: undefined,
+};
+const runtime = createPostgres({ pool, batchedCollections: undefined });
+void [plugin, runtime];`;
+
+const mongoExactOptionalTypes = `import { createMongoAdapter } from '@simtlix/simfinity-js';
+const adapter = createMongoAdapter({ batchedCollections: true, collectionBatchSize: undefined });
+adapter.findChildrenBatch = undefined;
+adapter.batchesChildren = undefined;
+void createMongoAdapter({ batchedCollections: undefined });`;
+
 const cases = [
   {
     name: 'core',
+    exactOptionalTypes: { 'exact-optional.ts': coreExactOptionalTypes },
     archives: ({ core }) => [core],
     source: coreSource,
     types: coreTypes,
-    extraTypes: { 'subpaths.ts': coreSubpathTypes, 'root.ts': coreRootTypes, 'auth-plugins.ts': coreAuthPluginsTypes },
+    extraTypes: {
+      'subpaths.ts': coreSubpathTypes,
+      'root.ts': coreRootTypes,
+      'auth-plugins.ts': coreAuthPluginsTypes,
+      'schema-plugins.ts': coreSchemaPluginTypes,
+    },
     // NodeNext, Node16 and Bundler read the subpath declarations from the exports map; Node10, which
     // ignores exports, reads them from typesVersions.
     moduleResolutions: ['NodeNext', 'Node16', 'Bundler', 'Node10'],
@@ -1238,16 +1492,20 @@ const cases = [
   },
   {
     name: 'sql',
+    exactOptionalTypes: { 'exact-optional.ts': sqlExactOptionalTypes },
     archives: ({ core, sql }) => [core, sql],
     source: sqlSource,
     types: sqlTypes,
+    extraTypes: { 'barrel.ts': databaseBarrelTypes('@simtlix/simfinity-sql') },
     forbiddenPackages: ['pg', 'mongoose', 'mongodb', '@simtlix/simfinity-postgres', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
   },
   {
     name: 'postgres',
+    exactOptionalTypes: { 'exact-optional.ts': postgresExactOptionalTypes },
     archives: ({ core, sql, postgres }) => [core, sql, postgres],
     source: postgresSource,
     types: postgresTypes,
+    extraTypes: { 'barrel.ts': databaseBarrelTypes('@simtlix/simfinity-postgres') },
     typeDependencies: ['@types/pg@8'],
     forbiddenPackages: ['mongoose', 'mongodb', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
   },
@@ -1256,6 +1514,11 @@ const cases = [
     archives: ({ core, mcp }) => [core, mcp],
     source: mcpSource,
     types: mcpTypes,
+    extraTypes: { 'barrel.ts': mcpBarrelTypes },
+    // The MCP declarations import core's EnvelopSchemaPlugin: NodeNext, Node16 and Bundler resolve it
+    // through core's exports map, Node10 through its types field, and the barrel's core subpaths
+    // through typesVersions.
+    moduleResolutions: ['NodeNext', 'Node16', 'Bundler', 'Node10'],
     forbiddenPackages: ['mongoose', 'mongodb', '@modelcontextprotocol/sdk'],
   },
   {
@@ -1263,15 +1526,24 @@ const cases = [
     archives: ({ core, mcp }) => [core, mcp],
     source: mcpSdkSource,
     types: mcpTypes,
+    extraTypes: { 'barrel.ts': mcpBarrelTypes },
     dependencies: ['@modelcontextprotocol/sdk@1'],
     forbiddenPackages: ['mongoose', 'mongodb'],
   },
   {
     name: 'mongo',
+    exactOptionalTypes: { 'exact-optional.ts': mongoExactOptionalTypes },
     archives: ({ core, mcp, mongo }) => [core, mcp, mongo],
     source: mongoSource,
     types: mongoTypes,
-    extraTypes: { 'legacy.ts': mongoLegacyTypes, 'legacy-auth-plugins.ts': mongoLegacyAuthPluginsTypes },
+    extraTypes: {
+      'legacy.ts': mongoLegacyTypes,
+      'legacy-auth-plugins.ts': mongoLegacyAuthPluginsTypes,
+      'legacy-mcp-auth.ts': mongoLegacyMcpBarrel('@simtlix/simfinity-js/src/auth/index.js'),
+      'legacy-mcp-plugins.ts': mongoLegacyMcpBarrel('@simtlix/simfinity-js/src/plugins.js'),
+      'legacy-mcp-root.ts': mongoLegacyMcpBarrel('@simtlix/simfinity-js'),
+      'legacy-mcp-workaround.ts': mongoLegacyMcpWorkaroundTypes,
+    },
     // The legacy deep-import declarations sit next to the shims: NodeNext, Node16 and Bundler find
     // them through the exports map, Node10 by path, and their core subpath imports through core's
     // typesVersions.
@@ -1335,6 +1607,27 @@ try {
         run(process.execPath, ['node_modules/typescript/bin/tsc', '--project', 'tsconfig.json'], cwd);
       } catch (error) {
         error.message = `${testCase.name} (moduleResolution ${moduleResolution}): ${error.message}`;
+        throw error;
+      }
+    }
+    if (testCase.exactOptionalTypes) {
+      for (const [file, source] of Object.entries(testCase.exactOptionalTypes)) writeFileSync(join(cwd, file), source);
+      writeFileSync(join(cwd, 'tsconfig.exact.json'), JSON.stringify({
+        compilerOptions: {
+          strict: true,
+          exactOptionalPropertyTypes: true,
+          target: 'ES2022',
+          module: 'NodeNext',
+          moduleResolution: 'NodeNext',
+          noEmit: true,
+          skipLibCheck: false,
+        },
+        include: Object.keys(testCase.exactOptionalTypes),
+      }));
+      try {
+        run(process.execPath, ['node_modules/typescript/bin/tsc', '--project', 'tsconfig.exact.json'], cwd);
+      } catch (error) {
+        error.message = `${testCase.name} (exactOptionalPropertyTypes): ${error.message}`;
         throw error;
       }
     }

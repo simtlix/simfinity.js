@@ -16,7 +16,7 @@ The MongoDB facade retains MCP compatibility exports. For either database, the d
 The following examples import `@simtlix/simfinity-mcp`, which works with either adapter. In either application, install it from npm:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.6.0
+npm install @simtlix/simfinity-mcp@3.7.0
 ```
 
 Keep it at the same version as your other Simfinity packages. The archived MongoDB starter already includes its matching version for compatibility. The published MongoDB 3.0.1 release instead exports these functions from `@simtlix/simfinity-js`.
@@ -158,7 +158,7 @@ const generated = mcp.generateMCPTools(schema, {
 });
 ```
 
-Nested collections, such as a series' seasons, are read with one query per returned row, up to 100 items each, and `limits` do not bound that work. For list-heavy agents, leave them out with `nestedCollections: 'none'`, globally or per tool in `toolOverrides`, or set `selectionDepth: 0`:
+Nested collections, such as a series' seasons, return up to 100 items for each returned row and are read with one query per row, or, with an adapter that [batches collection reads](./relationships#batched-collection-reads), one per nested collection field and batch of rows: with `batchedCollections: true`, one statement per 100 rows on PostgreSQL and one command per `collectionBatchSize` rows on MongoDB. `limits` do not bound that work. For list-heavy agents, leave them out with `nestedCollections: 'none'`, globally or per tool in `toolOverrides`, or set `selectionDepth: 0`:
 
 ```javascript
 const lean = mcp.generateMCPTools(schema, {

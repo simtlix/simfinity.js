@@ -25,6 +25,13 @@ export const bindPlugin = (plugin) => {
     if (typeof plugin[key] !== 'function') invalid(`SQL plugin ${key} must be a function`);
     bound[key] = plugin[key];
   }
+  // Optional batched children reads (findChildrenBatch). The compiler names, as its `compileQuery` property, the
+  // compileQuery whose per-parent statements it reproduces, and is bound only when that is the bound compileQuery:
+  // a plugin copy that overrides compileQuery, or a compiler that names none, reads each parent with compileQuery.
+  if (plugin.compileChildrenQuery !== undefined) {
+    if (typeof plugin.compileChildrenQuery !== 'function') invalid('SQL plugin compileChildrenQuery must be a function');
+    if (plugin.compileChildrenQuery.compileQuery === bound.compileQuery) bound.compileChildrenQuery = plugin.compileChildrenQuery;
+  }
   // Optional multi-row inserts of owned rows: records batch them only when both members are present.
   if (plugin.compileRecordBatch !== undefined) {
     if (typeof plugin.compileRecordBatch !== 'function') invalid('SQL plugin compileRecordBatch must be a function');

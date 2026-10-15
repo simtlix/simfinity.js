@@ -68,6 +68,22 @@ describe('SQL plugin binding', () => {
       expect(() => bindPlugin({ ...stubPlugin(), ...extra }), JSON.stringify(extra)).toThrow(expect.objectContaining({ extensions: expect.objectContaining({ code: 'INVALID_SQL_PLUGIN' }) }));
     }
   });
+  it('binds an optional children compiler only with the compileQuery it names, and rejects one that is not a function', () => {
+    const plugin = stubPlugin();
+    const compileChildrenQuery = Object.assign(() => ({ text: 'children', parentColumn: 'parent' }), { compileQuery: plugin.compileQuery });
+    const source = { ...plugin, compileChildrenQuery };
+    const bound = bindPlugin(source);
+    source.compileChildrenQuery = () => ({ text: 'changed' });
+    expect(bound.compileChildrenQuery).toBe(compileChildrenQuery);
+    expect(bindPlugin(stubPlugin()).compileChildrenQuery).toBeUndefined();
+    // A copy whose compileQuery is another function, and a compiler that names none, read each parent with compileQuery.
+    expect(bindPlugin({ ...plugin, compileChildrenQuery, compileQuery() {} }).compileChildrenQuery).toBeUndefined();
+    expect(bindPlugin({ ...plugin, compileChildrenQuery: () => ({ text: 'unpaired' }) }).compileChildrenQuery).toBeUndefined();
+    expect('compileChildrenQuery' in bindPlugin({ ...plugin, compileChildrenQuery: () => ({ text: 'unpaired' }) })).toBe(false);
+    for (const value of [null, 'SELECT', {}, { compileQuery: plugin.compileQuery }]) {
+      expect(() => bindPlugin({ ...plugin, compileChildrenQuery: value }), String(value)).toThrow(expect.objectContaining({ extensions: expect.objectContaining({ code: 'INVALID_SQL_PLUGIN' }) }));
+    }
+  });
 });
 
 it('rejects missing required guarantees before compilation or I/O', () => {

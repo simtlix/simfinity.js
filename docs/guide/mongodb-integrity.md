@@ -5,7 +5,7 @@ description: Opt into transactional reference checks and restrict-delete behavio
 
 # MongoDB reference integrity
 
-Available from **Simfinity 3.4.0**. Install `@simtlix/simfinity-js@3.6.0` and keep any directly installed Simfinity packages at the same version.
+Available from **Simfinity 3.4.0**. Install `@simtlix/simfinity-js@3.7.0` and keep any directly installed Simfinity packages at the same version.
 
 MongoDB applications can opt into transactional reference integrity when creating their adapter. The setting is fixed for that runtime. Queries, mutation inputs, scopes, authorization and MCP schemas keep their existing shape.
 
@@ -108,7 +108,7 @@ Custom Mongoose middleware must preserve the transaction session and operation i
 
 | Code | Meaning |
 | --- | --- |
-| `INVALID_MONGO_INTEGRITY_CONFIGURATION` | Invalid option, unsupported model/registry, conflicting field, missing collection, connection or key configuration. |
+| `INVALID_MONGO_INTEGRITY_CONFIGURATION` | Invalid option, unsupported model/registry, conflicting field, missing collection, connection or key configuration. Invalid `batchedCollections` or `collectionBatchSize` values throw `INVALID_MONGO_ADAPTER_OPTIONS` instead. |
 | `MONGO_INTEGRITY_NOT_INITIALIZED` | Protected operations attempted before successful initialization. |
 | `MONGO_TRANSACTIONS_REQUIRED` | The server cannot run the required transactions. |
 | `MONGO_INTEGRITY_TRANSACTION_OPTIONS` | A supplied transaction lacks snapshot/majority options. |

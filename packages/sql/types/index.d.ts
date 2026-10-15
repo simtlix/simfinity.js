@@ -16,6 +16,7 @@ export type {
   AuthPluginOptions,
   AuthRule,
   AuthRuleFunction,
+  AuthSchemaPlugin,
   EntityController,
   EnvelopSchemaPlugin,
   FieldValidations,
@@ -140,6 +141,39 @@ export interface SQLCompiledQuery extends SQLStatement {
   /** Group field followed by each fact field, required for aggregate queries. */
   aggregateFields?: SQLFieldDescription[];
 }
+/** The children of many parents in one statement, from `compileChildrenQuery`. */
+export interface SQLChildrenStatement extends SQLStatement {
+  /** Result column holding the 1-based position, in `extra.ids`, of the parent each row belongs to. */
+  parentColumn: string;
+  /**
+   * Optional statements the adapter runs, in order, on the same connection right before this statement, such as
+   * settings scoped to the transaction (PostgreSQL's `SET LOCAL`). When any statement of a batch has setup, the whole
+   * batch, owned-row hydration included, runs in one transaction from the driver's `begin` to its `commit`, even for
+   * types without owned tables. Their rows are ignored. A value that is not a list of statements makes the batch fail
+   * with a TypeError, and the runtime then reads each parent with `compileQuery`. `null` or an absent value means no setup.
+   */
+  setup?: readonly SQLStatement[] | null;
+}
+/**
+ * Optional plugin member for batched collection reads: one statement that runs, for each parent in `extra.ids`, the
+ * find statement the paired `compileQuery` returns for `{ column, id }`, with exactly its rows in the same order, and
+ * tags each row with its parent's 1-based position in `parentColumn`, optionally with `setup` statements to run before
+ * it in its transaction. It receives only paginated find plans and 1 to 100 distinct cast IDs, and the bound
+ * configuration, or null when there is none, as its last argument. The adapter uses it only with
+ * `batchedCollections: true`.
+ */
+export interface SQLChildrenQueryCompiler<
+  Configuration extends object = SQLConfiguration,
+  Description extends SQLDatabaseDescription = SQLDatabaseDescription,
+  Id = string,
+> {
+  (models: SQLModelDescription, description: Description, plan: QueryPlan, extra: { column: string; ids: Id[] }, configuration?: Configuration | null): SQLChildrenStatement;
+  /**
+   * The `compileQuery` whose per-parent statements this compiler reproduces. The runtime uses the compiler only when
+   * this is the plugin's own `compileQuery`, so a plugin copy that overrides `compileQuery` reads each parent with it.
+   */
+  readonly compileQuery?: (models: SQLModelDescription, description: Description, plan: QueryPlan, extra?: { column: string; id: Id } | null, configuration?: Configuration | null) => SQLCompiledQuery;
+}
 export interface SQLQueryResult {
   rows: Array<Record<string, unknown>>;
   rowCount?: number | null;
@@ -164,6 +198,13 @@ export interface SQLConfiguration {
    * a write are inserted with multi-row statements. `false` keeps one INSERT per owned row.
    */
   multiRowInserts?: boolean;
+  /**
+   * Defaults to false: the adapter has no `findChildrenBatch`, so each generated collection field reads with
+   * `findChildren`, as 3.6.0 did. Only `true`, with a plugin whose `compileChildrenQuery` is paired with its
+   * `compileQuery`, reads the collection fields of many parents that share their arguments with one statement per 100
+   * parents, after the statement's `setup`; any other value keeps the default.
+   */
+  batchedCollections?: boolean | undefined;
 }
 /**
  * Plugins receive only `create`, `validate` or no mode. Before calling the plugin, a runtime that allows creation rejects
@@ -231,15 +272,21 @@ export interface SQLPlugin<
   compileSchema(description: Description): string[];
   /** Receives the bound configuration, or null when there is none, as its last argument. */
   compileQuery(models: SQLModelDescription, description: Description, plan: QueryPlan, extra?: { column: string; id: Id } | null, configuration?: Configuration | null): SQLCompiledQuery;
+  /**
+   * Optional: batched collection reads, used only with `batchedCollections: true` in the configuration. Bound only when
+   * its `compileQuery` property is this plugin's `compileQuery`; otherwise, and when it is absent, each parent's
+   * children are read with `compileQuery`. A value that is not a function throws INVALID_SQL_PLUGIN (400).
+   */
+  compileChildrenQuery?: SQLChildrenQueryCompiler<Configuration, Description, Id> | undefined;
   /** The operation's table is the physical metadata from describeSchema. */
   compileRecord(description: Description, operation: SQLRecordOperation<Description['tables'][number], Id>): SQLStatement;
   /**
    * Optional, with `maxRecordBatchValues`: one statement that inserts every row of the operation. The runtime
    * sends a single row through `compileRecord` instead.
    */
-  compileRecordBatch?(description: Description, operation: SQLInsertManyOperation<Description['tables'][number]>): SQLStatement;
+  compileRecordBatch?: ((description: Description, operation: SQLInsertManyOperation<Description['tables'][number]>) => SQLStatement) | undefined;
   /** Positive safe integer: the most values (rows times columns) one `compileRecordBatch` statement carries. */
-  maxRecordBatchValues?: number;
+  maxRecordBatchValues?: number | undefined;
   values: SQLValueCodec<Id>;
   driver: SQLDriver<Configuration, Client, Result>;
 }

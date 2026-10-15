@@ -40,6 +40,8 @@ await adapter.initialize();
 
 `createMongoAdapter(options?: MongoAdapterOptions): MongoAdapter` accepts `referentialIntegrity: 'off' | 'transactional'`, defaulting to `'off'`. The mode is immutable and exposed as readonly `adapter.referentialIntegrity`. Transactional mode checks references and restricts target deletion using coordinated MongoDB transactions. `initialize(): Promise<void>` validates startup and existing data; await it before serving protected operations. It is a no-op in off mode. See [the complete contract](../guide/mongodb-integrity).
 
+`batchedCollections: boolean` (default `false`) and `collectionBatchSize: number` (an integer from 1 to 100, default 5) turn on [batched collection reads](/guide/relationships#batched-collection-reads): aggregate commands of up to `collectionBatchSize` parents each, sent concurrently. Both are fixed at creation. Invalid values throw `INVALID_MONGO_ADAPTER_OPTIONS` (400); unknown option names still throw `INVALID_MONGO_INTEGRITY_CONFIGURATION` (400). The package-root runtime keeps one read per parent.
+
 ## configureQueryLimits
 
 ```javascript
@@ -241,6 +243,7 @@ await postgres.initializeDatabase({ mode: 'create' });
 | --- | --- | --- |
 | `multiRowInserts` | `true` | The owned rows of a write are inserted with multi-row `INSERT` statements of at most 32,767 values. `false` keeps one `INSERT` per row. |
 | `explicitNullsOrder` | `false` | Sorts on `id` and required root fields omit the `NULLS` clause, so indexes can serve them. `true` keeps the clause on every sort term, as 3.5.9 did. |
+| `batchedCollections` | `false` | Each generated collection field is read with its own statement, as 3.6.0 did. `true` reads the collection fields of many parents that share their arguments with one statement per 100 parents, in a repeatable-read transaction that first runs `SET LOCAL jit = off`, so a batch whose plan crosses `jit_above_cost` is not JIT-compiled; unsorted and tied rows can come in another order. Only `true` enables it. It saves statements and pool connections, but each batch takes 4 round trips one after another on one connection and runs the parents one after another, so it pays off when the pool is saturated or much smaller than the number of parents per level; measure before enabling it. See [batched collection reads](/guide/relationships#batched-collection-reads). |
 | `refreshTriggers` | `'perRow'` | For roots created while it is set, `'perRoot'` refreshes the owned shape and unique keys of each changed root once per transaction instead of once per changed row, as long as the root's guard trigger stays deferred (the default). |
 | `ownerIndexes` | `'all'` | `'minimal'` leaves out the `(__owner_id)` index of new owned and guard tables, which their primary key or a unique index covers. |
 

@@ -16,8 +16,8 @@ const publicSubpaths = {
     target: './src/auth/index.js',
     types: './types/auth/index.d.ts',
     rootTypes: [
-      'AuthPluginOptions', 'AuthRule', 'AuthRuleFunction', 'EnvelopSchemaPlugin', 'PermissionSchema',
-      'PolicyExpression', 'TypePermissions',
+      'AuthPluginOptions', 'AuthRule', 'AuthRuleFunction', 'AuthSchemaPlugin', 'EnvelopSchemaPlugin',
+      'PermissionSchema', 'PolicyExpression', 'TypePermissions',
     ],
   },
   './auth/errors': { target: './src/auth/errors.js', types: './types/auth/errors.d.ts', rootTypes: [] },
@@ -30,7 +30,7 @@ const publicSubpaths = {
   './plugins': {
     target: './src/plugins.js',
     types: './types/plugins.d.ts',
-    rootTypes: ['AuthPluginOptions', 'EnvelopSchemaPlugin', 'PermissionSchema'],
+    rootTypes: ['AuthPluginOptions', 'AuthSchemaPlugin', 'EnvelopSchemaPlugin', 'PermissionSchema'],
   },
   './scalars': { target: './src/scalars.js', types: './types/scalars.d.ts', rootTypes: [] },
   './validators': {
@@ -215,5 +215,44 @@ describe('MongoDB legacy deep-import declarations', () => {
     expect(legacyFiles('.d.ts')).toEqual(shims.map((file) => file.replace(/\.js$/, '.d.ts')).sort());
     // The adapter internals stay undeclared.
     expect(readdirSync(join(mongoRoot, 'src/mongo')).filter((file) => file.endsWith('.ts'))).toEqual([]);
+  });
+});
+
+// EnvelopSchemaPlugin has one declaration, core's: MCP imports it through its core dependency and
+// re-exports it, so `export *` of MCP together with core, or with a package that re-exports core,
+// reports no TS2308. The packed check in scripts/test-packages.js compiles those barrels; this guards
+// the declaration text without packing.
+const packageDeclarations = (name) => readFileSync(resolve(root, `../${name}/types/index.d.ts`), 'utf8');
+const ownDeclaration = (name) => new RegExp(`^(?:export )?(?:declare )?(?:interface|type|class) ${name}\\b`, 'm');
+const reexportedCoreTypes = (text) => [...text.matchAll(/^export type \{([^}]*)\} from '@simtlix\/simfinity-core';/gm)]
+  .flatMap(([, list]) => list.split(',').map((item) => item.trim()).filter(Boolean));
+
+describe('EnvelopSchemaPlugin declarations', () => {
+  it('types the core hook to return nothing or a promise, and the auth plugin hook to return nothing', () => {
+    const envelop = rootDeclarations.match(/^export interface EnvelopSchemaPlugin \{\n([\s\S]*?)\n\}/m);
+    expect(envelop).not.toBeNull();
+    expect(envelop[1]).toMatch(/onSchemaChange\?: \(payload: \{[\s\S]*?\}\) => void \| Promise<void>;/);
+    const authPlugin = rootDeclarations.match(/^export interface AuthSchemaPlugin extends EnvelopSchemaPlugin \{\n([\s\S]*?)\n\}/m);
+    expect(authPlugin).not.toBeNull();
+    expect(authPlugin[1]).toMatch(/onSchemaChange\?: \(payload: \{[\s\S]*?\}\) => void;/);
+    // auth.createAuthPlugin and plugins.createAuthPlugin, which /auth and /plugins re-export.
+    expect([...rootDeclarations.matchAll(/^ {2}createAuthPlugin\([^)]*\): (\w+);$/gm)].map((match) => match[1]))
+      .toEqual(['AuthSchemaPlugin', 'AuthSchemaPlugin']);
+  });
+
+  it('re-exports the core declaration from MCP instead of declaring another one', () => {
+    const mcp = packageDeclarations('mcp');
+    expect(mcp).toMatch(/^import type \{ EnvelopSchemaPlugin \} from '@simtlix\/simfinity-core';$/m);
+    expect(mcp).toMatch(/^export type \{ EnvelopSchemaPlugin \};$/m);
+    expect(mcp).not.toMatch(ownDeclaration('EnvelopSchemaPlugin'));
+    expect(JSON.parse(readFileSync(resolve(root, '../mcp/package.json'), 'utf8')).dependencies['@simtlix/simfinity-core'])
+      .toBe(manifest.version);
+  });
+
+  it.each(['sql', 'postgres', 'mongodb'])('re-exports both plugin types from the %s root', (name) => {
+    const text = packageDeclarations(name);
+    expect(reexportedCoreTypes(text)).toEqual(expect.arrayContaining(['AuthSchemaPlugin', 'EnvelopSchemaPlugin']));
+    expect(text).not.toMatch(ownDeclaration('EnvelopSchemaPlugin'));
+    expect(text).not.toMatch(ownDeclaration('AuthSchemaPlugin'));
   });
 });

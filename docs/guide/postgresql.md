@@ -13,10 +13,10 @@ Version 3.3.0 also exposes a [driver-free SQL core and PostgreSQL plugin](./sql-
 
 ## Download and install
 
-[Download the v3.6.0 starters](/releases/simfinity-3.6.0-starters.zip), extract them, and install the PostgreSQL application from npm:
+[Download the v3.7.0 starters](/releases/simfinity-3.7.0-starters.zip), extract them, and install the PostgreSQL application from npm:
 
 ```sh
-cd simfinity-3.6.0-starters/postgres
+cd simfinity-3.7.0-starters/postgres
 npm install
 ```
 
@@ -123,6 +123,8 @@ The runtime preserves absent versus explicit-null embedded fields, null list ite
 
 The shared query API supports typed scalar/reference/embedded filters, AND/OR groups, scopes, pagination, sorting, joined counts, and `SUM`, `COUNT`, `AVG`, `MIN`, and `MAX`. Nested scalar-list leaves support filters, sorts, ragged group projections, and array facts. Array MIN/MAX compares complete arrays; result sorting selects immediate extrema. Date parameters are encoded per query in UTC, including historical years, without changing global `pg` or process timezone defaults.
 
+Generated collection fields are read with one statement per field, as in 3.6.0. With `batchedCollections: true`, the fields of many parents are [read in batches](./relationships#batched-collection-reads), with one statement per 100 parents, in a transaction that turns JIT off for that transaction only. Each parent keeps its own filters, sort and page, and its statement is planned for its own ID, as before, so unsorted rows and rows with equal sort keys normally keep their order; PostgreSQL does not promise that order, though, so end sorts with `id` for stable pages. A batch saves statements and pool connections, but takes 4 round trips one after another on one connection and runs its parents one after another, where per-parent reads take one round trip each, concurrently. It pays off when the pool is saturated or much smaller than the number of parents per level, with small child lists; with free connections it can be slower, even on a remote database. Measure before enabling it. Behind Amazon RDS Proxy, batches pin the pooled connections that run them; see [PostgreSQL options](/reference/api#postgresql-options) and the [connection proxy notes](../postgresql#graphql-execution-and-native-access).
+
 Unsupported shapes fail explicitly: implicit many-to-many reciprocal lists, non-embedded collections inside embedded objects, embedded cycles, nested list wrappers, whole embedded-object uniqueness, conflicting relationship metadata, enum values that collide after text conversion, and custom scalars without a recognized base storage type. Whole embedded objects cannot be sorted or grouped. Arbitrary MongoDB pipelines and Mongoose-native methods have no PostgreSQL equivalent.
 
 Read the [detailed PostgreSQL storage and compatibility reference](../postgresql) and [database compatibility contract](../compatibility) before adopting PostgreSQL in an existing domain.
@@ -132,7 +134,7 @@ Read the [detailed PostgreSQL storage and compatibility reference](../postgresql
 MCP is a separate package so PostgreSQL and core do not install its SDK chain. Install both the MCP package and SDK only when the application exposes tools:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.6.0 \
+npm install @simtlix/simfinity-mcp@3.7.0 \
   @modelcontextprotocol/sdk@^1.31.0
 ```
 

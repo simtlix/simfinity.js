@@ -14,8 +14,8 @@ Choose a plugin when constructing a runtime. Its configuration is bound once, an
 Install the SQL core and the PostgreSQL plugin as direct dependencies when importing both:
 
 ```sh
-npm install @simtlix/simfinity-sql@3.6.0 \
-  @simtlix/simfinity-postgres@3.6.0 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-sql@3.7.0 \
+  @simtlix/simfinity-postgres@3.7.0 graphql@^16.11.0 pg@^8.16.3
 ```
 
 ```javascript
@@ -94,6 +94,7 @@ The exported `SQLPlugin` TypeScript interface documents the complete contract. A
 | `compileSchema(description)` | Return physical DDL statements for review or export. The runtime calls it only from `runtime.compileDatabaseSchema()`; storage is created and validated through `initialize` |
 | `initialize(configuration, description, options)` | Create or validate storage in the mode it receives, detecting incompatible existing definitions. The runtime rejects modes other than `create` and `validate` before calling it, and passes `validate` on a validation-only runtime. Match existing columns by name, and keep accepting indexes that earlier versions generated, such as the `[ID]` list index |
 | `compileQuery(models, description, queryPlan, extra, configuration)` | Return `{ text, values, aggregateFields? }`; aggregate decoding requires metadata for the group and each fact. The bound configuration, or `null`, is the last argument |
+| `compileChildrenQuery(models, description, queryPlan, { column, ids }, configuration)` | Optional, used only with `batchedCollections: true`: one statement whose rows, for each parent in `ids`, are exactly the rows `compileQuery` returns for `{ column, id }`, in the same order, each tagged with its parent's 1-based position in `ids` in the column the returned `parentColumn` names, and optional `setup` statements to run before it in its transaction; `setup` may be `null` or absent. See [batched collection reads](#batched-collection-reads) |
 | `compileRecord(description, operation)` | Compile one record operation into `{ text, values }` |
 | `compileRecordBatch(description, operation)`, `maxRecordBatchValues` | Optional, together: compile `{ kind: 'insertMany', table, rows }` into one statement that inserts every row, and bound the values (rows times columns) of such a statement with a positive safe integer |
 | `values` | Create/cast IDs, encode/decode scalars, encode embedded values |
@@ -128,6 +129,16 @@ const simfinity = createSQL({
   plugin: { ...plugin, capabilities: plugin.capabilities.filter((name) => name !== 'singleStatementReads') },
 });
 ```
+
+### Batched collection reads
+
+Batched collection reads are opt-in. Only with `batchedCollections: true` in the configuration and a `compileChildrenQuery` does the SQL adapter define `findChildrenBatch` and read generated collection fields in [batches](./relationships#batched-collection-reads); otherwise it keeps one `compileQuery` statement per field, as 3.6.0 did. It calls the compiler with paginated find plans only, 1 to 100 distinct cast parent IDs and the bound configuration, runs the statements one after another, and hydrates every child once. PostgreSQL's compiler returns a `UNION ALL` with one branch per parent: the `compileQuery` statement for that parent, with the parent ID as a parameter of its own and the other parameters, such as filter values and the page, shared, so its values are those of `compileQuery` without the parent ID, then one ID per parent. Each branch tags its rows with the parent's position and their row number, and an outer `ORDER BY` on both keeps each parent's rows together and in its statement's order; the adapter itself needs only `parentColumn` and each parent's rows in that order, and accepts rows of different parents interleaved. PostgreSQL plans an unnamed statement with its parameter values, so it plans each branch for its own parent ID. A compiler that binds every parent through one array parameter, such as a `LATERAL` join over `unnest`, is planned once for all parents from average statistics, and when a few parents hold most rows it can scan the table once per parent. A row whose position is outside `ids` fails the batch with `DATABASE_ERROR` (500), and the fields are then read per parent.
+
+The returned `SQLChildrenStatement` may carry `setup`, a list of statements (`{ text, values? }`) for settings that must hold while it runs, typed `readonly SQLStatement[] | null`. The adapter runs them, in order, on the same connection right before the statement, ignoring their rows. The runtime passes at most 100 parents per call, so each batch has one statement; only a direct `findChildrenBatch` call with more than 100 IDs runs further statements of 100 parents, in the same transaction, each after its own setup. When any statement of a batch has setup, the whole batch, owned-row hydration included, runs in one transaction from the driver's `begin` to its `commit`, even for a type without owned tables, and is retried like other owned transactions; without setup, the batch runs on the connection or transaction `findChildren` would use. Use transaction-scoped settings, such as PostgreSQL's `SET LOCAL`, so that the connection goes back to the pool unchanged. PostgreSQL returns `setup: [{ text: 'SET LOCAL jit = off', values: [] }]`, because a plan of up to 100 branches costs about as much as their statements together and can cross `jit_above_cost` when none of them does. A `setup` that is `null`, `undefined` or absent means no setup; any other value that is not a list of objects with a string `text` fails the batch with a `TypeError` before a connection is taken, which the runtime reports once per type before reading each parent with `compileQuery`.
+
+The compiler must name, as its `compileQuery` property, the `compileQuery` whose rows it reproduces, and the runtime binds it only when that is the plugin's own `compileQuery`; otherwise each parent is read with `compileQuery`. So a copy such as `{ ...postgresPlugin(options), compileQuery: myCompileQuery }` reads each parent with `myCompileQuery`, and its filters apply to every parent. Such a copy keeps batching only with a `compileChildrenQuery` of its own that names `myCompileQuery` and returns, for each parent, exactly the rows `myCompileQuery` returns; the bundled compiler wraps the bundled `compileQuery`, not yours.
+
+`bindPlugin` rejects a `compileChildrenQuery` that is not a function with `INVALID_SQL_PLUGIN` (400). The statement type is `SQLChildrenStatement`, with the optional `setup?: readonly SQLStatement[]`, and the compiler type `SQLChildrenQueryCompiler`.
 
 ### Capabilities and failure behavior
 

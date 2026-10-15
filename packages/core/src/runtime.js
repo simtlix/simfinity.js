@@ -1916,6 +1916,312 @@ const resolveById = async (type, args, context, requiredId) => {
   return results[0] || null;
 };
 
+// Batched collection reads. A generated collection field reads its children with one
+// adapter.findChildren call per parent unless the adapter defines findChildrenBatch and its
+// batchesChildren predicate does not return false. Then, within one request (a context object), the
+// reads of one related type and connection storage field whose effective arguments (after
+// middleware, the scope and joined scopes) hold the same plain data wait until the promise jobs
+// queued so far have run, as references do, and are read together, at most CHILD_BATCH_SIZE
+// distinct parents per call.
+const CHILD_BATCH_SIZE = 100;
+// Arguments whose canonical key would exceed this many characters, such as a long IN list, read
+// alone, so a field never spends more than this on canonicalization.
+const CHILD_ARGS_KEY_BUDGET = 64 * 1024;
+const NOT_PLAIN = Symbol('not plain data');
+
+// The canonical key of a collection read's effective arguments: two reads share it only when their
+// arguments hold the same data. Only plain data qualifies: strings, numbers (-0, NaN and Infinity
+// kept distinct), booleans, undefined, null, bigints, dates (by time, with no own properties), dense
+// arrays, and objects with the Object or a null prototype whose own string-keyed properties are
+// enumerable data properties, all writable and configurable, or all fixed by freezing. The key keeps
+// property order, null prototypes, frozen objects and shared references. Anything else, such as a
+// function, a symbol, a class instance (an ObjectId included), an accessor, a non-enumerable,
+// sealed or non-extensible member, a sparse or decorated array, a cycle, an exotic object that fails
+// while it is read, or a key over the budget, returns null, and the read runs alone.
+const childArgsKey = (args) => {
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return null;
+  const parts = [];
+  let size = 0;
+  const push = (part) => {
+    size += part.length;
+    if (size > CHILD_ARGS_KEY_BUDGET) throw NOT_PLAIN;
+    parts.push(part);
+  };
+  const seen = new Map();
+  const visit = (value) => {
+    switch (typeof value) {
+      case 'string':
+        if (value.length > CHILD_ARGS_KEY_BUDGET) throw NOT_PLAIN;
+        push(JSON.stringify(value));
+        return;
+      case 'number': push(Object.is(value, -0) ? '-0' : String(value)); return;
+      case 'boolean':
+      case 'undefined': push(String(value)); return;
+      case 'bigint': push(`${value}n`); return;
+      case 'object': if (value !== null) break; push('null'); return;
+      default: throw NOT_PLAIN;
+    }
+    const known = seen.get(value);
+    if (known) {
+      // A shared reference repeats the index of its first visit; a cycle is not plain data.
+      if (!known.done) throw NOT_PLAIN;
+      push(`@${known.index}`);
+      return;
+    }
+    const entry = { index: seen.size, done: false };
+    seen.set(value, entry);
+    const prototype = Object.getPrototypeOf(value);
+    const frozen = Object.isFrozen(value);
+    const keys = Reflect.ownKeys(value);
+    if (prototype === Date.prototype) {
+      if (keys.length) throw NOT_PLAIN;
+      // Throws a TypeError, caught below, for an object that only inherits from Date.prototype.
+      push(`D${frozen ? 'F' : ''}${Date.prototype.getTime.call(value)}`);
+    } else {
+      const array = Array.isArray(value);
+      if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) throw NOT_PLAIN;
+      // A dense array owns its indices, in order, then its length, and nothing else.
+      if (array && (keys.length !== value.length + 1
+        || keys.some((key, index) => key !== (index < value.length ? String(index) : 'length'))
+        || Reflect.getOwnPropertyDescriptor(value, 'length').writable === frozen)) throw NOT_PLAIN;
+      if (!frozen && !Object.isExtensible(value)) throw NOT_PLAIN;
+      push(`${array ? '[' : '{'}${prototype === null ? '0' : ''}${frozen ? 'F' : ''}`);
+      for (const key of keys) {
+        if (typeof key === 'symbol') throw NOT_PLAIN;
+        if (array && key === 'length') continue;
+        const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+        if (!descriptor || !('value' in descriptor) || !descriptor.enumerable
+          || descriptor.writable === frozen || descriptor.configurable === frozen) throw NOT_PLAIN;
+        if (!array) push(`${JSON.stringify(key)}:`);
+        visit(descriptor.value);
+        push(',');
+      }
+      push(array ? ']' : '}');
+    }
+    entry.done = true;
+  };
+  try {
+    visit(args);
+    return parts.join('');
+  } catch {
+    // Not plain data, too large, or an exotic object (such as a proxy) that failed while it was read.
+    return null;
+  }
+};
+
+// A copy of arguments that childArgsKey accepted, with the same prototypes, frozen objects, dates
+// and shared references, so the adapter may change it without reaching the request's objects.
+const clonePlainArgs = (value, copies = new Map()) => {
+  if (value === null || typeof value !== 'object') return value;
+  if (copies.has(value)) return copies.get(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype === Date.prototype) {
+    const date = new Date(Date.prototype.getTime.call(value));
+    copies.set(value, date);
+    return Object.isFrozen(value) ? Object.freeze(date) : date;
+  }
+  const copy = Array.isArray(value) ? [] : Object.create(prototype);
+  copies.set(value, copy);
+  for (const key of Object.keys(value)) {
+    Object.defineProperty(copy, key, {
+      value: clonePlainArgs(value[key], copies), writable: true, enumerable: true, configurable: true,
+    });
+  }
+  return Object.isFrozen(value) ? Object.freeze(copy) : copy;
+};
+
+// The batch key of a parent ID: its string form, when the adapter casts the ID without changing
+// that form. A missing ID (which keeps the adapter's own semantics, such as MongoDB matching
+// children without a parent), an object whose string form says nothing of its value, an ID castId
+// rejects and one it normalizes have none, and read alone.
+const childParentKey = (parentId) => {
+  try {
+    if (parentId == null) return null;
+    const key = String(parentId);
+    if (typeof parentId === 'object' && key === Object.prototype.toString.call(parentId)) return null;
+    return String(adapter.castId(parentId)) === key ? key : null;
+  } catch {
+    return null;
+  }
+};
+
+// Collection reads of one request that wait for a batch: context -> related type registration ->
+// (connection storage field + canonical arguments) -> group. Nothing is cached: each group is read
+// once and dropped.
+const childBatches = new WeakMap();
+
+const readChildrenAlone = (type, connection, parentId, args) => adapter.findChildren(
+  type.model, type.gqltype, connection.storageFieldName, parentId, args, null,
+);
+
+// Whether the adapter reads this type's children in batches, checked on every read as an adapter
+// method call. A predicate that throws keeps per-parent reads; an error other than a SimfinityError
+// is reported once per type.
+const batchesChildren = (type, connection) => {
+  if (adapter.batchesChildren == null) return true;
+  try {
+    return adapter.batchesChildren(type.model, type.gqltype, connection.storageFieldName) !== false;
+  } catch (error) {
+    if (!(error instanceof SimfinityError)) {
+      warnOnce(type.gqltype, 'batchesChildren', 'Configuration issue: adapter.batchesChildren failed for '
+        + `${type.gqltype.name} (${error?.message ?? String(error)}); its collection fields read one parent at a time.`);
+    }
+    return false;
+  }
+};
+
+// Whether a batched child record may belong to the parent with this key: it is an object, and the
+// parent it stores under the connection storage field (or its GraphQL name), when it shows one, has
+// that key by string form or by castId. A stored list (a multikey connection) needs one such entry.
+const belongsToParent = (record, connection, key) => {
+  if (record === null || typeof record !== 'object') return false;
+  let stored = ownValue(record, connection.storageFieldName);
+  if (stored === undefined && connection.graphqlFieldName) stored = ownValue(record, connection.graphqlFieldName);
+  if (stored === undefined) return true;
+  const matches = (value) => {
+    const id = value?._id ?? value;
+    if (id == null) return false;
+    try {
+      return String(id) === key || String(adapter.castId(id)) === key;
+    } catch {
+      return false;
+    }
+  };
+  return Array.isArray(stored) ? stored.some(matches) : matches(stored);
+};
+
+// The fields of one parent share its records, as references do, but each gets its own list.
+const settleChildren = (waiters, list) => waiters.forEach(({ resolve }, index) => {
+  resolve(index === 0 ? list : [...list]);
+});
+
+// After a failed read, each field reads alone, in its own promise job, with its own copy of the
+// arguments and its own parent ID, so an error fails only the fields it would fail alone.
+const readEachChildAlone = (type, group, waiters) => {
+  for (const { parentId, resolve, reject } of waiters) {
+    Promise.resolve()
+      .then(() => readChildrenAlone(type, group.connection, parentId, clonePlainArgs(group.args)))
+      .then(resolve, reject);
+  }
+};
+
+// Whether a batch result holds one list per parent, in order, of records of that parent. Every index is
+// checked, holes included, since Array.prototype.every skips empty slots.
+const listsMatchParents = (lists, parents, connection) => {
+  if (!Array.isArray(lists) || lists.length !== parents.length) return false;
+  for (let index = 0; index < lists.length; index++) {
+    const records = Object.hasOwn(lists, index) ? lists[index] : undefined;
+    if (!Array.isArray(records)) return false;
+    for (let position = 0; position < records.length; position++) {
+      if (!Object.hasOwn(records, position) || !belongsToParent(records[position], connection, parents[index].key)) return false;
+    }
+  }
+  return true;
+};
+
+const readChildren = async (type, group, parents, context) => {
+  const { connection } = group;
+  if (parents.length === 1) {
+    // One distinct parent reads with findChildren, as before, shared by the fields that read it.
+    const { waiters } = parents[0];
+    let list;
+    try {
+      list = await readChildrenAlone(type, connection, waiters[0].parentId, clonePlainArgs(group.args));
+    } catch (error) {
+      if (waiters.length === 1) waiters[0].reject(error);
+      else readEachChildAlone(type, group, waiters);
+      return;
+    }
+    if (waiters.length > 1 && !Array.isArray(list)) readEachChildAlone(type, group, waiters);
+    else settleChildren(waiters, list);
+    return;
+  }
+  let lists;
+  try {
+    lists = await adapter.findChildrenBatch(type.model, type.gqltype, connection.storageFieldName,
+      parents.map(({ waiters }) => waiters[0].parentId), clonePlainArgs(group.args), { context });
+  } catch (error) {
+    if (!(error instanceof SimfinityError)) {
+      warnOnce(type.gqltype, 'findChildrenBatch', `adapter.findChildrenBatch failed for ${type.gqltype.name} `
+        + `(${error?.message ?? String(error)}); the fields it read were read one parent at a time. Later failures `
+        + 'for this type are not reported.');
+    }
+    parents.forEach(({ waiters }) => readEachChildAlone(type, group, waiters));
+    return;
+  }
+  if (!listsMatchParents(lists, parents, connection)) {
+    warnOnce(type.gqltype, 'findChildrenBatch', 'Configuration issue: adapter.findChildrenBatch did not return one '
+      + `list of ${type.gqltype.name} records per parent ID, in parentIds order; the fields it read were read one `
+      + 'parent at a time.');
+    parents.forEach(({ waiters }) => readEachChildAlone(type, group, waiters));
+    return;
+  }
+  parents.forEach(({ waiters }, index) => settleChildren(waiters, lists[index]));
+};
+
+const flushChildren = (type, group, context) => {
+  const parents = [...group.parents].map(([key, { waiters }]) => ({ key, waiters }));
+  for (let start = 0; start < parents.length; start += CHILD_BATCH_SIZE) {
+    const chunk = parents.slice(start, start + CHILD_BATCH_SIZE);
+    // An unexpected error settles every field of the chunk that is still waiting.
+    readChildren(type, group, chunk, context).catch((error) => {
+      for (const { waiters } of chunk) waiters.forEach(({ reject }) => reject(error));
+    });
+  }
+};
+
+// A generated collection read. It runs at once, with the arguments object it received, as before,
+// unless the adapter batches this type's children, the request has a context object, the parent ID
+// has a batch key, and the effective arguments are plain data with valid pagination and a key within
+// the budget. Then it joins the request's group for its related type, connection storage field and
+// arguments: the first read of a group copies the arguments, and later reads compute only the key.
+const loadChildren = (type, connection, parentId, args, context) => {
+  if (typeof adapter.findChildrenBatch !== 'function' || typeof context !== 'object' || context === null
+    || !batchesChildren(type, connection)) return readChildrenAlone(type, connection, parentId, args);
+  const key = childParentKey(parentId);
+  const argsKey = key === null ? null : childArgsKey(args);
+  if (argsKey === null) return readChildrenAlone(type, connection, parentId, args);
+  try {
+    // Invalid pagination fails each field alone, as findChildren reports it.
+    paginationStages(args.pagination, true);
+  } catch {
+    return readChildrenAlone(type, connection, parentId, args);
+  }
+  let byType = childBatches.get(context);
+  if (!byType) {
+    byType = new Map();
+    childBatches.set(context, byType);
+  }
+  let groups = byType.get(type);
+  if (!groups) {
+    groups = new Map();
+    byType.set(type, groups);
+  }
+  const groupKey = `${JSON.stringify(connection.storageFieldName)}${argsKey}`;
+  let group = groups.get(groupKey);
+  if (!group) {
+    let snapshot;
+    try {
+      snapshot = clonePlainArgs(args);
+    } catch {
+      return readChildrenAlone(type, connection, parentId, args);
+    }
+    group = { connection, args: snapshot, parents: new Map() };
+    groups.set(groupKey, group);
+    const created = group;
+    // As for references, flush once the promise jobs queued so far have run.
+    Promise.resolve().then(() => process.nextTick(() => {
+      groups.delete(groupKey);
+      if (!groups.size && byType.get(type) === groups) byType.delete(type);
+      flushChildren(type, created, context);
+    }));
+  }
+  return new Promise((resolve, reject) => {
+    if (!group.parents.has(key)) group.parents.set(key, { waiters: [] });
+    group.parents.get(key).waiters.push({ parentId, resolve, reject });
+  });
+};
+
 // Why a type's generated create or update input has no fields, for the warnings of buildMutation. An
 // update input also needs a writable id.
 const withoutWritableFields = (type, { noWritableId = false } = {}) => {
@@ -2555,14 +2861,7 @@ const autoGenerateResolvers = (gqltype) => {
         await executeMiddleware(params);
         await executeScope(params);
         await applyJoinedScopes(joinedScopes, params);
-        return adapter.findChildren(
-          relatedTypeInfo.model,
-          relatedTypeInfo.gqltype,
-          connection.storageFieldName,
-          parent._id ?? parent.id,
-          params.args,
-          null,
-        );
+        return loadChildren(relatedTypeInfo, connection, parent._id ?? parent.id, params.args, context);
       }, { simfinityQuery: { typeName: relatedType.name, operation: 'find' } });
       runtimeBoundTypes.set(gqltype, runtimeIdentity);
     } else if (fieldEntry.type instanceof GraphQLObjectType

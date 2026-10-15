@@ -4,7 +4,7 @@ import { identifier, generatedName } from './schema/sql.js';
 import { describeRelationalSchema } from './schema/describe.js';
 import { initializeDatabase } from './schema/initialize.js';
 import { compileDatabaseSchema } from './schema/ddl.js';
-import { compileQuery } from './query/compiler.js';
+import { compileChildrenQuery, compileQuery } from './query/compiler.js';
 import { compileRecord, compileRecordBatch, MAX_RECORD_BATCH_VALUES } from './record-statements.js';
 import { castId, encodeScalar, decodeScalar, encodeParameter, isRetryableDatabaseError, normalizeDatabaseError } from './codecs.js';
 
@@ -23,6 +23,11 @@ export const postgresPlugin = (options) => ({
   initialize: (configuration, description, initialization) => initializeDatabase(configuration.pool, description, initialization),
   compileSchema: compileDatabaseSchema,
   compileQuery,
+  // Optional member: the find statements of many parents in one statement, for findChildrenBatch, which the SQL
+  // adapter defines only with `batchedCollections: true`. Each statement carries setup that turns JIT off for its
+  // transaction, and the compileQuery it reproduces, so a copy of this plugin with another compileQuery reads each
+  // parent alone.
+  compileChildrenQuery,
   compileRecord,
   compileRecordBatch,
   maxRecordBatchValues: MAX_RECORD_BATCH_VALUES,
