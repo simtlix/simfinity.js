@@ -1,5 +1,6 @@
 import { SimfinityError } from '@simtlix/simfinity-core';
 import { READ_OPTION_NAMES } from './read-options.js';
+import { buildReadStages } from './pipeline-stages.js';
 
 const READ_OPTIONS = new Set(['session', ...READ_OPTION_NAMES]);
 const FETCH_METHODS = ['_initialize', 'getMore'];
@@ -140,19 +141,7 @@ export const readMongoPipeline = (Model, pipeline, options, observer, stream = f
   }
   assertReadOptions(options || {});
   const { projection, sort, skip, limit, ...nativeOptions } = options || {};
-  const stages = [...pipeline];
-  if (sort) {
-    stages.push({ $sort: sort });
-  }
-  if (skip) {
-    stages.push({ $skip: skip });
-  }
-  if (limit) {
-    stages.push({ $limit: limit });
-  }
-  if (projection) {
-    stages.push({ $project: projection });
-  }
+  const stages = [...pipeline, ...buildReadStages({ sort, skip, limit, projection })];
   const cursor = observeMongoCursor(Model.collection.aggregate(stages, nativeOptions), observer);
   return stream ? cursor : cursor.toArray();
 };

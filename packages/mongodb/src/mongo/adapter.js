@@ -10,17 +10,14 @@ import { SERVER_READ_OPTION_NAMES } from './read-options.js';
 import { createStorageExecutor, validateMongoSession, validateStorageOptions } from './storage.js';
 import { createMongoIntegrity } from './integrity.js';
 import {
+  buildRecordReadPipeline, createRecordRead, createRecordUpdate, createRecordDelete,
+} from './record-queries.js';
+import { prepareStorageUpdate } from './storage-update.js';
+import {
   castModelId, castObjectId, castPathValue, invalidId, isQueryKeyCastFailure, mapIdCastError,
 } from './ids.js';
 
 const SERVER_READ_OPTIONS = new Set(SERVER_READ_OPTION_NAMES);
-const CONDITIONAL_QUERY_OPTIONS = { sanitizeFilter: false, strictQuery: false };
-const RETURN_UPDATED_DOCUMENT = { new: true };
-
-// Keep identity separate so a conditional predicate cannot replace it.
-const matchIdAndFilter = (id, filter) => ({
-  $and: [{ _id: id }, filter],
-});
 
 const validateServerReadOptions = (options) => {
   for (const key of Object.keys(options || {})) {
@@ -69,6 +66,20 @@ const hasNoHooks = (hooks, operations) => {
 // be free of hooks for the operations.
 const hasNoQueryHooks = (Model, operations) => hasNoHooks(Model.schema?.s?.hooks, operations)
   && (Model.Query?.prototype?._queryMiddleware == null || hasNoHooks(Model.Query.prototype._queryMiddleware, operations));
+
+const firstRecord = (rows) => rows[0] || null;
+
+const readObservedRecord = (Model, id, session, options) => {
+  if (!hasNoQueryHooks(Model, ['findOne'])) {
+    throw new SimfinityError(
+      'Observed by-ID reads require a model without findOne hooks', 'UNSUPPORTED_CAPABILITY', 400,
+    );
+  }
+  const pipeline = buildRecordReadPipeline(Model, id, options);
+  return readMongoPipeline(
+    Model, pipeline, { ...options.readOptions, session }, options.observer,
+  ).then(firstRecord);
+};
 
 // getById reads through `findOne` and getByIds through `find`.
 const batchesFindOne = (Model) => hasNoQueryHooks(Model, ['find', 'findOne']);
@@ -333,32 +344,14 @@ export const createMongoAdapter = (options) => {
       integrity.assertReady();
       const observation = observer || options?.queryObserver?.();
       if (observation || readOptions) {
-        if (!hasNoQueryHooks(Model, ['findOne'])) {
-          throw new SimfinityError('Observed by-ID reads require a model without findOne hooks', 'UNSUPPORTED_CAPABILITY', 400);
-        }
-        const predicates = [{ _id: castModelId(Model, id) }];
-        if (requiredId != null) predicates.push({ _id: castModelId(Model, requiredId) });
-        if (storage?.filter) predicates.push(storage.filter);
-        const pipeline = [{ $match: { $and: predicates } }];
-        if (projection) pipeline.push({ $project: projection });
-        pipeline.push({ $limit: 1 });
-        return readMongoPipeline(Model, pipeline, { ...readOptions, session }, observation).then((rows) => rows[0] || null);
+        return readObservedRecord(Model, id, session, {
+          projection, requiredId, storage, readOptions, observer: observation,
+        });
       }
-      let query;
-      if (storage?.filter) {
-        query = Model.findOne(
-          matchIdAndFilter(id, storage.filter),
-          projection,
-          { ...CONDITIONAL_QUERY_OPTIONS },
-        );
-      } else if (requiredId != null) {
-        query = Model.findOne({ $and: [{ _id: requiredId }, { _id: id }] }, projection);
-      } else {
-        query = Model.findById(id, projection);
-      }
-      query = withSession(query, session);
-      if (plain) query = query.lean();
-      return mapQueryIdCastErrors(query);
+      const query = createRecordRead(Model, id, { projection, requiredId, storage });
+      let result = withSession(query, session);
+      if (plain) result = result.lean();
+      return mapQueryIdCastErrors(result);
     },
     getByIds(Model, ids) {
       integrity.assertReady();
@@ -377,38 +370,10 @@ export const createMongoAdapter = (options) => {
     prepareUpdate(set, unset) {
       return Object.keys(unset).length > 0 ? { ...set, $unset: unset } : set;
     },
-    prepareStorageUpdate(update, storage) {
-      if (!storage?.increments) return update;
-      const set = {};
-      const operators = {};
-      for (const [key, value] of Object.entries(update)) {
-        if (key.startsWith('$')) {
-          operators[key] = value;
-        } else {
-          set[key] = value;
-        }
-      }
-      const changedFields = [set, ...Object.values(operators)];
-      for (const key of Object.keys(storage.increments)) {
-        if (changedFields.some((fields) => Object.hasOwn(fields, key))) {
-          throw new SimfinityError('Increment overlaps a generated update field', 'INVALID_STORAGE_OPERATION', 400);
-        }
-      }
-      if (Object.keys(set).length) operators.$set = set;
-      return { ...operators, $inc: storage.increments };
-    },
+    prepareStorageUpdate,
     update(Model, id, update, session, storage) {
       if (integrity.enabled) return integrity.updateRecord(Model, id, update, session);
-      let query;
-      if (storage?.filter === undefined) {
-        query = Model.findByIdAndUpdate(id, update, { ...RETURN_UPDATED_DOCUMENT });
-      } else {
-        query = Model.findOneAndUpdate(
-          matchIdAndFilter(id, storage.filter),
-          update,
-          { ...CONDITIONAL_QUERY_OPTIONS, ...RETURN_UPDATED_DOCUMENT },
-        );
-      }
+      const query = createRecordUpdate(Model, id, update, storage);
       return mapQueryIdCastErrors(withSession(query, session), mapIdCastError);
     },
     delete(Model, id, session, storage) {
@@ -416,15 +381,7 @@ export const createMongoAdapter = (options) => {
         integrity.assertWrite(Model, session);
         return integrity.deleteRecord(Model, id, session);
       }
-      let query;
-      if (storage?.filter === undefined) {
-        query = Model.findByIdAndDelete(id);
-      } else {
-        query = Model.findOneAndDelete(
-          matchIdAndFilter(id, storage.filter),
-          { ...CONDITIONAL_QUERY_OPTIONS },
-        );
-      }
+      const query = createRecordDelete(Model, id, storage);
       return mapQueryIdCastErrors(withSession(query, session));
     },
     async find(Model, gqltype, args, session, { requiredId, readOptions, observer, serverPlan } = {}) {

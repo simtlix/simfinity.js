@@ -214,25 +214,45 @@ const STORAGE_TYPES = {
   array: mongoose.Schema.Types.Mixed,
 };
 
+const storageFieldDefinition = ([name, kind]) => {
+  if (!Object.hasOwn(STORAGE_TYPES, kind)) {
+    throw new SimfinityError(`Unsupported storage type: ${kind}`, 'INVALID_MODEL', 400);
+  }
+  return [name, STORAGE_TYPES[kind]];
+};
+
+const createStorageSchema = (storage) => {
+  const definition = Object.fromEntries(Object.entries(storage.fields).map(storageFieldDefinition));
+  return new mongoose.Schema(definition, {
+    autoCreate: false,
+    autoIndex: false,
+    versionKey: false,
+    minimize: false,
+    strict: storage.strict ?? true,
+  });
+};
+
+const createModelSchema = (gqlType, storage) => {
+  if (storage) return createStorageSchema(storage);
+  return createSchemaWithIndexes(generateSchemaDefinition(gqlType));
+};
+
+const requestCollectionCreation = (model, collection) => {
+  Promise.resolve(model.createCollection()).catch((error) => {
+    console.warn(`Simfinity could not create MongoDB collection ${collection}: ${error?.message ?? error}`);
+  });
+};
+
 export const createMongoModel = (gqlType, onModelCreated, options = {}) => {
   const { createCollection = true, connection = mongoose.connection, storage } = options;
-  const definition = storage ? Object.fromEntries(Object.entries(storage.fields).map(([name, kind]) => {
-    if (!Object.hasOwn(STORAGE_TYPES, kind)) {
-      throw new SimfinityError(`Unsupported storage type: ${kind}`, 'INVALID_MODEL', 400);
-    }
-    return [name, STORAGE_TYPES[kind]];
-  })) : generateSchemaDefinition(gqlType);
-  const schema = storage ? new mongoose.Schema(definition, {
-    autoCreate: false, autoIndex: false, versionKey: false, minimize: false,
-    strict: storage.strict ?? true,
-  }) : createSchemaWithIndexes(definition);
+  const schema = createModelSchema(gqlType, storage);
   const collection = storage?.collection ?? gqlType.name;
   const model = connection.model(gqlType.name, schema, collection);
-  if (onModelCreated) onModelCreated(model);
+  if (onModelCreated) {
+    onModelCreated(model);
+  }
   if (createCollection) {
-    Promise.resolve(model.createCollection()).catch((error) => {
-      console.warn(`Simfinity could not create MongoDB collection ${collection}: ${error?.message ?? error}`);
-    });
+    requestCollectionCreation(model, collection);
   }
   return model;
 };

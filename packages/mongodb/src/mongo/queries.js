@@ -14,6 +14,7 @@ import {
 
 import { castObjectId } from './ids.js';
 import { resolveStorageScalar } from './models.js';
+import { buildReadStages } from './pipeline-stages.js';
 import { parseServerQuery, lowerServerPredicate } from './server-query.js';
 
 const getEffectiveTypeName = (type) => (
@@ -498,11 +499,12 @@ const buildQuery = async (input, gqltype, isCount, serverPlan) => {
     const stages = await buildFilterQuery(input, gqltype);
     stages.push({ $match: lowerServerPredicate(serverPlan.where) });
     if (isCount) return [...stages, { $count: 'size' }];
-    const items = [];
-    if (serverPlan.sort) items.push({ $sort: serverPlan.sort });
-    if (serverPlan.window.skip) items.push({ $skip: serverPlan.window.skip });
-    if (serverPlan.window.limit) items.push({ $limit: serverPlan.window.limit });
-    if (serverPlan.projection) items.push({ $project: serverPlan.projection });
+    const items = buildReadStages({
+      sort: serverPlan.sort,
+      skip: serverPlan.window.skip,
+      limit: serverPlan.window.limit,
+      projection: serverPlan.projection,
+    });
     return serverPlan.operation === 'page'
       ? [...stages, { $facet: { items, count: [{ $count: 'total' }] } }]
       : [...stages, ...items];
