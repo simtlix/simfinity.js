@@ -14,6 +14,7 @@ import {
 
 import { castObjectId } from './ids.js';
 import { resolveStorageScalar } from './models.js';
+import { parseServerQuery, lowerServerPredicate } from './server-query.js';
 
 const getEffectiveTypeName = (type) => (
   type instanceof GraphQLScalarType ? resolveStorageScalar(type).name : type.name
@@ -26,7 +27,7 @@ const isGraphQLisoDate = (typeName) => (
 // GraphQL reserves `__` names, so these aliases never replace a stored field.
 const LOOKUP_ALIAS_PREFIX = '__sf_l';
 
-export const createMongoQueries = ({ getModel, getRegistrations }) => {
+export const createMongoQueries = ({ getModel, getRegistrations, assertQueryField }) => {
 // One alias per relation path for each query build, keyed by the build's `included` accumulator.
 const lookupAliases = new WeakMap();
 
@@ -128,9 +129,10 @@ const identifierLeaf = (model, schemaPath, gqltype) => {
 };
 
 // Resolve GraphQL paths and storage paths together; supplied models own ID casting.
-const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
-  assertValidFilterPath(path);
+const resolveQueryPath = (gqltype, path, aggregationsIncluded, server = false) => {
+  if (!server) assertValidFilterPath(path);
   const parts = path.split('.');
+  if (server && parts[0] === '_id') parts[0] = 'id';
   let currentType = gqltype;
   let currentModel = getModel(gqltype);
   let mongoPath = '';
@@ -138,12 +140,37 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
   const aggregateClauses = {};
 
   for (const [index, part] of parts.entries()) {
-    const field = Object.hasOwn(currentType.getFields(), part) ? currentType.getFields()[part] : null;
+    const fields = currentType.getFields();
+    const name = server && !Object.hasOwn(fields, part)
+      ? Object.keys(fields).find((key) => fields[key].extensions?.relation && getFieldStorageName(key, fields[key]) === part) : part;
+    const field = Object.hasOwn(fields, name) ? fields[name] : null;
     if (!field) throw filterError(`Unknown query field: ${path}`, 'INVALID_FILTER_FIELD');
     const fieldType = getNamedType(field.type);
     const relation = field.extensions?.relation;
+    if (server) {
+      assertQueryField?.(currentType, name, field);
+      if (relation && !relation.embedded) {
+        if (index !== parts.length - 1 || getListShape(field.type)) throw filterError('Server queries cannot traverse nonembedded relations', 'INVALID_FILTER_PATH');
+        const leaf = getFieldStorageName(name, field);
+        if (!currentModel?.schema.path(schemaPath ? schemaPath + '.' + leaf : leaf)) throw filterError('Query field has no registered storage path', 'INVALID_FILTER_PATH');
+        return { mongoPath: mongoPath ? mongoPath + '.' + leaf : leaf };
+      }
+      if (field.extensions?.queryPaths?.dynamic === true) {
+        const storage = currentModel?.schema.path(schemaPath ? schemaPath + '.' + part : part);
+        const item = storage?.caster || storage;
+        if (!(fieldType instanceof GraphQLScalarType) || !['Mixed', 'Map'].includes(item?.instance)) throw filterError('Dynamic query paths require a scalar with registered Mixed or Map storage', 'INVALID_FILTER_PATH');
+        return { mongoPath: [mongoPath, ...parts.slice(index)].filter(Boolean).join('.') };
+      }
+    }
     if (fieldType instanceof GraphQLObjectType) {
-      if (index === parts.length - 1) throw filterError(`Query path must end in a scalar field: ${path}`, 'INVALID_FILTER_PATH');
+      if (index === parts.length - 1) {
+        if (server) {
+          const stored = schemaPath ? schemaPath + '.' + part : part;
+          if (!currentModel?.schema.path(stored) && !currentModel?.schema.nested[stored]) throw filterError('Query field has no registered storage path', 'INVALID_FILTER_PATH');
+          return { mongoPath: mongoPath ? mongoPath + '.' + part : part, structured: true };
+        }
+        throw filterError(`Query path must end in a scalar field: ${path}`, 'INVALID_FILTER_PATH');
+      }
       if (!relation || relation.embedded) {
         mongoPath = mongoPath ? `${mongoPath}.${part}` : part;
         schemaPath = schemaPath ? `${schemaPath}.${part}` : part;
@@ -172,6 +199,7 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
       if (index !== parts.length - 1) throw filterError(`Cannot traverse scalar field in ${path}`, 'INVALID_FILTER_PATH');
       const leaf = part === 'id' ? identifierLeaf(currentModel, schemaPath, currentType) : part;
       const storagePath = schemaPath ? `${schemaPath}.${leaf}` : leaf;
+      if (server && !currentModel?.schema.path(storagePath)) throw filterError('Query field has no registered storage path', 'INVALID_FILTER_PATH');
       return {
         mongoPath: mongoPath ? `${mongoPath}.${leaf}` : leaf,
         schemaType: currentModel?.schema?.path(storagePath),
@@ -432,7 +460,23 @@ const buildFilterQuery = async (input, gqltype) => {
   return pipeline;
 };
 
-const buildQuery = async (input, gqltype, isCount) => {
+const compileServerQuery = (gqltype, query, operation) => parseServerQuery(query, operation,
+  (path) => resolveQueryPath(gqltype, path, {}, true));
+
+const buildQuery = async (input, gqltype, isCount, serverPlan) => {
+  if (serverPlan) {
+    const stages = await buildFilterQuery(input, gqltype);
+    stages.push({ $match: lowerServerPredicate(serverPlan.where) });
+    if (isCount) return [...stages, { $count: 'size' }];
+    const items = [];
+    if (serverPlan.sort) items.push({ $sort: serverPlan.sort });
+    if (serverPlan.window.skip) items.push({ $skip: serverPlan.window.skip });
+    if (serverPlan.window.limit) items.push({ $limit: serverPlan.window.limit });
+    if (serverPlan.projection) items.push({ $project: serverPlan.projection });
+    return serverPlan.operation === 'page'
+      ? [...stages, { $facet: { items, count: [{ $count: 'total' }] } }]
+      : [...stages, ...items];
+  }
   const aggregateClauses = [];
   const aggregationsIncluded = {};
   const paging = paginationStages(input.pagination, true);
@@ -517,5 +561,5 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
   return aggregateClauses;
 };
 
-  return { buildQuery, buildFilterQuery, buildFilterGroupMatch, buildAggregationQuery };
+  return { buildQuery, buildFilterQuery, buildFilterGroupMatch, buildAggregationQuery, compileServerQuery };
 };

@@ -97,7 +97,26 @@ export type MongoStorageRequest = { backend: 'mongodb' } & (
   | { operation: 'insertMany'; documents: MongoStorageDocument[]; options?: Pick<MongoWriteOptions, 'ordered' | 'timeoutMS'> }
   | { operation: 'bulkWrite'; operations: MongoBulkOperation[]; options?: Pick<MongoWriteOptions, 'ordered' | 'timeoutMS'> }
 );
+/** Strict, server-only stored-value filters. Unsupported operators reject at runtime. */
+export interface MongoCountQuery {
+  dialect: 'mongodb';
+  filter?: Record<string, unknown>;
+}
+export interface MongoFindQuery extends MongoCountQuery {
+  window: { skip?: number; limit: number; unbounded?: never } | { unbounded: true; skip?: never; limit?: never };
+  sort?: Record<string, 1 | -1>;
+  projection?: Record<string, 0 | 1>;
+}
+export interface MongoPageQuery extends MongoCountQuery {
+  window: { skip?: number; limit: number };
+  sort?: Record<string, 1 | -1>;
+  projection?: Record<string, 0 | 1>;
+}
+/** Field extension opt-in; only registered Mixed/Map storage accepts dynamic traversal. */
+export interface MongoQueryPaths { dynamic: true }
+
 declare module '@simtlix/simfinity-core' {
+  interface ServerQueryCapabilities { mongodb: { find: MongoFindQuery; count: MongoCountQuery; stream: MongoFindQuery; page: MongoPageQuery } }
   interface StorageCapabilities { mongodb: MongoStorageRequest }
 }
 

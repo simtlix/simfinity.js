@@ -62,3 +62,5 @@ For tooling that locates the package, use `require.resolve('@simtlix/simfinity-j
 - [Aggregation examples](./AGGREGATION_EXAMPLE.md)
 
 The Mongo adapter supports registered conditional writes, explicit atomic and projection capabilities, and physical cursor observation. See the [registered data operations guide](https://simtlix.github.io/simfinity.js/guide/registered-data-operations.html). Native capabilities are private server infrastructure and do not claim SQL portability.
+
+Ordinary Mongo-shaped server filters can use the registered `execute` find/count/stream/page query dialect, with explicit windows and registration-controlled dynamic paths. See the registered data operations guide linked above; caller pipelines remain specialized capabilities.

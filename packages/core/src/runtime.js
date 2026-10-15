@@ -1738,6 +1738,13 @@ const copyFilterGroups = (groups) => (Array.isArray(groups) ? groups.map((group)
   return copy;
 }) : groups);
 
+const assertQueryField = (type, fieldName, field, path = type.name + '.' + fieldName) => {
+  const queryable = field.extensions?.queryable;
+  if (queryable === false || (queryable !== true && hasApplicationResolver(type, fieldName))) {
+    throw forbiddenPath(`Query path ${path} uses the non-queryable field ${type.name}.${fieldName}`);
+  }
+};
+
 // Checks the filter, sort and aggregation paths a client supplied, before middleware and scopes
 // add trusted paths. Returns the scoped relations those paths enter, keyed by path, with the
 // client AND/OR groups whose conditions use each path, or `topLevel` for every other form.
@@ -1751,10 +1758,7 @@ const inspectClientPaths = (gqltype, args, operation) => {
   for (const { segments, group } of collectQueryPathEntries(args, operation)) {
     walkQueryPath(gqltype, segments, ({ type, fieldName, field, index }) => {
       const path = segments.slice(0, index + 1).join('.');
-      const queryable = field.extensions?.queryable;
-      if (queryable === false || (queryable !== true && hasApplicationResolver(type, fieldName))) {
-        throw forbiddenPath(`Query path ${path} uses the non-queryable field ${type.name}.${fieldName}`);
-      }
+      assertQueryField(type, fieldName, field, path);
       const relation = field.extensions?.relation;
       if (!relation || relation.embedded) return;
       const target = typesDict.types[unwrapListAndNonNull(field.type).name];
@@ -2758,6 +2762,13 @@ const execute = async (typeName, operation, args = {}, options = {}) => {
   const type = registered(typeName);
   const { context, session } = options;
   let { storage } = options;
+  if (options.query !== undefined || ['stream', 'page'].includes(operation)) {
+    if (!['find', 'count', 'stream', 'page'].includes(operation) || !adapter.compileServerQuery || typeof adapter[operation] !== 'function') {
+      throw new SimfinityError('Server queries are unsupported for this operation/backend', 'UNSUPPORTED_CAPABILITY', 400);
+    }
+    if (options.query === undefined || Object.keys(args).length) throw new SimfinityError('Server queries require an explicit query and empty generated arguments', 'INVALID_FILTER_VALUE', 400);
+    adapter.compileServerQuery(type.gqltype, options.query, operation);
+  }
   if ((options.readOptions || options.observer) && !adapter.supportsObservedReads) {
     throw new SimfinityError('Observed reads are unsupported by this backend', 'UNSUPPORTED_CAPABILITY', 400);
   }
@@ -2777,7 +2788,7 @@ const execute = async (typeName, operation, args = {}, options = {}) => {
       operation === operations.DELETE ? params.args.id : params.args.input,
       operation, null, session, context, inputType, storage);
   }
-  if (!['find', 'count', 'get_by_id', 'aggregate'].includes(operation)) {
+  if (!['find', 'count', 'stream', 'page', 'get_by_id', 'aggregate'].includes(operation)) {
     throw new SimfinityError('Unsupported registered operation', 'INVALID_OPERATION', 400);
   }
   if (operation === 'get_by_id') {
@@ -2790,13 +2801,15 @@ const execute = async (typeName, operation, args = {}, options = {}) => {
     return rows[0] || null;
   }
   const queryArgs = { ...args };
-  const scopeOperation = operation === 'count' ? 'find' : operation;
+  const scopeOperation = ['count', 'stream', 'page'].includes(operation) ? 'find' : operation;
   const joinedScopes = inspectClientPaths(type.gqltype, queryArgs, scopeOperation);
-  const params = { type, args: queryArgs, operation: scopeOperation, context };
+  const params = { type, args: queryArgs, operation: options.query !== undefined ? operation : scopeOperation, context,
+    ...(options.query !== undefined ? { query: options.query } : {}) };
   await executeMiddleware(params);
-  await executeScope(params);
+  await executeScope({ ...params, operation: scopeOperation });
   await applyJoinedScopes(joinedScopes, params);
-  return adapter[operation](type.model, type.gqltype, params.args, session, { context, readOptions: options.readOptions, observer: options.observer });
+  const serverPlan = options.query !== undefined ? adapter.compileServerQuery(type.gqltype, params.query, operation) : undefined;
+  return adapter[operation](type.model, type.gqltype, params.args, session, { context, readOptions: options.readOptions, observer: options.observer, ...(serverPlan ? { serverPlan } : {}) });
 };
 
 // Explicit backend capability, private to server code. The adapter owns its fixed operation
@@ -2827,7 +2840,7 @@ const executeStorage = async (typeName, request, options = {}) => {
 };
 
   if (adapter.bind) {
-    adapter.bind({ getModel, getType, getRegistrations });
+    adapter.bind({ getModel, getType, getRegistrations, assertQueryField });
   }
 
   return {

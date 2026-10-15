@@ -12,6 +12,13 @@ import {
   castModelId, castObjectId, castPathValue, invalidId, isQueryKeyCastFailure, mapIdCastError,
 } from './ids.js';
 
+const validateServerReadOptions = (options) => {
+  const allowed = ['batchSize', 'collation', 'hint', 'maxTimeMS', 'timeoutMS', 'timeoutMode', 'signal', 'allowDiskUse', 'readConcern'];
+  for (const key of Object.keys(options || {})) {
+    if (!allowed.includes(key)) throw new SimfinityError('Unsupported server read option: ' + key, 'INVALID_FILTER_VALUE', 400);
+  }
+};
+
 const withSession = (query, session) => (session ? query.session(session) : query);
 
 // A write that fails only on malformed ObjectId values reports NOT_VALID_ID, not a driver error.
@@ -233,6 +240,10 @@ export const createMongoAdapter = (options) => {
       if (!executeStorage) throw new SimfinityError('MongoDB adapter must be bound to a runtime before storage operations', 'ADAPTER_NOT_BOUND', 500);
       return executeStorage(...args);
     },
+    compileServerQuery(gqltype, query, operation) {
+      if (!queries) throw new SimfinityError('MongoDB adapter must be bound to a runtime before queries', 'ADAPTER_NOT_BOUND', 500);
+      return queries.compileServerQuery(gqltype, query, operation);
+    },
     storageBackend: 'mongodb',
     supportsObservedReads: true,
     validateSession: validateMongoSession,
@@ -359,9 +370,10 @@ export const createMongoAdapter = (options) => {
         ? Model.findOneAndDelete({ $and: [{ _id: id }, storage.filter] }, { sanitizeFilter: false, strictQuery: false })
         : Model.findByIdAndDelete(id), session));
     },
-    async find(Model, gqltype, args, session, { requiredId, readOptions, observer } = {}) {
+    async find(Model, gqltype, args, session, { requiredId, readOptions, observer, serverPlan } = {}) {
       integrity.assertReady();
-      const pipeline = await queries.buildQuery(args, gqltype);
+      const pipeline = await queries.buildQuery(args, gqltype, false, serverPlan);
+      if (serverPlan) validateServerReadOptions(readOptions);
       // Mongoose does not cast aggregation stages, so cast the key type here, without setters.
       if (requiredId != null) pipeline.unshift({ $match: { _id: castModelId(Model, requiredId) } });
       const observation = observer || options?.queryObserver?.();
@@ -369,14 +381,25 @@ export const createMongoAdapter = (options) => {
       if (pipeline.length === 0) return withSession(Model.find({}), session);
       return withSession(Model.aggregate(pipeline), session);
     },
-    async count(Model, gqltype, args, session, { readOptions, observer } = {}) {
+    async count(Model, gqltype, args, session, { readOptions, observer, serverPlan } = {}) {
       integrity.assertReady();
-      const pipeline = await queries.buildQuery(args, gqltype, true);
+      const pipeline = await queries.buildQuery(args, gqltype, true, serverPlan);
+      if (serverPlan) validateServerReadOptions(readOptions);
       const observation = observer || options?.queryObserver?.();
       const result = observation || readOptions
         ? await readMongoPipeline(Model, pipeline, { ...readOptions, session }, observation)
         : await withSession(Model.aggregate(pipeline), session);
       return result[0] ? result[0].size : 0;
+    },
+    async page(Model, gqltype, args, session, read = {}) {
+      const rows = await adapter.find(Model, gqltype, args, session, read);
+      return { items: rows[0]?.items || [], totalCount: rows[0]?.count?.[0]?.total || 0 };
+    },
+    async stream(Model, gqltype, args, session, { readOptions, observer, serverPlan } = {}) {
+      integrity.assertReady();
+      validateServerReadOptions(readOptions);
+      const pipeline = await queries.buildQuery(args, gqltype, false, serverPlan);
+      return readMongoPipeline(Model, pipeline, { ...readOptions, session }, observer || options?.queryObserver?.(), true);
     },
     async aggregate(Model, gqltype, args, session, { readOptions, observer } = {}) {
       integrity.assertReady();

@@ -21,3 +21,20 @@ void runtime.executeStorage('Item', { backend: 'mongodb', operation: 'find', opt
 void runtime.execute('Item', 'drop');
 // @ts-expect-error opt-out only, cannot re-enable shared introspection
 runtime.configureIntrospection({ fieldExtensions: true });
+
+void runtime.execute('Item', 'find', {}, { query: { dialect: 'mongodb', filter: { 'data.507f1f77bcf86cd799439011': { $exists: true } }, window: { unbounded: true }, projection: { _id: 1 } } });
+void runtime.execute('Item', 'stream', {}, { query: { dialect: 'mongodb', window: { limit: 200 } }, observer: { onRows(rows) { void rows; } } });
+void runtime.execute('Item', 'count', {}, { query: { dialect: 'mongodb', filter: { version: { $gt: 1 } } } });
+void runtime.execute('Item', 'page', {}, { query: { dialect: 'mongodb', window: { skip: 10, limit: 20 } } }).then(page => { const count: number = page.totalCount; void count; });
+// @ts-expect-error stream requires an explicit server query
+void runtime.execute('Item', 'stream');
+// @ts-expect-error find requires an explicit window
+void runtime.execute('Item', 'find', {}, { query: { dialect: 'mongodb' } });
+// @ts-expect-error count does not accept a window
+void runtime.execute('Item', 'count', {}, { query: { dialect: 'mongodb', window: { limit: 10 } } });
+// @ts-expect-error a page must be finite
+void runtime.execute('Item', 'page', {}, { query: { dialect: 'mongodb', window: { unbounded: true } } });
+// @ts-expect-error no caller-authored pipeline
+void runtime.execute('Item', 'find', {}, { query: { dialect: 'mongodb', window: { limit: 10 }, pipeline: [] } });
+// @ts-expect-error no unknown dialect
+void runtime.execute('Item', 'find', {}, { query: { dialect: 'sql', window: { limit: 10 } } });

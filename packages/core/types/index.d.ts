@@ -161,6 +161,8 @@ export interface RuntimeRegistration<Model = any, Session = any> extends ModelRe
   storedIdentity?: boolean;
 }
 export interface MiddlewareContext {
+  /** Server-only dialect request; middleware edits are validated before execution. */
+  query?: ServerQuery;
   args: any;
   operation: string;
   entry?: string;
@@ -226,6 +228,16 @@ export interface ExecuteOptions<Session = unknown> {
   readOptions?: Record<string, unknown>;
   observer?: ReadObserver;
 }
+/** Backends augment this map with per-operation server query dialects. */
+export interface ServerQueryCapabilities {}
+export type ServerQueryOperation = 'find' | 'count' | 'stream' | 'page';
+export type ServerQueryFor<Operation extends ServerQueryOperation> = {
+  [Backend in keyof ServerQueryCapabilities]: Operation extends keyof ServerQueryCapabilities[Backend] ? ServerQueryCapabilities[Backend][Operation] : never
+}[keyof ServerQueryCapabilities];
+export type ServerQuery = ServerQueryFor<ServerQueryOperation>;
+export type ExecuteQueryOptions<Session, Operation extends ServerQueryOperation> = Omit<ExecuteOptions<Session>, 'storage'> & { query: ServerQueryFor<Operation> };
+export interface RegisteredPage<Row = Record<string, unknown>> { items: Row[]; totalCount: number }
+
 /** Backends augment this interface with their discriminated capability request union. */
 export interface StorageCapabilities {}
 export type StorageRequest = StorageCapabilities[keyof StorageCapabilities];
@@ -237,6 +249,10 @@ export interface Runtime<Model = any, Session = any> {
    * @throws UNREGISTERED_ENTITY, INVALID_OPERATION, backend/session/coercion errors.
    * @remarks Schema auth wrappers and GraphQL output resolvers do not execute.
    */
+  /** Strict server query dialects share registered middleware, find scope and normal compilation. */
+  execute<Result = unknown>(typeName: string, operation: 'find' | 'stream', args: Record<string, never>, options: ExecuteQueryOptions<Session, 'find'>): Promise<Result>;
+  execute<Result = number>(typeName: string, operation: 'count', args: Record<string, never>, options: ExecuteQueryOptions<Session, 'count'>): Promise<Result>;
+  execute<Result = RegisteredPage>(typeName: string, operation: 'page', args: Record<string, never>, options: ExecuteQueryOptions<Session, 'page'>): Promise<Result>;
   execute<Result = unknown>(typeName: string, operation: RegisteredOperation, args?: Record<string, unknown>, options?: ExecuteOptions<Session>): Promise<Result>;
   /** Execute an explicitly supported trusted backend capability on the registered owner.
    * @throws UNSUPPORTED_CAPABILITY or INVALID_STORAGE_OPERATION for unsupported requests.
@@ -323,12 +339,14 @@ export interface Runtime<Model = any, Session = any> {
 export interface DatabaseAdapter<Model = any, Session = any> {
   storageBackend?: string;
   supportsObservedReads?: boolean;
+  /** Internal compiled plan; never supplied by an application. */
+  compileServerQuery?(type: GraphQLObjectType, query: ServerQuery, operation: ServerQueryOperation): unknown;
   validateSession?(model: Model, session: Session): void;
   validateStorageOptions?(model: Model, type: GraphQLObjectType, operation: RegisteredOperation, options: RegisteredStorageOptions): RegisteredStorageOptions | void;
   prepareStorageUpdate?(update: unknown, storage: RegisteredStorageOptions): unknown;
   setRecordIdentity?(model: Model, record: unknown, id: unknown): void;
   executeStorage?(model: Model, type: GraphQLObjectType, request: StorageRequest, options: { session?: Session; context?: unknown; queryArgs: Record<string, unknown>; observer?: ReadObserver }): Promise<unknown>;
-  bind?(runtime: Pick<Runtime<Model, Session>, 'getModel' | 'getType' | 'getRegistrations'>): void;
+  bind?(runtime: Pick<Runtime<Model, Session>, 'getModel' | 'getType' | 'getRegistrations'> & { assertQueryField?(type: GraphQLObjectType, name: string, field: import('graphql').GraphQLField<unknown, unknown>): void }): void;
   validateRegistration?(registration: RuntimeRegistration<Model, Session>): void;
   prepare?(registrations: RuntimeRegistration<Model, Session>[], options: { createCollection: boolean }): void;
   createModel(type: GraphQLObjectType, callback: ((model: Model) => void) | null | undefined, options: { createCollection: boolean }): Model;
@@ -397,6 +415,8 @@ export interface DatabaseAdapter<Model = any, Session = any> {
   find(model: Model, type: GraphQLObjectType, args: any, session?: Session | null, options?: { requiredId?: any; context?: any; readOptions?: Record<string, unknown>; observer?: ReadObserver }): any;
   count(model: Model, type: GraphQLObjectType, args: any, session?: Session | null, options?: Pick<ExecuteOptions<Session>, 'readOptions' | 'observer'>): Promise<number> | number;
   aggregate(model: Model, type: GraphQLObjectType, args: any, session?: Session | null, options?: Pick<ExecuteOptions<Session>, 'readOptions' | 'observer'>): any;
+  stream?(model: Model, type: GraphQLObjectType, args: unknown, session?: Session, options?: { readOptions?: Record<string, unknown>; observer?: ReadObserver; serverPlan?: unknown }): Promise<AsyncIterable<Record<string, unknown>>>;
+  page?(model: Model, type: GraphQLObjectType, args: unknown, session?: Session, options?: { readOptions?: Record<string, unknown>; observer?: ReadObserver; serverPlan?: unknown }): Promise<RegisteredPage>;
   findChildren(model: Model, type: GraphQLObjectType, connectionField: string, parentId: any, args: any, session?: Session | null): any;
 }
 export function createRuntime<Model = any, Session = any>(adapter: DatabaseAdapter<Model, Session>): Runtime<Model, Session>;

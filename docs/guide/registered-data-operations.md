@@ -146,3 +146,145 @@ backend and lifecycle errors retain existing behavior.
 These APIs do not grant access through schema auth wrappers, deliver effects, invent
 transaction policies, or expose native methods to clients. Keep them inside trusted
 server infrastructure with runtime middleware and explicit ownership.
+
+## Ordinary Mongo-shaped server queries
+
+For existing private server filters, `execute` supports a strict Mongo dialect on
+`find`, `count`, `stream` and `page`. It parses and reconstructs accepted predicates
+through the normal registered Mongo compiler, not `executeStorage` or a caller
+pipeline. The public GraphQL input types, generated LIKE semantics and ordinary
+pagination defaults are unchanged.
+
+```js
+const query = {
+  dialect: 'mongodb',
+  filter: {
+    'document.links': { $elemMatch: { resourceType: 'Article', resourceId } },
+    archivedAt: null,
+  },
+  sort: { _id: 1 },
+  window: { skip: 0, limit: 51 },
+  projection: { _id: 1, document: 1 },
+};
+const rows = await runtime.execute('Article', 'find', {}, {
+  query, context, session, observer, readOptions: { maxTimeMS: 5000 },
+});
+const page = await runtime.execute('Article', 'page', {}, { query, context });
+// page = { items: [...], totalCount: number }
+const total = await runtime.execute('Article', 'count', {}, {
+  query: { dialect: 'mongodb', filter: query.filter }, context,
+});
+const cursor = await runtime.execute('Article', 'stream', {}, {
+  query: { ...query, window: { unbounded: true } }, context, observer,
+});
+for await (const row of cursor) { /* one compiled cursor; break closes it */ }
+```
+
+Pass empty generated arguments with this dialect; combining caller-generated
+filters with `query` rejects. Find/stream require an explicit positive safe-integer
+`window.limit`, optional nonnegative safe-integer `skip`, or exactly
+`{ unbounded: true }`. There is no implicit 100-row page. These private windows do
+not use the generated public `maxPageSize`; set server budgets explicitly. Page
+requires a finite window and executes one compiler-built facet: totalCount sees
+the complete authorized filter, while sort/window/projection apply only to items.
+Count rejects window, sort and projection. No-match page returns empty items and
+zero total. A page observer receives the physical facet row containing `items`
+and `count`; account for `row.items.length` when measuring returned item budgets.
+
+Middleware receives `params.query` and the actual operation (`find`, `count`,
+`stream` or `page`). Changes are validated again before execution. All four use
+the existing find scope. Scope-generated filters are conjoined with the server
+predicate, outside caller OR/NOR/NOT; a caller cannot negate the scope. Scopes that
+provide sort/pagination reject with INVALID_SCOPE rather than silently overriding
+an explicit window. Context identity and active same-client session adoption are
+unchanged. Reads add no transactions/retries. Invalid syntax never falls back to
+a native query. Unsupported backends reject UNSUPPORTED_CAPABILITY.
+
+### Fields and values
+
+Only registered stored fields are accepted. `_id` aliases the declared entity
+identity. Declared singular reference storage aliases may be compared as keys;
+traversing nonembedded relationships is rejected. Use existing generated relation
+filters and their joined scopes, or an explicit authorized projection for joins.
+Embedded fields resolve through their declarations. Non-queryable fields and
+application-resolved fields without `queryable: true` remain forbidden, including
+sort/projection paths. Authorization of business-specific custom fields remains
+with their owning service.
+
+Dynamic traversal requires opt-in on an actual Mixed/Map-backed scalar field (or
+an array of Mixed values):
+
+```js
+attributes: {
+  type: QLValue,
+  extensions: { queryPaths: { dynamic: true } },
+}
+```
+
+This server-only metadata does not enable arbitrary traversal of every QLValue.
+It accepts safe alphanumeric/underscore child segments, including digit-leading
+attribute IDs and numeric array indices such as `document.links.0`. Empty,
+operator-prefixed, prototype/constructor, NUL and internal `__sf_` segments reject.
+Ordinary scalar fields remain nontraversable. Legacy generated filter behavior
+is unchanged; use this explicit dialect for the richer stored-value contract.
+
+Values retain BSON-sensitive semantics: an ObjectId and its hex string are not
+interchangeable. No generated GraphQL/model coercion is applied to server filter
+literals. Supported literals are null, booleans, finite numbers, strings, dense
+arrays, plain data records, valid Date, the Mongo adapter's Mongoose ObjectId and
+Buffer. Normalize foreign BSON IDs in the owning boundary if needed. Other BSON
+classes/custom objects reject until explicitly supported. Structured equality
+preserves document key order and array order; it is not rewritten into independent
+subfield comparisons. Literals on declared embedded object types also validate
+their child field paths; they cannot hide an unknown or non-queryable child inside
+an equality value. Sorting a declared object requires a scalar child path.
+Functions, symbols, accessors, cycles, undefined, nonfinite
+numbers and unsafe/operator-bearing literal keys reject. Strings beginning `$`
+remain literal data, never expressions.
+
+### Supported grammar and limits
+
+- Implicit equality and `$eq`, `$ne`, `$lt`, `$lte`, `$gt`, `$gte`.
+- `$in`, `$nin`, `$all`, including empty arrays and null members with Mongo semantics.
+- `$exists` boolean, `$size` nonnegative integer, and `$type` aliases `string`,
+  `number`, `double`, `int`, `long`, `decimal`, `date`, `objectId`, `bool`, `object`,
+  `array`, `null`, `binData`. Numeric type codes and other aliases reject.
+- Document `$and`, `$or`, `$nor` with nonempty lists; field `$not` with an operator
+  object; `$elemMatch` with object-element predicates or scalar-element operators.
+  Correlation is preserved, including nested logic and nested elemMatch.
+- `$regex` accepts only escaped literal patterns, optional leading `^` / terminal
+  `$`, and `$options` absent/empty or `i`. Mongo anchor semantics are retained.
+  This supports exact anchored, prefix and contains search without accepting
+  arbitrary regular-expression programs. Existing generated LIKE remains
+  case-sensitive. RegExp/BSON regex objects and other flags reject.
+- Sort uses 1/-1; projection uses 1/0 inclusion or exclusion, with the normal `_id`
+  exception. Unknown, duplicate resolved or overlapping projection paths reject.
+  Computed/positional projections and caller pipelines are not accepted.
+
+EMPTY can retain its exact missing/null/empty-string/empty-array OR expression;
+NOT_EMPTY retains exists plus NIN(null, '') plus NOT SIZE(0). No truthiness shortcut
+is applied. Negating a structured conjunction retains its original NOR semantics.
+
+Complexity is bounded: at most 10,000 structural/path visits, depth 20, 100,000
+literal nodes (arrays/records and scalar members), 8 MiB of accounted literal data,
+1,048,576 code units per literal string, 1,024 per field path and 4,096 per regex.
+Membership values have a separate budget from predicate structure, so 50,001 IDs
+are supported. `FILTER_DEPTH_EXCEEDED` covers structural/data budget exhaustion.
+Malformed fields/values/operators use INVALID_FILTER_PATH, INVALID_FILTER_FIELD,
+INVALID_FILTER_VALUE or INVALID_FILTER_OPERATOR; window errors use
+INVALID_PAGINATION and sort errors INVALID_SORT.
+
+Read options accept batchSize, collation, hint, maxTimeMS, timeoutMS, timeoutMode,
+signal, allowDiskUse and readConcern. Put sort/projection/paging in the query only;
+a second session in readOptions rejects. Normal unobserved reads retain Mongoose
+aggregate hooks. As with existing observed reads, cursor/observed execution rejects
+models with aggregate hooks instead of bypassing them. Find-limit-one is a list
+read and does not promise findOne hooks. Observers retain physical batch accounting
+including empty batches, decoded-row observation and awaited error/cancellation
+cleanup. Native aggregate hooks are not supported on streams.
+
+`$expr`, `$where`, JavaScript, full regex, text/geo operators, lookup stages and
+arbitrary native methods are outside this ordinary grammar. Use explicit owner
+capabilities for genuine authorization joins, computed projections, facets beyond
+the fixed page shape and field-to-field calculations. Writes, complete CAS
+predicates and specialized atomic capabilities are unchanged.

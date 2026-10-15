@@ -41,3 +41,5 @@ The same helpers are available from the `@simtlix/simfinity-core/auth`, `/auth/e
 Programmatic server consumers can use runtime.execute(), runtime.executeMutation() and backend-declared runtime.executeStorage(). See the [registered data operations guide](https://simtlix.github.io/simfinity.js/guide/registered-data-operations.html). These APIs use runtime middleware; schema resolver authorization wrappers do not run.
 
 Call the named `configureIntrospection({ fieldExtensions: false })` export before constructing schemas when standard introspection is required; the runtime method is an alias.
+
+Ordinary Mongo-shaped server filters can use the registered `execute` find/count/stream/page query dialect, with explicit windows and registration-controlled dynamic paths. See the registered data operations guide linked above; caller pipelines remain specialized capabilities.
