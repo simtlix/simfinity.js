@@ -1,9 +1,14 @@
 import mongoose from 'mongoose';
+import { types as nativeTypes } from 'node:util';
 import { SimfinityError } from '@simtlix/simfinity-core';
 
 const fail = (message, code = 'INVALID_FILTER_VALUE') => { throw new SimfinityError(message, code, 400); };
 const unsafe = (key) => ['__proto__', 'prototype', 'constructor'].includes(key) || key.startsWith('$') || key.startsWith('__sf_') || key.includes('\0');
-const plain = (value) => value && typeof value === 'object' && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+const prototype = (value) => {
+  if (nativeTypes.isProxy(value)) fail('Proxies are not supported query data');
+  return Object.getPrototypeOf(value);
+};
+const plain = (value) => value && typeof value === 'object' && [Object.prototype, null].includes(prototype(value));
 const entries = (value) => {
   if (!plain(value)) fail('Expected a plain query object');
   const descriptors = Object.getOwnPropertyDescriptors(value);
@@ -14,18 +19,42 @@ const keysOnly = (value, allowed) => {
   for (const [key] of entries(value)) if (!allowed.includes(key)) fail('Unsupported query option: ' + key);
 };
 const denseArray = (value) => {
-  if (!Array.isArray(value)) fail('Expected an array');
+  if (!Array.isArray(value) || prototype(value) !== Array.prototype) fail('Expected an ordinary array');
   const descriptors = Object.getOwnPropertyDescriptors(value);
-  if (Reflect.ownKeys(value).length !== value.length + 1) fail('Arrays require dense data elements');
-  for (let index = 0; index < value.length; index++) if (!Object.hasOwn(descriptors[index] || {}, 'value')) fail('Arrays require data elements');
-  return value;
+  const length = descriptors.length.value;
+  if (Reflect.ownKeys(descriptors).length !== length + 1) fail('Arrays require dense data elements');
+  const result = [];
+  for (let index = 0; index < length; index++) {
+    const descriptor = descriptors[index];
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) fail('Arrays require enumerable data elements');
+    result.push(descriptor.value);
+  }
+  return result;
+};
+const byteLength = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'byteLength').get;
+const copyBytes = (value, charge, expectedLength) => {
+  if (!value || typeof value !== 'object') fail('Expected ordinary binary data');
+  const proto = prototype(value);
+  if (![Buffer.prototype, Uint8Array.prototype].includes(proto) || !nativeTypes.isUint8Array(value)) fail('Expected ordinary binary data');
+  const length = byteLength.call(value);
+  if (expectedLength !== undefined && length !== expectedLength) fail('Invalid ObjectId bytes');
+  charge(length);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(descriptors).length !== length) fail('Binary data cannot have custom properties');
+  const result = Buffer.alloc(length);
+  for (let index = 0; index < length; index++) {
+    const descriptor = descriptors[index];
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) fail('Binary data requires data elements');
+    result[index] = descriptor.value;
+  }
+  return result;
 };
 const types = new Set(['string', 'number', 'double', 'int', 'long', 'decimal', 'date', 'objectId', 'bool', 'object', 'array', 'null', 'binData']);
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // Accept only escaped literal patterns. Anchors keep Mongo's regex semantics (including $).
 const literalRegex = (pattern, flags = '') => {
-  if (typeof pattern !== 'string' || pattern.length > 4096 || !['', 'i'].includes(flags)) fail('Only literal regex patterns and the i flag are supported');
+  if (typeof pattern !== 'string' || pattern.length > 4096 || pattern.includes('\0') || !['', 'i'].includes(flags)) fail('Only literal regex patterns without NUL and the i flag are supported');
   let start = false, end = false, literal = '';
   for (let index = 0; index < pattern.length; index++) {
     const char = pattern[index];
@@ -62,9 +91,21 @@ export const parseServerQuery = (query, operation, resolve) => {
     if (value === null || typeof value === 'boolean') return value;
     if (typeof value === 'string' && value.length <= 1048576) { charge(Buffer.byteLength(value)); return value; }
     if (typeof value === 'number' && Number.isFinite(value)) { charge(8); return value; }
-    if (value instanceof Date && Number.isFinite(value.getTime())) return new Date(value.getTime());
-    if (value instanceof mongoose.Types.ObjectId) { charge(12); return new mongoose.Types.ObjectId(value.toHexString()); }
-    if (Buffer.isBuffer(value)) { charge(value.length); return Buffer.from(value); }
+    if (value && typeof value === 'object') {
+      const proto = prototype(value);
+      if (proto === Date.prototype) {
+        if (!nativeTypes.isDate(value) || Reflect.ownKeys(value).length) fail('Expected an ordinary Date');
+        const time = Date.prototype.getTime.call(value);
+        if (!Number.isFinite(time)) fail('Invalid Date');
+        charge(8); return new Date(time);
+      }
+      if (proto === mongoose.Types.ObjectId.prototype) {
+        const descriptors = Object.getOwnPropertyDescriptors(value);
+        if (Reflect.ownKeys(descriptors).length !== 1 || !Object.hasOwn(descriptors.buffer || {}, 'value')) fail('Expected an ordinary ObjectId');
+        return new mongoose.Types.ObjectId(copyBytes(descriptors.buffer.value, charge, 12));
+      }
+      if (proto === Buffer.prototype) return copyBytes(value, charge);
+    }
     if (Array.isArray(value)) {
       if (value.length > 100000) fail('Server query has too many literal values', 'FILTER_DEPTH_EXCEEDED');
       return denseArray(value).map((item) => literal(item, depth + 1));
@@ -128,8 +169,9 @@ export const parseServerQuery = (query, operation, resolve) => {
     const terms = [];
     for (const [key, operand] of entries(value)) {
       if (['$and', '$or', '$nor'].includes(key)) {
-        if (!Array.isArray(operand) || !operand.length) fail(key + ' requires a nonempty array');
-        terms.push({ kind: key, terms: denseArray(operand).map((item) => document(item, prefix, depth + 1)) });
+        const members = denseArray(operand);
+        if (!members.length) fail(key + ' requires a nonempty array');
+        terms.push({ kind: key, terms: members.map((item) => document(item, prefix, depth + 1)) });
       } else {
         const field = prefix + key;
         const resolved = path(field);

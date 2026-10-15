@@ -93,6 +93,60 @@ describe.skipIf(!uri)('registered ordinary server queries', () => {
     } finally { aggregate.mockRestore(); }
   });
 
+  test('rejects polymorphic query arrays without calling custom behavior or Mongo', async () => {
+    const invoked = vi.fn();
+    class InjectedArray extends Array {
+      map() { invoked(); return [{ kind: 'field', path: '$expr', terms: [{ operator: '$eq', value: [1, 1] }] }]; }
+    }
+    const accessor = ['missing']; Object.defineProperty(accessor, 'map', { get() { invoked(); return Array.prototype.map; } });
+    const sparse = Array(1);
+    const proxy = new Proxy(['missing'], { getPrototypeOf() { invoked(); return Array.prototype; }, get() { invoked(); return 1; } });
+    const element = ['missing']; Object.defineProperty(element, '0', { get() { invoked(); return 'missing'; } });
+    const aggregate = vi.spyOn(Model.collection, 'aggregate');
+    try {
+      for (const filter of [{ $and: new InjectedArray({ name: 'safe' }) }, { _id: { $in: new InjectedArray('missing') } }, { _id: { $in: accessor } }, { _id: { $in: sparse } }, { _id: { $in: element } }, { _id: { $in: proxy } }, { $and: proxy }]) {
+        await expect(run(filter)).rejects.toMatchObject({ extensions: { code: 'INVALID_FILTER_VALUE' } });
+      }
+      expect(invoked).not.toHaveBeenCalled(); expect(aggregate).not.toHaveBeenCalled();
+    } finally { aggregate.mockRestore(); }
+    expect((await run({ $and: [{ _id: { $in: Object.freeze(['missing']) } }] })).map((row) => row._id)).toEqual(['missing']);
+  });
+
+  test('rejects special literal overrides without invoking them and preserves ordinary BSON literals', async () => {
+    const invoked = vi.fn(() => { throw Error('custom literal behavior invoked'); });
+    const date = new Date('2026-01-01'); Object.defineProperty(date, 'getTime', { get: invoked });
+    const id = new mongoose.Types.ObjectId(); Object.defineProperty(id, 'toHexString', { get: invoked });
+    const idBuffer = new mongoose.Types.ObjectId(); Object.defineProperty(idBuffer, 'buffer', { get: invoked });
+    const binary = Buffer.from([1, 2]); Object.defineProperty(binary, 'length', { get: invoked });
+    const method = new mongoose.Types.ObjectId(); method.toHexString = invoked;
+    const idBytes = new mongoose.Types.ObjectId(); Object.defineProperty(idBytes.buffer, 'valueOf', { get: invoked });
+    const binaryMethod = Buffer.from([1, 2]); binaryMethod[Symbol.iterator] = invoked;
+    class CustomDate extends Date { getTime() { return invoked(); } }
+    const proxy = new Proxy(new Date(), { getPrototypeOf: invoked });
+    const aggregate = vi.spyOn(Model.collection, 'aggregate');
+    try {
+      for (const value of [date, id, idBuffer, idBytes, binary, binaryMethod, method, new CustomDate(), proxy]) {
+        await expect(run({ 'data.value': value })).rejects.toMatchObject({ extensions: { code: 'INVALID_FILTER_VALUE' } });
+      }
+      expect(invoked).not.toHaveBeenCalled(); expect(aggregate).not.toHaveBeenCalled();
+    } finally { aggregate.mockRestore(); }
+    await Model.collection.insertOne({ _id: 'literal-control', tenant: 'one', data: { date: new Date('2026-01-01'), oid, binary: Buffer.from([1, 2]) } });
+    try {
+      expect((await run({ _id: 'literal-control', 'data.date': new Date('2026-01-01'), 'data.oid': new mongoose.Types.ObjectId(oid.buffer), 'data.binary': Buffer.from([1, 2]) })).map((row) => row._id)).toEqual(['literal-control']);
+    } finally { await Model.collection.deleteOne({ _id: 'literal-control' }); }
+  });
+
+  test('rejects embedded NUL regex before Mongo but permits ordinary NUL string equality', async () => {
+    const aggregate = vi.spyOn(Model.collection, 'aggregate');
+    try {
+      await expect(run({ name: { $regex: 'A\0B' } })).rejects.toMatchObject({ extensions: { code: 'INVALID_FILTER_VALUE' } });
+      expect(aggregate).not.toHaveBeenCalled();
+    } finally { aggregate.mockRestore(); }
+    await Model.collection.insertOne({ _id: 'nul-control', tenant: 'one', name: 'A\0B' });
+    try { expect((await run({ name: 'A\0B' })).map((row) => row._id)).toEqual(['nul-control']); }
+    finally { await Model.collection.deleteOne({ _id: 'nul-control' }); }
+  });
+
   test('complete compiled paging, projection, count and a single observed stream exceed 100 rows', async () => {
     await Model.insertMany(Array.from({ length: 201 }, (_, i) => ({ _id: 'page-' + String(i).padStart(3, '0'), tenant: 'one', name: 'page' })));
     const filter = { name: 'page' };
