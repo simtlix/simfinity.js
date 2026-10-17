@@ -7,6 +7,23 @@ description: Work on Simfinity.js, improve the documentation, and run the projec
 
 Simfinity.js is maintained by Simtlix and released under the Apache 2.0 License. Contributions to the library, examples, and documentation are welcome.
 
+## Explain the change in an issue
+
+Every pull request must link an issue in this repository explaining **why the change is needed**. Create or reuse the relevant issue before opening the PR; existing PRs must add it before approval or merge. This applies to features, bug fixes, documentation, examples, dependencies and maintenance, including automated PRs. Keep the explanation proportional to the change: a typo fix needs a short explanation, not a feature proposal. A maintainer can supply the issue for a bot-generated PR.
+
+For a feature or public behavior change, the issue must describe:
+
+1. The concrete use case, actor and desired outcome, with a minimal example and the affected package/version and database engine when relevant.
+2. The current behavior and what was tried with existing Simfinity capabilities. Consider relationships, generated operations, query scopes, aggregates, controllers and registered operations where relevant; explain why they do not solve the problem. Distinguish an experiment from an untested assumption.
+3. Why the missing capability belongs in the library rather than application business logic or infrastructure. Consider authorization, hooks, transaction ownership and MongoDB/PostgreSQL compatibility; identify engine-specific scope explicitly.
+4. Observable acceptance criteria and the proposed scope. Record uncertainties rather than inventing evidence or prescribing an implementation before understanding the need.
+
+Bug issues need expected/actual behavior and reproduction evidence. Documentation or maintenance issues need the current gap, its impact and the desired result. Remove credentials and private application data from all examples.
+
+The PR must link the issue, summarize the motivation, explain how the implementation addresses it, and report validation and relevant compatibility effects. Use `Closes #<issue-number>` only when the PR completes the issue; use `Refs #<issue-number>` for partial work. Update the issue when the scope changes; an unrelated issue or a bare feature name is insufficient.
+
+Reviewers read the issue and verify the claimed gap against the current library before recommending a new API. If the issue or rationale is missing, continue the technical review but withhold approval and merge until it is supplied. An existing capability may call for usage guidance, an application change or better documentation; a demonstrated gap may justify a library feature. A linked issue records the problem, not automatic design approval.
+
 ## Work on the library
 
 Clone the repository and install the locked dependencies:
@@ -28,7 +45,7 @@ npm run lint
 npm test
 ```
 
-Add focused coverage for critical behavior and regressions. Keep the public documentation synchronized with API changes. A useful pull request explains the affected behavior, the change, and how it was validated.
+Add focused coverage for critical behavior and regressions. Keep the public documentation synchronized with API changes. Follow the [issue and PR requirements](#explain-the-change-in-an-issue) when submitting the change.
 
 ### Package quality and dependency security
 
@@ -79,7 +96,7 @@ Check links, search, mobile navigation, code examples, and both color themes. Th
 
 This workflow is a shared repository rule for human contributors and coding agents. It is also required by [AGENTS.md](https://github.com/simtlix/simfinity.js/blob/master/AGENTS.md#shared-development-and-publication-rule) and the always-applied [Cursor rule](https://github.com/simtlix/simfinity.js/blob/master/.cursor/rules/simfinity-development-workflow.mdc), so it travels with every clone of the repository.
 
-Develop scoped changes on a branch, update the relevant documentation and tests, and merge through a reviewed pull request with passing checks. If the agreed task includes publishing a library change, the contributor or agent owns the complete release process below. Publication already requested in that task does not need a second request or confirmation of the same scope.
+Explain the need in a [linked issue](#explain-the-change-in-an-issue), develop scoped changes on a branch, update the relevant documentation and tests, and merge through a reviewed pull request with passing checks. If the agreed task includes publishing a library change, the contributor or agent owns the complete release process below. Publication already requested in that task does not need a second request or confirmation of the same scope.
 
 A publication task is complete only when all of these conditions hold:
 

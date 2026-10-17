@@ -1,4 +1,4 @@
 interface:
   display_name: "Simfinity PR Review"
   short_description: "Review lifecycle, engine parity and API boundaries"
-  default_prompt: "Use $simfinity-pr-review to review this Simfinity PR for correctness, lifecycle guarantees, engine compatibility and architectural fit."
+  default_prompt: "Use $simfinity-pr-review to review this Simfinity PR and its linked issue for motivation, correctness, lifecycle guarantees, engine compatibility and architectural fit."

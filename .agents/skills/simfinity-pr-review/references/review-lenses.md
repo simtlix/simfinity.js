@@ -2,6 +2,16 @@
 
 Read the sections relevant to the changed behavior. The linked repository rules and current implementation take precedence over these review prompts; historical limitations are not permanent API bans.
 
+## Verify the motivation
+
+Apply the [issue and PR requirements](../../../../docs/resources/contributing.md#explain-the-change-in-an-issue). Read the actual linked repository issue, not just the PR's implementation summary or closing keyword. Confirm it covers the current diff and explains a concrete problem. A bare title such as “add native filters” does not establish why they are needed; an unrelated issue does not satisfy the rule.
+
+For features and public behavior changes, identify the actor, desired outcome, minimal example, current API usage, alternatives considered and the remaining gap. Compare the claim with today's relationships, scopes, aggregates, controllers and registered operations. Look for repository-style wrappers that bypass the stack and then request APIs to replace its existing capabilities. Demonstrate that mismatch and suggest the supported usage; do not assume unfamiliarity from the author's vocabulary or reject a real missing capability.
+
+Check why the change belongs in the library, which lifecycle guarantees apply, how MongoDB/PostgreSQL are affected, and what outcome would satisfy the issue. Treat untried alternatives as open questions, not fabricated experiments. Bug fixes need expected/actual behavior and reproduction evidence; documentation, dependency and maintenance changes need a proportionate explanation of their gap and result. Automated PRs still need a relevant issue supplied by a maintainer.
+
+Report a missing issue or insufficient rationale as a readiness blocker separate from code defects. Continue useful technical review, but do not recommend approval or merge until it is resolved. If the issue cannot be accessed, report that readiness remains unverified until its contents can be checked; do not assume it is absent or recommend unconditional approval. A review-only request does not authorize creating or editing issues; when opening a PR is authorized, create or reuse its required issue using the established task context. A linked issue is not automatic design approval.
+
 ## Choose the owning layer
 
 | Need or proposal | First place to look | Evidence needed for a library change |

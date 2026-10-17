@@ -11,6 +11,7 @@ Protect Simfinity's generated, typed data API and its lifecycle across database 
 
 - Confirm repository, PR number, base and current head SHA, diff, existing feedback and CI for that head. If a number identifies an issue instead, clarify the target. Preserve unrelated working changes; reuse an appropriate checkout.
 - Read [AGENTS.md](../../../AGENTS.md) and its relevant `.cursor/rules/` links. They own the current contract. For API or usage changes, read [server-side operations](../../../docs/guide/server-side-operations.md) and [anti-patterns](../../../docs/guide/anti-patterns.md).
+- Read the linked issue and apply the [motivation check](references/review-lenses.md#verify-the-motivation). Every PR needs a relevant repository issue with rationale; missing context blocks approval or merge, not continued technical review. Do not invent the author's use case.
 - Trace changed entry points to their callers, implementation, public types and tests. A PR description, resolved thread or green CI is evidence to verify, not proof of correctness.
 
 ## Evaluate architectural fit
