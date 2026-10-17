@@ -2713,6 +2713,8 @@ console.log(UserType.getFields()); // Access GraphQL fields
 const BookInput = simfinity.getInputType(BookType);
 ```
 
+For jobs, workers, webhooks and other server code, read [server-side operations](docs/guide/server-side-operations.md): it shows when to use a mutation with nested writes, a controller hook, in-process execution of the generated schema, a custom mutation with `saveObject()` or the native model with the session, and what each of them runs. [Usage anti-patterns](docs/guide/anti-patterns.md) lists the approaches to avoid.
+
 ## 🤖 MCP Generation
 
 Simfinity can automatically expose every generated GraphQL operation as a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) tool. For each connected type you get one MCP tool per generated query and mutation — exactly mirroring the GraphQL surface:

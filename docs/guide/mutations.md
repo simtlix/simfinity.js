@@ -27,7 +27,7 @@ mutation {
 
 `SerieInput` is generated from the type. It excludes the entity `id`, fields marked `readOnly`, and a `state` field managed by a state machine. Required scalar, enum, embedded-object, and list fields remain required on creation. Lists preserve item nullability: `[String!]!` becomes `[String!]!` on create and `[String!]` on update.
 
-Nested inputs follow the relationship's storage model: embedded objects accept their fields, references accept `{ id }`, and referenced collections accept `added`, `updated`, and `deleted`. See [relationships](./relationships). To bound how many nested collection operations one mutation may carry, see [limit nested collection operations](#limit-nested-collection-operations).
+Nested inputs follow the relationship's storage model: embedded objects accept their fields, references accept `{ id }`, and referenced collections accept `added`, `updated`, and `deleted`. See [relationships](./relationships). To bound how many nested collection operations one mutation may carry, see [limit nested collection operations](#limit-nested-collection-operations). To write a parent and its children, such as an order and its lines, in one transaction from server code, see [server-side operations](./server-side-operations#write-a-parent-and-its-children-together).
 
 ## Update selected fields
 
@@ -102,7 +102,7 @@ MongoDB's optional [transactional reference integrity](./mongodb-integrity) mode
 
 On MongoDB, an `UnknownTransactionCommitResult` retries only the commit, up to five times, without repeating writes or hooks. An expired commit (`MaxTimeMSExpired`) is not retried. PostgreSQL retries confirmed serialization/deadlock aborts as complete transaction attempts. If a driver reports an uncertain outcome, reconcile it before repeating an operation. Session cleanup is awaited, and cleanup failures do not replace an earlier operation error.
 
-Multiple root mutation fields in a GraphQL request are not one shared transaction. If a later field fails, an earlier field may already have committed. Use a custom mutation when a business operation needs a single transaction spanning several writes.
+Multiple root mutation fields in a GraphQL request are not one shared transaction. If a later field fails, an earlier field may already have committed. Use a custom mutation when a business operation needs a single transaction spanning several writes. [Server-side operations](./server-side-operations) shows which path a job, worker or internal command should take for each kind of write.
 
 Controllers, validators, state actions and the middleware of nested collection children can run again on a retry. Keep their database work on the supplied session and design external side effects separately from the transaction. See [controllers](./controllers#transactions-and-side-effects).
 

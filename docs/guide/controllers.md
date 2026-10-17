@@ -127,7 +127,7 @@ await AuditModel.create(
 );
 ```
 
-`AuditModel` is an application-defined Mongoose model. This write can participate in the same MongoDB transaction as the entity change. PostgreSQL controllers use `session.query(sql, values)` or a PostgreSQL Model method with `{ session }` instead.
+`AuditModel` is an application-defined Mongoose model. This write can participate in the same MongoDB transaction as the entity change. PostgreSQL controllers use `session.query(sql, values)` or a PostgreSQL Model method with `{ session }` instead. [Server-side operations](./server-side-operations#work-inside-the-transaction-with-controllers) shows both backends side by side, including reads of the transaction's uncommitted writes and counters kept with native calls.
 
 On PostgreSQL, a statement that fails aborts the whole transaction, even when the hook catches its error: the mutation then fails with `DATABASE_ERROR` (500) and nothing is stored. When another statement runs in the aborted transaction, such as Simfinity's own write after `onSaving`, `onUpdating` or `onDelete`, or a later query of the hook, that statement fails and the message is `Database operation failed`. When nothing runs after the failure, as after `onSaved` or `onUpdated`, PostgreSQL rolls the transaction back at `COMMIT` and the message is `Transaction was rolled back because one of its statements failed`. To make a statement optional, wrap it in a savepoint:
 
