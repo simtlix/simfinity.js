@@ -243,15 +243,13 @@ const schema = simfinity.createSchema(
   includedQueryTypes,     // Optional: Array of types to include in queries
   includedMutationTypes,  // Optional: Array of types to include in mutations
   includedCustomMutations, // Optional: Array of custom mutation names to include
-  includedCustomQueries   // Optional: Array of custom query names to include (unreleased)
+  includedCustomQueries   // Optional: Array of custom query names to include
 );
 ```
 
-The fourth allowlist and `registerQuery()` are available in the current source, not in the published 3.7.0 packages. For each allowlist, `undefined` or `null` includes all entries and `[]` excludes all. The first two select registered type objects; the last two select operation names. The current source omits `Mutation` when no mutation fields remain. Once a custom query has been registered, exposing no generated or custom query fails before model preparation with `EMPTY_QUERY_ROOT`; runtimes without custom queries retain their existing storage-preparation behavior. See [custom queries](#custom-queries) and the [API reference](docs/reference/api.md#createschema).
-
 Importing Simfinity initializes its global `__Field.extensions` introspection field safely whether GraphQL's fields have already been materialized or a schema already exists. Repeated module evaluation with the same GraphQL peer reuses the existing extension field and metadata types. Application field metadata is preserved.
 
-The extension remains shared by every schema using that GraphQL peer; Simfinity's type and middleware registries belong to each runtime instance. A `GraphQLObjectType` belongs to the first runtime whose schema generates its relation resolvers, or reaches it while one of its non-embedded relation fields has no resolver, such as an unregistered custom query or mutation result. Registering it in another runtime, reaching it from another runtime's schema, or copying its relation fields with `toConfig()` after that runtime generated them, throws `TYPE_BOUND_TO_OTHER_RUNTIME`. Give each runtime its own type objects, for example from a factory function. Types without non-embedded relation fields, and types whose relations all have your own resolvers, can be shared; see [types belong to one runtime](docs/guide/schema.md#types-belong-to-one-runtime). Schemas constructed after import include `FieldExtensionsType` and `RelationType` in their type maps, or their fallback names `SimfinityFieldExtensionsType` and `SimfinityRelationType` once an application type with one of those names was in the process's first Simfinity schema; see [what gets generated](docs/guide/schema.md#what-gets-generated). Earlier schemas keep their original type maps: ordinary operations and direct metadata selections work, but named fragments on the new metadata types require a schema constructed after import.
+The extension remains shared by every schema using that GraphQL peer; Simfinity's type and middleware registries belong to each runtime instance. A `GraphQLObjectType` belongs to the first runtime whose schema generates its relation resolvers, or reaches it while one of its non-embedded relation fields has no resolver, such as an unregistered custom mutation result. Registering it in another runtime, reaching it from another runtime's schema, or copying its relation fields with `toConfig()` after that runtime generated them, throws `TYPE_BOUND_TO_OTHER_RUNTIME`. Give each runtime its own type objects, for example from a factory function. Types without non-embedded relation fields, and types whose relations all have your own resolvers, can be shared; see [types belong to one runtime](docs/guide/schema.md#types-belong-to-one-runtime). Schemas constructed after import include `FieldExtensionsType` and `RelationType` in their type maps, or their fallback names `SimfinityFieldExtensionsType` and `SimfinityRelationType` once an application type with one of those names was in the process's first Simfinity schema; see [what gets generated](docs/guide/schema.md#what-gets-generated). Earlier schemas keep their original type maps: ordinary operations and direct metadata selections work, but named fragments on the new metadata types require a schema constructed after import.
 
 Schema-cloning tools remain unsupported. In a process that has imported Simfinity, `buildClientSchema()` on a post-import schema's introspection result can also fail with duplicate metadata type names. Use Envelop plugins and in-place resolver wrapping; see the [introspection metadata reference](docs/reference/extensions.md).
 
@@ -2392,13 +2390,13 @@ Generated non-embedded relationship reads and nested collection mutations also i
 simfinity.use(async (params, next) => {
   // params object contains:
   const {
-    type,        // Registered type metadata: gqltype, model, controller, etc. Absent for custom operations
+    type,        // Registered type metadata: gqltype, model, controller, etc. Absent for custom queries and mutations
     args,        // GraphQL arguments passed to the operation
-    operation,   // 'save', 'update', 'delete', 'get_by_id', 'find', 'aggregate', 'state_changed', 'custom_mutation', 'custom_query'
+    operation,   // Operation type: 'save', 'update', 'delete', 'get_by_id', 'find', 'aggregate', 'state_changed', 'custom_mutation', 'custom_query'
     context,     // GraphQL context object (includes request info, user data, etc.)
     actionName,  // For state machine actions (only present for state_changed operations)
     actionField, // State machine action details (only present for state_changed operations)
-    entry        // Registered operation name for custom_mutation or custom_query
+    entry        // Custom operation name (custom_mutation or custom_query)
   } = params;
   
   // Await next() to continue the middleware chain
@@ -2646,14 +2644,15 @@ const BookType = new GraphQLObjectType({
 
 ### Custom Queries
 
-**Unreleased:** `registerQuery()` is included in the current source and is not available in published 3.7.0 packages.
+Use `registerQuery(name, description, inputModel, outputModel, callback, options?)` for application reads with their own input and result types. Register them before calling `createSchema()`; their result types do not need a storage model.
 
-Use `registerQuery(name, description, inputModel, outputModel, callback, { transactional })` to expose a business read through the same runtime and schema. A result type can describe a response without becoming a stored entity. Both database facades and runtimes created with `createRuntime()` or `createSQL()` expose the method.
-
-This MongoDB example assumes `BookType` has already been connected. The result exposes only a preview of the book:
+This MongoDB example assumes `BookType` has already been connected:
 
 ```javascript
-import { GraphQLID, GraphQLInputObjectType, GraphQLNonNull, GraphQLObjectType, GraphQLString } from 'graphql';
+import {
+  GraphQLID, GraphQLInputObjectType, GraphQLNonNull,
+  GraphQLObjectType, GraphQLString,
+} from 'graphql';
 
 const BookPreviewInput = new GraphQLInputObjectType({
   name: 'BookPreviewInput',
@@ -2664,11 +2663,16 @@ const BookPreview = new GraphQLObjectType({
   fields: { title: { type: GraphQLString } },
 });
 
-simfinity.registerQuery('bookPreview', 'Read a book preview', BookPreviewInput, BookPreview,
-  async (input, session) => {
-    const book = await simfinity.getModel(BookType).findById(input.bookId).session(session);
+simfinity.registerQuery(
+  'bookPreview',
+  'Read a book preview',
+  BookPreviewInput,
+  BookPreview,
+  async (input) => {
+    const book = await simfinity.getModel(BookType).findById(input.bookId);
     return book ? { title: book.title } : null;
-  }, { transactional: false });
+  },
+);
 
 const schema = simfinity.createSchema();
 ```
@@ -2679,11 +2683,9 @@ query BookPreview($input: BookPreviewInput!) {
 }
 ```
 
-The callback receives `(input, session, context)`. An input object becomes the required `input` argument; use `null` or `undefined` for no arguments. On PostgreSQL the native read is `model.findById(input.bookId, { session })`; use the configured PostgreSQL runtime and await its database initialization as usual.
+The callback receives `(input, session, context)`. By default, `session` is `null` and no transaction wraps the callback. Pass `{ transactional: true }` as the sixth argument to use the adapter's transaction and retry policy; database calls must use the supplied session to participate. Native calls retain their existing hooks and behavior. Authorize the root under `RootQueryType` and enforce access restrictions on the callback's native reads.
 
-Choose `transactional` explicitly: `false` passes `null` and adds no transaction around the callback; `true` uses the adapter's transaction and retry policy. Native calls keep their hooks and transaction behavior. A transaction covers the callback's work that uses its session, and ends before GraphQL resolves output fields. It does not span sibling query fields or aliases.
-
-Authorize the root with `RootQueryType.bookPreview` and any protected output fields with the existing auth plugin. Native model reads do not automatically apply CRUD scopes, permissions or controllers: the callback must enforce its business restrictions. Registering a query does not enforce database read-only mode. See the [custom query guide](docs/guide/queries.md#custom-queries) for middleware, retries, authorization and MCP, and the [API reference](docs/reference/api.md#registerquery) for validation and errors.
+See the [custom query guide](docs/guide/queries.md#custom-queries) for both backends, transactions and authorization, and the [API reference](docs/reference/api.md#registerquery) for the full contract.
 
 ### Custom Mutations
 
@@ -2732,7 +2734,7 @@ const BookModel = mongoose.model('Book', BookSchema);
 simfinity.connect(BookModel, BookType, 'book', 'books');
 ```
 
-A supplied model may also use another connection, such as one from `mongoose.createConnection()`. Generated mutations and `saveObject()` use the model's connection. In the default `referentialIntegrity: 'off'` mode, custom mutations and transactional custom queries use the default Mongoose connection unless it is unused, never opened and without compiled models, also on its `useDb()` descendants, and every registered model shares one MongoDB client; with transactional reference integrity they use the first protected model's connection. See [which connection the session uses](docs/guide/mutations.md#which-connection-the-session-uses-on-mongodb).
+A supplied model may also use another connection, such as one from `mongoose.createConnection()`. Generated mutations and `saveObject()` use the model's connection. In the default `referentialIntegrity: 'off'` mode, custom mutations use the default Mongoose connection unless it is unused, never opened and without compiled models, also on its `useDb()` descendants, and every registered model shares one MongoDB client; with transactional reference integrity they use the first protected model's connection. See [which connection the session uses](docs/guide/mutations.md#which-connection-the-session-uses-on-mongodb).
 
 ### Programmatic Data Access
 
@@ -4477,7 +4479,7 @@ const newBook = await simfinity.saveObject('Book', {
 
 **Note**: When `context` is not provided, it is `undefined` in controller hooks and in the middleware that nested collection children run. This is acceptable for programmatic usage where context may not be available.
 
-### `createSchema(includedQueryTypes?, includedMutationTypes?, includedCustomMutations?)`
+### `createSchema(includedQueryTypes?, includedMutationTypes?, includedCustomMutations?, includedCustomQueries?)`
 
 Creates the final GraphQL schema with all connected types.
 
@@ -4485,6 +4487,7 @@ Creates the final GraphQL schema with all connected types.
 - `includedQueryTypes` (array, optional): Limit query types to include
 - `includedMutationTypes` (array, optional): Limit mutation types to include  
 - `includedCustomMutations` (array, optional): Limit custom mutations to include
+- `includedCustomQueries` (array, optional): Limit custom queries by their registered names
 
 **Returns:**
 - `GraphQLSchema`: The complete GraphQL schema

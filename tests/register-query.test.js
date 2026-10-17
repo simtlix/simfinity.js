@@ -18,7 +18,13 @@ const entity = (name, extensions) => new GraphQLObjectType({
 });
 
 describe('registerQuery', () => {
-  test('executes a query-only schema with required input, middleware and no transaction', async () => {
+  test.each([
+    { label: 'omitted options', options: [] },
+    { label: 'undefined options', options: [undefined] },
+    { label: 'empty options', options: [{}] },
+    { label: 'undefined transactional', options: [{ transactional: undefined }] },
+    { label: 'false transactional', options: [{ transactional: false }] },
+  ])('executes a query-only schema with input, middleware and no transaction for $label', async ({ options }) => {
     const adapter = createAdapter();
     const runtime = createRuntime(adapter);
     const Input = new GraphQLInputObjectType({
@@ -49,7 +55,7 @@ describe('registerQuery', () => {
         expect(receivedContext).toBe(context);
         events.push('callback');
         return [{ start: '10:00' }];
-      }, { transactional: false });
+      }, ...options);
 
     const schema = runtime.createSchema();
     expect(validateSchema(schema)).toEqual([]);
@@ -76,7 +82,7 @@ describe('registerQuery', () => {
     runtime.registerQuery('health', null, null, GraphQLString, callback, options);
     options.transactional = true;
     const earlier = runtime.createSchema();
-    runtime.registerQuery('version', 'Version', undefined, GraphQLString, () => '3.7.0', { transactional: false });
+    runtime.registerQuery('version', 'Version', undefined, GraphQLString, () => '3.7.0');
     const later = runtime.createSchema();
     expect(earlier.getQueryType().getFields().version).toBeUndefined();
     expect(later.getQueryType().getFields().version).toBeDefined();
@@ -85,7 +91,7 @@ describe('registerQuery', () => {
       .toEqual({ data: { health: 'ok:undefined:null' } });
 
     const other = createRuntime(createAdapter());
-    other.registerQuery('health', 'Health', null, GraphQLString, () => 'other', { transactional: false });
+    other.registerQuery('health', 'Health', null, GraphQLString, () => 'other');
     expect(await graphql({ schema: other.createSchema(), source: '{ health }' }))
       .toEqual({ data: { health: 'other' } });
   });
@@ -126,7 +132,7 @@ describe('registerQuery', () => {
     expect(adapter.withTransaction).toHaveBeenCalledTimes(1);
 
     const failure = new Error('unavailable');
-    runtime.registerQuery('failure', 'Failure', null, GraphQLString, async () => { throw failure; }, { transactional: false });
+    runtime.registerQuery('failure', 'Failure', null, GraphQLString, async () => { throw failure; });
     const failed = await graphql({ schema: runtime.createSchema(), source: '{ failure }' });
     expect(failed.errors?.[0].originalError).toBe(failure);
   });
@@ -152,10 +158,8 @@ describe('registerQuery', () => {
     ['input object as output', { output: new GraphQLInputObjectType({ name: 'QueryInvalidOutput', fields: { value: { type: GraphQLString } } }) }],
     ['missing output', { output: undefined }],
     ['non-function callback', { callback: 'query' }],
-    ['missing options', { options: undefined }],
     ['null options', { options: null }],
     ['array options', { options: [] }],
-    ['missing policy', { options: {} }],
     ['non-boolean policy', { options: { transactional: 'false' } }],
     ['unknown option', { options: { transactional: false, readonly: true } }],
   ])('rejects %s at registration without keeping the entry', (label, invalid) => {
@@ -166,14 +170,14 @@ describe('registerQuery', () => {
     };
     expect(() => runtime.registerQuery(config.name, config.description, config.input, config.output, config.callback, config.options))
       .toThrow(expect.objectContaining({ extensions: expect.objectContaining({ code: 'INVALID_QUERY_REGISTRATION', status: 500 }) }));
-    runtime.registerQuery('report', 'Report', null, GraphQLString, () => 'ok', { transactional: false });
+    runtime.registerQuery('report', 'Report', null, GraphQLString, () => 'ok');
     expect(Object.keys(runtime.createSchema().getQueryType().getFields())).toEqual(['report']);
   });
 
   test('rejects a duplicate registration instead of replacing the callback', async () => {
     const runtime = createRuntime(createAdapter());
-    runtime.registerQuery('report', 'Report', null, GraphQLString, () => 'first', { transactional: false });
-    expect(() => runtime.registerQuery('report', 'Replacement', null, GraphQLString, () => 'second', { transactional: false }))
+    runtime.registerQuery('report', 'Report', null, GraphQLString, () => 'first');
+    expect(() => runtime.registerQuery('report', 'Replacement', null, GraphQLString, () => 'second'))
       .toThrow(expect.objectContaining({ extensions: expect.objectContaining({ code: 'QUERY_NAME_CONFLICT', status: 500 }) }));
     expect(await graphql({ schema: runtime.createSchema(), source: '{ report }' }))
       .toEqual({ data: { report: 'first' } });
@@ -184,7 +188,7 @@ describe('registerQuery', () => {
       const adapter = createAdapter();
       const runtime = createRuntime(adapter);
       const Item = entity(`QueryConflict${name}${customFirst}`);
-      const custom = () => runtime.registerQuery(name, 'Custom', null, GraphQLString, () => 'custom', { transactional: false });
+      const custom = () => runtime.registerQuery(name, 'Custom', null, GraphQLString, () => 'custom');
       if (customFirst) custom();
       runtime.connect(null, Item, 'item', 'items');
       if (!customFirst) custom();
@@ -200,8 +204,8 @@ describe('registerQuery', () => {
     const runtime = createRuntime(createAdapter());
     const Item = entity('QueryAllowlistItem');
     runtime.connect(null, Item, 'item', 'items');
-    runtime.registerQuery('items', 'Custom items', null, GraphQLString, () => 'custom', { transactional: false });
-    runtime.registerQuery('health', 'Health', null, GraphQLString, () => 'ok', { transactional: false });
+    runtime.registerQuery('items', 'Custom items', null, GraphQLString, () => 'custom');
+    runtime.registerQuery('health', 'Health', null, GraphQLString, () => 'ok');
     runtime.registerMutation('ping', 'Ping', null, GraphQLString, () => 'pong');
     const generatedOnly = runtime.createSchema([Item], [], ['ping'], []);
     expect(Object.keys(generatedOnly.getQueryType().getFields())).toEqual(['item', 'items', 'items_aggregate']);
@@ -220,16 +224,16 @@ describe('registerQuery', () => {
   });
 
   test.each([
-    { label: 'empty allowlist', included: [] },
-    { label: 'unknown query name', included: ['missing'] },
-  ])('rejects a custom-query schema with $label before preparation', ({ included }) => {
+    { label: 'no registered queries', included: [], register: false },
+    { label: 'empty allowlist', included: [], register: true },
+    { label: 'unknown query name', included: ['missing'], register: true },
+  ])('preserves storage preparation without exposed queries for $label', ({ included, register }) => {
     const adapter = createAdapter();
     const runtime = createRuntime(adapter);
-    runtime.registerQuery('health', 'Health', null, GraphQLString, () => 'ok', { transactional: false });
-    expect(() => runtime.createSchema([], [], [], included)).toThrow(expect.objectContaining({
-      extensions: expect.objectContaining({ code: 'EMPTY_QUERY_ROOT', status: 500 }),
-    }));
-    expect(adapter.prepare).not.toHaveBeenCalled();
+    if (register) runtime.registerQuery('health', 'Health', null, GraphQLString, () => 'ok');
+    const schema = runtime.createSchema([], [], [], included);
+    expect(adapter.prepare).toHaveBeenCalledWith([], { createCollection: true });
+    expect(Object.keys(schema.getQueryType().getFields())).toEqual([]);
     expect(adapter.createModel).not.toHaveBeenCalled();
   });
 
@@ -237,19 +241,11 @@ describe('registerQuery', () => {
     const runtime = createRuntime(createAdapter());
     const Item = entity('QueryNonemptyGeneratedItem');
     runtime.connect(null, Item, 'item', 'items');
-    runtime.registerQuery('health', 'Health', null, GraphQLString, () => 'ok', { transactional: false });
+    runtime.registerQuery('health', 'Health', null, GraphQLString, () => 'ok');
     const schema = runtime.createSchema([Item], [], [], []);
     expect(validateSchema(schema)).toEqual([]);
     expect(Object.keys(schema.getQueryType().getFields())).toEqual(['item', 'items', 'items_aggregate']);
     expect(schema.getMutationType()).toBeUndefined();
-  });
-
-  test('preserves storage preparation without exposed roots for runtimes that do not register queries', () => {
-    const adapter = createAdapter();
-    const runtime = createRuntime(adapter);
-    const schema = runtime.createSchema([], [], []);
-    expect(adapter.prepare).toHaveBeenCalledWith([], { createCollection: true });
-    expect(Object.keys(schema.getQueryType().getFields())).toEqual([]);
   });
 
   test('does not apply CRUD scopes to the custom callback or its returned entity', async () => {
@@ -257,7 +253,7 @@ describe('registerQuery', () => {
     const scope = vi.fn(() => { throw new Error('CRUD scope must not run'); });
     const Item = entity('QueryScopedResult', { scope: { find: scope, get_by_id: scope, aggregate: scope } });
     runtime.connect(null, Item, 'item', 'items');
-    runtime.registerQuery('report', 'Report', null, Item, () => ({ _id: '1', name: 'custom' }), { transactional: false });
+    runtime.registerQuery('report', 'Report', null, Item, () => ({ _id: '1', name: 'custom' }));
     const result = await graphql({ schema: runtime.createSchema([], [], []), source: '{ report { id name } }' });
     expect(result).toEqual({ data: { report: { id: '1', name: 'custom' } } });
     expect(scope).not.toHaveBeenCalled();
@@ -269,7 +265,7 @@ describe('registerQuery', () => {
     runtime.connect(null, Item, 'item', 'items');
     const fields = vi.fn(() => ({ item: { type: new GraphQLNonNull(runtime.getInputType(Item)) } }));
     const Input = new GraphQLInputObjectType({ name: 'QueryDeferredInput', fields });
-    runtime.registerQuery('inspectItem', 'Inspect', Input, GraphQLString, ({ item }) => item.name, { transactional: false });
+    runtime.registerQuery('inspectItem', 'Inspect', Input, GraphQLString, ({ item }) => item.name);
     expect(fields).not.toHaveBeenCalled();
     const schema = runtime.createSchema([], [], []);
     expect(schema.getMutationType()).toBeUndefined();
@@ -284,8 +280,8 @@ describe('registerQuery', () => {
     const runtime = createRuntime(adapter);
     runtime.connect(null, entity('QueryJSONItem'), 'item', 'items');
     const JSONScalar = new GraphQLScalarType({ name: 'JSON', serialize: (value) => ({ wrapped: value }) });
-    runtime.registerQuery('report', 'Report', null, JSONScalar, () => 'query', { transactional: false });
-    runtime.registerQuery('hidden', 'Hidden', null, GraphQLString, () => 'hidden', { transactional: false });
+    runtime.registerQuery('report', 'Report', null, JSONScalar, () => 'query');
+    runtime.registerQuery('hidden', 'Hidden', null, GraphQLString, () => 'hidden');
     const schema = runtime.createSchema(null, [], [], ['report']);
     expect(validateSchema(schema)).toEqual([]);
     expect(schema.getType('JSON')).toBe(JSONScalar);
@@ -309,7 +305,7 @@ describe('registerQuery', () => {
       const adapter = createAdapter();
       const second = createRuntime(adapter);
       const Output = new GraphQLUnionType({ name: `${type.name}Result`, types: [type] });
-      second.registerQuery('report', 'Report', null, Output, () => null, { transactional: false });
+      second.registerQuery('report', 'Report', null, Output, () => null);
       expect(() => second.createSchema()).toThrow(expect.objectContaining({
         extensions: expect.objectContaining({ code: 'TYPE_BOUND_TO_OTHER_RUNTIME' }),
       }));
@@ -324,7 +320,7 @@ describe('registerQuery', () => {
       fields: { author: { type: Author, extensions: { relation: {} } } },
     });
     const first = createRuntime(createAdapter());
-    first.registerQuery('report', 'Report', null, Book, () => ({}), { transactional: false });
+    first.registerQuery('report', 'Report', null, Book, () => ({}));
     first.createSchema();
     const second = createRuntime(createAdapter());
     expect(() => second.addNoEndpointType(Book)).toThrow(expect.objectContaining({
@@ -335,15 +331,15 @@ describe('registerQuery', () => {
 
   test.each(['input', 'output'])('rejects a reserved metadata name in an included query %s before preparation', (position) => {
     const seed = createRuntime(createAdapter());
-    seed.registerQuery('health', 'Health', null, GraphQLString, () => 'ok', { transactional: false });
+    seed.registerQuery('health', 'Health', null, GraphQLString, () => 'ok');
     seed.createSchema();
     const name = __Field.getFields().extensions.type.name;
     const Input = new GraphQLInputObjectType({ name, fields: { value: { type: GraphQLString } } });
     const adapter = createAdapter();
     const runtime = createRuntime(adapter);
     runtime.registerQuery('report', 'Report', position === 'input' ? Input : null,
-      position === 'output' ? entity(name) : GraphQLString, () => null, { transactional: false });
-    runtime.registerQuery('health', 'Health', null, GraphQLString, () => 'ok', { transactional: false });
+      position === 'output' ? entity(name) : GraphQLString, () => null);
+    runtime.registerQuery('health', 'Health', null, GraphQLString, () => 'ok');
     expect(() => runtime.createSchema()).toThrow(expect.objectContaining({
       extensions: expect.objectContaining({ code: 'RESERVED_TYPE_NAME' }),
     }));

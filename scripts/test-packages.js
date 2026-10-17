@@ -213,7 +213,7 @@ const coreSource = `import assert from 'node:assert/strict';
   runtime.registerQuery('coreRead', '', null, GraphQLString, (input, session, context) => {
     assert.equal(session, null);
     return context.marker;
-  }, { transactional: false });
+  });
   const schema = runtime.createSchema(null, null, null, ['coreRead']);
   const custom = await graphql({ schema, source: '{ coreRead }', contextValue: { marker: 'core' } });
   assert.equal(custom.errors, undefined);
@@ -305,7 +305,7 @@ const sqlSource = `import assert from 'node:assert/strict';
   api.registerQuery('sqlRead', '', undefined, GraphQLString, (input, session) => {
     assert.equal(session, null);
     return 'sql';
-  }, { transactional: false });
+  });
   const schema = api.createSchema(null, null, null, ['sqlRead']);
   await api.initializeDatabase();
   const result = await graphql({ schema, source: '{ sqlBooks { id title } sqlRead }' });
@@ -389,7 +389,7 @@ const postgresSource = `import assert from 'node:assert/strict';
   registerQuery('postgresRead', '', null, GraphQLString, (input, session) => {
     assert.equal(session, null);
     return 'postgres';
-  }, { transactional: false });
+  });
   const defaultSchema = createSchema(null, null, null, ['postgresRead']);
   const custom = await graphql({ schema: defaultSchema, source: '{ postgresRead }' });
   assert.equal(custom.errors, undefined);
@@ -454,7 +454,7 @@ const mongoSource = `import assert from 'node:assert/strict';
   simfinity.registerQuery('mongoRead', '', undefined, GraphQLString, (input, session) => {
     assert.equal(session, null);
     return 'mongo';
-  }, { transactional: false });
+  });
   const defaultSchema = simfinity.createSchema([], [], [], ['mongoRead']);
   const custom = await graphql({ schema: defaultSchema, source: '{ mongoRead }' });
   assert.equal(custom.errors, undefined);
@@ -1512,7 +1512,7 @@ const register = ${singleton ? 'registerQuery' : 'api.registerQuery'};
 const input = new GraphQLInputObjectType({ name: 'CustomQueryInput', fields: { text: { type: GraphQLString } } });
 type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 const sameOptions: Equals<RegisterQueryOptions, CoreOptions> = true;
-const transactional: RegisterQueryOptions<true> = { transactional: true };
+const transactional = { transactional: true } as const;
 register('transactional', '', input, GraphQLString, (args, session, context) => {
   const exactSession: Equals<typeof session, Session> = true;
   void [exactSession, context];
@@ -1523,23 +1523,40 @@ register('withoutTransaction', '', null, GraphQLString, async (args, session, co
   void [exactNull, args];
   return context.text;
 }, { transactional: false });
+register('default', '', null, GraphQLString, (args, session) => {
+  const exactNull: Equals<typeof session, null> = true;
+  return String(exactNull);
+});
+register('emptyOptions', '', null, GraphQLString, (args, session) => {
+  const exactNull: Equals<typeof session, null> = true;
+  return String(exactNull);
+}, {});
+register('undefinedOptions', '', null, GraphQLString, (args, session) => {
+  const exactNull: Equals<typeof session, null> = true;
+  return String(exactNull);
+}, undefined);
+register('undefinedTransaction', '', null, GraphQLString, (args, session) => {
+  const exactNull: Equals<typeof session, null> = true;
+  return String(exactNull);
+}, { transactional: undefined });
 declare const enabled: boolean;
 register('dynamic', '', undefined, GraphQLString, (args, session) => {
   const exactUnion: Equals<typeof session, Session | null> = true;
   return String(exactUnion);
 }, { transactional: enabled });
-// @ts-expect-error The transaction choice is required.
-register('missingOptions', '', null, GraphQLString, () => 'value');
-// @ts-expect-error transactional is a required property.
-register('emptyOptions', '', null, GraphQLString, () => 'value', {});
-// @ts-expect-error Options cannot be undefined.
-register('undefinedOptions', '', null, GraphQLString, () => 'value', undefined);
+declare const options: RegisterQueryOptions | undefined;
+register('configured', '', null, GraphQLString, (args, session) => {
+  const exactUnion: Equals<typeof session, Session | null> = true;
+  return String(exactUnion);
+}, options);
+${sessionType === 'any' ? '' : `// @ts-expect-error Without a transaction, the callback cannot require a session.
+register('requiresSession', '', null, GraphQLString, (args, session: Session) => String(session));
+// @ts-expect-error Optional transaction options do not guarantee a session.
+register('requiresConfiguredSession', '', null, GraphQLString, (args, session: Session) => String(session), options);`}
 // @ts-expect-error transactional must be a boolean, not a string.
 register('invalidBoolean', '', null, GraphQLString, () => 'value', { transactional: 'true' });
-// @ts-expect-error transactional cannot be undefined.
-register('undefinedBoolean', '', null, GraphQLString, () => 'value', { transactional: undefined });
 // @ts-expect-error A custom query input must be an input object, not a scalar.
-register('scalarInput', '', GraphQLString, GraphQLString, () => 'value', { transactional: false });
+register('scalarInput', '', GraphQLString, GraphQLString, () => 'value');
 const schema: GraphQLSchema = api.createSchema(null, null, null, ['transactional']);
 api.createSchema(undefined, undefined, undefined, []);
 // @ts-expect-error Custom query allowlists hold names.

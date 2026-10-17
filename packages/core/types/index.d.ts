@@ -195,9 +195,9 @@ export interface MutationLimitsOptions {
   maxNestedOperations?: number | null;
 }
 
-/** Whether a custom query owns an adapter transaction. This choice is required at registration. */
-export interface RegisterQueryOptions<Transactional extends boolean = boolean> {
-  transactional: Transactional;
+export interface RegisterQueryOptions {
+  /** Run the callback in an adapter transaction. Defaults to false. */
+  transactional?: boolean | undefined;
 }
 
 export interface Runtime<Model = any, Session = any> {
@@ -219,9 +219,6 @@ export interface Runtime<Model = any, Session = any> {
   /** Throws like `connect` for an invalid scope or a type bound to another runtime. */
   addNoEndpointType(type: GraphQLObjectType): void;
   /**
-   * The fourth allowlist selects custom queries by name; null or omission includes every registered query.
-   * Once a custom query is registered, at least one generated or custom query must remain exposed.
-   * An empty query root throws EMPTY_QUERY_ROOT (500) before model preparation. Empty mutations are omitted.
    * Validates every registered scope (`INVALID_SCOPE`) before building models, and rejects
    * (`TYPE_BOUND_TO_OTHER_RUNTIME`) any reachable type that another runtime bound or reserved, or
    * whose field was copied with `toConfig()` after another runtime generated its relation
@@ -251,6 +248,9 @@ export interface Runtime<Model = any, Session = any> {
    * field argument's type, and when the schema is constructed otherwise, such as for a type inside
    * an input object's fields. The check before `adapter.prepare()` never reads an input object's
    * fields, so a registered input's `fields` function may call `getInputType()`.
+   *
+   * The fourth allowlist selects custom queries by name; null or omission includes all of them.
+   * Empty mutation roots are omitted.
    */
   createSchema(includedQueryTypes?: GraphQLObjectType[] | null, includedMutationTypes?: GraphQLObjectType[] | null, includedCustomMutations?: string[] | null, includedCustomQueries?: string[] | null): GraphQLSchema;
   getModel(type: GraphQLObjectType | { name: string }): Model | null | undefined;
@@ -272,12 +272,12 @@ export interface Runtime<Model = any, Session = any> {
   use(middleware: (params: MiddlewareContext, next: () => Promise<void>) => void | Promise<void>): void;
   registerMutation(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (args: any, session: Session, context: any) => any): void;
   /**
-   * Register a read callback with an explicit transaction choice. True passes an adapter session;
-   * false passes null and adds no transaction around the callback. Native reads keep their own behavior.
-   * The transaction ends with the callback, before output field resolution, and may retry the callback.
-   * The callback owns its business authorization; registering a query does not prevent database writes.
+   * Register a custom query. The callback receives null unless transactional is true, which passes
+   * an adapter session. That transaction covers the callback and may retry it.
    */
-  registerQuery<Transactional extends boolean>(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, session: Transactional extends true ? Session : null, context: any) => any, options: RegisterQueryOptions<Transactional>): void;
+  registerQuery(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, session: null, context: any) => any, options?: { transactional?: false | undefined }): void;
+  registerQuery(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, session: Session, context: any) => any, options: { transactional: true }): void;
+  registerQuery(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, session: Session | null, context: any) => any, options: RegisterQueryOptions | undefined): void;
   /** Owns the full workflow transaction unless an active caller session is supplied. */
   saveObject(typeName: string, args: Record<string, any>, session?: Session, context?: any): Promise<any>;
   preventCreatingCollection(prevent: boolean): void;

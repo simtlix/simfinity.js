@@ -120,7 +120,7 @@ for (const [backend, uri] of [
         return { first: first.name, second: second.name, marker: input.marker, actor: context.user.name, lines: (second.lines || []).map((line) => line.label) };
       };
       runtime.registerQuery('readTransactional', 'Two native reads in one transaction', Input, Output, callback, { transactional: true });
-      runtime.registerQuery('readPlain', 'Two native reads without a custom-query transaction', Input, Output, callback, { transactional: false });
+      runtime.registerQuery('readPlain', 'Two native reads without a custom-query transaction', Input, Output, callback);
       schema = runtime.createSchema();
       if (backend === 'mongo') {
         await mongoose.connect(uri, { dbName: namespace, monitorCommands: true });

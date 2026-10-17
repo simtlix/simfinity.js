@@ -1,11 +1,11 @@
 ---
 title: Middleware
-description: Inspect and prepare generated operations and registered callbacks with Simfinity's global middleware chain.
+description: Inspect and prepare generated operations with Simfinity's global middleware chain.
 ---
 
 # Middleware
 
-Register global middleware with `simfinity.use()` to inspect arguments, enforce prerequisites, or attach request metadata before a generated operation or registered callback executes.
+Register global middleware with `simfinity.use()` to inspect arguments, enforce prerequisites, or attach request metadata before a generated operation executes.
 
 ```javascript
 // simfinity is your selected runtime, initialized during application setup.
@@ -23,16 +23,16 @@ simfinity.use(async ({ operation, type, context }, next) => {
 });
 ```
 
-Register middleware once during application startup. `use()` accepts only functions; any other value, such as `null` from `enabled && middleware`, throws `INVALID_MIDDLEWARE` (500). Registrations belong to the selected runtime and apply to its generated operations and registered custom operations. The MongoDB facade and PostgreSQL module facade each expose a default runtime; a `createPostgres()` instance owns its own registrations. Register middleware on the same runtime used to register your types and callbacks.
+Register middleware once during application startup. `use()` accepts only functions; any other value, such as `null` from `enabled && middleware`, throws `INVALID_MIDDLEWARE` (500). Registrations belong to the selected runtime and apply to its generated operations. The MongoDB facade and PostgreSQL module facade each expose a default runtime; a `createPostgres()` instance owns its own registrations. Register middleware on the same runtime used to register your types.
 
 For MongoDB, `simfinity` is the namespace imported from `@simtlix/simfinity-js`. For PostgreSQL, use the instance returned by `createPostgres()` in the [PostgreSQL quick start](./postgresql). Both expose `use()` and the shared `auth.ForbiddenError`.
 
 ## Execution order
 
-For generated root reads and generated non-embedded relationship reads, the sequence is middleware, query scope, query construction, and database execution. Root mutation middleware runs before the transactional mutation handler. [Custom queries](./queries#custom-queries) run middleware before their callback and its optional transaction, without an automatic entity scope. Nested collection mutations run the target child's middleware inside that transaction before checking its persisted parent and performing the child operation.
+For root reads and generated non-embedded relationship reads, the sequence is middleware, query scope, query construction, and database execution. Root mutation middleware runs before the transactional mutation handler. Nested collection mutations run the target child's middleware inside that transaction before checking its persisted parent and performing the child operation.
 
 ::: warning What next() means
-`next()` advances to the next registered middleware. The database resolver or custom callback executes after the entire middleware chain returns. Code after `await next()` still runs before that execution, and omitting `next()` only skips the remaining middleware. Throw an error to cancel the operation.
+`next()` advances to the next registered middleware. The database resolver executes after the entire middleware chain returns. Code after `await next()` still runs before database execution, and omitting `next()` only skips the remaining middleware. Throw an error to cancel the operation.
 :::
 
 Middleware runs in registration order, and the runtime waits for the whole chain before the operation runs:
@@ -56,11 +56,11 @@ simfinity.use(async (params, next) => {
 
 | Property | Availability |
 | --- | --- |
-| `args` | GraphQL arguments: for example, `args.input` for add/update or a custom operation with an input type, and `args.id` for delete. |
+| `args` | GraphQL arguments: for example, `args.input` for add/update or `args.id` for delete. |
 | `operation` | One of the operation values below. |
 | `context` | The GraphQL request context. For nested collection children of a programmatic `saveObject()` call, the `context` passed to `saveObject()`, which is `undefined` when omitted; guard with `context?.`. |
-| `type` | Registered type metadata for generated entity operations; absent for custom mutations and custom queries. |
-| `entry` | Registered operation name for `custom_mutation` and `custom_query`. |
+| `type` | Registered type metadata for generated entity operations; absent for custom queries and mutations. |
+| `entry` | Registered operation name for `custom_query` and `custom_mutation`. |
 | `actionName`, `actionField` | State-machine action name and configuration for `state_changed`. |
 
 | Operation | Trigger |
@@ -73,7 +73,7 @@ simfinity.use(async (params, next) => {
 | `delete` | Generated delete mutation or nested `deleted` child (including children of a `saveObject()` call). |
 | `state_changed` | Generated state-machine action. |
 | `custom_mutation` | Registered custom mutation. |
-| `custom_query` | Registered [custom query](./queries#custom-queries), unreleased. |
+| `custom_query` | Registered [custom query](./queries#custom-queries). |
 
 ## Prepare arguments
 
@@ -88,8 +88,6 @@ simfinity.use(async ({ operation, args }, next) => {
 });
 ```
 
-Prefer mutating the existing `args` object. Generated list queries (including their total count), aggregations and collection-relationship reads pass the `params.args` object left after the middleware chain to the query scope and the database adapter, so `find` and `aggregate` middleware may also replace it. Mutations, custom queries, nested collection writes and `get_by_id` reads keep the resolver's own reference, so replacing `params.args` there has no effect. With an adapter that [batches collection reads](/guide/relationships#batched-collection-reads), a generated collection read that can join a batch passes the adapter a copy of `params.args`, taken once the middleware chain and scopes finish, even when it ends up reading alone, and fields whose arguments hold the same data may share one adapter read, so change `args` before your middleware returns. Only reads that cannot join a batch pass `params.args` itself, as before: those without a context object, with an adapter that has no `findChildrenBatch` or whose `batchesChildren` returns `false`, for a parent without an ID the adapter casts unchanged, or with arguments that are not plain data, would form a key over 64 KiB or have invalid pagination. Client filter, sort and aggregation paths of generated reads are checked before middleware runs, and paths that middleware adds are trusted; see [path restrictions](/guide/queries#path-restrictions).
-
-For `custom_query`, mutate `args.input` or assign a new `args.input` on the same `args` object before returning. The callback receives a copy of that resulting input. Replacing `params.context` does not replace the original request context delivered to the callback; mutate the existing context when appropriate. A query registered without an input type has no declared arguments. See the [custom query guide](./queries#custom-queries) for its explicit transaction policy and authorization boundaries.
+Prefer mutating the existing `args` object. Generated list queries (including their total count), aggregations and collection-relationship reads pass the `params.args` object left after the middleware chain to the query scope and the database adapter, so `find` and `aggregate` middleware may also replace it. Mutations, nested collection writes and `get_by_id` reads keep the resolver's own reference, so replacing `params.args` there has no effect. With an adapter that [batches collection reads](/guide/relationships#batched-collection-reads), a generated collection read that can join a batch passes the adapter a copy of `params.args`, taken once the middleware chain and scopes finish, even when it ends up reading alone, and fields whose arguments hold the same data may share one adapter read, so change `args` before your middleware returns. Only reads that cannot join a batch pass `params.args` itself, as before: those without a context object, with an adapter that has no `findChildrenBatch` or whose `batchesChildren` returns `false`, for a parent without an ID the adapter casts unchanged, or with arguments that are not plain data, would form a key over 64 KiB or have invalid pagination. Client filter, sort and aggregation paths are checked before middleware runs, and paths that middleware adds are trusted; see [path restrictions](/guide/queries#path-restrictions).
 
 For record visibility, prefer the type's [query scope](/guide/query-scope). Generated relationship reads and nested collection writes invoke middleware with the target type, the same request context (for a programmatic `saveObject()` call, the `context` passed to it, possibly `undefined`), and root-compatible argument shapes. Existing custom resolvers and direct programmatic data access remain responsible for invoking their own checks. Review middleware that assumes a request only invokes it for its root operation.

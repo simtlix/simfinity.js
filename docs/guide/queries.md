@@ -1,13 +1,11 @@
 ---
 title: Queries
-description: Retrieve records with filters, pagination and aggregation, or register application-specific read operations.
+description: Retrieve records with scalar filters, related-field conditions, AND/OR groups, pagination, sorting, and aggregation.
 ---
 
 # Queries
 
 Each connected type gets a single-record query, a list query, and an aggregation query. The examples below use the `Serie` fields from [getting started](./getting-started) and the `Season` relationship from [relationships](./relationships).
-
-Use [custom queries](#custom-queries) for application-specific reads and calculations that do not fit those generated operations.
 
 ## Get one record
 
@@ -290,10 +288,6 @@ PostgreSQL also supports scalar-list leaves inside nested embedded lists for fil
 
 ## Custom queries
 
-::: info Unreleased
-`registerQuery()` is implemented in the current development source. It is not part of the published 3.7.0 packages.
-:::
-
 Register an application-specific read on `RootQueryType` before calling `createSchema()`. It uses the existing GraphQL endpoint and can also become an [MCP tool](./mcp#custom-query-tools). The input and output describe this operation independently of any connected entity.
 
 This storage-free example estimates a duration using an application-owned catalog. `simfinity` is the runtime already initialized by your application; the same registration works with either backend.
@@ -338,7 +332,6 @@ simfinity.registerQuery(
   DurationInput,
   DurationEstimate,
   (input) => durationService.estimate(input.serviceCodes),
-  { transactional: false },
 );
 
 const schema = simfinity.createSchema();
@@ -356,25 +349,20 @@ The result is `{ "data": { "estimateServiceDuration": { "minutes": 45 } } }`. An
 
 The callback receives `(input, session, context)`. GraphQL validates and coerces its arguments first, then [global middleware](./middleware) runs with `operation: 'custom_query'`. The callback gets a copy of the input after middleware and the original request context. The fourth `createSchema()` argument independently selects custom queries by name; see [`registerQuery()`](/reference/api#registerquery) for the signature, registration errors and schema selection rules.
 
-### Choose the transaction policy
+### Transactions
 
-The sixth argument is required and must explicitly contain `{ transactional: true }` or `{ transactional: false }`:
+By default, the callback receives `session = null` and runs without an enclosing transaction. Pass `{ transactional: true }` as the optional sixth argument when several reads need to participate in one adapter transaction.
 
-| Policy | Callback behavior |
-| --- | --- |
-| `transactional: true` | Runs through the selected adapter's transaction mechanism and receives its session. Pass that session to every native operation that must participate in the transaction. |
-| `transactional: false` | Adds no transaction around the callback and passes exactly `null` as its session. Native operations retain their own transaction behavior; this option does not disable it. |
+Pass the supplied session to each participating database call: `model.findById(id).session(session)` on MongoDB, or `model.findById(id, { session })` on PostgreSQL. Both runtimes must have their database connection and initialization ready as usual. MongoDB selects the session's connection as it does for [custom mutations](./mutations#which-connection-the-session-uses-on-mongodb).
 
-A transaction covers the callback, not the complete GraphQL response. Output field resolvers, including nested generated relationship reads, run after the callback and its owned transaction finish. Several root queries can execute concurrently; they do not share one transaction. To keep several reads in the same transaction, perform and materialize them inside one transactional callback using its session. Their consistency and snapshot guarantees depend on the selected adapter, backend and transaction isolation; `registerQuery()` adds no stronger guarantee.
+Native calls keep their hooks and transaction behavior in both modes. The adapter may retry a transactional callback, so keep it safe to repeat. Each attempt receives a fresh typed input copy; see the [input-copy contract](/reference/api#registerquery).
 
-The adapter may retry a transactional callback according to its existing retry policy. Each attempt receives a fresh typed copy of the post-middleware input; this does not deep-clone enum or opaque custom scalar values or the request context. See the [input-copy contract](/reference/api#registerquery), and keep callbacks safe to repeat. Simfinity does not deduplicate separate root field executions or their native reads, and it does not suppress native model hooks. Choosing a query or a transaction policy does not enforce database read-only access: the callback remains responsible for performing only reads.
+The transaction ends when the callback completes. Output field resolvers run afterwards, and sibling query fields do not share its session. Materialize the required data inside the callback when several reads must use the same transaction. Consistency follows the adapter's existing isolation policy. Registering a query does not enforce database read-only access.
 
-### Authorization and result resolution
+### Authorization
 
-Install the [authorization plugin](./authorization) and use the actual root name, such as `RootQueryType: { estimateServiceDuration: requireAuth() }`. A rejected root rule prevents the callback from running. Output object fields still need their normal permissions, such as rules for `DurationEstimate.minutes`; a permitted root does not automatically permit all returned fields.
+Use the [authorization plugin](./authorization) with the root field under `RootQueryType`, such as `RootQueryType: { estimateServiceDuration: requireAuth() }`. Output fields retain their normal resolvers and permissions.
 
-Custom queries do not automatically apply entity scopes, persistence controllers or generated filter-path checks to the callback, its native reads or its returned records. They have no `extensions.simfinityQuery` CRUD marker. Input members named `id`, `sort` or `pagination` remain your own data, without generated filtering, pagination or counting behavior. Authorize those inputs and restrict native reads explicitly, using trusted request context. Native model APIs and their session arguments remain backend-specific.
-
-If the result exposes generated non-embedded relationships, those field resolvers still run their own middleware and target-type scopes when selected, as well as installed field authorization. This does not extend the callback's transaction to those later reads. Prefer a result object containing the data already read when the entire result must reflect the callback's snapshot.
+The callback must enforce access restrictions on its native reads using trusted request context. Registering it does not automatically apply generated CRUD scopes, controllers, filters or pagination. Generated relationship fields selected on the result still run their usual middleware and scopes, after the callback has completed.
 
 For generated entity reads, use [query scope](./query-scope) to constrain which records a caller may query.

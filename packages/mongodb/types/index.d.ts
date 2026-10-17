@@ -154,9 +154,7 @@ export function addNoEndpointType(gqltype: GraphQLObjectType): void;
  * Build the executable GraphQLSchema from every connected type. The first two
  * allowlists are matched against the GraphQLObjectType INSTANCES passed to
  * connect(); custom mutations and the fourth custom-query allowlist are matched by name.
- * Once a custom query is registered, exposing no generated or custom query throws EMPTY_QUERY_ROOT
- * (500) before model preparation. Empty mutation roots are omitted. Scopes are validated
- * (INVALID_SCOPE), and reachable types bound or reserved by another runtime, or
+ * Scopes are validated (INVALID_SCOPE), and reachable types bound or reserved by another runtime, or
  * holding a field copied with toConfig() after another runtime generated its
  * relation resolver, keeping the generated resolver or its extensions, are rejected (TYPE_BOUND_TO_OTHER_RUNTIME), before models
  * are created; a list or embedded relation to an unregistered type throws
@@ -178,6 +176,7 @@ export function addNoEndpointType(gqltype: GraphQLObjectType): void;
  * before models are created when it is an included endpoint type, a registered custom operation's input or
  * output type, an output type they reach or a field argument's type, and when the schema is
  * constructed otherwise.
+ * Empty mutation roots are omitted.
  */
 export function createSchema(
   includedQueryTypes?: GraphQLObjectType[] | null,
@@ -195,7 +194,7 @@ export function registerMutation(
   callback: (input: any, session: any, context: any) => any,
 ): void;
 
-/** Register a custom query with an explicit transaction choice; nontransactional callbacks receive null. */
+/** Register a custom query; transactional defaults to false and the callback receives null. */
 export const registerQuery: Runtime['registerQuery'];
 
 /** Operation context for root operations, generated non-embedded relation reads, and nested collection writes. */

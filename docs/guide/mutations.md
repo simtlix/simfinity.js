@@ -120,8 +120,6 @@ The setting is process-wide and shared by every runtime. It is unlimited by defa
 
 ## Add a custom mutation
 
-For a business read, the current source also provides [registerQuery()](./queries#custom-queries), with an explicit transaction policy. Existing mutations are not moved automatically; clients and root permissions must change when an application migrates a read to Query.
-
 Use `registerMutation()` for an operation that does not fit the generated CRUD shape. This example creates a serie through the same materialization and lifecycle pipeline while sharing the custom mutation's transaction:
 
 ```javascript
@@ -173,8 +171,6 @@ mutation {
 `saveObject()` owns a transaction when no session is supplied. Pass the supplied active session when using it inside a registered mutation: it shares that transaction without starting, committing, aborting, retrying, or ending it. On MongoDB the session must come from the MongoDB client of the model that `saveObject()` writes; see [which connection the session uses](#which-connection-the-session-uses-on-mongodb). MongoDB rejects an inactive native Mongoose session with `ACTIVE_TRANSACTION_REQUIRED` (400). PostgreSQL rejects an inactive or foreign Simfinity session with `INVALID_SESSION`. Direct Mongoose or PostgreSQL Model calls must also use the matching session and do not automatically run Simfinity validators, hooks, or authorization rules.
 
 ### Which connection the session uses on MongoDB
-
-The same connection-selection rules apply to [custom queries](./queries#custom-queries) registered with `transactional: true` in the current source. Their native reads must use models belonging to the supplied session's MongoDB client, just as writes must.
 
 A MongoDB session belongs to one MongoDB client, and `saveObject()` and native model calls that use it must write models of that client. Generated mutations and `saveObject()` without a session use the connection of the type's model. A custom mutation names no model, so in the default `referentialIntegrity: 'off'` mode its session uses the default Mongoose connection, `mongoose.connection`. The exception is an unused default connection: one that was never opened and on which no model is compiled, neither one of yours nor one that Simfinity generates, also counting models compiled on its `useDb()` descendants at any depth, such as `mongoose.connection.useDb('tenant').useDb('audit')`, which share its client. When, in addition, every registered model uses one MongoDB client, such as the models of one `mongoose.createConnection()` connection and its `useDb()` connections, the session uses that client. With `referentialIntegrity: 'transactional'`, it uses the first protected model's connection. A direct `adapter.withTransaction(null, callback)` call on an off-mode adapter bound to a runtime follows the same rule; an unbound adapter keeps `mongoose.connection`.
 

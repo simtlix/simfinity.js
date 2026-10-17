@@ -66,9 +66,7 @@ Generated inputs distinguish omission from explicit null: defaulted arguments us
 
 ## Custom query tools
 
-The unreleased [`registerQuery()` API](./queries#custom-queries) adds fields to the same schema consumed by MCP. No additional endpoint or MCP registration is needed. A registered query is a `kind: 'query'` tool with `readOnlyHint: true`, whether its callback uses `transactional: true` or `false`. These annotations communicate intent to clients; they do not prevent database writes.
-
-An input object becomes the required tool argument `input`, while a query without an input type has an empty argument object. With the default selection, object results and lists of objects use a generated selection and matching `outputSchema`; scalar results and lists of scalars need no selection. An explicit selection override omits `outputSchema`, as described under [result shape](#choose-the-result-shape). For example, the [duration estimate](./queries#custom-queries) is called with:
+Queries registered with [`registerQuery()`](./queries#custom-queries) are discovered from the schema as query tools, with `readOnlyHint: true`. For example, the duration estimate from the query guide is called with:
 
 ```javascript
 const { callTool } = mcp.generateMCPTools(schema, {
@@ -80,11 +78,7 @@ const result = await callTool('estimateServiceDuration', {
 });
 ```
 
-A custom query returning a list has no generated pagination arguments or `totalCount`. Members inside its own `input`, even when named `pagination` or `id`, do not become CRUD controls. `defaultPagination` and `maxPageSize` do not bound this custom input; implement any domain limits in the callback. `maxResultBytes` still applies to the tool result.
-
-In-process calls execute GraphQL and its installed field resolvers. Apply `schemaPlugins` as described under [authorization](#preserve-authorization), with root permissions on `RootQueryType` and output-type permissions for selected fields. The callback's native reads still need their own access restrictions. In remote mode, the remote server owns those checks. Query classification also makes the operation eligible for configured remote retries; registration does not enable retries by itself.
-
-An existing custom mutation can remain alongside a query with the same field name in GraphQL, but MCP has one shared tool-name namespace. Its existing collision rule keeps the query tool, warns and skips the mutation tool. Rename one field to expose both, or use `include: 'mutation'` to select mutation tools. A shared `toolNamePrefix` does not disambiguate them, and including or excluding only the field name applies to both.
+Custom inputs do not acquire generated pagination or filtering behavior. Apply domain limits inside the callback and configure [authorization](#preserve-authorization) for its root and output fields. If Query and Mutation expose the same field name, MCP keeps the query tool and skips the mutation with a warning; use distinct names to expose both.
 
 ## Start a stdio server
 

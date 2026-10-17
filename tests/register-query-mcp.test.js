@@ -23,7 +23,7 @@ describe('registered queries through GraphQL and MCP', () => {
   it('executes a no-input scalar query through GraphQL and MCP without a mutation root', async () => {
     const runtime = createTestRuntime();
     runtime.registerQuery('availabilityStatus', 'Read availability status', null, GraphQLString,
-      () => 'available', { transactional: false });
+      () => 'available');
     const schema = runtime.createSchema();
 
     const result = await graphql({ schema, source: '{ availabilityStatus }' });
@@ -51,7 +51,7 @@ describe('registered queries through GraphQL and MCP', () => {
     const runtime = createTestRuntime();
     const callback = vi.fn((input, session, context) => `shop:${context.user.shopId}`);
     runtime.registerQuery('privateAvailability', 'Read shop availability', null, GraphQLString,
-      callback, { transactional: false });
+      callback);
     const schema = runtime.createSchema();
     const plugin = auth.createAuthPlugin({
       RootQueryType: { privateAvailability: auth.requireAuth() },
@@ -86,7 +86,7 @@ describe('registered queries through GraphQL and MCP', () => {
     });
     const callback = vi.fn(() => ({ startsAt: '10:00', privateNote: 'staff only' }));
     runtime.registerQuery('privateAvailability', 'Read shop availability', null, output,
-      callback, { transactional: false });
+      callback);
     const schema = runtime.createSchema();
     const plugin = auth.createAuthPlugin({
       RootQueryType: { privateAvailability: auth.requireAuth() },
@@ -154,7 +154,7 @@ describe('registered queries through GraphQL and MCP', () => {
     ]);
     runtime.registerQuery('listBusyRanges', 'Read busy ranges for a shop', input,
       new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(output))),
-      callback, { transactional: false });
+      callback);
     const schema = runtime.createSchema();
     const field = schema.getQueryType().getFields().listBusyRanges;
     expect(field.extensions.simfinityQuery).toBeUndefined();
@@ -200,9 +200,9 @@ describe('registered queries through GraphQL and MCP', () => {
   it('filters custom queries with the fourth schema allowlist without removing legacy mutations', async () => {
     const runtime = createTestRuntime();
     runtime.registerQuery('publicStatus', 'Read public status', null, GraphQLString,
-      () => 'public', { transactional: false });
+      () => 'public');
     runtime.registerQuery('privateStatus', 'Read private status', null, GraphQLString,
-      () => 'private', { transactional: false });
+      () => 'private');
     runtime.registerMutation('legacyStatus', 'Legacy operation', null, GraphQLString, () => 'legacy');
     const schema = runtime.createSchema(undefined, undefined, undefined, ['publicStatus']);
 
@@ -215,7 +215,7 @@ describe('registered queries through GraphQL and MCP', () => {
   it('keeps query-first MCP collisions and the explicitly selected legacy mutation executable', async () => {
     const runtime = createTestRuntime();
     runtime.registerQuery('bookingAvailability', 'Read availability', null, GraphQLString,
-      () => 'query', { transactional: false });
+      () => 'query');
     runtime.registerMutation('bookingAvailability', 'Legacy availability', null, GraphQLString,
       () => 'legacy mutation');
     const schema = runtime.createSchema();
