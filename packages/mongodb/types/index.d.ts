@@ -15,6 +15,7 @@ import type {
 import type {
   DatabaseAdapter,
   MutationLimitsOptions,
+  Runtime,
   RuntimeRegistration,
   SimfinityError,
 } from '@simtlix/simfinity-core';
@@ -41,6 +42,7 @@ export type {
   MutationLimitsOptions,
   PermissionSchema,
   PolicyExpression,
+  RegisterQueryOptions,
   ScopeFunction,
   ScopeOperation,
   ScopeParams,
@@ -151,7 +153,9 @@ export function addNoEndpointType(gqltype: GraphQLObjectType): void;
 /**
  * Build the executable GraphQLSchema from every connected type. The first two
  * allowlists are matched against the GraphQLObjectType INSTANCES passed to
- * connect(); only custom mutations are matched by name. Scopes are validated
+ * connect(); custom mutations and the fourth custom-query allowlist are matched by name.
+ * Once a custom query is registered, exposing no generated or custom query throws EMPTY_QUERY_ROOT
+ * (500) before model preparation. Empty mutation roots are omitted. Scopes are validated
  * (INVALID_SCOPE), and reachable types bound or reserved by another runtime, or
  * holding a field copied with toConfig() after another runtime generated its
  * relation resolver, keeping the generated resolver or its extensions, are rejected (TYPE_BOUND_TO_OTHER_RUNTIME), before models
@@ -171,7 +175,7 @@ export function addNoEndpointType(gqltype: GraphQLObjectType): void;
  * SimfinityRelationType) with a warning when it is in the process's first Simfinity schema. That
  * schema fixes the names: in a later createSchema(), an application type with one of the current
  * names (the original ones, or the fallback names after a rename) throws RESERVED_TYPE_NAME (500),
- * before models are created when it is an included endpoint type, a registered mutation's input or
+ * before models are created when it is an included endpoint type, a registered custom operation's input or
  * output type, an output type they reach or a field argument's type, and when the schema is
  * constructed otherwise.
  */
@@ -179,6 +183,7 @@ export function createSchema(
   includedQueryTypes?: GraphQLObjectType[] | null,
   includedMutationTypes?: GraphQLObjectType[] | null,
   includedCustomMutations?: string[] | null,
+  includedCustomQueries?: string[] | null,
 ): GraphQLSchema;
 
 /** Register a custom mutation executed inside a transaction. */
@@ -189,6 +194,9 @@ export function registerMutation(
   outputModel: GraphQLOutputType,
   callback: (input: any, session: any, context: any) => any,
 ): void;
+
+/** Register a custom query with an explicit transaction choice; nontransactional callbacks receive null. */
+export const registerQuery: Runtime['registerQuery'];
 
 /** Operation context for root operations, generated non-embedded relation reads, and nested collection writes. */
 export interface SimfinityMiddlewareContext {

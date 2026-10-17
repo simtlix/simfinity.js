@@ -195,6 +195,11 @@ export interface MutationLimitsOptions {
   maxNestedOperations?: number | null;
 }
 
+/** Whether a custom query owns an adapter transaction. This choice is required at registration. */
+export interface RegisterQueryOptions<Transactional extends boolean = boolean> {
+  transactional: Transactional;
+}
+
 export interface Runtime<Model = any, Session = any> {
   configureQueryLimits(options?: { maxPageSize?: number }): void;
   /**
@@ -214,6 +219,9 @@ export interface Runtime<Model = any, Session = any> {
   /** Throws like `connect` for an invalid scope or a type bound to another runtime. */
   addNoEndpointType(type: GraphQLObjectType): void;
   /**
+   * The fourth allowlist selects custom queries by name; null or omission includes every registered query.
+   * Once a custom query is registered, at least one generated or custom query must remain exposed.
+   * An empty query root throws EMPTY_QUERY_ROOT (500) before model preparation. Empty mutations are omitted.
    * Validates every registered scope (`INVALID_SCOPE`) before building models, and rejects
    * (`TYPE_BOUND_TO_OTHER_RUNTIME`) any reachable type that another runtime bound or reserved, or
    * whose field was copied with `toConfig()` after another runtime generated its relation
@@ -225,7 +233,7 @@ export interface Runtime<Model = any, Session = any> {
    * `INVALID_MODEL` (500). Fields named like generated query arguments also log a warning. The
    * first schema binds the types whose relation resolvers it generates to this runtime and
    * reserves reachable types that still have a
-   * non-embedded relation field without a resolver, such as an unregistered custom mutation result.
+   * non-embedded relation field without a resolver, such as an unregistered custom operation result.
    * Every entity type resolves `id` to `_id ?? id`, whatever the allowlists include.
    *
    * A generated input that would have no fields is left out, with a `Configuration issue`
@@ -239,12 +247,12 @@ export interface Runtime<Model = any, Session = any> {
    * metadata types `SimfinityFieldExtensionsType` and `SimfinityRelationType` (numbered when
    * taken) for every later schema and logs a warning; once those names are fixed, a type with one
    * of them throws `RESERVED_TYPE_NAME` (500), before `adapter.prepare()` when it is an included
-   * endpoint type, a registered mutation's input or output type, an output type they reach or a
+   * endpoint type, a registered custom operation's input or output type, an output type they reach or a
    * field argument's type, and when the schema is constructed otherwise, such as for a type inside
    * an input object's fields. The check before `adapter.prepare()` never reads an input object's
    * fields, so a registered input's `fields` function may call `getInputType()`.
    */
-  createSchema(includedQueryTypes?: GraphQLObjectType[] | null, includedMutationTypes?: GraphQLObjectType[] | null, includedCustomMutations?: string[] | null): GraphQLSchema;
+  createSchema(includedQueryTypes?: GraphQLObjectType[] | null, includedMutationTypes?: GraphQLObjectType[] | null, includedCustomMutations?: string[] | null, includedCustomQueries?: string[] | null): GraphQLSchema;
   getModel(type: GraphQLObjectType | { name: string }): Model | null | undefined;
   getType(name: string | { name: string }): GraphQLObjectType | null | undefined;
   /**
@@ -263,6 +271,13 @@ export interface Runtime<Model = any, Session = any> {
    */
   use(middleware: (params: MiddlewareContext, next: () => Promise<void>) => void | Promise<void>): void;
   registerMutation(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (args: any, session: Session, context: any) => any): void;
+  /**
+   * Register a read callback with an explicit transaction choice. True passes an adapter session;
+   * false passes null and adds no transaction around the callback. Native reads keep their own behavior.
+   * The transaction ends with the callback, before output field resolution, and may retry the callback.
+   * The callback owns its business authorization; registering a query does not prevent database writes.
+   */
+  registerQuery<Transactional extends boolean>(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, session: Transactional extends true ? Session : null, context: any) => any, options: RegisterQueryOptions<Transactional>): void;
   /** Owns the full workflow transaction unless an active caller session is supplied. */
   saveObject(typeName: string, args: Record<string, any>, session?: Session, context?: any): Promise<any>;
   preventCreatingCollection(prevent: boolean): void;

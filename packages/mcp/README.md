@@ -28,3 +28,5 @@ await server.close();
 ```
 
 The package works with schemas produced by either `@simtlix/simfinity-js` or `@simtlix/simfinity-postgres`, including the `createSQL` composition API. `generateMCPTools` needs no SDK. Server and transport constructors report `MCP_SDK_NOT_INSTALLED` when the optional SDK is unavailable.
+
+The unreleased runtime API `registerQuery(..., { transactional })`, **not available in runtime packages 3.7.0**, adds GraphQL root query fields that MCP discovers through its existing schema integration. The required boolean controls the callback's transaction; the resulting tool is a query with `readOnlyHint: true`, which is an annotation rather than a database write guard or an authorization rule. Protect the field under `RootQueryType`, including when migrating an existing custom mutation. See [custom queries](https://simtlix.github.io/simfinity.js/guide/queries.html#custom-queries) and the [registerQuery API](https://simtlix.github.io/simfinity.js/reference/api.html#registerquery).

@@ -11,6 +11,8 @@ import library from '../../package.json';
 
 This documentation covers Simfinity.js **{{ library.version }}**, for **MongoDB and PostgreSQL**. All five packages are versioned and released together.
 
+Changes marked **Unreleased** describe the current source and are not included in the published version above.
+
 ## Package availability
 
 | Package | Purpose | Release |
@@ -34,6 +36,18 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | Downloadable starters | Node.js 22.15.0 or newer, npm and the database selected in the corresponding quick start |
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22 or newer |
+
+## Unreleased: custom queries
+
+The current source adds [registerQuery()](../reference/api#registerquery) for business reads with their own input and result types. It is available on runtime instances and both database facades; published 3.7.0 packages do not include it.
+
+- Choose `{ transactional: true }` or `{ transactional: false }` at registration. The former wraps each callback invocation in the adapter's transaction and retry policy; the latter passes a null session without adding a wrapper. Native calls retain their existing hooks, session requirements and transaction behavior. The query contract does not enforce database read-only mode.
+- `createSchema()` gains a fourth optional allowlist for custom query names. Its first three arguments keep their meaning. A schema with no mutations omits the Mutation root. When a runtime has registered custom queries, excluding every generated and custom query throws `EMPTY_QUERY_ROOT` before model preparation. Runtimes without custom queries retain their existing storage-preparation behavior.
+- Runtime middleware receives `custom_query`, the registered `entry`, arguments and context, without entity `type` metadata. The root permission belongs to `RootQueryType`; native reads still require the callback's business authorization. Query results follow the existing output-field authorization and type-ownership rules.
+- Existing custom mutations remain available. Moving one to Query requires changing the client operation and root permission explicitly. Query fields may run concurrently, and each transactional callback owns its own session. A callback transaction ends before output field resolution; it does not cover the entire GraphQL response.
+- MCP consumes the generated query through its existing custom-query path. If Query and Mutation expose the same name, MCP keeps the query tool and warns that it skipped the duplicate mutation. Use distinct names or filter operation kinds when migrating consumers.
+
+No storage migration is required by this API. The Barber applications continue to use their released dependencies and existing mutations. See the [custom query guide](../guide/queries#custom-queries) for examples and execution boundaries.
 
 ## Upgrade to 3.7.0
 
