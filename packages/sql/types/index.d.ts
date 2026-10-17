@@ -26,6 +26,7 @@ export type {
   MutationLimitsOptions,
   PermissionSchema,
   PolicyExpression,
+  RegisterQueryOptions,
   ScopeFunction,
   ScopeOperation,
   ScopeParams,

@@ -21,6 +21,7 @@ Shared examples can import the selected instance from [your application’s runt
 | --- | --- | --- |
 | Register a domain type | [connect](#connect) | Type registration; no return value |
 | Build the executable API | [createSchema](#createschema) | `GraphQLSchema` |
+| Register an application read | [registerQuery](#registerquery) | Custom query registration |
 | Register an application operation | [registerMutation](#registermutation) | Custom mutation registration |
 | Retrieve a registered type | [getType](#gettype) | Type, `undefined`, or `null` as described below |
 | Work with its model | [getModel](#getmodel) | Registered backend-native Model |
@@ -109,10 +110,11 @@ const schema = simfinity.createSchema(
   includedQueryTypes,
   includedMutationTypes,
   includedCustomMutations,
+  includedCustomQueries,
 );
 ```
 
-Builds models, generated resolvers, input types, and an executable `GraphQLSchema`. The root names are `RootQueryType` and `Mutation`.
+Builds models, generated resolvers, input types, and an executable `GraphQLSchema`. The root names are `RootQueryType` and `Mutation`. When no mutation fields are included, the schema omits `Mutation`; generated inputs are still prepared.
 
 Before it creates any model, `createSchema()` validates the scope of every registered type (`INVALID_SCOPE`) and rejects the schema with `TYPE_BOUND_TO_OTHER_RUNTIME` when it reaches, through fields, interfaces, union members or custom mutation results, a type that another runtime bound or reserved, or a field copied with `toConfig()` after another runtime generated its relation resolver. A list relation, embedded object or embedded list whose type is not registered throws `UNREGISTERED_RELATION_TARGET` (500). A writable non-embedded list relation whose child `connectionField` is missing or empty, and whose resolver Simfinity would generate, throws `INVALID_MODEL` (400, `Type.field requires a child connectionField`) before the adapter prepares storage. In default MongoDB mode and with custom adapters, such a collection with its own resolver, or marked `readOnly`, builds and logs a `Configuration issue` warning instead, except a `readOnly` one with its own resolver, which is silent; its nested writes fail with `INVALID_MODEL` (500). PostgreSQL and transactional MongoDB reject every collection without `connectionField`. Fields named like generated query arguments also log a warning; see [fields named like query arguments](/guide/queries#fields-named-like-query-arguments). Interface and union fields build on default MongoDB and custom adapters as output-only fields, with a `Configuration issue` warning when they are not `readOnly`; PostgreSQL and transactional MongoDB reject them with `INVALID_MODEL`. See [what gets generated](/guide/schema#what-gets-generated). Generated inputs that would have no fields are left out with a warning, together with the `added` or `updated` collection operations, embedded fields and add, update or state-action mutations that would take them; a non-null embedded field whose embedded type has no writable fields throws `INVALID_MODEL` (400) instead when the generated mutations reach its owner. PostgreSQL and transactional MongoDB reject embedded types that contain each other with `INVALID_MODEL` (`Embedded cycle at …`); default MongoDB mode rejects them when Simfinity generates a model whose embedded fields reach them, and does not check a cycle that only supplied models reach. An application type named `FieldExtensionsType` or `RelationType` in the first Simfinity schema of a process renames Simfinity's introspection metadata types to `SimfinityFieldExtensionsType` and `SimfinityRelationType`. That first schema fixes the names: a later `createSchema()` with an application type that has one of the current names, `FieldExtensionsType` and `RelationType` or the fallback names after a rename, throws `RESERVED_TYPE_NAME` (500), before any model is created when the type is an included endpoint type, a registered mutation's input or output type, an output type they reach or a field argument's type, and when the schema is constructed otherwise. The first schema binds the types whose relation resolvers it generates to this runtime. It also reserves reachable types that still have an unresolved relation field; see [types belong to one runtime](/guide/schema#types-belong-to-one-runtime).
 
@@ -121,6 +123,7 @@ Before it creates any model, `createSchema()` validates the scope of every regis
 | `includedQueryTypes` | Array of the exact object-type instances passed to `connect()`. |
 | `includedMutationTypes` | Array of the exact object-type instances passed to `connect()`. |
 | `includedCustomMutations` | Array of registered custom mutation names. |
+| `includedCustomQueries` | Array of registered custom query names. |
 
 Omitting an argument or passing `null` includes all registered entries in that category. An empty array excludes that category's fields. String type names do not work in the first two arrays.
 
@@ -134,7 +137,34 @@ const schema = simfinity.createSchema(
 );
 ```
 
-Ensure the resulting schema has fields in both generated roots. `createSchema()` always creates a `Mutation` object; excluding all mutations and all custom mutations leaves an empty root that GraphQL rejects. Allowlists control exposed fields, not whether registered models are initialized.
+An executable schema needs at least one query field. Allowlists control exposed fields, not whether registered models are initialized; excluding every query still prepares storage, but leaves a query root that GraphQL rejects for execution.
+
+A custom query cannot overwrite an included generated single-record, list or aggregate query: `createSchema()` throws `QUERY_NAME_CONFLICT` (500) before model preparation. Exclude one of the conflicting fields with the allowlists, or choose another name.
+
+## registerQuery
+
+```javascript
+simfinity.registerQuery(name, description, inputModel, outputModel, callback, options);
+```
+
+Registers an application read on `RootQueryType` and returns `undefined`. Register it before building the schema that should expose it. A result type describes the response without requiring a storage model or generating CRUD operations. See [custom queries](/guide/queries#custom-queries) for an example.
+
+| Parameter | Contract |
+| --- | --- |
+| `name` | A valid GraphQL field name without the `__` prefix, unique among this runtime's custom queries. |
+| `description` | A string describing the operation. |
+| `inputModel` | A `GraphQLInputObjectType`, or `null`/`undefined`. With a type, the root field has one required `input` argument. Without one, it has no arguments and the callback receives `undefined` as input. |
+| `outputModel` | A GraphQL output type, including scalars, objects, lists and nullability wrappers. |
+| `callback` | `(input, session, context) => valueOrPromise`. Receives the input directly and the original request context. |
+| `options` | Optional plain object. Its only supported key is `transactional`, an optional boolean that defaults to `false`. Unknown keys are rejected. |
+
+By default, the callback receives `session = null` without an enclosing transaction. Set `options.transactional` to `true` to use the adapter's transaction and retry policy. Pass its session to database calls that must participate. Native calls retain their own hooks and transaction behavior in either mode. The transaction ends when the callback completes, before output field resolution; sibling query fields do not share it. This option does not enforce database read-only access.
+
+The callback receives a typed copy of the input after middleware. Transaction retries receive a fresh copy for each attempt. GraphQL input objects, lists and scalar `Date` values are copied; enum values, other custom scalar values and request context keep their identity.
+
+Middleware runs before the callback and its optional transaction with `operation: 'custom_query'`, `entry: name`, `args` and `context`, without an entity `type`. Modify `args.input` on the existing arguments object; replacing `params.args` does not replace the callback's input. Authorize the root under `RootQueryType`. The callback must enforce business restrictions on native reads; registration does not apply generated CRUD scopes or controllers to them. Selected output fields retain their normal resolvers and permissions.
+
+Custom query result types follow the existing [runtime ownership rules](/guide/schema#types-belong-to-one-runtime). Their input and output types also participate in schema name validation. Invalid registration arguments throw `INVALID_QUERY_REGISTRATION` (500); duplicate names throw `QUERY_NAME_CONFLICT` (500). See [createSchema](#createschema) for allowlists and generated-name conflicts.
 
 ## registerMutation
 

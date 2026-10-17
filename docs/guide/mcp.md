@@ -64,6 +64,22 @@ Generated inputs distinguish omission from explicit null: defaulted arguments us
 
 `limits` bound reads, not writes. Generated add and update tools accept nested collection inputs, and each nested `added`, `updated` or `deleted` entry runs inside the parent's transaction. On servers exposed to MCP clients, cap them with [`configureMutationLimits({ maxNestedOperations })`](/guide/mutations#limit-nested-collection-operations) at startup.
 
+## Custom query tools
+
+Queries registered with [`registerQuery()`](./queries#custom-queries) are discovered from the schema as query tools, with `readOnlyHint: true`. For example, the duration estimate from the query guide is called with:
+
+```javascript
+const { callTool } = mcp.generateMCPTools(schema, {
+  include: ['estimateServiceDuration'],
+});
+
+const result = await callTool('estimateServiceDuration', {
+  input: { serviceCodes: ['haircut', 'beard'] },
+});
+```
+
+Custom inputs do not acquire generated pagination or filtering behavior. Apply domain limits inside the callback and configure [authorization](#preserve-authorization) for its root and output fields. If Query and Mutation expose the same field name, MCP keeps the query tool and skips the mutation with a warning; use distinct names to expose both.
+
 ## Start a stdio server
 
 Install the SDK for protocol transports:

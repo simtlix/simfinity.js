@@ -286,4 +286,83 @@ Supported operations are `SUM`, `COUNT`, `AVG`, `MIN`, and `MAX`. Every fact req
 
 PostgreSQL also supports scalar-list leaves inside nested embedded lists for filters, sorts, ragged group keys, and array-valued facts. Array `MIN`/`MAX` compares the complete array, while result sorting selects the immediate extrema. Whole embedded objects cannot be sorted or grouped. The [PostgreSQL query boundaries](./postgresql#query-support-and-boundaries) list the exact remaining limits.
 
-To constrain which records a caller may query, continue with [query scope](./query-scope).
+## Custom queries
+
+Register an application-specific read on `RootQueryType` before calling `createSchema()`. It uses the existing GraphQL endpoint and can also become an [MCP tool](./mcp#custom-query-tools). The input and output describe this operation independently of any connected entity.
+
+This storage-free example estimates a duration using an application-owned catalog. `simfinity` is the runtime already initialized by your application; the same registration works with either backend.
+
+```javascript
+import {
+  GraphQLInputObjectType, GraphQLInt, GraphQLList,
+  GraphQLNonNull, GraphQLObjectType, GraphQLString,
+} from 'graphql';
+
+const minutesByService = new Map([
+  ['haircut', 30],
+  ['beard', 15],
+]);
+
+const durationService = {
+  estimate(serviceCodes) {
+    const minutes = serviceCodes.reduce((total, code) => {
+      const duration = minutesByService.get(code);
+      if (duration === undefined) throw new Error(`Unknown service: ${code}`);
+      return total + duration;
+    }, 0);
+    return { minutes };
+  },
+};
+
+const DurationInput = new GraphQLInputObjectType({
+  name: 'DurationInput',
+  fields: {
+    serviceCodes: { type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(GraphQLString))) },
+  },
+});
+
+const DurationEstimate = new GraphQLObjectType({
+  name: 'DurationEstimate',
+  fields: { minutes: { type: new GraphQLNonNull(GraphQLInt) } },
+});
+
+simfinity.registerQuery(
+  'estimateServiceDuration',
+  'Estimate the total duration of selected services',
+  DurationInput,
+  DurationEstimate,
+  (input) => durationService.estimate(input.serviceCodes),
+);
+
+const schema = simfinity.createSchema();
+```
+
+```graphql
+query {
+  estimateServiceDuration(input: { serviceCodes: ["haircut", "beard"] }) {
+    minutes
+  }
+}
+```
+
+The result is `{ "data": { "estimateServiceDuration": { "minutes": 45 } } }`. An input object type creates one required `input` argument. Pass `null` or `undefined` instead of that type for an operation without arguments; its callback receives `undefined` as the input. Outputs can also be scalars, enums, lists, interfaces or unions, with GraphQL nullability wrappers. They do not need an entity model just to describe a result.
+
+The callback receives `(input, session, context)`. GraphQL validates and coerces its arguments first, then [global middleware](./middleware) runs with `operation: 'custom_query'`. The callback gets a copy of the input after middleware and the original request context. Use `includedCustomQueries` in [`createSchema()`](/reference/api#createschema) to select custom queries by name. See [`registerQuery()`](/reference/api#registerquery) for its parameters and registration errors.
+
+### Transactions
+
+By default, the callback receives `session = null` and runs without an enclosing transaction. Set `options.transactional` to `true` when several reads need to participate in one adapter transaction.
+
+Pass the supplied session to each participating database call: `model.findById(id).session(session)` on MongoDB, or `model.findById(id, { session })` on PostgreSQL. Both runtimes must have their database connection and initialization ready as usual. MongoDB selects the session's connection as it does for [custom mutations](./mutations#which-connection-the-session-uses-on-mongodb).
+
+Native calls keep their hooks and transaction behavior in both modes. The adapter may retry a transactional callback, so keep it safe to repeat. Each attempt receives a fresh typed input copy; see the [input-copy contract](/reference/api#registerquery).
+
+The transaction ends when the callback completes. Output field resolvers run afterwards, and sibling query fields do not share its session. Materialize the required data inside the callback when several reads must use the same transaction. Consistency follows the adapter's existing isolation policy. Registering a query does not enforce database read-only access.
+
+### Authorization
+
+Use the [authorization plugin](./authorization) with the root field under `RootQueryType`, such as `RootQueryType: { estimateServiceDuration: requireAuth() }`. Output fields retain their normal resolvers and permissions.
+
+The callback must enforce access restrictions on its native reads using trusted request context. Registering it does not automatically apply generated CRUD scopes, controllers, filters or pagination. Generated relationship fields selected on the result still run their usual middleware and scopes, after the callback has completed.
+
+For generated entity reads, use [query scope](./query-scope) to constrain which records a caller may query.

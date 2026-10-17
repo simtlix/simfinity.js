@@ -13,6 +13,7 @@ For relational storage, `@simtlix/simfinity-sql` builds on core and delegates ph
 - `connect`, `addNoEndpointType`, and `createSchema` for registration and schema creation;
 - `getModel`, `getType`, `getInputType`, and `getRegistrations` for runtime inspection;
 - `use`, `registerMutation`, and `saveObject` for middleware and write orchestration;
+- `registerQuery` for application-specific reads;
 - `preventCreatingCollection` to pass validation-only storage setup to an adapter;
 - `configureQueryLimits` and `configureMutationLimits` for the process-wide page-size and nested-operation limits.
 

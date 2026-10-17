@@ -69,6 +69,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
   - [Common Use Cases](#common-use-cases)
 - [Advanced Features](#-advanced-features)
   - [Field Extensions](#field-extensions)
+  - [Custom Queries](#custom-queries)
   - [Custom Mutations](#custom-mutations)
   - [Working with Existing Mongoose Models](#working-with-existing-mongoose-models)
   - [Programmatic Data Access](#programmatic-data-access)
@@ -241,7 +242,8 @@ Generate your complete GraphQL schema with optional type filtering:
 const schema = simfinity.createSchema(
   includedQueryTypes,     // Optional: Array of types to include in queries
   includedMutationTypes,  // Optional: Array of types to include in mutations
-  includedCustomMutations // Optional: Array of custom mutations to include
+  includedCustomMutations, // Optional: Array of custom mutation names to include
+  includedCustomQueries   // Optional: Array of custom query names to include
 );
 ```
 
@@ -2373,7 +2375,7 @@ Register middlewares using `simfinity.use()`. Middlewares execute in the order t
 ```javascript
 // Basic logging middleware
 simfinity.use(async (params, next) => {
-  console.log(`Executing ${params.operation} on ${params.type?.gqltype.name || 'custom mutation'}`);
+  console.log(`Executing ${params.operation} on ${params.type?.gqltype.name || params.entry}`);
   await next();
 });
 ```
@@ -2388,13 +2390,13 @@ Generated non-embedded relationship reads and nested collection mutations also i
 simfinity.use(async (params, next) => {
   // params object contains:
   const {
-    type,        // Registered type metadata: gqltype, model, controller, etc. Absent for custom mutations
+    type,        // Registered type metadata: gqltype, model, controller, etc. Absent for custom queries and mutations
     args,        // GraphQL arguments passed to the operation
-    operation,   // Operation type: 'save', 'update', 'delete', 'get_by_id', 'find', 'aggregate', 'state_changed', 'custom_mutation'
+    operation,   // Operation type: 'save', 'update', 'delete', 'get_by_id', 'find', 'aggregate', 'state_changed', 'custom_mutation', 'custom_query'
     context,     // GraphQL context object (includes request info, user data, etc.)
     actionName,  // For state machine actions (only present for state_changed operations)
     actionField, // State machine action details (only present for state_changed operations)
-    entry        // Custom mutation name (only present for custom_mutation operations)
+    entry        // Custom operation name (custom_mutation or custom_query)
   } = params;
   
   // Await next() to continue the middleware chain
@@ -2639,6 +2641,51 @@ const BookType = new GraphQLObjectType({
   })
 });
 ```
+
+### Custom Queries
+
+Register custom queries with their own input and result types. Their result types do not need a storage model.
+
+This MongoDB example assumes `BookType` has already been connected:
+
+```javascript
+import {
+  GraphQLID, GraphQLInputObjectType, GraphQLNonNull,
+  GraphQLObjectType, GraphQLString,
+} from 'graphql';
+
+const BookPreviewInput = new GraphQLInputObjectType({
+  name: 'BookPreviewInput',
+  fields: { bookId: { type: new GraphQLNonNull(GraphQLID) } },
+});
+const BookPreview = new GraphQLObjectType({
+  name: 'BookPreview',
+  fields: { title: { type: GraphQLString } },
+});
+
+simfinity.registerQuery(
+  'bookPreview',
+  'Read a book preview',
+  BookPreviewInput,
+  BookPreview,
+  async (input) => {
+    const book = await simfinity.getModel(BookType).findById(input.bookId);
+    return book ? { title: book.title } : null;
+  },
+);
+
+const schema = simfinity.createSchema();
+```
+
+```graphql
+query BookPreview($input: BookPreviewInput!) {
+  bookPreview(input: $input) { title }
+}
+```
+
+The callback receives `(input, session, context)`. By default, `session` is `null` and no transaction wraps the callback. Set `options.transactional` to `true` to use the adapter's transaction and retry policy; database calls must use the supplied session to participate. Native calls retain their existing hooks and behavior. Authorize the root under `RootQueryType` and enforce access restrictions on the callback's native reads.
+
+See the [custom query guide](docs/guide/queries.md#custom-queries) for both backends, transactions and authorization, and the [API reference](docs/reference/api.md#registerquery) for the full contract.
 
 ### Custom Mutations
 
@@ -4434,7 +4481,7 @@ const newBook = await simfinity.saveObject('Book', {
 
 **Note**: When `context` is not provided, it is `undefined` in controller hooks and in the middleware that nested collection children run. This is acceptable for programmatic usage where context may not be available.
 
-### `createSchema(includedQueryTypes?, includedMutationTypes?, includedCustomMutations?)`
+### `createSchema(includedQueryTypes?, includedMutationTypes?, includedCustomMutations?, includedCustomQueries?)`
 
 Creates the final GraphQL schema with all connected types.
 
@@ -4442,6 +4489,7 @@ Creates the final GraphQL schema with all connected types.
 - `includedQueryTypes` (array, optional): Limit query types to include
 - `includedMutationTypes` (array, optional): Limit mutation types to include  
 - `includedCustomMutations` (array, optional): Limit custom mutations to include
+- `includedCustomQueries` (array, optional): Limit custom queries by their registered names
 
 **Returns:**
 - `GraphQLSchema`: The complete GraphQL schema

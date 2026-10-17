@@ -4,7 +4,7 @@ import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
   GraphQLInt, GraphQLEnumType, GraphQLBoolean, GraphQLError, GraphQLInterfaceType, GraphQLUnionType,
-  Kind, getNamedType,
+  Kind, getNamedType, isOutputType,
 } from 'graphql';
 
 import SimfinityError from './errors/simfinity.error.js';
@@ -264,13 +264,22 @@ const assertFieldMetadataNamesFree = (roots) => {
   if (clash) throw reservedTypeNameError(clash);
 };
 
+const buildSchemaConfig = (query, mutation) => {
+  const config = { query };
+  if (Object.keys(mutation.getFields()).length > 0) {
+    config.mutation = mutation;
+  }
+  return config;
+};
+
 // Constructs the schema of these roots. When one of its types has the name of a field metadata type,
 // those are renamed SimfinityFieldExtensionsType and SimfinityRelationType, with a number appended
 // when the schema also has those names, in every schema the process constructs from then on. A
 // construction that fails puts the previous metadata types back, so only a schema that exists fixes
 // the names.
 const constructSchema = (query, mutation) => {
-  const roots = [query, mutation];
+  const config = buildSchemaConfig(query, mutation);
+  const roots = Object.values(config);
   const clash = fieldMetadataClash(roots);
   if (clash && fieldMetadataNamesFixed()) throw reservedTypeNameError(clash);
   let names = null;
@@ -285,7 +294,7 @@ const constructSchema = (query, mutation) => {
   const restore = names ? renameFieldMetadataTypes(...names) : null;
   let schema;
   try {
-    schema = new GraphQLSchema({ query, mutation });
+    schema = new GraphQLSchema(config);
   } catch (error) {
     if (restore) restore();
     throw error;
@@ -461,6 +470,7 @@ export const createRuntime = (adapter) => {
   const selfCollectionNameHolders = new Map();
   const qualifiedSelfCollections = new Map();
   const registeredMutations = {};
+  const registeredQueries = {};
   const middlewares = [];
 
   const operations = {
@@ -469,6 +479,7 @@ export const createRuntime = (adapter) => {
     DELETE: 'delete',
     STATE_CHANGED: 'state_changed',
     CUSTOM_MUTATION: 'custom_mutation',
+    CUSTOM_QUERY: 'custom_query',
   };
 
   const use = (middleware) => {
@@ -521,7 +532,7 @@ export const createRuntime = (adapter) => {
   };
 
   // Object and interface types a schema of this runtime can reach from its registered types and
-  // custom mutation results, following the same references as GraphQLSchema.
+  // custom operation results, following the same references as GraphQLSchema.
   const collectSchemaOutputTypes = () => {
     const visited = new Set();
     const outputTypes = [];
@@ -538,8 +549,13 @@ export const createRuntime = (adapter) => {
       named.getInterfaces().forEach(visit);
       for (const field of Object.values(named.getFields())) visit(field.type);
     };
-    for (const { gqltype } of Object.values(typesDict.types)) visit(gqltype);
-    for (const { outputModel } of Object.values(registeredMutations)) visit(outputModel);
+    const registeredTypes = Object.values(typesDict.types).map(({ gqltype }) => gqltype);
+    const customOperations = [
+      ...Object.values(registeredMutations),
+      ...Object.values(registeredQueries),
+    ];
+    const customOutputTypes = customOperations.map(({ outputModel }) => outputModel);
+    [...registeredTypes, ...customOutputTypes].forEach(visit);
     return outputTypes;
   };
 
@@ -1260,10 +1276,15 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
   return { modelArgs, collectionFields };
 };
 
-const executeRegisteredMutation = (args, callback, context, session, inputModel) => {
+const executeRegisteredOperation = (args, registration, operation, context) => {
+  const { inputModel, callback } = registration;
+  const transactional = operation === operations.CUSTOM_MUTATION || registration.transactional;
+  if (!transactional) {
+    return callback(cloneInput(args, inputModel), null, context);
+  }
   const nextInput = attemptInputs(args, inputModel);
   return adapter.withTransaction(
-    session,
+    null,
     (mySession) => callback(nextInput(), mySession, context),
   );
 };
@@ -2232,6 +2253,33 @@ const withoutWritableFields = (type, { noWritableId = false } = {}) => {
   return `${type.gqltype.name} has no writable fields${state}${id}`;
 };
 
+const createArgsForRegisteredOperation = (inputModel) => {
+  if (!inputModel) return null;
+  return { input: { type: new GraphQLNonNull(inputModel) } };
+};
+
+const buildRegisteredOperationField = (entry, registration, operation) => {
+  const field = {
+    type: registration.outputModel,
+    description: registration.description,
+    args: createArgsForRegisteredOperation(registration.inputModel),
+    async resolve(parent, args, context) {
+      const params = {
+        args,
+        operation,
+        entry,
+        context,
+      };
+      await executeMiddleware(params);
+      return executeRegisteredOperation(args.input, registration, operation, context);
+    },
+  };
+  if (operation === operations.CUSTOM_MUTATION) {
+    field.extensions = { simfinityMutation: { operation } };
+  }
+  return field;
+};
+
 // Every generated mutation field carries extensions.simfinityMutation with its operation (and, for
 // a state-machine action, the action and its from/to states), so tools such as the MCP package can
 // classify it without guessing from its name. Extensions do not appear in SDL or introspection.
@@ -2367,32 +2415,15 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
 
   for (const [entry, registeredMutation] of Object.entries(registeredMutations)) {
     if (!shouldNotBeIncludedInSchema(includedCustomMutations, entry)) {
-      const argsObject = registeredMutation.inputModel
-        ? { input: { type: new GraphQLNonNull(registeredMutation.inputModel) } } : null;
-      rootQueryArgs.fields[entry] = {
-        type: registeredMutation.outputModel,
-        description: registeredMutation.description,
-        args: argsObject,
-        extensions: { simfinityMutation: { operation: operations.CUSTOM_MUTATION } },
-        async resolve(parent, args, context) {
-          const params = {
-            args,
-            operation: operations.CUSTOM_MUTATION,
-            entry,
-            context,
-          };
-          await executeMiddleware(params);
-          return executeRegisteredMutation(args.input, registeredMutation.callback,
-            context, null, registeredMutation.inputModel);
-        },
-      };
+      rootQueryArgs.fields[entry] = buildRegisteredOperationField(entry, registeredMutation,
+        operations.CUSTOM_MUTATION);
     }
   }
 
   return new GraphQLObjectType(rootQueryArgs);
 };
 
-const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggregationResult) => {
+const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggregationResult, includedCustomQueries = null) => {
   const rootQueryArgs = {};
   rootQueryArgs.name = name;
   rootQueryArgs.fields = {};
@@ -2476,6 +2507,13 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
           },
         };
       }
+    }
+  }
+
+  for (const [entry, registeredQuery] of Object.entries(registeredQueries)) {
+    if (!shouldNotBeIncludedInSchema(includedCustomQueries, entry)) {
+      rootQueryArgs.fields[entry] = buildRegisteredOperationField(entry, registeredQuery,
+        operations.CUSTOM_QUERY);
     }
   }
 
@@ -2693,22 +2731,41 @@ const assertCollectionConnections = () => {
 
 const getRegistrations = () => Object.values(typesDict.types);
 
+const includedOperationTypes = (registrations, includedOperations) => Object.entries(registrations)
+  .filter(([entry]) => !shouldNotBeIncludedInSchema(includedOperations, entry))
+  .flatMap(([, { inputModel, outputModel }]) => [inputModel, outputModel].filter(Boolean));
+
 // Application types that a schema with these allowlists contains, whatever else it reaches: the
-// endpoint types of its queries and mutations, and the input and output types of its registered
-// mutations.
-const includedApplicationTypes = (includedQueryTypes, includedMutationTypes, includedCustomMutations) => [
+// endpoint types of its queries and mutations, and the input and output types of its custom operations.
+const includedApplicationTypes = (includedQueryTypes, includedMutationTypes, includedCustomMutations, includedCustomQueries) => [
   ...Object.values(typesDict.types)
     .filter((type) => type.endpoint
       && ((type.simpleEntityEndpointName && !shouldNotBeIncludedInSchema(includedQueryTypes, type.gqltype))
         || !shouldNotBeIncludedInSchema(includedMutationTypes, type.gqltype)))
     .map((type) => type.gqltype),
-  ...Object.entries(registeredMutations)
-    .filter(([entry]) => !shouldNotBeIncludedInSchema(includedCustomMutations, entry))
-    .flatMap(([, { inputModel, outputModel }]) => [inputModel, outputModel].filter(Boolean)),
+  ...includedOperationTypes(registeredMutations, includedCustomMutations),
+  ...includedOperationTypes(registeredQueries, includedCustomQueries),
 ];
 
-const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomMutations) => {
+const queryNameConflict = (name) => new SimfinityError(
+  `Query ${name} is already registered or conflicts with a generated query in this schema`,
+  'QUERY_NAME_CONFLICT', 500,
+);
+
+const assertQueryNamesAvailable = (includedQueryTypes, includedCustomQueries) => {
+  for (const type of Object.values(typesDict.types)) {
+    if (!type.simpleEntityEndpointName || shouldNotBeIncludedInSchema(includedQueryTypes, type.gqltype)) continue;
+    for (const name of [type.simpleEntityEndpointName, type.listEntitiesEndpointName, `${type.listEntitiesEndpointName}_aggregate`]) {
+      if (Object.hasOwn(registeredQueries, name) && !shouldNotBeIncludedInSchema(includedCustomQueries, name)) {
+        throw queryNameConflict(name);
+      }
+    }
+  }
+};
+
+const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomMutations, includedCustomQueries) => {
   // Reject before models, resolvers or roots are built, so a rejected schema changes nothing.
+  assertQueryNamesAvailable(includedQueryTypes, includedCustomQueries);
   Object.values(typesDict.types).forEach(({ gqltype }) => validateScope(gqltype));
   const schemaTypes = collectSchemaOutputTypes();
   schemaTypes.forEach(assertNotBoundElsewhere);
@@ -2718,7 +2775,7 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
   // only generated types or the fields of an input object reach is found when the schema is
   // constructed.
   assertFieldMetadataNamesFree(includedApplicationTypes(includedQueryTypes, includedMutationTypes,
-    includedCustomMutations));
+    includedCustomMutations, includedCustomQueries));
   const referencedTypes = markReferencedTypesForModelGeneration();
   // Entities, which keep their own stored identity: connect() types and relation targets.
   Object.values(typesDict.types).forEach((typeInfo) => {
@@ -2766,7 +2823,7 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
   const objectMemberTypes = new Set();
   Object.values(typesDict.types).forEach(({ gqltype }) => installObjectMemberResolvers(gqltype, objectMemberTypes));
 
-  let query = buildRootQuery('RootQueryType', includedQueryTypes);
+  let query = buildRootQuery('RootQueryType', includedQueryTypes, undefined, includedCustomQueries);
   Object.values(typesDict.types).forEach(({ gqltype }) => {
     if (gqltype && !applicationResolvedFields.has(gqltype)) {
       applicationResolvedFields.set(gqltype, listApplicationResolvedFields(gqltype));
@@ -2777,12 +2834,13 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
   // other type named JSON still collides, and GraphQLSchema reports the duplicate name.
   const applicationJSON = findSchemaType([query, mutation], 'JSON', QLTypeAggregationResult);
   if (applicationJSON instanceof GraphQLScalarType) {
-    query = buildRootQuery('RootQueryType', includedQueryTypes, aggregationResultTypeFor(applicationJSON));
+    query = buildRootQuery('RootQueryType', includedQueryTypes, aggregationResultTypeFor(applicationJSON),
+      includedCustomQueries);
   }
 
   const schema = constructSchema(query, mutation);
   // Reserve reachable types whose relation fields still have no resolver, such as an unregistered
-  // custom mutation result, so another runtime cannot later generate resolvers this schema executes.
+  // custom operation result, so another runtime cannot later generate resolvers this schema executes.
   schemaTypes.forEach((type) => {
     if (type instanceof GraphQLObjectType && hasUnresolvedRelation(type)) {
       runtimeBoundTypes.set(type, runtimeIdentity);
@@ -2810,6 +2868,56 @@ const registerMutation = (name, description, inputModel, outputModel, callback) 
     outputModel,
     callback,
   };
+};
+
+const invalidQueryRegistration = (detail) => new SimfinityError(
+  `registerQuery ${detail}`, 'INVALID_QUERY_REGISTRATION', 500,
+);
+
+const validateQueryRegistration = (name, registration) => {
+  const { description, inputModel, outputModel, callback } = registration;
+  if (typeof name !== 'string' || !/^[_A-Za-z][_0-9A-Za-z]*$/.test(name) || name.startsWith('__')) {
+    throw invalidQueryRegistration('requires a valid GraphQL field name that does not start with __');
+  }
+  if (description != null && typeof description !== 'string') {
+    throw invalidQueryRegistration('description must be a string');
+  }
+  if (inputModel != null && !(inputModel instanceof GraphQLInputObjectType)) {
+    throw invalidQueryRegistration('input must be a GraphQLInputObjectType, null or undefined');
+  }
+  if (!isOutputType(outputModel)) {
+    throw invalidQueryRegistration('output must be a GraphQL output type');
+  }
+  if (typeof callback !== 'function') {
+    throw invalidQueryRegistration('callback must be a function');
+  }
+};
+
+const readQueryOptions = (options) => {
+  if (!options || typeof options !== 'object' || !isPlainObject(options)
+    || Reflect.ownKeys(options).some((key) => key !== 'transactional')) {
+    throw invalidQueryRegistration('options must be an object containing only transactional');
+  }
+  const { transactional = false } = options;
+  if (typeof transactional !== 'boolean') {
+    throw invalidQueryRegistration('options.transactional must be a boolean');
+  }
+  return { transactional };
+};
+
+const registerQuery = (name, description, inputModel, outputModel, callback, options = {}) => {
+  const registration = {
+    description,
+    inputModel,
+    outputModel,
+    callback,
+  };
+  validateQueryRegistration(name, registration);
+  const queryOptions = readQueryOptions(options);
+  if (Object.hasOwn(registeredQueries, name)) {
+    throw queryNameConflict(name);
+  }
+  registeredQueries[name] = { ...registration, ...queryOptions };
 };
 
 // Gives the field a new extensions object as well as the resolver, so a copy made before keeps
@@ -3044,6 +3152,7 @@ function formatArgs(argsArray) {
     getRegistrations,
     use,
     registerMutation,
+    registerQuery,
     saveObject,
     preventCreatingCollection,
   };

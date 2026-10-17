@@ -195,6 +195,11 @@ export interface MutationLimitsOptions {
   maxNestedOperations?: number | null;
 }
 
+export interface RegisterQueryOptions {
+  /** Run the callback in an adapter transaction. Defaults to false. */
+  transactional?: boolean | undefined;
+}
+
 export interface Runtime<Model = any, Session = any> {
   configureQueryLimits(options?: { maxPageSize?: number }): void;
   /**
@@ -225,7 +230,7 @@ export interface Runtime<Model = any, Session = any> {
    * `INVALID_MODEL` (500). Fields named like generated query arguments also log a warning. The
    * first schema binds the types whose relation resolvers it generates to this runtime and
    * reserves reachable types that still have a
-   * non-embedded relation field without a resolver, such as an unregistered custom mutation result.
+   * non-embedded relation field without a resolver, such as an unregistered custom operation result.
    * Every entity type resolves `id` to `_id ?? id`, whatever the allowlists include.
    *
    * A generated input that would have no fields is left out, with a `Configuration issue`
@@ -239,12 +244,15 @@ export interface Runtime<Model = any, Session = any> {
    * metadata types `SimfinityFieldExtensionsType` and `SimfinityRelationType` (numbered when
    * taken) for every later schema and logs a warning; once those names are fixed, a type with one
    * of them throws `RESERVED_TYPE_NAME` (500), before `adapter.prepare()` when it is an included
-   * endpoint type, a registered mutation's input or output type, an output type they reach or a
+   * endpoint type, a registered custom operation's input or output type, an output type they reach or a
    * field argument's type, and when the schema is constructed otherwise, such as for a type inside
    * an input object's fields. The check before `adapter.prepare()` never reads an input object's
    * fields, so a registered input's `fields` function may call `getInputType()`.
+   *
+   * `includedCustomQueries` selects custom queries by name; null or omission includes all of them.
+   * Empty mutation roots are omitted.
    */
-  createSchema(includedQueryTypes?: GraphQLObjectType[] | null, includedMutationTypes?: GraphQLObjectType[] | null, includedCustomMutations?: string[] | null): GraphQLSchema;
+  createSchema(includedQueryTypes?: GraphQLObjectType[] | null, includedMutationTypes?: GraphQLObjectType[] | null, includedCustomMutations?: string[] | null, includedCustomQueries?: string[] | null): GraphQLSchema;
   getModel(type: GraphQLObjectType | { name: string }): Model | null | undefined;
   getType(name: string | { name: string }): GraphQLObjectType | null | undefined;
   /**
@@ -263,6 +271,13 @@ export interface Runtime<Model = any, Session = any> {
    */
   use(middleware: (params: MiddlewareContext, next: () => Promise<void>) => void | Promise<void>): void;
   registerMutation(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (args: any, session: Session, context: any) => any): void;
+  /**
+   * Register a custom query. The session argument is null unless `transactional` is true, which
+   * supplies an adapter session. That transaction covers the callback and may retry it.
+   */
+  registerQuery(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, session: null, context: any) => any, options?: { transactional?: false | undefined }): void;
+  registerQuery(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, session: Session, context: any) => any, options: { transactional: true }): void;
+  registerQuery(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, session: Session | null, context: any) => any, options: RegisterQueryOptions | undefined): void;
   /** Owns the full workflow transaction unless an active caller session is supplied. */
   saveObject(typeName: string, args: Record<string, any>, session?: Session, context?: any): Promise<any>;
   preventCreatingCollection(prevent: boolean): void;

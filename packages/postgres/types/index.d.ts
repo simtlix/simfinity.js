@@ -26,6 +26,7 @@ export type {
   MutationLimitsOptions,
   PermissionSchema,
   PolicyExpression,
+  RegisterQueryOptions,
   ScopeFunction,
   ScopeOperation,
   ScopeParams,
@@ -250,6 +251,7 @@ export const getInputType: PostgresRuntime['getInputType'];
 export const getRegistrations: PostgresRuntime['getRegistrations'];
 export const use: PostgresRuntime['use'];
 export const registerMutation: PostgresRuntime['registerMutation'];
+export const registerQuery: PostgresRuntime['registerQuery'];
 export const saveObject: PostgresRuntime['saveObject'];
 export const preventCreatingCollection: PostgresRuntime['preventCreatingCollection'];
 export const withTransaction: PostgresRuntime['withTransaction'];

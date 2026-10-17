@@ -200,6 +200,7 @@ const coreSource = `import assert from 'node:assert/strict';
     GraphQLInt,
     GraphQLObjectType,
     GraphQLString,
+    graphql,
     graphqlSync,
   } from 'graphql';
   ${adapterSource}
@@ -209,7 +210,14 @@ const coreSource = `import assert from 'node:assert/strict';
   });
   const runtime = createRuntime(adapter);
   runtime.connect(null, type, 'coreBook', 'coreBooks');
-  const schema = runtime.createSchema();
+  runtime.registerQuery('coreRead', '', null, GraphQLString, (input, session, context) => {
+    assert.equal(session, null);
+    return context.marker;
+  });
+  const schema = runtime.createSchema(null, null, null, ['coreRead']);
+  const custom = await graphql({ schema, source: '{ coreRead }', contextValue: { marker: 'core' } });
+  assert.equal(custom.errors, undefined);
+  assert.equal(custom.data.coreRead, 'core');
   const introspection = graphqlSync({
     schema,
     source: '{ __type(name: "__Field") { fields { name } } }',
@@ -294,11 +302,16 @@ const sqlSource = `import assert from 'node:assert/strict';
   };
   const api = createSQL({ plugin });
   api.connect(null, book, 'sqlBook', 'sqlBooks');
-  const schema = api.createSchema();
+  api.registerQuery('sqlRead', '', undefined, GraphQLString, (input, session) => {
+    assert.equal(session, null);
+    return 'sql';
+  });
+  const schema = api.createSchema(null, null, null, ['sqlRead']);
   await api.initializeDatabase();
-  const result = await graphql({ schema, source: '{ sqlBooks { id title } }' });
+  const result = await graphql({ schema, source: '{ sqlBooks { id title } sqlRead }' });
   assert.equal(result.errors, undefined);
   assert.deepEqual(result.data.sqlBooks, []);
+  assert.equal(result.data.sqlRead, 'sql');
   assert.deepEqual(calls, ['find']);`;
 
 const postgresSource = `import assert from 'node:assert/strict';
@@ -315,6 +328,7 @@ const postgresSource = `import assert from 'node:assert/strict';
     describeDatabase,
     initializeDatabase,
     postgresPlugin,
+    registerQuery,
     plugins,
     scalars,
     validators,
@@ -372,7 +386,14 @@ const postgresSource = `import assert from 'node:assert/strict';
   });
   configure({ pool, schema: 'default_app' });
   connect(null, defaultType, 'defaultPostgresBook', 'defaultPostgresBooks');
-  const defaultSchema = createSchema();
+  registerQuery('postgresRead', '', null, GraphQLString, (input, session) => {
+    assert.equal(session, null);
+    return 'postgres';
+  });
+  const defaultSchema = createSchema(null, null, null, ['postgresRead']);
+  const custom = await graphql({ schema: defaultSchema, source: '{ postgresRead }' });
+  assert.equal(custom.errors, undefined);
+  assert.equal(custom.data.postgresRead, 'postgres');
   const defaultBeforeReady = await graphql({
     schema: defaultSchema,
     source: '{ defaultPostgresBooks { id } }',
@@ -413,9 +434,10 @@ const mongoSource = `import assert from 'node:assert/strict';
     scalars,
     validators,
   } from '@simtlix/simfinity-core';
-  import { GraphQLID, GraphQLObjectType, GraphQLString, graphqlSync } from 'graphql';
+  import { GraphQLID, GraphQLObjectType, GraphQLString, graphql, graphqlSync } from 'graphql';
   ${adapterSource}
   assert.equal(legacyEntry.connect, simfinity.connect);
+  assert.equal(legacyEntry.registerQuery, simfinity.registerQuery);
   assert.equal(legacyAuth, auth);
   assert.equal(legacyIsOwner, auth.isOwner);
   assert.equal(LegacyError, SimfinityError);
@@ -429,6 +451,14 @@ const mongoSource = `import assert from 'node:assert/strict';
   assert.equal(simfinity.validators, validators);
   assert.equal(typeof simfinity.generateMCPTools, 'function');
   assert.equal(simfinity.mcp.generateMCPTools, simfinity.generateMCPTools);
+  simfinity.registerQuery('mongoRead', '', undefined, GraphQLString, (input, session) => {
+    assert.equal(session, null);
+    return 'mongo';
+  });
+  const defaultSchema = simfinity.createSchema([], [], [], ['mongoRead']);
+  const custom = await graphql({ schema: defaultSchema, source: '{ mongoRead }' });
+  assert.equal(custom.errors, undefined);
+  assert.equal(custom.data.mongoRead, 'mongo');
   const runtime = simfinity.createRuntime(adapter);
   const type = new GraphQLObjectType({
     name: 'RootRuntimeBook',
@@ -1472,6 +1502,69 @@ adapter.findChildrenBatch = undefined;
 adapter.batchesChildren = undefined;
 void createMongoAdapter({ batchedCollections: undefined });`;
 
+const customQueryTypes = (name, runtimeType, sessionType, singleton = false) => `import type { RegisterQueryOptions } from '${name}';
+import type { RegisterQueryOptions as CoreOptions } from '@simtlix/simfinity-core';
+import { GraphQLInputObjectType, GraphQLString, type GraphQLSchema } from 'graphql';
+${singleton ? `import { registerQuery, createSchema } from '${name}';` : ''}
+type Session = ${sessionType};
+declare const api: ${runtimeType};
+const register = ${singleton ? 'registerQuery' : 'api.registerQuery'};
+const input = new GraphQLInputObjectType({ name: 'CustomQueryInput', fields: { text: { type: GraphQLString } } });
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+const sameOptions: Equals<RegisterQueryOptions, CoreOptions> = true;
+const transactional = { transactional: true } as const;
+register('transactional', '', input, GraphQLString, (args, session, context) => {
+  const exactSession: Equals<typeof session, Session> = true;
+  void [exactSession, context];
+  return args.text;
+}, transactional);
+register('withoutTransaction', '', null, GraphQLString, async (args, session, context) => {
+  const exactNull: Equals<typeof session, null> = true;
+  void [exactNull, args];
+  return context.text;
+}, { transactional: false });
+register('default', '', null, GraphQLString, (args, session) => {
+  const exactNull: Equals<typeof session, null> = true;
+  return String(exactNull);
+});
+register('emptyOptions', '', null, GraphQLString, (args, session) => {
+  const exactNull: Equals<typeof session, null> = true;
+  return String(exactNull);
+}, {});
+register('undefinedOptions', '', null, GraphQLString, (args, session) => {
+  const exactNull: Equals<typeof session, null> = true;
+  return String(exactNull);
+}, undefined);
+register('undefinedTransaction', '', null, GraphQLString, (args, session) => {
+  const exactNull: Equals<typeof session, null> = true;
+  return String(exactNull);
+}, { transactional: undefined });
+declare const enabled: boolean;
+register('dynamic', '', undefined, GraphQLString, (args, session) => {
+  const exactUnion: Equals<typeof session, Session | null> = true;
+  return String(exactUnion);
+}, { transactional: enabled });
+declare const options: RegisterQueryOptions | undefined;
+register('configured', '', null, GraphQLString, (args, session) => {
+  const exactUnion: Equals<typeof session, Session | null> = true;
+  return String(exactUnion);
+}, options);
+${sessionType === 'any' ? '' : `// @ts-expect-error Without a transaction, the callback cannot require a session.
+register('requiresSession', '', null, GraphQLString, (args, session: Session) => String(session));
+// @ts-expect-error Optional transaction options do not guarantee a session.
+register('requiresConfiguredSession', '', null, GraphQLString, (args, session: Session) => String(session), options);`}
+// @ts-expect-error transactional must be a boolean, not a string.
+register('invalidBoolean', '', null, GraphQLString, () => 'value', { transactional: 'true' });
+// @ts-expect-error A custom query input must be an input object, not a scalar.
+register('scalarInput', '', GraphQLString, GraphQLString, () => 'value');
+const schema: GraphQLSchema = api.createSchema(null, null, null, ['transactional']);
+api.createSchema(undefined, undefined, undefined, []);
+// @ts-expect-error Custom query allowlists hold names.
+api.createSchema(null, null, null, [1]);
+${singleton ? `const defaultSchema: GraphQLSchema = createSchema([], [], [], ['withoutTransaction']);
+void defaultSchema;` : ''}
+void [schema, sameOptions];`;
+
 const cases = [
   {
     name: 'core',
@@ -1484,6 +1577,7 @@ const cases = [
       'root.ts': coreRootTypes,
       'auth-plugins.ts': coreAuthPluginsTypes,
       'schema-plugins.ts': coreSchemaPluginTypes,
+      'custom-queries.ts': customQueryTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>', '{ active: boolean }'),
     },
     // NodeNext, Node16 and Bundler read the subpath declarations from the exports map; Node10, which
     // ignores exports, reads them from typesVersions.
@@ -1496,7 +1590,10 @@ const cases = [
     archives: ({ core, sql }) => [core, sql],
     source: sqlSource,
     types: sqlTypes,
-    extraTypes: { 'barrel.ts': databaseBarrelTypes('@simtlix/simfinity-sql') },
+    extraTypes: {
+      'barrel.ts': databaseBarrelTypes('@simtlix/simfinity-sql'),
+      'custom-queries.ts': customQueryTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime', 'import(\'@simtlix/simfinity-sql\').SQLSession'),
+    },
     forbiddenPackages: ['pg', 'mongoose', 'mongodb', '@simtlix/simfinity-postgres', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
   },
   {
@@ -1505,7 +1602,10 @@ const cases = [
     archives: ({ core, sql, postgres }) => [core, sql, postgres],
     source: postgresSource,
     types: postgresTypes,
-    extraTypes: { 'barrel.ts': databaseBarrelTypes('@simtlix/simfinity-postgres') },
+    extraTypes: {
+      'barrel.ts': databaseBarrelTypes('@simtlix/simfinity-postgres'),
+      'custom-queries.ts': customQueryTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', 'import(\'@simtlix/simfinity-postgres\').PostgresSession', true),
+    },
     typeDependencies: ['@types/pg@8'],
     forbiddenPackages: ['mongoose', 'mongodb', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
   },
@@ -1543,6 +1643,8 @@ const cases = [
       'legacy-mcp-plugins.ts': mongoLegacyMcpBarrel('@simtlix/simfinity-js/src/plugins.js'),
       'legacy-mcp-root.ts': mongoLegacyMcpBarrel('@simtlix/simfinity-js'),
       'legacy-mcp-workaround.ts': mongoLegacyMcpWorkaroundTypes,
+      'custom-queries.ts': customQueryTypes('@simtlix/simfinity-js', 'import(\'@simtlix/simfinity-core\').Runtime', 'any', true),
+      'legacy-custom-queries.ts': customQueryTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', 'any', true),
     },
     // The legacy deep-import declarations sit next to the shims: NodeNext, Node16 and Bundler find
     // them through the exports map, Node10 by path, and their core subpath imports through core's

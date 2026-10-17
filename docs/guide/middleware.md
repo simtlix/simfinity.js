@@ -59,8 +59,8 @@ simfinity.use(async (params, next) => {
 | `args` | GraphQL arguments: for example, `args.input` for add/update or `args.id` for delete. |
 | `operation` | One of the operation values below. |
 | `context` | The GraphQL request context. For nested collection children of a programmatic `saveObject()` call, the `context` passed to `saveObject()`, which is `undefined` when omitted; guard with `context?.`. |
-| `type` | Registered type metadata for generated entity operations; absent for custom mutations. |
-| `entry` | Custom mutation name when `operation` is `custom_mutation`. |
+| `type` | Registered type metadata for generated entity operations; absent for custom queries and mutations. |
+| `entry` | Registered operation name for `custom_query` and `custom_mutation`. |
 | `actionName`, `actionField` | State-machine action name and configuration for `state_changed`. |
 
 | Operation | Trigger |
@@ -73,6 +73,7 @@ simfinity.use(async (params, next) => {
 | `delete` | Generated delete mutation or nested `deleted` child (including children of a `saveObject()` call). |
 | `state_changed` | Generated state-machine action. |
 | `custom_mutation` | Registered custom mutation. |
+| `custom_query` | Registered custom query. |
 
 ## Prepare arguments
 
