@@ -347,11 +347,11 @@ query {
 
 The result is `{ "data": { "estimateServiceDuration": { "minutes": 45 } } }`. An input object type creates one required `input` argument. Pass `null` or `undefined` instead of that type for an operation without arguments; its callback receives `undefined` as the input. Outputs can also be scalars, enums, lists, interfaces or unions, with GraphQL nullability wrappers. They do not need an entity model just to describe a result.
 
-The callback receives `(input, session, context)`. GraphQL validates and coerces its arguments first, then [global middleware](./middleware) runs with `operation: 'custom_query'`. The callback gets a copy of the input after middleware and the original request context. The fourth `createSchema()` argument independently selects custom queries by name; see [`registerQuery()`](/reference/api#registerquery) for the signature, registration errors and schema selection rules.
+The callback receives `(input, session, context)`. GraphQL validates and coerces its arguments first, then [global middleware](./middleware) runs with `operation: 'custom_query'`. The callback gets a copy of the input after middleware and the original request context. Use `includedCustomQueries` in [`createSchema()`](/reference/api#createschema) to select custom queries by name. See [`registerQuery()`](/reference/api#registerquery) for its parameters and registration errors.
 
 ### Transactions
 
-By default, the callback receives `session = null` and runs without an enclosing transaction. Pass `{ transactional: true }` as the optional sixth argument when several reads need to participate in one adapter transaction.
+By default, the callback receives `session = null` and runs without an enclosing transaction. Set `options.transactional` to `true` when several reads need to participate in one adapter transaction.
 
 Pass the supplied session to each participating database call: `model.findById(id).session(session)` on MongoDB, or `model.findById(id, { session })` on PostgreSQL. Both runtimes must have their database connection and initialization ready as usual. MongoDB selects the session's connection as it does for [custom mutations](./mutations#which-connection-the-session-uses-on-mongodb).
 

@@ -249,7 +249,7 @@ export interface Runtime<Model = any, Session = any> {
    * an input object's fields. The check before `adapter.prepare()` never reads an input object's
    * fields, so a registered input's `fields` function may call `getInputType()`.
    *
-   * The fourth allowlist selects custom queries by name; null or omission includes all of them.
+   * `includedCustomQueries` selects custom queries by name; null or omission includes all of them.
    * Empty mutation roots are omitted.
    */
   createSchema(includedQueryTypes?: GraphQLObjectType[] | null, includedMutationTypes?: GraphQLObjectType[] | null, includedCustomMutations?: string[] | null, includedCustomQueries?: string[] | null): GraphQLSchema;
@@ -272,8 +272,8 @@ export interface Runtime<Model = any, Session = any> {
   use(middleware: (params: MiddlewareContext, next: () => Promise<void>) => void | Promise<void>): void;
   registerMutation(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (args: any, session: Session, context: any) => any): void;
   /**
-   * Register a custom query. The callback receives null unless transactional is true, which passes
-   * an adapter session. That transaction covers the callback and may retry it.
+   * Register a custom query. The session argument is null unless `transactional` is true, which
+   * supplies an adapter session. That transaction covers the callback and may retry it.
    */
   registerQuery(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, session: null, context: any) => any, options?: { transactional?: false | undefined }): void;
   registerQuery(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, session: Session, context: any) => any, options: { transactional: true }): void;

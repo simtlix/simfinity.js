@@ -73,7 +73,7 @@ simfinity.use(async (params, next) => {
 | `delete` | Generated delete mutation or nested `deleted` child (including children of a `saveObject()` call). |
 | `state_changed` | Generated state-machine action. |
 | `custom_mutation` | Registered custom mutation. |
-| `custom_query` | Registered [custom query](./queries#custom-queries). |
+| `custom_query` | Registered custom query. |
 
 ## Prepare arguments
 

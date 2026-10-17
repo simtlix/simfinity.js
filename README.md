@@ -2644,7 +2644,7 @@ const BookType = new GraphQLObjectType({
 
 ### Custom Queries
 
-Use `registerQuery(name, description, inputModel, outputModel, callback, options?)` for application reads with their own input and result types. Register them before calling `createSchema()`; their result types do not need a storage model.
+Register custom queries with their own input and result types. Their result types do not need a storage model.
 
 This MongoDB example assumes `BookType` has already been connected:
 
@@ -2683,7 +2683,7 @@ query BookPreview($input: BookPreviewInput!) {
 }
 ```
 
-The callback receives `(input, session, context)`. By default, `session` is `null` and no transaction wraps the callback. Pass `{ transactional: true }` as the sixth argument to use the adapter's transaction and retry policy; database calls must use the supplied session to participate. Native calls retain their existing hooks and behavior. Authorize the root under `RootQueryType` and enforce access restrictions on the callback's native reads.
+The callback receives `(input, session, context)`. By default, `session` is `null` and no transaction wraps the callback. Set `options.transactional` to `true` to use the adapter's transaction and retry policy; database calls must use the supplied session to participate. Native calls retain their existing hooks and behavior. Authorize the root under `RootQueryType` and enforce access restrictions on the callback's native reads.
 
 See the [custom query guide](docs/guide/queries.md#custom-queries) for both backends, transactions and authorization, and the [API reference](docs/reference/api.md#registerquery) for the full contract.
 

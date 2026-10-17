@@ -144,7 +144,7 @@ A custom query cannot overwrite an included generated single-record, list or agg
 ## registerQuery
 
 ```javascript
-simfinity.registerQuery(name, description, inputModel, outputModel, callback);
+simfinity.registerQuery(name, description, inputModel, outputModel, callback, options);
 ```
 
 Registers an application read on `RootQueryType` and returns `undefined`. Register it before building the schema that should expose it. A result type describes the response without requiring a storage model or generating CRUD operations. See [custom queries](/guide/queries#custom-queries) for an example.
@@ -158,7 +158,7 @@ Registers an application read on `RootQueryType` and returns `undefined`. Regist
 | `callback` | `(input, session, context) => valueOrPromise`. Receives the input directly and the original request context. |
 | `options` | Optional plain object. Its only supported key is `transactional`, an optional boolean that defaults to `false`. Unknown keys are rejected. |
 
-By default, the callback receives `session = null` without an enclosing transaction. Passing `{ transactional: true }` as the sixth argument uses the adapter's transaction and retry policy. Pass its session to database calls that must participate. Native calls retain their own hooks and transaction behavior in either mode. The transaction ends when the callback completes, before output field resolution; sibling query fields do not share it. This option does not enforce database read-only access.
+By default, the callback receives `session = null` without an enclosing transaction. Set `options.transactional` to `true` to use the adapter's transaction and retry policy. Pass its session to database calls that must participate. Native calls retain their own hooks and transaction behavior in either mode. The transaction ends when the callback completes, before output field resolution; sibling query fields do not share it. This option does not enforce database read-only access.
 
 The callback receives a typed copy of the input after middleware. Transaction retries receive a fresh copy for each attempt. GraphQL input objects, lists and scalar `Date` values are copied; enum values, other custom scalar values and request context keep their identity.
 

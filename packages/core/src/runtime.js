@@ -2423,7 +2423,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
   return new GraphQLObjectType(rootQueryArgs);
 };
 
-const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggregationResult, includedCustomQueries) => {
+const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggregationResult, includedCustomQueries = null) => {
   const rootQueryArgs = {};
   rootQueryArgs.name = name;
   rootQueryArgs.fields = {};

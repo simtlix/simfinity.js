@@ -153,8 +153,8 @@ export function addNoEndpointType(gqltype: GraphQLObjectType): void;
 /**
  * Build the executable GraphQLSchema from every connected type. The first two
  * allowlists are matched against the GraphQLObjectType INSTANCES passed to
- * connect(); custom mutations and the fourth custom-query allowlist are matched by name.
- * Scopes are validated (INVALID_SCOPE), and reachable types bound or reserved by another runtime, or
+ * connect(); custom queries and mutations are matched by name. Scopes are validated
+ * (INVALID_SCOPE), and reachable types bound or reserved by another runtime, or
  * holding a field copied with toConfig() after another runtime generated its
  * relation resolver, keeping the generated resolver or its extensions, are rejected (TYPE_BOUND_TO_OTHER_RUNTIME), before models
  * are created; a list or embedded relation to an unregistered type throws
@@ -194,7 +194,7 @@ export function registerMutation(
   callback: (input: any, session: any, context: any) => any,
 ): void;
 
-/** Register a custom query; transactional defaults to false and the callback receives null. */
+/** Register a custom query. The session argument is null by default. */
 export const registerQuery: Runtime['registerQuery'];
 
 /** Operation context for root operations, generated non-embedded relation reads, and nested collection writes. */
