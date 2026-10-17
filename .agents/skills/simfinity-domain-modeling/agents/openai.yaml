@@ -1,0 +1,4 @@
+interface:
+  display_name: "Simfinity Domain Modeling"
+  short_description: "Define types, relations and generated inputs"
+  default_prompt: "Use $simfinity-domain-modeling to model these entities with Simfinity types, relationships and validation."

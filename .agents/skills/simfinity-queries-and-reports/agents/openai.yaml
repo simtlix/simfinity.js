@@ -1,0 +1,4 @@
+interface:
+  display_name: "Simfinity Queries and Reports"
+  short_description: "Build scoped queries, totals and read models"
+  default_prompt: "Use $simfinity-queries-and-reports to implement this query or report with correct visibility, calculations and pagination."

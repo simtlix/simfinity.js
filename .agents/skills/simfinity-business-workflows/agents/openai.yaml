@@ -1,0 +1,4 @@
+interface:
+  display_name: "Simfinity Business Workflows"
+  short_description: "Implement states, hooks and transactional rules"
+  default_prompt: "Use $simfinity-business-workflows to implement this business workflow with the appropriate Simfinity lifecycle and transaction boundaries."

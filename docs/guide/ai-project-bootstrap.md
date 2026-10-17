@@ -9,6 +9,25 @@ Copy the prompt below into a coding agent with terminal and workspace access. It
 
 The prompt is self-contained and can be used outside this repository. Project name and domain details can be supplied during the conversation. Repository artifacts are written in English; the agent can discuss requirements in your preferred language.
 
+## Skills for application work
+
+For ongoing application work, the repository also maintains six focused skills for MongoDB and PostgreSQL. The copyable bootstrap prompt below starts with MongoDB; the skills inspect the application's selected engine and installed package version before choosing APIs. They were checked against 3.7.0 and must be reconciled with the version used by the application.
+
+| Work | Skill |
+| --- | --- |
+| Choose the model and plan an integration or migration | [simfinity-application-design](https://github.com/simtlix/simfinity.js/tree/master/.agents/skills/simfinity-application-design) |
+| Define types, relationships, validation and generated inputs | [simfinity-domain-modeling](https://github.com/simtlix/simfinity.js/tree/master/.agents/skills/simfinity-domain-modeling) |
+| Combine read scopes with operation, field and write permissions | [simfinity-access-control](https://github.com/simtlix/simfinity.js/tree/master/.agents/skills/simfinity-access-control) |
+| Implement controllers, state transitions and transactional behavior | [simfinity-business-workflows](https://github.com/simtlix/simfinity.js/tree/master/.agents/skills/simfinity-business-workflows) |
+| Execute worker operations, custom commands and native primitives | [simfinity-server-operations](https://github.com/simtlix/simfinity.js/tree/master/.agents/skills/simfinity-server-operations) |
+| Build scoped lists, aggregates, calculations and materialized reports | [simfinity-queries-and-reports](https://github.com/simtlix/simfinity.js/tree/master/.agents/skills/simfinity-queries-and-reports) |
+
+Use the relevant skill directly, for example `$simfinity-access-control` when adding tenant isolation. Each directory contains `SKILL.md`, UI metadata and its own references. Copy the complete directory from a reviewed repository revision into the consumer project's skill location; other skills and the Simfinity checkout are optional. Keep its source revision recorded so updates can be reviewed. These skills are repository resources, not files installed by the runtime npm packages.
+
+The application-design skill includes a runnable order/customer/line example with separate MongoDB and PostgreSQL storage helpers. Its tests cover scoped reads and counts, authoritative totals after hooks, cross-tenant writes, foreign-child rollback and action authorization. A scope is not write permission, and a state machine is not user authorization. Native infrastructure operations remain supported with explicit transaction and access responsibilities.
+
+The [PR review skill](https://github.com/simtlix/simfinity.js/tree/master/.agents/skills/simfinity-pr-review) serves a different task: reviewing changes to the library itself.
+
 ## Copyable prompt
 
 ```text
