@@ -301,6 +301,8 @@ Server request hooks do not run, because the helper calls graphql-js directly ra
 
 When one command creates several records, register a custom mutation and create each record with `saveObject()` and the mutation's session. This checkout creates an order with its lines and an invoice for it. It assumes an `Invoice` type with an `amount` and a single reference `order`:
 
+The example uses the `orderController` above, which calculates `order.total` from the stored lines in `onSaved`. The invoice uses that total, including any price or quantity changes made by the line hooks or middleware.
+
 ```javascript
 import {
   GraphQLInputObjectType,
@@ -346,7 +348,7 @@ simfinity.registerMutation(
       status: 'PLACED',
       lines: { added: input.lines },
     }, session, context);
-    const amount = input.lines.reduce((sum, line) => sum + line.quantity * line.unitPrice, 0);
+    const amount = order.total;
     await simfinity.saveObject('Invoice', { amount, order: { id: String(order._id) } }, session, context);
     return order;
   },
