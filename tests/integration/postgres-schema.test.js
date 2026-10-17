@@ -178,9 +178,10 @@ describe.skipIf(!uri)('PostgreSQL [ID] list columns', () => {
   const legacySchema = `${schema}_legacy`;
   const long = 'aVeryLongFieldNameForRelatedIdentifiersThatHashesTheIndexName';
   let pool; let api; let types; let warn;
-  const listIndexes = async (name) => (await pool.query(`SELECT i.indexname FROM pg_indexes i WHERE i.schemaname = $1
-    AND EXISTS (SELECT 1 FROM pg_index x JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = ANY (x.indkey)
-      WHERE x.indexrelid = format('%I.%I', i.schemaname, i.indexname)::regclass AND a.atttypid = 'uuid[]'::regtype) ORDER BY 1`, [name])).rows.map((row) => row.indexname);
+  const listIndexes = async (name) => (await pool.query(`SELECT DISTINCT i.relname AS indexname
+    FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid JOIN pg_namespace n ON n.oid = i.relnamespace
+    JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = ANY (x.indkey)
+    WHERE n.nspname = $1 AND a.atttypid = 'uuid[]'::regtype ORDER BY 1`, [name])).rows.map((row) => row.indexname);
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: uri });
     const Author = new GraphQLObjectType({ name: 'IdListAuthor', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
