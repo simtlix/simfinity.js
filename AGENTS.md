@@ -26,6 +26,10 @@ This file helps coding agents (and humans) work productively and safely in this 
 
 If something is ambiguous, prefer the matching `.mdc` file over this summary.
 
+## Pull request reviews
+
+For Simfinity PR reviews and re-reviews, use the repository skill [simfinity-pr-review](.agents/skills/simfinity-pr-review/SKILL.md), also invocable as `$simfinity-pr-review`. It covers architectural fit, application/library boundaries, lifecycle and authorization, MongoDB/PostgreSQL compatibility, and verification. Apply only the lenses relevant to the change; the rules above remain authoritative. A review request alone does not authorize posting feedback, merging or publishing.
+
 ## Non-negotiables
 
 1. **Do not** use `graphql-middleware`’s `applyMiddleware` or `@graphql-tools/utils` `mapSchema` on a Simfinity schema — they rebuild the schema and duplicate globally injected introspection types. Use **Envelop** plugins and in-place resolver wrapping instead (see architecture rule).
