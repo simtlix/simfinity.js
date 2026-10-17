@@ -26,6 +26,12 @@ This file helps coding agents (and humans) work productively and safely in this 
 
 If something is ambiguous, prefer the matching `.mdc` file over this summary.
 
+## Pull request reviews
+
+Every PR must link a repository issue explaining the problem and motivation, following the [issue and PR requirements](docs/resources/contributing.md#explain-the-change-in-an-issue). For features, establish the use case, existing Simfinity capabilities tried, why they are insufficient, the owning layer and engine compatibility. Create or reuse the issue before opening a PR; existing and automated PRs need it before approval or merge. Keep small fixes proportional. If rationale is missing, continue reviewing but report the readiness blocker; do not invent it or approve the PR.
+
+For Simfinity PR reviews and re-reviews, use the repository skill [simfinity-pr-review](.agents/skills/simfinity-pr-review/SKILL.md), also invocable as `$simfinity-pr-review`. It covers architectural fit, application/library boundaries, lifecycle and authorization, MongoDB/PostgreSQL compatibility, and verification. Apply only the lenses relevant to the change; the rules above remain authoritative. A review request alone does not authorize posting feedback, merging or publishing.
+
 ## Non-negotiables
 
 1. **Do not** use `graphql-middleware`’s `applyMiddleware` or `@graphql-tools/utils` `mapSchema` on a Simfinity schema — they rebuild the schema and duplicate globally injected introspection types. Use **Envelop** plugins and in-place resolver wrapping instead (see architecture rule).
