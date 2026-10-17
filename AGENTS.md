@@ -26,6 +26,19 @@ This file helps coding agents (and humans) work productively and safely in this 
 
 If something is ambiguous, prefer the matching `.mdc` file over this summary.
 
+## Application usage skills
+
+When building or migrating an application with Simfinity, use the relevant repository skills below. They complement the public guides, check the installed version and engine, and can be copied with their references/assets into consumer projects. Load only the topics needed for the task; ordinary application work does not authorize library changes or publication.
+
+| Task | Skill |
+| --- | --- |
+| Application design or migration | [simfinity-application-design](.agents/skills/simfinity-application-design/SKILL.md) |
+| Types, relations and generated inputs | [simfinity-domain-modeling](.agents/skills/simfinity-domain-modeling/SKILL.md) |
+| Scopes, operation/field permissions and write ownership | [simfinity-access-control](.agents/skills/simfinity-access-control/SKILL.md) |
+| Controllers, states and transactional business rules | [simfinity-business-workflows](.agents/skills/simfinity-business-workflows/SKILL.md) |
+| Workers, custom commands and native atomic operations | [simfinity-server-operations](.agents/skills/simfinity-server-operations/SKILL.md) |
+| Lists, aggregates, calculations and read models | [simfinity-queries-and-reports](.agents/skills/simfinity-queries-and-reports/SKILL.md) |
+
 ## Pull request reviews
 
 Every PR must link a repository issue explaining the problem and motivation, following the [issue and PR requirements](docs/resources/contributing.md#explain-the-change-in-an-issue). For features, establish the use case, existing Simfinity capabilities tried, why they are insufficient, the owning layer and engine compatibility. Create or reuse the issue before opening a PR; existing and automated PRs need it before approval or merge. Keep small fixes proportional. If rationale is missing, continue reviewing but report the readiness blocker; do not invent it or approve the PR.
