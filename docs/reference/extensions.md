@@ -120,9 +120,9 @@ Permission rules of the [authorization plugin](/guide/authorization) apply to a 
 | No `resolve` of its own | `Barbershop.busyRanges is virtual, so it requires its own resolve function` |
 | `relation`, `unique: true`, `validations`, `queryable: true` or `readOnly: false` as well | `Barbershop.busyRanges is virtual, which is never stored, so it cannot declare extensions.relation` (or `unique: true`, `extensions.validations`, `queryable: true`, `readOnly: false`) |
 | A field named `id` or `_id` | `Barbershop.id is the identity field, so it cannot be virtual` |
-| A field named in the type's `extensions.indexes` | `An index of Barbershop names the virtual field Barbershop.score, which is never stored` |
+| A field named in the type's `extensions.indexes`, also as a member of a dotted key such as `address.pin` | `An index of Barbershop names the virtual field Barbershop.score, which is never stored`; for a dotted key, `An index of Barbershop names the virtual field Address.pin (through address.pin), which is never stored` |
 | The `state` field of a type with a state machine | `Barbershop.state holds the state of its state machine, so it cannot be virtual` |
-| The `connectionField` of a reference, or of a collection, on the type that stores it | `Shop.bookings uses the virtual field Booking.shopRef as its connectionField; a virtual field is never stored` |
+| The `connectionField` of a reference, or of a collection, on the type that stores it: also a dotted `connectionField` such as `meta.key` that ends at or passes through a virtual member of an embedded type (checked on every backend), and the field name that a collection without a `connectionField` reads its items by, unless the application resolves that collection | `Shop.bookings uses the virtual field Booking.shopRef as its connectionField; a virtual field is never stored`; for a dotted path, `Booking.shop uses the virtual field BookingMeta.key as its connectionField (through meta.key); a virtual field is never stored` |
 
 `readOnly: true` and `queryable: false` restate what `virtual` implies, so they are allowed.
 

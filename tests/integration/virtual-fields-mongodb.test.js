@@ -317,6 +317,58 @@ withStandalone('virtual fields on a standalone MongoDB server', () => {
   });
 });
 
+// A MongoDB connectionField may be a dotted path into an embedded value. Such a path must not end at,
+// or pass through, a virtual member: the reference would store its link, and get an index, there.
+describe.each(['off', 'transactional'])('dotted connectionField aliases on MongoDB (%s integrity)', (referentialIntegrity) => {
+  const build = (name, keyField, connectionField = 'meta.key') => {
+    const Target = new GraphQLObjectType({ name: `${name}Target`, fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+    const Meta = new GraphQLObjectType({ name: `${name}Meta`, fields: { label: { type: GraphQLString }, key: keyField } });
+    const Owner = new GraphQLObjectType({
+      name: `${name}Owner`,
+      fields: {
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        meta: { type: Meta, extensions: { relation: { embedded: true } } },
+        owner: { type: Target, extensions: { relation: { connectionField } } },
+      },
+    });
+    const runtime = createRuntime(createMongoAdapter({ referentialIntegrity }));
+    runtime.preventCreatingCollection(true);
+    runtime.connect(null, Target, `${name.toLowerCase()}target`, `${name.toLowerCase()}targets`);
+    runtime.connect(null, Owner, `${name.toLowerCase()}owner`, `${name.toLowerCase()}owners`);
+    runtime.addNoEndpointType(Meta);
+    return { runtime, Owner };
+  };
+  const prefix = referentialIntegrity === 'off' ? 'VfmDot' : 'VfmDotTx';
+
+  test('createSchema rejects a dotted connectionField that ends at a virtual member, before building any model', () => {
+    const { runtime, Owner } = build(`${prefix}Virtual`, virtualField(GraphQLID, () => null));
+    let thrown;
+    try {
+      runtime.createSchema();
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown?.extensions).toMatchObject({ code: 'INVALID_MODEL', status: 400 });
+    expect(thrown.message).toContain(`${prefix}VirtualOwner.owner uses the virtual field ${prefix}VirtualMeta.key as its connectionField (through meta.key)`);
+    expect(mongoose.modelNames()).not.toContain(Owner.name);
+  });
+
+  test('createSchema rejects a non-string connectionField that names a virtual member, before building any model', () => {
+    const { runtime, Owner } = build(`${prefix}Boxed`, virtualField(GraphQLID, () => null), ['meta.key']);
+    expect(() => runtime.createSchema()).toThrow(`${prefix}BoxedOwner.owner uses the virtual field ${prefix}BoxedMeta.key as its connectionField (through meta.key)`);
+    expect(mongoose.modelNames()).not.toContain(Owner.name);
+  });
+
+  test('a dotted connectionField that ends at a stored member still builds its path and index', () => {
+    const { runtime, Owner } = build(`${prefix}Stored`, { type: GraphQLID });
+    runtime.createSchema();
+    const schema = runtime.getModel(Owner).schema;
+    expect(schema.path('meta.key')?.instance).toBe('ObjectId');
+    expect(schema.indexes()).toContainEqual([{ 'meta.key': 1 }, expect.anything()]);
+  });
+});
+
 withReplicaSet('virtual fields on a MongoDB replica set', () => {
   const log = commandLog();
   let warn;

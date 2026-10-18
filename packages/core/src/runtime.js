@@ -2734,7 +2734,7 @@ const assertVirtualFields = (schemaTypes) => {
       if (assertVirtualDeclaration(type.name, fieldName, field, () => hasApplicationResolver(type, fieldName))) {
         declared = true;
       }
-      assertVirtualConnection(type, fieldName, field);
+      assertVirtualConnection(type, fieldName, field, () => hasApplicationResolver(type, fieldName));
     }
   }
   for (const { gqltype, stateMachine } of Object.values(typesDict.types)) {

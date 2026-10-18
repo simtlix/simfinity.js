@@ -328,6 +328,96 @@ describe('virtual field declarations', () => {
     }), 'VfDecl.value uses the virtual field VfDecl.ownerKey as its connectionField');
   });
 
+  test('rejects a dotted connectionField or index key that ends at or passes through a virtual member', () => {
+    const Meta = new GraphQLObjectType({
+      name: 'VfDeclMeta',
+      fields: { label: { type: GraphQLString }, key: { type: GraphQLID, resolve, extensions: { virtual: true } } },
+    });
+    const Owner = new GraphQLObjectType({ name: 'VfDeclOwner', fields: { id: { type: GraphQLID } } });
+    const embeddedMeta = { meta: { type: Meta, extensions: { relation: { embedded: true } } } };
+    // A reference whose dotted connectionField ends at a virtual member of an embedded type.
+    expectInvalidModel(singleType({ type: Owner, extensions: { relation: { connectionField: 'meta.key' } } }, {
+      extraFields: embeddedMeta,
+    }), 'VfDecl.value uses the virtual field VfDeclMeta.key as its connectionField (through meta.key); a virtual field is never stored');
+    // A dotted path that passes through a virtual object.
+    const Info = new GraphQLObjectType({ name: 'VfDeclInfo', fields: { key: { type: GraphQLID } } });
+    expectInvalidModel(singleType({ type: Owner, extensions: { relation: { connectionField: 'info.key' } } }, {
+      extraFields: { info: { type: Info, resolve, extensions: { virtual: true } } },
+    }), 'VfDecl.value uses the virtual field VfDecl.info as its connectionField (through info.key)');
+    // A collection whose dotted connectionField ends at a virtual member of the item type.
+    const Parent = new GraphQLObjectType({
+      name: 'VfDeclParent',
+      fields: () => ({ id: { type: GraphQLID }, children: { type: new GraphQLList(Child), extensions: { relation: { connectionField: 'meta.key' } } } }),
+    });
+    const Child = new GraphQLObjectType({
+      name: 'VfDeclChild',
+      fields: () => ({ id: { type: GraphQLID }, ...embeddedMeta }),
+    });
+    const runtime = createRuntime(createMemoryAdapter());
+    runtime.addNoEndpointType(Meta);
+    runtime.connect(null, Parent, 'vfDeclParent', 'vfDeclParents');
+    runtime.connect(null, Child, 'vfDeclChild', 'vfDeclChildren');
+    const message = 'VfDeclParent.children uses the virtual field VfDeclMeta.key as its connectionField (through meta.key)';
+    expect(() => runtime.createSchema()).toThrow(message);
+    expect(() => describeModels([{ gqltype: Parent }, { gqltype: Child }])).toThrow(message);
+    // An index key that ends at a virtual member.
+    expectInvalidModel(singleType({ type: GraphQLInt }, {
+      typeExtensions: { indexes: [{ fields: ['name', 'meta.key'] }] },
+      extraFields: embeddedMeta,
+    }), 'An index of VfDecl names the virtual field VfDeclMeta.key (through meta.key), which is never stored');
+  });
+
+  test('reads a non-string connectionField as its string form, as storage keys the link by it', () => {
+    const Owner = new GraphQLObjectType({ name: 'VfDeclOwner', fields: { id: { type: GraphQLID } } });
+    const Meta = new GraphQLObjectType({
+      name: 'VfDeclMeta',
+      fields: { key: { type: GraphQLID, resolve, extensions: { virtual: true } } },
+    });
+    // A String object, as an application could pass one.
+    expectInvalidModel(singleType({ type: Owner, extensions: { relation: { connectionField: new String('ownerKey') } } }, {
+      extraFields: { ownerKey: { type: GraphQLID, resolve, extensions: { virtual: true } } },
+    }), 'VfDecl.value uses the virtual field VfDecl.ownerKey as its connectionField; a virtual field is never stored');
+    expectInvalidModel(singleType({ type: Owner, extensions: { relation: { connectionField: ['meta.key'] } } }, {
+      extraFields: { meta: { type: Meta, extensions: { relation: { embedded: true } } } },
+    }), 'VfDecl.value uses the virtual field VfDeclMeta.key as its connectionField (through meta.key)');
+  });
+
+  test('checks the field name that a collection without a connectionField reads its items by', () => {
+    const build = (collection) => {
+      const Parent = new GraphQLObjectType({
+        name: 'VfDeclParent',
+        fields: () => ({ id: { type: GraphQLID }, kids: { type: new GraphQLList(Child), ...collection } }),
+      });
+      const Child = new GraphQLObjectType({
+        name: 'VfDeclChild',
+        fields: () => ({ id: { type: GraphQLID }, label: { type: GraphQLString }, kids: { type: GraphQLID, resolve, extensions: { virtual: true } } }),
+      });
+      const runtime = createRuntime(createMemoryAdapter());
+      runtime.connect(null, Parent, 'vfDeclParent', 'vfDeclParents');
+      runtime.connect(null, Child, 'vfDeclChild', 'vfDeclChildren');
+      return () => runtime.createSchema();
+    };
+    expect(build({ extensions: { readOnly: true, relation: {} } }))
+      .toThrow('VfDeclParent.kids uses the virtual field VfDeclChild.kids as its connectionField; a virtual field is never stored');
+    // A collection that the application resolves is never read by Simfinity, so its name is not a link.
+    expect(build({ extensions: { readOnly: true, relation: {} }, resolve: () => [] })).not.toThrow();
+  });
+
+  test('a dotted connectionField through a reference names a path of its own type, not the target field', () => {
+    const Target = new GraphQLObjectType({
+      name: 'VfDeclTarget',
+      fields: { id: { type: GraphQLID }, vk: { type: GraphQLID, resolve, extensions: { virtual: true } } },
+    });
+    const Owner = new GraphQLObjectType({ name: 'VfDeclOwner', fields: { id: { type: GraphQLID } } });
+    const runtime = createRuntime(createMemoryAdapter());
+    runtime.connect(null, Target, 'vfDeclTarget', 'vfDeclTargets');
+    runtime.connect(null, Owner, 'vfDeclOwner', 'vfDeclOwners');
+    runtime.connect(null, singleType({ type: Owner, extensions: { relation: { connectionField: 'link.vk' } } }, {
+      extraFields: { link: { type: Target, extensions: { relation: { connectionField: 'linkId' } } } },
+    }), 'vfDecl', 'vfDecls');
+    expect(() => runtime.createSchema()).not.toThrow();
+  });
+
   test('checks members of embedded types and types reached only through virtual fields', () => {
     const Embedded = new GraphQLObjectType({
       name: 'VfDeclEmbedded',
