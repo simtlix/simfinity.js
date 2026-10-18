@@ -100,5 +100,5 @@ Use `npm run test:watch` while iterating; `npm run test:coverage` when coverage 
 
 - Keep changes scoped to the task; avoid drive-by refactors.
 - Extend existing patterns rather than introducing parallel abstractions.
-- For GraphQL types in examples/tests: use `extensions.relation` on relationship fields; use `extensions.readOnly` where appropriate.
+- For GraphQL types in examples/tests: use `extensions.relation` on relationship fields; use `extensions.readOnly` where appropriate; use `extensions.virtual` (not `readOnly` plus a resolver) for a field that its resolver computes and nothing stores. Code that walks `gqltype.getFields()` for storage, inputs or query arguments must skip virtual fields with `isVirtualField`, a public root export of `@simtlix/simfinity-core` (bundled packages import it from `@simtlix/simfinity-core/internal/relation-storage`); `describeModels()` already leaves them out.
 - Keep the root free of backup READMEs and local `.tgz`/`.zip` output. Generate temporary archives outside the repository. Archives under `docs/public/` are intentional website downloads; check links and checksums before changing them.

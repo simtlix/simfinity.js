@@ -14,6 +14,7 @@ Examples use the selected runtime from [database setup](./databases#runtime-setu
 - A record and the child records that change with it, such as an order and its lines: one [generated mutation with nested collection writes](#write-a-parent-and-its-children-together).
 - Writes that must accompany an entity change, such as audit rows, outbox events, counters or derived totals: [controller hooks](#work-inside-the-transaction-with-controllers) that use the session they receive.
 - A job, worker or webhook that reads data or runs an existing generated operation: [execute the generated schema in-process](#execute-the-generated-schema-in-process).
+- A read that generated filters, scopes and aggregates cannot express, for clients and server code alike: a [virtual field](./queries#virtual-fields) on the type it belongs to, read through the generated queries.
 - One command that creates several records, of one type or several, in a single transaction: a [custom mutation with `saveObject()`](#create-several-records-in-one-custom-mutation).
 - Conditional updates, counters, upserts, leases, bulk changes and infrastructure rows without a business lifecycle: the [native model with the session](#use-the-native-model-for-atomic-operations).
 - Updates or deletes of several unrelated records in one transaction: not generated yet; see [what Simfinity does not provide](#what-simfinity-does-not-provide).
@@ -410,7 +411,8 @@ Inside a hook or a custom mutation, pass the session you received. A call withou
 
 - No generated mutation updates or deletes several unrelated records in one transaction. Each root mutation field runs in its own transaction, and nested writes only reach the children of one parent. Write a custom mutation instead: `saveObject()` for new records and the native model with the session for changes, with your own checks. A generated mutation that runs a list of operations in one transaction is proposed in [#100](https://github.com/simtlix/simfinity.js/issues/100); optimistic concurrency, in [#98](https://github.com/simtlix/simfinity.js/issues/98).
 - No programmatic update or delete through the lifecycle. `saveObject()` creates records only.
-- No generated read inside a caller's transaction. Generated queries never receive a session, so read uncommitted data through the native model.
+- No generated read inside a caller's transaction. Generated queries never receive a session, so read uncommitted data through the native model. Virtual field resolvers receive no session either.
+- No registered custom queries: `registerMutation()` registers mutations only. Expose a read that generated filters, scopes and aggregates cannot express as a [virtual field](./queries#virtual-fields) on the type it belongs to, and read it from server code through [in-process execution](#execute-the-generated-schema-in-process); see [reading stored records through a custom mutation](./anti-patterns#reading-stored-records-through-a-custom-mutation).
 - No IDs in nested `added` items, and no references between records added in the same mutation.
 - No caller-supplied condition on generated updates or deletes, such as an expected version. Check the stored record with the session in `onUpdating` or `onDelete`, or use a native conditional update.
 

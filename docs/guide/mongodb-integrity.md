@@ -55,7 +55,7 @@ The protected graph comes from `extensions.relation`, using the same metadata de
 - Explicit many-to-many link entities and self-references.
 - Referenced supporting types registered without root endpoints.
 
-Plain scalar IDs without a declared or inferred relationship remain ordinary values. Optional absent/null references do not require a target. An embedded document itself belongs to its owner and disappears when its owner is deleted; references within it still protect their separate targets.
+Plain scalar IDs without a declared or inferred relationship remain ordinary values. [Virtual fields](./queries#virtual-fields) store nothing, so they are never part of the graph, whatever their result type, and need no `relation` in this mode either. Optional absent/null references do not require a target. An embedded document itself belongs to its owner and disappears when its owner is deleted; references within it still protect their separate targets.
 
 A missing target returns `REFERENCE_CONSTRAINT_VIOLATION` with status metadata `409`, matching PostgreSQL's FK error. The entire generated mutation rolls back, including its parent and earlier nested children. Deleting a target still referenced by another stored document returns the same error. Deleting a self-referencing document is allowed when no other document references it.
 

@@ -1,5 +1,5 @@
 import { SimfinityError } from '@simtlix/simfinity-core';
-import { identifier, qualified, generatedName } from './sql.js';
+import { identifier, qualified, generatedName, literal } from './sql.js';
 import { createTableSQL, createForeignKeySQL, createIndexSQL, createFunctionSQL, createTriggerSQL, triggerEvents } from './ddl.js';
 import { maintenanceLayouts, layoutOf, withLayouts } from './constraints.js';
 
@@ -342,8 +342,18 @@ const traverse = async (client, description, catalog, pass, missing, created) =>
   return legacy;
 };
 
-// Names to read from the catalog: the description's, plus the refresh-trigger objects of both layouts.
-const catalogNames = (description, layouts) => {
+// The table that an embedded value holding a virtual member owned while that member was stored, when the description
+// no longer has it: the value then has no member with its own table, so it is stored as JSON.
+const formerOwnedTable = (description, location) => {
+  if (!location.path.length) return null;
+  const name = generatedName(location.table, location.path[0]);
+  return description.tables.some((table) => table.name === name) ? null : name;
+};
+
+// Names to read from the catalog: the description's, plus the refresh-trigger objects of both layouts. With virtual
+// fields, also the touch trigger of each root that owns nothing, and the former owned table of each embedded value
+// that holds one (see formerOwnedTable), which only storage no longer described can leave.
+const catalogNames = (description, layouts, virtualFields) => {
   const functions = new Set((description.functions || []).map((fn) => fn.name));
   const triggers = new Set((description.triggers || []).map((trigger) => trigger.name));
   for (const layout of layouts.values()) {
@@ -352,7 +362,18 @@ const catalogNames = (description, layouts) => {
       for (const trigger of objects.triggers) triggers.add(trigger.name);
     }
   }
-  return { tables: description.tables.map((table) => table.name), functions: [...functions], triggers: [...triggers] };
+  const tables = new Set(description.tables.map((table) => table.name));
+  if (virtualFields.length) {
+    const maintained = new Set((description.maintenance || []).map((item) => item.rootTable));
+    for (const table of description.tables) {
+      if (!table.ownership && !table.auxiliary && !maintained.has(table.name)) triggers.add(generatedName(table.name, 'touch'));
+    }
+    for (const location of virtualFields) {
+      const former = formerOwnedTable(description, location);
+      if (former) tables.add(former);
+    }
+  }
+  return { tables: [...tables], functions: [...functions], triggers: [...triggers] };
 };
 
 // Each maintained root keeps the refresh-trigger layout its database already has: a function or trigger
@@ -412,6 +433,148 @@ const lockRoots = async (client, description, catalog, roots) => {
   if (names.length) await client.query(`LOCK TABLE ${names.map((table) => qualified(description.schema, table.name)).join(', ')} IN SHARE ROW EXCLUSIVE MODE`);
 };
 
+const UPGRADE_NOTES = 'https://simtlix.github.io/simfinity.js/resources/compatibility.html';
+const series = (items) => (items.length < 3 ? items.join(' and ') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`);
+// A name longer than PostgreSQL identifiers was never stored, so nothing can refer to it.
+const quotedName = (name) => (Buffer.byteLength(name) <= 63 ? identifier(name) : null);
+
+// The described functions whose bodies could refer to the storage of a virtual field's location: for a member of a
+// JSON value, the validation functions of its column, which the column's shape check calls; for a column, the
+// maintenance functions of its table's root and the functions of that root's triggers. Each set includes the
+// described functions that its functions call.
+const functionOwners = (description) => {
+  const functions = description.functions || [];
+  const called = (text) => functions.filter((fn) => text.includes(qualified(description.schema, fn.name)));
+  const closure = (seeds) => {
+    const names = new Set();
+    const queue = [...seeds];
+    while (queue.length) {
+      const fn = queue.pop();
+      if (names.has(fn.name)) continue;
+      names.add(fn.name);
+      queue.push(...called(fn.body));
+    }
+    return names;
+  };
+  const ofRoot = (table) => {
+    const root = rootOf(description, table);
+    const item = (description.maintenance || []).find((entry) => entry.rootTable === root);
+    const triggered = new Set((description.triggers || []).filter((trigger) => rootOf(description, trigger.table) === root).map((trigger) => trigger.function));
+    return closure(functions.filter((fn) => triggered.has(fn.name) || (item && [item.validateFunction, item.refreshFunction].includes(fn.name))));
+  };
+  const ofColumn = (tableName, column) => {
+    const table = description.tables.find((item) => item.name === tableName);
+    const check = table?.checks.find((item) => item.name === generatedName(tableName, column, 'shape'));
+    return closure(check ? called(check.expression) : []);
+  };
+  return { ofRoot, ofColumn };
+};
+
+// Storage that virtual fields (`extensions.virtual`) left in a database created while they were stored, found in
+// the catalog this run has read, with no further statement: a column of a described table named as such a field's
+// column, presence flag or owned-records state, a described function whose stored body still refers to such a
+// field while its description does not, and the owned table of an embedded value that such a field, as its last
+// member with its own table, made the value own. A state column means the field owned tables, which are dropped. An
+// embedded value that no longer owns a table is stored as JSON instead, which needs a data migration. A root that
+// now owns nothing but still has its refresh triggers loses them and its guard table, since the functions they call
+// refer to the storage being dropped. Only the functions of a field's own column or root are compared (see
+// functionOwners). Returns the explanation, with the migration, that a SCHEMA_MISMATCH appends, or null when
+// nothing is left.
+const virtualLeftovers = (description, catalog, virtualFields) => {
+  const { schema } = description;
+  const maintained = new Set((description.maintenance || []).map((item) => item.rootTable));
+  const owners = functionOwners(description);
+  const left = new Set();
+  const columns = new Map();
+  const owned = [];
+  const moved = new Map();
+  const has = (actual, name) => actual.columns.some((column) => column.name === name);
+  for (const location of virtualFields) {
+    const former = formerOwnedTable(description, location);
+    const table = former && description.tables.find((item) => item.name === location.table);
+    const actual = table && catalog.tables.get(table.name);
+    const ownedActual = former && catalog.tables.get(former);
+    const [value, member = location.name] = location.path;
+    const state = `__${value}_state`;
+    if (!actual || !ownedActual || table.columns.some((column) => column.name === state) || !has(actual, state)) continue;
+    // The member, or the value inside the owned table that holds it, had storage there.
+    if (![member, generatedName('__field', member, 'present'), `__${member}_state`].some((name) => has(ownedActual, name))) continue;
+    left.add(location.field);
+    moved.set(former, { table: table.name, value, state, location });
+  }
+  for (const location of virtualFields.filter((item) => !item.path.length)) {
+    const table = description.tables.find((item) => item.name === location.table);
+    const actual = table && catalog.tables.get(table.name);
+    if (!actual) continue;
+    const state = `__${location.name}_state`;
+    const names = [location.name, generatedName('__field', location.name, 'present'), state].filter((name) => !table.columns.some((column) => column.name === name)
+      && actual.columns.some((column) => column.name === name));
+    if (!names.length) continue;
+    left.add(location.field);
+    columns.set(table.name, [...(columns.get(table.name) || []), ...names]);
+    if (names.includes(state)) owned.push(location);
+  }
+  const statements = [...columns].map(([table, names]) => `ALTER TABLE ${qualified(schema, table)} ${names.map((name) => `DROP COLUMN ${identifier(name)}`).join(', ')};`);
+  const add = (statement) => { if (!statements.includes(statement)) statements.push(statement); };
+  for (const location of owned) add(`DROP TABLE IF EXISTS ${qualified(schema, generatedName(location.table, location.name))} CASCADE;`);
+  for (const [former, { table, value, state }] of moved) {
+    const json = [value, generatedName('__field', value, 'present')].map(identifier).join(' and ');
+    add(`The embedded value ${value} of ${qualified(schema, table)} now has no member with its own table, so it is stored as JSON in the columns ${json} `
+      + `of that table, with the checks and functions that compileDatabaseSchema() gives them, instead of in the table ${qualified(schema, former)}: `
+      + `add them, fill them from the rows of ${qualified(schema, former)}, then drop the column ${identifier(state)} and run DROP TABLE IF EXISTS ${qualified(schema, former)} CASCADE;`);
+  }
+  for (const root of new Set([...columns.keys(), ...[...moved.values()].map((item) => item.table)].map((table) => rootOf(description, table)))) {
+    if (maintained.has(root) || !catalog.triggers(root, generatedName(root, 'touch')).length) continue;
+    for (const suffix of ['touch', 'deferred']) add(`DROP TRIGGER IF EXISTS ${identifier(generatedName(root, suffix))} ON ${qualified(schema, root)};`);
+    add(`DROP TABLE IF EXISTS ${qualified(schema, generatedName(root, 'guard'))};`);
+  }
+  // A column is referred to as `alias."name"`, a member of a JSON value as `($1 -> 'name')`, and a former owned table
+  // by its qualified name.
+  const references = [
+    ...virtualFields.map((location) => ({
+      field: location.field,
+      functions: location.path.length ? owners.ofColumn(location.table, location.path[0]) : owners.ofRoot(location.table),
+      tokens: location.path.length
+        ? [`($1 -> ${literal(location.name)})`]
+        : [location.name, generatedName('__field', location.name, 'present'), `__${location.name}_state`].map(quotedName).filter(Boolean).map((name) => `.${name}`),
+    })),
+    ...[...moved].map(([former, { table, location }]) => ({ field: location.field, functions: owners.ofRoot(table), tokens: [qualified(schema, former)] })),
+  ];
+  const functions = [];
+  for (const fn of description.functions || []) {
+    const rows = catalog.functions(fn.name);
+    if (rows.length !== 1 || rows[0].body === fn.body) continue;
+    const matched = references.filter(({ functions: owned, tokens }) => owned.has(fn.name)
+      && tokens.some((token) => rows[0].body.includes(token) && !fn.body.includes(token)));
+    if (!matched.length) continue;
+    functions.push(qualified(schema, fn.name));
+    for (const { field } of matched) left.add(field);
+  }
+  if (!left.size) return null;
+  const fields = [...new Set(virtualFields.map((item) => item.field))].filter((field) => left.has(field));
+  const many = fields.length > 1;
+  if (functions.length) {
+    statements.push(`Replace ${functions.length > 1 ? 'the functions' : 'the function'} ${series(functions)} with ${functions.length > 1 ? 'their CREATE FUNCTION statements' : 'its CREATE FUNCTION statement'} `
+      + 'from compileDatabaseSchema(), run as CREATE OR REPLACE FUNCTION.');
+  }
+  return `${series(fields)} ${many ? 'are' : 'is'} virtual (extensions.virtual), so ${many ? 'they are' : 'it is'} never stored, but this database still holds ${many ? 'their' : 'its'} `
+    + `earlier storage. Once nothing reads that storage, migrate it: ${statements.join(' ')} See the upgrade notes at ${UPGRADE_NOTES}`;
+};
+// A SCHEMA_MISMATCH of a database that still holds storage of fields that are now virtual also names them.
+const explainMismatch = (error, description, catalog, layouts, virtualFields) => {
+  if (!virtualFields.length || !catalog || !(error instanceof SimfinityError) || error.extensions?.code !== 'SCHEMA_MISMATCH') return error;
+  let resolved = description;
+  // Refresh-trigger objects of two layouts in one root are themselves the mismatch; compare with the description.
+  try { resolved = resolveLayouts(description, catalog, layouts); } catch { /* keep the description */ }
+  try {
+    const explanation = virtualLeftovers(resolved, catalog, virtualFields);
+    return explanation ? new SimfinityError(`${error.message} ${explanation}`, 'SCHEMA_MISMATCH', 409) : error;
+  } catch {
+    // An explanation never replaces the mismatch it explains.
+    return error;
+  }
+};
+
 const backfill = async (client, description, roots) => {
   // The keys of these roots can be stale because maintenance objects were recreated. Their tables are
   // locked; rebuild their complete derived key set before testing owners against one another. Rollback
@@ -430,18 +593,23 @@ const backfill = async (client, description, roots) => {
  * Create missing objects or validate an existing schema; never alter/drop existing storage. The catalog is
  * read in a fixed number of statements without table locks. Create mode changes nothing, and locks nothing,
  * when nothing is missing; otherwise it locks only the tables of roots whose keys it must rebuild.
+ * `context.virtualFields`, which the SQL runtime passes when its types declare virtual fields, lets a
+ * SCHEMA_MISMATCH name such a field whose earlier storage the database still holds, with its migration.
  */
-export const initializeDatabase = async (pool, description, { mode = 'create' } = {}) => {
+export const initializeDatabase = async (pool, description, { mode = 'create' } = {}, context) => {
   if (!['create', 'validate'].includes(mode)) throw new SimfinityError(`Unknown initialization mode: ${mode}`, 'INVALID_INITIALIZATION_MODE', 400);
   const { schema } = description;
   identifier(schema);
   if (schema.startsWith('pg_') || schema === 'information_schema') throw new SimfinityError('System schemas cannot be managed', 'INVALID_DATABASE_SCHEMA', 400);
   const layouts = maintenanceLayouts(description);
-  const names = catalogNames(description, layouts);
+  const virtualFields = Array.isArray(context?.virtualFields) ? context.virtualFields : [];
+  const names = catalogNames(description, layouts, virtualFields);
   const client = await pool.connect();
   const created = [];
   let legacy = [];
   let rollbackError;
+  // The catalog most recently read, which explains a mismatch.
+  let latest = null;
   try {
     await client.query(mode === 'validate' ? 'BEGIN READ ONLY' : 'BEGIN');
     await client.query('SET LOCAL search_path = pg_catalog');
@@ -451,6 +619,7 @@ export const initializeDatabase = async (pool, description, { mode = 'create' } 
     // Serializes initializers of this schema before anything is read.
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`simfinity:${schema}`]);
     const inspected = await loadCatalog(client, schema, names);
+    latest = inspected;
     if (mode === 'validate') legacy = await traverse(client, resolveLayouts(description, inspected, layouts), inspected, 'validate', [], created);
     else {
       // Inspect first, without table locks or DDL. Drift before the first missing object is reported as
@@ -468,6 +637,7 @@ export const initializeDatabase = async (pool, description, { mode = 'create' } 
         const roots = staleRoots(planned, missing);
         await lockRoots(client, planned, inspected, roots);
         const catalog = await loadCatalog(client, schema, names);
+        latest = catalog;
         const effective = resolveLayouts(description, catalog, layouts);
         const objects = [];
         legacy = await traverse(client, effective, catalog, 'create', objects, created);
@@ -487,7 +657,7 @@ export const initializeDatabase = async (pool, description, { mode = 'create' } 
     return { mode, created };
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch (failure) { rollbackError = failure; }
-    throw error;
+    throw explainMismatch(error, description, latest, layouts, virtualFields);
   } finally {
     // A failed ROLLBACK can leave the transaction open; the error makes pg-pool destroy the connection.
     client.release(rollbackError);

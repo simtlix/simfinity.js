@@ -2635,10 +2635,20 @@ const BookType = new GraphQLObjectType({
       extensions: {
         unique: true
       }
+    },
+    readers: {
+      type: GraphQLInt,
+      args: { since: { type: new GraphQLNonNull(GraphQLString) } },
+      extensions: {
+        virtual: true        // Computed by its resolver; never stored, filtered or written
+      },
+      resolve: (book, { since }) => countReaders(book._id ?? book.id, since)
     }
   })
 });
 ```
+
+A virtual field (`extensions: { virtual: true }`) is computed by its own resolver on every read. No backend stores it, generated inputs leave it out, and list queries have no filter, sort or aggregation argument or path for it: client paths through it fail with `FORBIDDEN_FILTER_PATH`. Clients read it through the type's generated queries, after the type's middleware and scope, so use one for a read that the filter language cannot express. Its result can be any output type, registered or not, without `relation`. Generated MCP tools give a virtual field with a required argument its own read tool, here `book_readers`; `extensions: { virtual: { mcp: 'select' } }` lets list tools select a field without required arguments, and `{ mcp: false }` turns the tool off. See [virtual fields](https://simtlix.github.io/simfinity.js/guide/queries.html#virtual-fields).
 
 ### Custom Mutations
 
@@ -2729,6 +2739,7 @@ Simfinity can automatically expose every generated GraphQL operation as a [Model
 | Delete mutation | `deletebook` |
 | State-machine action | `publish_book` |
 | Custom mutation | _the registered name_ |
+| Virtual field with a required argument | `book_readers` (`<byIdQuery>_<field>`) |
 
 Each generated tool follows MCP best practices so an agent can use it without extra context:
 
@@ -2831,7 +2842,7 @@ The handler catches all errors itself: `onError` is for logging/metrics, and a J
 | --- | --- | --- |
 | `execution` | `{ mode: 'in-process' }` | `in-process` runs against the in-memory `schema`. `remote` issues HTTP GraphQL requests: `{ mode: 'remote', endpoint, headers, timeoutMs, retry: { attempts, backoffMs, retryAfter, maxRetryAfterMs, jitter } }`. Remote `endpoint` (for credentials only), `headers` and `timeoutMs` are validated at setup (`MCP_INVALID_EXECUTION_CONFIG`) and read again on every call. See [Remote execution](#remote-execution). |
 | `context` | `{}` | GraphQL context value, or a factory. For in-process/stdio it is called as `(extra) => context`; for the HTTP handler it is called as `(req, extra) => context` so you can authenticate per request. Passed through to execution so `scope` functions and auth rules work (they read `context.user`). |
-| `include` / `exclude` | — | String or array: raw GraphQL field names, prefixed tool names, or the categories `'query'` / `'mutation'`. `exclude` wins over `include`. |
+| `include` / `exclude` | — | String or array: raw GraphQL field names, prefixed tool names, or the categories `'query'` / `'mutation'`. `exclude` wins over `include`. A virtual field tool matches its own names (`book_readers`), not its by-ID query's. |
 | `includeTypes` / `excludeTypes` | — | String or array of entity (return) type names — one entry covers every tool for that entity (`'Book'` matches `book`, `books`, `books_aggregate`, `addbook`, ...). `excludeTypes` wins. |
 | `selectionDepth` | `1` | Nesting depth for the auto-generated output selection set (and the mirrored `outputSchema`). Each nested collection it reaches is read with one query per returned row, or, with an adapter that batches collection reads, one per nested collection field and batch of rows ([batched collection reads](https://simtlix.github.io/simfinity.js/guide/relationships.html#batched-collection-reads)). |
 | `nestedCollections` | `'all'` | `'none'` leaves nested collections (object list fields with a `pagination` argument, such as non-embedded one-to-many relations) out of the generated selection set and `outputSchema`. Also per tool in `toolOverrides`, where the tool's value wins; ignored with `selection`. Other values throw `MCP_INVALID_OPTIONS` at setup. |
@@ -2848,7 +2859,7 @@ The handler catches all errors itself: `onError` is for logging/metrics, and a J
 
 In TypeScript, the `options` parameter is typed `GenerateMCPToolsInit` (`generateMCPTools`), `MCPServerInit` (`createMCPServer`, `startStdioMCPServer`) or `HTTPMCPHandlerInit` (`createHTTPMCPHandler`). Each accepts every value of its option interface plus the wider forms the runtime takes. `limits` may be an `MCPLimitsInit`, whose caps are numbers, numeric strings, bigints, `null` or `false`. A remote `execution` may be an `MCPRemoteExecutionInit`, whose `headers` is a plain object, `Headers`, `Map` or `[name, value]` pairs and whose `timeoutMs` is a number, numeric string, bigint, `null` or `false`. `GenerateMCPToolsOptions`, `MCPServerOptions`, `HTTPMCPHandlerOptions`, `MCPLimits` and `MCPRemoteExecutionOptions` keep the 3.5.6 shapes of their existing members and gain only optional ones (`nestedCollections`, `textFormat` and the `retry` opt-ins), so code that reads options back compiles unchanged.
 
-Selection sets select every scalar/enum field without required arguments, `id` included. An object type with no such field selects `__typename`, and interface/union return types select `__typename`, so the generated documents are always statically valid — and the output schemas mirror the same fallbacks.
+Selection sets select every scalar/enum field without required arguments, `id` included, except that tools whose root field returns a list select only the virtual fields that set `mcp: 'select'`, since each listed record runs their resolvers. An object type with no such field selects `__typename`, and interface/union return types select `__typename`, so the generated documents are always statically valid — and the output schemas mirror the same fallbacks.
 
 ### Selecting and naming tools
 
@@ -2869,7 +2880,7 @@ console.log(getOperation('catalog_books'));
 
 - `include`/`exclude` entries match the raw GraphQL field name, the prefixed tool name, or the categories `'query'` / `'mutation'`. `exclude` always wins over `include`.
 - `includeTypes`/`excludeTypes` match the entity (return) type. Aggregate queries resolve their entity through the sibling list field (`books_aggregate` → `books`), so `excludeTypes: 'Book'` also hides the aggregate tool. With an `includeTypes` allowlist, tools without an object return type are dropped too.
-- Duplicate tool names (e.g. a Query field and a Mutation field sharing a name) are not allowed by MCP: the first tool wins and the later one is skipped with a `console.warn` — rename one of the GraphQL fields or use `include`/`exclude`.
+- Duplicate tool names (e.g. a Query field and a Mutation field sharing a name) are not allowed by MCP: the first tool wins and the later one is skipped with a `console.warn` — rename one of the GraphQL fields or use `include`/`exclude`. Virtual field tools come after every query and mutation tool, so they are the ones skipped.
 
 ### Customizing tools
 

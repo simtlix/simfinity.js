@@ -32,6 +32,8 @@ export type {
   StateMachine,
   TypePermissions,
   TypeScopes,
+  VirtualFieldDeclaration,
+  VirtualFieldOptions,
 } from '@simtlix/simfinity-core';
 
 export interface DatabaseColumn {
@@ -222,7 +224,8 @@ export interface PostgresRuntime extends Runtime<PostgresModel, PostgresSession>
    * Must be awaited before operations execute. Does not synchronize incompatible schemas. A request rejected before
    * storage is touched, such as an unknown mode (INVALID_INITIALIZATION_MODE, 400) or, on a validation-only runtime,
    * a non-empty mode other than validate (DATABASE_CREATION_DISABLED, 409), keeps the current readiness; a ready runtime keeps serving while it is initialized again, and any failure of the latest
-   * initialization makes it unavailable.
+   * initialization makes it unavailable. When the database still holds storage of a field that is now virtual (`extensions.virtual`), such as its column,
+   * the SCHEMA_MISMATCH (409) message also names the field and gives the migration.
    */
   initializeDatabase(options?: InitializationOptions): Promise<InitializationResult>;
   withTransaction<T>(session: PostgresSession | null | undefined, callback: (session: PostgresSession) => Promise<T> | T): Promise<T>;

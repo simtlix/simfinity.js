@@ -159,8 +159,8 @@ const quotedUnion = (names) => names.map((name) => `'${name}'`).join(' | ');
 const coreRootValues = [
   'ForbiddenError', 'InternalServerError', 'QLOperator', 'QLSort', 'QLValue', 'SimfinityError',
   'UnauthenticatedError', 'auth', 'buildErrorFormatter', 'configureMutationLimits', 'configureQueryLimits',
-  'createQueryPlan', 'createRuntime', 'createValidatedScalar', 'describeModels', 'paginationStages',
-  'plugins', 'resolveModelPath', 'scalars', 'validators',
+  'createQueryPlan', 'createRuntime', 'createValidatedScalar', 'describeModels', 'isVirtualField',
+  'paginationStages', 'plugins', 'resolveModelPath', 'scalars', 'validators', 'virtualFieldOptions',
 ];
 // MongoDB's legacy deep imports of the core subpaths, which re-export them unchanged, as do their
 // sibling declarations.
@@ -190,9 +190,11 @@ const coreSource = `import assert from 'node:assert/strict';
     createRuntime,
     createValidatedScalar,
     describeModels,
+    isVirtualField,
     plugins,
     scalars,
     validators,
+    virtualFieldOptions,
   } from '@simtlix/simfinity-core';
   import {
     GraphQLError,
@@ -217,6 +219,9 @@ const coreSource = `import assert from 'node:assert/strict';
   assert.equal(introspection.errors, undefined);
   assert(introspection.data.__type.fields.some((field) => field.name === 'extensions'));
   assert.equal(describeModels([]).entities.length, 0);
+  assert.equal(isVirtualField({ extensions: { virtual: true } }), true);
+  assert.equal(isVirtualField(type.getFields().title), false);
+  assert.deepEqual(virtualFieldOptions({ extensions: { virtual: { mcp: 'select' } } }), { mcp: 'select' });
   assert.equal(createValidatedScalar('Count', '', GraphQLInt, () => {}).parseValue(3), 3);
   assert.equal(QLOperator.name, 'QLOperator');
   assert.equal(QLSort.name, 'QLSort');
@@ -517,14 +522,18 @@ const coreTypes = `import {
   buildErrorFormatter,
   configureMutationLimits,
   createRuntime,
+  isVirtualField,
   plugins,
   scalars,
   validators,
+  virtualFieldOptions,
   type AuthRuleFunction,
   type DatabaseAdapter,
   type FieldValidations,
   type MutationLimitsOptions,
   type TypeScopes,
+  type VirtualFieldDeclaration,
+  type VirtualFieldOptions,
 } from '@simtlix/simfinity-core';
 import {
   GraphQLEnumType,
@@ -639,7 +648,25 @@ const validations: FieldValidations = validators.email();
 const scalarName: string = scalars.EmailScalar.name;
 const countPlugin = plugins.envelopCountPlugin();
 void [model, formatted, graphQLError, shape, scopes, misspelledScopes, owner, roleRule, known, operator, sort, valueName, rule, validations, scalarName, countPlugin, conditionalScopes];
-void [readonlyRoles, frozenPermissions];`;
+void [readonlyRoles, frozenPermissions];
+// extensions.virtual is true or an options object whose only option is mcp.
+const virtualField: VirtualFieldDeclaration = true;
+const virtualOptions: VirtualFieldOptions[] = [{}, { mcp: 'tool' }, { mcp: 'select' }, { mcp: false }];
+const virtualDeclarations: VirtualFieldDeclaration[] = [virtualField, ...virtualOptions];
+// @ts-expect-error extensions.virtual is true or an options object, never false.
+const notVirtual: VirtualFieldDeclaration = false;
+// @ts-expect-error mcp is 'tool', 'select' or false.
+const badMcp: VirtualFieldOptions = { mcp: 'list' };
+// @ts-expect-error mcp is the only option.
+const unknownOption: VirtualFieldOptions = { batch: () => [] };
+void [virtualDeclarations, notVirtual, badMcp, unknownOption];
+// Custom adapters skip virtual fields of the GraphQL types they receive.
+const storedFieldNames = (type: GraphQLObjectType): string[] => Object.entries(type.getFields())
+  .filter(([, field]) => !isVirtualField(field)).map(([name]) => name);
+const virtualMode: 'tool' | 'select' | false | undefined = virtualFieldOptions({ extensions: { virtual: true } })?.mcp;
+// @ts-expect-error the helpers read a field, not its name.
+isVirtualField('busyRanges');
+void [storedFieldNames, virtualMode];`;
 
 // The expected type of a subpath's default export.
 const subpathDefaultType = ({ namespace, values, defaultExport, defaultExtras }) => {
@@ -873,9 +900,17 @@ const sqlTypes = `import {
   type MutationLimitsOptions,
   type TypeScopes,
   type ItemValidators,
+  type VirtualFieldDeclaration,
+  type VirtualFieldOptions,
   validators,
 } from '@simtlix/simfinity-sql';
-import { describeModels, type ItemValidators as CoreItemValidators, type QueryPlan } from '@simtlix/simfinity-core';
+import {
+  describeModels,
+  type ItemValidators as CoreItemValidators,
+  type QueryPlan,
+  type VirtualFieldDeclaration as CoreVirtualFieldDeclaration,
+  type VirtualFieldOptions as CoreVirtualFieldOptions,
+} from '@simtlix/simfinity-core';
 import { GraphQLID, GraphQLObjectType, GraphQLString } from 'graphql';
 type Configuration = { schema: string; token: string };
 type Client = { active: boolean };
@@ -1016,7 +1051,11 @@ type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B
 const itemRules: ItemValidators = [validators.maxLength('Tag', 20), null];
 const tagRules = validators.arrayLength('Tags', 10, itemRules);
 const sameItemValidators: Equals<ItemValidators, CoreItemValidators> = true;
-void [capability, scalar, description, badOperation, badPlugin, scopes, itemRules, tagRules, sameItemValidators];`;
+const sameVirtualTypes: {
+  declaration: Equals<VirtualFieldDeclaration, CoreVirtualFieldDeclaration>;
+  options: Equals<VirtualFieldOptions, CoreVirtualFieldOptions>;
+} = { declaration: true, options: true };
+void [capability, scalar, description, badOperation, badPlugin, scopes, itemRules, tagRules, sameItemValidators, sameVirtualTypes];`;
 
 const postgresTypes = `import { Pool, type PoolClient } from 'pg';
 import { createSQL, type SQLChildrenQueryCompiler, type SQLStatement } from '@simtlix/simfinity-sql';
@@ -1044,8 +1083,14 @@ import {
   type PostgresSession,
   type DatabaseQueryable,
   type ItemValidators,
+  type VirtualFieldDeclaration,
+  type VirtualFieldOptions,
 } from '@simtlix/simfinity-postgres';
-import type { ItemValidators as CoreItemValidators } from '@simtlix/simfinity-core';
+import type {
+  ItemValidators as CoreItemValidators,
+  VirtualFieldDeclaration as CoreVirtualFieldDeclaration,
+  VirtualFieldOptions as CoreVirtualFieldOptions,
+} from '@simtlix/simfinity-core';
 import { GraphQLObjectType, GraphQLString } from 'graphql';
 declare const pool: Pool;
 const type = new GraphQLObjectType({ name: 'TypedPostgresBook', fields: { title: { type: GraphQLString } } });
@@ -1084,6 +1129,11 @@ type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B
 const itemRules: ItemValidators = [validators.maxLength('Tag', 20), null];
 const tagRules = validators.arrayLength('Tags', 10, itemRules);
 const sameItemValidators: Equals<ItemValidators, CoreItemValidators> = true;
+const sameVirtualTypes: {
+  declaration: Equals<VirtualFieldDeclaration, CoreVirtualFieldDeclaration>;
+  options: Equals<VirtualFieldOptions, CoreVirtualFieldOptions>;
+} = { declaration: true, options: true };
+void sameVirtualTypes;
 const pgOptions: PostgresConfiguration = { pool, schema: 'app', multiRowInserts: false, explicitNullsOrder: true };
 createPostgres(pgOptions);
 createPostgres().configure({ pool, explicitNullsOrder: false, multiRowInserts: true });
@@ -1150,12 +1200,16 @@ const mongoTypes = `import {
   type MutationLimitsOptions,
   type TypeScopes,
   type ItemValidators,
+  type VirtualFieldDeclaration,
+  type VirtualFieldOptions,
 } from '@simtlix/simfinity-js';
 import type {
   AuthSchemaPlugin as CoreAuthSchemaPlugin,
   DatabaseAdapter as CoreDatabaseAdapter,
   EnvelopSchemaPlugin as CoreEnvelopSchemaPlugin,
   ItemValidators as CoreItemValidators,
+  VirtualFieldDeclaration as CoreVirtualFieldDeclaration,
+  VirtualFieldOptions as CoreVirtualFieldOptions,
 } from '@simtlix/simfinity-core';
 import { GraphQLObjectType, GraphQLString } from 'graphql';
 const runtime = createRuntime(createMongoAdapter());
@@ -1190,6 +1244,11 @@ const sameSchemaPlugins: {
   auth: Equals<AuthSchemaPlugin, CoreAuthSchemaPlugin>;
   createAuthPlugin: Equals<ReturnType<typeof auth.createAuthPlugin>, CoreAuthSchemaPlugin>;
 } = { envelop: true, auth: true, createAuthPlugin: true };
+const sameVirtualTypes: {
+  declaration: Equals<VirtualFieldDeclaration, CoreVirtualFieldDeclaration>;
+  options: Equals<VirtualFieldOptions, CoreVirtualFieldOptions>;
+} = { declaration: true, options: true };
+void sameVirtualTypes;
 // Batched collection reads are an adapter option; the adapter declares the optional members only.
 const plain: MongoAdapter = createMongoAdapter();
 const integrity: MongoAdapter = createMongoAdapter({ referentialIntegrity: 'transactional' });

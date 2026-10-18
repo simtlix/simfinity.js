@@ -2,6 +2,9 @@ import {
   isObjectType, isScalarType, isEnumType, isNonNullType, isListType,
 } from 'graphql';
 import SimfinityError from './errors/simfinity.error.js';
+import {
+  assertVirtualConnection, assertVirtualDeclaration, assertVirtualIndexes, assertVirtualStateField,
+} from './virtual-fields.js';
 
 const invalid = (message) => {
   throw new SimfinityError(message, 'INVALID_MODEL', 400);
@@ -42,7 +45,11 @@ const scalarDescription = (type) => {
   return { scalar };
 };
 
-/** Describe persistent entities without importing a database driver or mutating GraphQL types. */
+/**
+ * Describe persistent entities without importing a database driver or mutating GraphQL types.
+ * Virtual fields (`extensions.virtual`) store nothing, so they are left out of every entity and
+ * embedded type, and their result types are neither described nor required to declare a relation.
+ */
 export const describeModels = (registrations) => {
   if (!Array.isArray(registrations)) invalid('registrations must be an array');
   const knownTypes = new Map();
@@ -61,12 +68,16 @@ export const describeModels = (registrations) => {
     }
   };
   for (const registration of registrations) registerType(registration.gqltype);
+  for (const registration of registrations) assertVirtualStateField(registration.gqltype, registration.stateMachine);
   for (const registration of registrations) if (registration.endpoint !== false) addEntity(registration.gqltype);
 
   const fieldsOf = (type, ancestors, path, embedded = false) => {
     if (ancestors.includes(type)) invalid(`Embedded cycle at ${path}`);
     registerType(type);
-    const fields = Object.values(type.getFields()).map((field) => {
+    const stored = Object.values(type.getFields()).filter((field) => !assertVirtualDeclaration(
+      type.name, field.name, field, () => typeof field.resolve === 'function',
+    ));
+    const fields = stored.map((field) => {
       const { named, ...wrappers } = unwrap(field.type);
       const extensions = field.extensions || {};
       const descriptor = {
@@ -79,6 +90,7 @@ export const describeModels = (registrations) => {
       if (!isObjectType(named)) invalid(`Unsupported field type at ${path}.${field.name}`);
       const relation = extensions.relation;
       if (!relation) invalid(`${path}.${field.name} requires extensions.relation`);
+      assertVirtualConnection(type, field.name, field);
       if (relation.embedded) {
         return {
           ...descriptor, kind: 'embedded',
@@ -111,6 +123,7 @@ export const describeModels = (registrations) => {
       }
       return { fields: [...index.fields], unique: index.unique === true };
     });
+    assertVirtualIndexes(type);
   }
   for (const entity of entities.values()) {
     for (const field of entity.fields.filter((item) => item.kind === 'collection')) {

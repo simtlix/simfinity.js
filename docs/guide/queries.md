@@ -1,6 +1,6 @@
 ---
 title: Queries
-description: Retrieve records with scalar filters, related-field conditions, AND/OR groups, pagination, sorting, and aggregation.
+description: Retrieve records with scalar filters, related-field conditions, AND/OR groups, pagination, sorting, aggregation, and virtual fields for reads that filters cannot express.
 ---
 
 # Queries
@@ -171,9 +171,10 @@ Filter, sort, `groupId` and fact paths supplied by the client are collected befo
 
 - No path segment may name a field with `extensions.queryable: false`, or a field with an application-defined `resolve`. This includes masking resolvers, relationship fields with a manual resolver, and a custom `id` resolver; only the resolvers Simfinity generates keep a field queryable. Set `extensions.queryable: true` to let clients query a stored field that has its own resolver. Such paths fail with `FORBIDDEN_FILTER_PATH` (403); unknown fields still fail with `INVALID_FILTER_FIELD` (400).
 - A path through a non-embedded single reference to a type with a `find` scope only matches rows whose referenced record that scope admits, including when it is used for sorting or grouping; a path used only in `AND`/`OR` group conditions restricts just the groups that use it. A path into a collection relation whose type's `find` scope restricts the caller, such as `seasons.year` when `Season` is scoped, fails with `FORBIDDEN_FILTER_PATH`. So does a path into a type whose `find` scope, while it restricts the caller, filters through a collection relation or a reference inside an embedded list. See [query scope](./query-scope#relationship-paths-in-filters-sorts-and-aggregations).
+- No path segment may name a [virtual field](#virtual-fields), which holds no stored value. Such paths fail with `FORBIDDEN_FILTER_PATH` (403) too, whatever `queryable` says.
 - With the [authorization plugin](./authorization#filter-sort-and-aggregation-paths), every field a path names also needs a read rule.
 
-Paths that middleware or scope functions add are trusted and are not checked.
+Paths that middleware or scope functions add are trusted and are not checked, with one exception: a path through a virtual field fails with `INVALID_MODEL` (500) before the database is queried, because it cannot compile against storage that does not exist.
 
 ::: tip Upgrading
 Relationship fields and `id` fields that define their own `resolve` were previously usable in filter, sort and aggregation paths. Remove manual relationship resolvers that only load the related record, since Simfinity generates them, or set `extensions: { queryable: true }` on fields whose resolver returns the stored value.
@@ -285,5 +286,239 @@ Each result contains a `groupId` and a JSON `facts` object, such as `{ "total": 
 Supported operations are `SUM`, `COUNT`, `AVG`, `MIN`, and `MAX`. Every fact requires `path`, including `COUNT`; use an existing field such as `id` for counting. `groupId` and fact paths follow the same [path restrictions](#path-restrictions) as filters. Filters run before grouping. Aggregate sorting accepts a fact name or `groupId`, and pagination applies to groups. Unlike list queries, aggregates have no default 100-result limit when pagination is omitted. See the [aggregation reference](../reference/aggregation) for input and result details.
 
 PostgreSQL also supports scalar-list leaves inside nested embedded lists for filters, sorts, ragged group keys, and array-valued facts. Array `MIN`/`MAX` compares the complete array, while result sorting selects the immediate extrema. Whole embedded objects cannot be sorted or grouped. The [PostgreSQL query boundaries](./postgresql#query-support-and-boundaries) list the exact remaining limits.
+
+## Virtual fields
+
+Most reads of stored records are generated queries: filters select what the client asks for, [query scopes](./query-scope) restrict what the caller may see, and [aggregate queries](#aggregate-records) calculate totals. Some reads need logic that the filter language cannot express, such as a projection of records that a scope hides from the caller, a calculation, or data from another source. Add such a read to the registered type it belongs to, as a **virtual field**: a field with its own resolver, optionally with arguments, declared with `extensions: { virtual: true }`. Clients select it together with the record, through the type's generated queries, so the type's middleware, scope and permission rules decide which records reach it. No backend stores it, and it is not part of the query language. Prefer it to a custom mutation that reads the records; see [reading stored records through a custom mutation](./anti-patterns#reading-stored-records-through-a-custom-mutation).
+
+### Declare a virtual field
+
+This field returns the times that confirmed bookings hold in a barbershop on a date. A scope on `Booking` lets clients read only their own bookings, so they cannot list the others to find the taken times, but every client who may see a shop may see when it is busy. The example assumes a `Booking` type registered with `connect()`, with references to its `barbershop` and to its `professional`, which is `null` when the booking holds the whole shop. `scheduledDate` (`'YYYY-MM-DD'`), `startTime` and `endTime` (`'HH:mm'`) are `String` fields, and `status` is an enum whose `CONFIRMED` value has no internal value, so MongoDB stores `CONFIRMED` too:
+
+```javascript
+// barbershop.js
+import {
+  GraphQLID,
+  GraphQLList,
+  GraphQLNonNull,
+  GraphQLObjectType,
+  GraphQLString,
+} from 'graphql';
+import { simfinity } from './runtime.js';
+import { listBusyRanges } from './busy-ranges.js';
+
+// Clients see approved shops only; administrators see every shop.
+const approvedShops = async ({ args, context }) => {
+  if (context?.user?.role === 'admin') return;
+  args.AND = [
+    ...(args.AND || []),
+    { conditions: [{ field: 'status', operator: 'EQ', value: 'APPROVED' }] },
+  ];
+};
+
+const BusyRangeType = new GraphQLObjectType({
+  name: 'BusyRange',
+  description: 'Time held by a confirmed booking, without client data.',
+  fields: {
+    startTime: { type: GraphQLString },
+    endTime: { type: GraphQLString },
+    professionalId: { type: GraphQLID, description: 'Null when the booking holds the whole shop.' },
+  },
+});
+
+export const BarbershopType = new GraphQLObjectType({
+  name: 'Barbershop',
+  extensions: { scope: { find: approvedShops, get_by_id: approvedShops } },
+  fields: () => ({
+    id: { type: GraphQLID },
+    name: { type: new GraphQLNonNull(GraphQLString) },
+    status: { type: GraphQLString },
+    busyRanges: {
+      type: new GraphQLList(new GraphQLNonNull(BusyRangeType)),
+      description: 'Times held by confirmed bookings on a date, by start time.',
+      args: {
+        date: { type: new GraphQLNonNull(GraphQLString), description: 'Day in YYYY-MM-DD format.' },
+        professionalId: { type: GraphQLID, description: 'Only the ranges that block this professional.' },
+      },
+      extensions: { virtual: true },
+      resolve: async (shop, { date, professionalId }) => {
+        const ranges = await listBusyRanges(shop, date);
+        // A booking without a professional blocks every professional of the shop.
+        return professionalId
+          ? ranges.filter((range) => range.professionalId === null || range.professionalId === professionalId)
+          : ranges;
+      },
+    },
+  }),
+});
+
+simfinity.connect(null, BarbershopType, 'barbershop', 'barbershops');
+```
+
+`listBusyRanges` reads the bookings through the [native model](./server-side-operations#use-the-native-model-for-atomic-operations). It is written on top of `listBusyRangesOfShops`, which reads the bookings of several shops at once, so that the [batched reads](#performance-and-batching) below can reuse it:
+
+::: code-group
+
+```javascript [MongoDB]
+// busy-ranges.js
+import { simfinity } from './runtime.js';
+import { BookingType } from './booking.js';
+
+const toRange = (booking) => ({
+  startTime: booking.startTime,
+  endTime: booking.endTime,
+  professionalId: booking.professional ? String(booking.professional) : null,
+});
+
+// The confirmed bookings of the given shops on a date, read natively, without
+// Booking's scope: one list of busy ranges per shop ID, in the order of shopIds.
+export const listBusyRangesOfShops = async (shopIds, date) => {
+  const bookings = await simfinity.getModel(BookingType)
+    .find({ barbershop: { $in: shopIds }, scheduledDate: date, status: 'CONFIRMED' })
+    .select('barbershop startTime endTime professional')
+    .sort({ startTime: 1 })
+    .lean();
+  const ranges = new Map(shopIds.map((id) => [id, []]));
+  for (const booking of bookings) ranges.get(String(booking.barbershop)).push(toRange(booking));
+  return shopIds.map((id) => ranges.get(id));
+};
+
+export const listBusyRanges = async (shop, date) => (await listBusyRangesOfShops([String(shop._id)], date))[0];
+```
+
+```javascript [PostgreSQL]
+// busy-ranges.js
+import { simfinity } from './runtime.js';
+import { BookingType } from './booking.js';
+
+// find() returns at most 100 records without pagination and rejects a page
+// size above the maxPageSize of configureQueryLimits(), so read every page.
+// Keep PAGE_SIZE at or below that limit.
+const PAGE_SIZE = 100;
+
+const toRange = (booking) => ({
+  startTime: booking.startTime,
+  endTime: booking.endTime,
+  professionalId: booking.professional ?? null,
+});
+
+// The confirmed bookings of the given shops on a date, read natively, without
+// Booking's scope: one list of busy ranges per shop ID, in the order of shopIds.
+export const listBusyRangesOfShops = async (shopIds, date) => {
+  const ranges = new Map(shopIds.map((id) => [id, []]));
+  for (let page = 1; ; page += 1) {
+    const bookings = await simfinity.getModel(BookingType).find({
+      barbershop: { terms: [{ path: 'id', operator: 'IN', value: shopIds }] },
+      scheduledDate: { operator: 'EQ', value: date },
+      status: { operator: 'EQ', value: 'CONFIRMED' },
+      // The ID breaks ties between equal start times, so pages do not overlap.
+      sort: { terms: [{ field: 'startTime', order: 'ASC' }, { field: 'id', order: 'ASC' }] },
+      pagination: { page, size: PAGE_SIZE },
+    });
+    for (const booking of bookings) ranges.get(booking.barbershop).push(toRange(booking));
+    if (bookings.length < PAGE_SIZE) break;
+  }
+  return shopIds.map((id) => ranges.get(id));
+};
+
+export const listBusyRanges = async (shop, date) => (await listBusyRangesOfShops([shop.id], date))[0];
+```
+
+:::
+
+The MongoDB query compares stored values, while PostgreSQL's `find()` takes generated filters, which accept enum names: for an enum declared as `CONFIRMED: { value: 'confirmed' }`, only the MongoDB snippet needs `'confirmed'`.
+
+A client reads the field through the shop:
+
+```graphql
+query ShopDay($id: ID!, $date: String!, $professionalId: ID) {
+  barbershop(id: $id) {
+    name
+    busyRanges(date: $date, professionalId: $professionalId) {
+      startTime
+      endTime
+      professionalId
+    }
+  }
+}
+```
+
+### What a virtual field runs
+
+The field resolves wherever a response contains a barbershop: under `barbershop` and `barbershops`, through generated relationships that reach the type, in mutation results, in [in-process execution](./server-side-operations#execute-the-generated-schema-in-process) and in [MCP tools](#virtual-fields-in-mcp-tools). In a query, the generated read has already run the type's global middleware and its `get_by_id` or `find` scope, so a shop that the scope hides from the caller reads as `null`, or is left out of the list, and the resolver never runs for it. Generated single relationships run the `get_by_id` scope too, as described in [scope boundaries](./query-scope#scope-boundaries). In a mutation result, the field runs after the mutation has committed, on the record that the mutation wrote.
+
+The resolver receives `(parent, args, context, info)`, as every GraphQL resolver does. `parent` is the record that the generated read returned, with `_id` on MongoDB and both `id` and `_id` on PostgreSQL; `args` holds the field's arguments, coerced by GraphQL; `context` is the request context. It receives no session: like the generated query, its native read runs outside any transaction and sees committed data.
+
+Simfinity adds nothing to that native read: the booking scope, middleware and permission rules do not run, which is what lets it see every client's bookings. Return only what every caller who may read the shop may see, as `BusyRange` does with times and professional IDs, and check anything else in the resolver itself. With the [authorization plugin](./authorization), the root query's rule, such as `RootQueryType.barbershop`, and the field's own rule, `Barbershop.busyRanges`, both apply; unlike [path rules](./authorization#filter-sort-and-aggregation-paths), the field rule receives the shop as `parent` and the field's arguments as `args`. Under `defaultPolicy: 'DENY'`, also grant the fields of `BusyRange`.
+
+### What virtual changes
+
+Without `virtual`, Simfinity would describe `busyRanges` as stored data. With it, on both backends:
+
+- **Nothing is stored.** The `Barbershop` table has only `id`, `name` and `status`, and MongoDB documents have no `busyRanges` key. Adding a virtual field to a deployed type is not a schema change: `initializeDatabase()` validates, in both modes, a PostgreSQL database created before the field existed.
+- **Nothing is written.** `BarbershopInput` has `name` and `status` only, and `BusyRange` needs no registration, input type or model.
+- **Nothing filters by it.** `barbershops`, `barbershops_aggregate` and collection fields that list barbershops have no `busyRanges` argument, and filter, sort, `groupId` and fact paths through it fail as described in [path restrictions](#path-restrictions).
+- **Any result type works** without `relation`, including registered entities, interfaces, unions and custom scalars, and so does a non-null result.
+
+The [`virtual` reference](../reference/extensions#virtual) lists every rule, option and error.
+
+Virtual fields cannot be filtered, sorted, grouped or aggregated, because they hold no value to compare. Keep a value that clients must filter or sort by in a stored field that a controller keeps up to date, as the order total in [work inside the transaction with controllers](./server-side-operations#work-inside-the-transaction-with-controllers). They cannot be written either, appear on input types or subscriptions, or read inside a caller's transaction.
+
+### Performance and batching
+
+The resolver runs once for every shop in the response, and once more for every alias of the field. A list query such as `barbershops { busyRanges(date: "2026-10-20") { startTime } }` therefore runs one native read per returned shop after the list query, the N+1 pattern; nested collections and MCP list tools multiply it. When lists select the field, batch these reads per request with the [DataLoader](https://github.com/graphql/dataloader) package, keeping one loader per context object and per value of the arguments that change the read, here the date:
+
+```javascript
+// busy-range-loader.js
+import DataLoader from 'dataloader';
+import { listBusyRangesOfShops } from './busy-ranges.js';
+
+// One loader per request context and date, so the shops of one response that
+// ask for the same date share one read.
+const loaders = new WeakMap();
+
+export const loadBusyRanges = (context, shop, date) => {
+  let byDate = loaders.get(context);
+  if (!byDate) {
+    byDate = new Map();
+    loaders.set(context, byDate);
+  }
+  if (!byDate.has(date)) {
+    byDate.set(date, new DataLoader((shopIds) => listBusyRangesOfShops(shopIds, date)));
+  }
+  return byDate.get(date).load(String(shop._id));
+};
+```
+
+The field's resolver then takes `context` as its third argument and calls `loadBusyRanges(context, shop, date)` instead of `listBusyRanges(shop, date)`:
+
+```javascript
+resolve: async (shop, { date, professionalId }, context) => {
+  const ranges = await loadBusyRanges(context, shop, date);
+  // A booking without a professional blocks every professional of the shop.
+  return professionalId
+    ? ranges.filter((range) => range.professionalId === null || range.professionalId === professionalId)
+    : ranges;
+},
+```
+
+DataLoader collects the `load()` calls of one tick and passes their shop IDs to `listBusyRangesOfShops` together, which returns one list of ranges per ID, in their order, as DataLoader requires. The two shops of the list above then share one read, and two aliases with different dates take one read each.
+
+- On MongoDB, one `$in` read returns every booking of the batch.
+- On PostgreSQL, the read must page through every result, as `listBusyRangesOfShops` does: the default page of 100 records and the `maxPageSize` of [`configureQueryLimits()`](../reference/api#configurequerylimits) apply to the whole read, not to each shop. A single unpaged `find()` returns at most 100 bookings across all the shops of the batch, so the shops past them would show their taken times as free, and a page larger than `maxPageSize` fails with `INVALID_PAGINATION` (400).
+- Each request needs its own context object, which GraphQL servers and the [operation runner](./server-side-operations#execute-the-generated-schema-in-process) create. A `WeakMap` cannot use a primitive as a key, and a context object shared by several requests would share its loaders and their cached ranges. MCP's in-process execution uses the `context` option itself when it is an object, `{}` by default, for every call, so pass a factory such as `context: () => ({})`, or one that authenticates the call.
+
+### Virtual fields in MCP tools
+
+[Generated MCP tools](./mcp) read virtual fields like other fields, with two rules, because each one costs a resolver call:
+
+- A virtual field with a required argument that has no default, such as `busyRanges(date: String!)`, gets its own read tool on a type with a generated by-ID query, named `<byIdQuery>_<field>`: `barbershop_busyRanges`. It takes the shop's `id` and the field's arguments, runs `barbershop(id) { busyRanges(…) }`, with the type's middleware, scope and rules, and returns `{ barbershop: { busyRanges: […] } }`, or `{ barbershop: null }` for a shop that the caller cannot see. Its annotations mark it read-only. `extensions: { virtual: { mcp: false } }` leaves it out.
+- A virtual field without required arguments is selected by by-ID and mutation tools, as any other field. List tools select it only with `extensions: { virtual: { mcp: 'select' } }`, since they would run its resolver for every listed record; batch its reads when you set it. The same rule applies to the items of a nested collection or an embedded list in any tool, such as the bookings that a shop's get-by-id tool selects.
+
+A per-field tool runs the resolver once per call, and an `mcp: 'select'` field once per listed record. See [virtual field tools](../reference/mcp#virtual-field-tools) for the tool's input, operation, output and options.
+
+### Fields that compute without virtual
+
+A field that is `readOnly` and has arguments and its own resolver, but is not virtual, is still described as stored data: PostgreSQL gives it storage, and requires `relation` for an object result; list queries give it a filter argument, which clients cannot use unless the field sets `queryable: true`, and which then compares the stored value; and no MCP tool can pass its required arguments. `createSchema()` logs a `Configuration issue` warning once for each such field of a registered type, unless it is a reference or a collection; see [virtual](../reference/extensions#virtual). Declaring a deployed field virtual removes its storage, its filter argument and its MCP input property, so read the [upgrade notes](../resources/compatibility#virtual-fields) first.
 
 To constrain which records a caller may query, continue with [query scope](./query-scope).

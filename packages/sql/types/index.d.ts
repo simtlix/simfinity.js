@@ -32,6 +32,8 @@ export type {
   StateMachine,
   TypePermissions,
   TypeScopes,
+  VirtualFieldDeclaration,
+  VirtualFieldOptions,
 } from '@simtlix/simfinity-core';
 
 /**
@@ -213,6 +215,23 @@ export interface SQLConfiguration {
  */
 export interface SQLInitializationOptions { mode?: 'create' | 'validate' }
 export interface SQLInitializationResult { mode: 'create' | 'validate'; created: string[] }
+/**
+ * Where a virtual field (`extensions.virtual`) would hold storage, had it any. Virtual fields store nothing and
+ * the description has none of them; a plugin uses the location only to name a field whose storage from before it
+ * became virtual is still in a database, such as a column of `table`.
+ */
+export interface SQLVirtualFieldLocation {
+  /** The table of the type that declares the field: its entity's table, or the owned table of an embedded value. */
+  table: string;
+  /** Storage names of the embedded values between a column of `table` and the field, outermost first; empty for a field of the table itself. */
+  path: string[];
+  /** The field as `Type.field`. */
+  field: string;
+  /** The field's name. */
+  name: string;
+}
+/** Passed to `initialize` only when the runtime's types declare virtual fields; otherwise `initialize` receives three arguments. */
+export interface SQLInitializationContext { virtualFields: SQLVirtualFieldLocation[] }
 export interface SQLValueCodec<Id = string> {
   /** Any identifier, including `0`; only a stored null, missing value or empty string reads as no reference. */
   createId(): Id;
@@ -267,7 +286,7 @@ export interface SQLPlugin<
   naming: SQLNaming;
   /** Receives the bound configuration, or null when there is none, as its last argument. */
   describeSchema(plan: RelationalPlan, configuration?: Configuration | null): Description;
-  initialize(configuration: Configuration, description: Description, options?: SQLInitializationOptions): Promise<SQLInitializationResult>;
+  initialize(configuration: Configuration, description: Description, options?: SQLInitializationOptions, context?: SQLInitializationContext): Promise<SQLInitializationResult>;
   /** Physical DDL for review or export, returned by `runtime.compileDatabaseSchema()`; storage is created and validated through `initialize`. */
   compileSchema(description: Description): string[];
   /** Receives the bound configuration, or null when there is none, as its last argument. */

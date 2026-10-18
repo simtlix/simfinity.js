@@ -17,8 +17,11 @@ import { collectQueryPathEntries, collectQueryPaths, walkQueryPath } from './que
 import { relationFieldOwners } from './relation-owners.js';
 import { isThenable } from './auth/thenable.js';
 import {
-  getFieldStorageName, getListShape, markStoredIdentity, normalizeConnectionField,
+  getFieldStorageName, getListShape, isVirtualField, markStoredIdentity, normalizeConnectionField,
 } from './relation-storage.js';
+import {
+  assertVirtualConnection, assertVirtualDeclaration, assertVirtualIndexes, assertVirtualStateField, virtualConflicts,
+} from './virtual-fields.js';
 import {
   fieldMetadataNamesFixed, fieldMetadataTypes, fixFieldMetadataNames, renameFieldMetadataTypes,
 } from './introspection.js';
@@ -71,6 +74,8 @@ const hasApplicationResolver = (gqltype, fieldName) => (
 // so a bound type cannot be registered in, or reached from, another runtime's schema.
 const runtimeBoundTypes = new WeakMap();
 const forbiddenPath = (message) => new SimfinityError(message, 'FORBIDDEN_FILTER_PATH', 403);
+// Generated inputs never write a readOnly field, nor a virtual one, which virtual implies.
+const isReadOnlyField = (field) => !!field.extensions?.readOnly || isVirtualField(field);
 
 // Query scopes restrict reads, so a scope Simfinity cannot run must fail rather than be skipped.
 const SCOPE_OPERATIONS = ['find', 'get_by_id', 'aggregate'];
@@ -816,7 +821,7 @@ const graphQLListInputType = (dict, fieldEntry, fieldEntryName,
 const selfCollectionFieldNames = (gqltype) => {
   const hasStateMachine = !!typesDict.types[gqltype.name]?.stateMachine;
   return Object.entries(gqltype.getFields())
-    .filter(([fieldName, field]) => !field.extensions?.readOnly
+    .filter(([fieldName, field]) => !isReadOnlyField(field)
       && !(fieldName === 'state' && hasStateMachine)
       && getListShape(field.type)?.itemType === gqltype)
     .map(([fieldName]) => fieldName);
@@ -896,7 +901,7 @@ const buildInputType = (gqltype, reachable) => {
     const fieldArg = {};
     const fieldArgForUpdate = {};
 
-    if (!fieldEntry.extensions || !fieldEntry.extensions.readOnly) {
+    if (!isReadOnlyField(fieldEntry)) {
       const hasStateMachine = !!typesDict.types[gqltype.name].stateMachine;
       const stateFieldManagedByStateMachine = !!(fieldEntryName === 'state' && hasStateMachine);
 
@@ -1037,7 +1042,7 @@ const typesWithReachableInputs = (includedMutationTypes) => {
     if (reached.has(gqltype)) return;
     reached.add(gqltype);
     for (const field of Object.values(gqltype.getFields())) {
-      if (field.extensions?.readOnly) continue;
+      if (isReadOnlyField(field)) continue;
       const listShape = getListShape(field.type);
       const target = listShape ? listShape.itemType : unwrapNonNull(field.type);
       // A single reference is an IdInputType, so it reaches no input of its target.
@@ -1181,6 +1186,8 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
   const collectionFields = {};
 
   for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
+    // A virtual field stores nothing, whatever middleware or saveObject() passes for it.
+    if (isVirtualField(fieldEntry)) continue;
     const fieldValue = ownValue(args, fieldEntryName);
     if (fieldEntry.extensions && fieldEntry.extensions.validations
       && fieldEntry.extensions.validations[operation]) {
@@ -1339,7 +1346,7 @@ const completeEmbeddedValue = (fieldName, fieldEntry, value, patch = null) => {
     for (const [memberName, member] of Object.entries(embeddedType.getFields())) {
       const relation = member.extensions?.relation;
       const memberList = getListShape(member.type);
-      if (relation && !relation.embedded && memberList) continue;
+      if ((relation && !relation.embedded && memberList) || isVirtualField(member)) continue;
       const storageName = getFieldStorageName(memberName, member);
       if (ownValue(item, storageName) === undefined && memberList) item[storageName] = [];
       if (memberName === 'id' || member.extensions?.readOnly) continue;
@@ -1366,7 +1373,7 @@ const clearNullEmbeddedMembers = (merged, fieldEntry, patch) => {
   const members = unwrapNonNull(fieldEntry.type).getFields();
   for (const [memberName, value] of Object.entries(patch)) {
     const member = members[memberName];
-    if (value !== null || !member || member.type instanceof GraphQLNonNull) continue;
+    if (value !== null || !member || member.type instanceof GraphQLNonNull || isVirtualField(member)) continue;
     const relation = member.extensions?.relation;
     const listShape = getListShape(member.type);
     if (relation && !relation.embedded && listShape) continue;
@@ -1429,7 +1436,7 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
   }
 
   for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
-    if (args[fieldEntryName] === null && !(fieldEntry.type instanceof GraphQLNonNull)) {
+    if (args[fieldEntryName] === null && !(fieldEntry.type instanceof GraphQLNonNull) && !isVirtualField(fieldEntry)) {
       materializedModel.modelArgs.$unset = {
         ...materializedModel.modelArgs.$unset,
         [getFieldStorageName(fieldEntryName, fieldEntry)]: '',
@@ -1735,6 +1742,9 @@ const inspectClientPaths = (gqltype, args, operation) => {
   for (const { segments, group } of collectQueryPathEntries(args, operation)) {
     walkQueryPath(gqltype, segments, ({ type, fieldName, field, index }) => {
       const path = segments.slice(0, index + 1).join('.');
+      if (isVirtualField(field)) {
+        throw forbiddenPath(`Query path ${path} uses the virtual field ${type.name}.${fieldName}, which is not stored`);
+      }
       const queryable = field.extensions?.queryable;
       if (queryable === false || (queryable !== true && hasApplicationResolver(type, fieldName))) {
         throw forbiddenPath(`Query path ${path} uses the non-queryable field ${type.name}.${fieldName}`);
@@ -1757,6 +1767,24 @@ const inspectClientPaths = (gqltype, args, operation) => {
     });
   }
   return joinedScopes;
+};
+
+// Whether a schema of this runtime declared a virtual field, so that query paths may name one.
+let virtualFieldsDeclared = false;
+
+// Client paths through a virtual field were rejected before middleware and scopes ran
+// (inspectClientPaths), so a path through one now is a trusted path that middleware or a scope added.
+// It would compile against storage that does not exist, so the operation fails with INVALID_MODEL
+// (500), the code of model declarations that cannot be honored at request time.
+const assertStoredQueryPaths = (gqltype, args, operation) => {
+  if (!virtualFieldsDeclared) return;
+  for (const { segments } of collectQueryPathEntries(args, operation)) {
+    walkQueryPath(gqltype, segments, ({ type, fieldName, field, index }) => {
+      if (!isVirtualField(field)) return;
+      throw new SimfinityError(`Query path ${segments.slice(0, index + 1).join('.')}, added by middleware or a `
+        + `scope, uses the virtual field ${type.name}.${fieldName}, which is not stored`, 'INVALID_MODEL', 500);
+    });
+  }
 };
 
 // A joined scope must not repeat the rows it restricts: its paths may not cross a collection, nor
@@ -1912,6 +1940,7 @@ const resolveById = async (type, args, context, requiredId) => {
   }
   const queryArgs = { id: { operator: 'EQ', value: args.id } };
   await executeScope({ type, args: queryArgs, operation: 'get_by_id', context });
+  assertStoredQueryPaths(type.gqltype, queryArgs, 'find');
   const results = await adapter.find(type.model, type.gqltype, queryArgs, null, { requiredId, context });
   return results[0] || null;
 };
@@ -2428,6 +2457,7 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
             await executeMiddleware(params);
             await executeScope(params);
             await applyJoinedScopes(joinedScopes, params);
+            assertStoredQueryPaths(type.gqltype, params.args, 'find');
             const queryArgs = params.args;
             const wantsCount = !!(queryArgs.pagination && queryArgs.pagination.count)
               && canReportCount(parent, info, context);
@@ -2448,7 +2478,8 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
         };
 
         const aggregateArgsObject = { ...argsObject };
-        if (Object.hasOwn(type.gqltype.getFields(), 'aggregation')) {
+        const fields = type.gqltype.getFields();
+        if (Object.hasOwn(fields, 'aggregation') && !isVirtualField(fields.aggregation)) {
           warnOnce(type.gqltype, 'aggregation', `Configuration issue: ${type.gqltype.name}.aggregation has the name `
             + `of the aggregation argument of ${type.listEntitiesEndpointName}_aggregate, so that endpoint cannot `
             + 'filter it with a top-level argument; filter it in AND/OR group conditions or rename the field.');
@@ -2472,6 +2503,7 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
             await executeMiddleware(params);
             await executeScope(params);
             await applyJoinedScopes(joinedScopes, params);
+            assertStoredQueryPaths(type.gqltype, params.args, 'aggregate');
             return adapter.aggregate(type.model, type.gqltype, params.args, null);
           },
         };
@@ -2576,7 +2608,7 @@ const holdsNoData = (stored, type, ancestors = []) => !ancestors.includes(stored
 // which buildInputType leaves out; nor do referenced collections or members with an application
 // resolver, which may compute a value.
 const countsAsRequired = (type, memberName, member) => member.type instanceof GraphQLNonNull
-  && !isReferencedCollection(member) && memberName !== 'id' && !member.extensions?.readOnly
+  && !isReferencedCollection(member) && memberName !== 'id' && !isReadOnlyField(member)
   && !isAbstractOutputType(unwrapListAndNonNull(member.type)) && !hasApplicationResolver(type, memberName);
 const hasRequiredMember = (type) => Object.entries(type.getFields())
   .some(([memberName, member]) => countsAsRequired(type, memberName, member));
@@ -2691,6 +2723,50 @@ const assertCollectionConnections = () => {
   }
 };
 
+// Virtual fields (`extensions.virtual`) of the object types a schema reaches, registered or not, and
+// the uses of them that registered types declare, are checked before anything is built
+// (INVALID_MODEL, 400). Returns whether any field is virtual.
+const assertVirtualFields = (schemaTypes) => {
+  let declared = false;
+  for (const type of schemaTypes) {
+    if (!(type instanceof GraphQLObjectType)) continue;
+    for (const [fieldName, field] of Object.entries(type.getFields())) {
+      if (assertVirtualDeclaration(type.name, fieldName, field, () => hasApplicationResolver(type, fieldName))) {
+        declared = true;
+      }
+      assertVirtualConnection(type, fieldName, field);
+    }
+  }
+  for (const { gqltype, stateMachine } of Object.values(typesDict.types)) {
+    assertVirtualIndexes(gqltype);
+    assertVirtualStateField(gqltype, stateMachine);
+  }
+  return declared;
+};
+
+// A readOnly field with arguments and its own resolver is almost always computed, yet unless it is
+// virtual it is stored and filterable like any other field. References and collections, whose
+// storage is a link rather than the field's value and which cannot be virtual, are not reported.
+// The advice also names the settings it declares that a virtual field cannot, such as the
+// `relation: { embedded: true }` of a computed embedded value.
+const warnUndeclaredVirtualFields = () => {
+  for (const { gqltype } of Object.values(typesDict.types)) {
+    for (const [fieldName, field] of Object.entries(gqltype.getFields())) {
+      const relation = field.extensions?.relation;
+      if (!field.extensions?.readOnly || !field.args.length || isVirtualField(field)
+        || (relation && !relation.embedded) || !hasApplicationResolver(gqltype, fieldName)) continue;
+      const conflicts = virtualConflicts(field.extensions);
+      const removal = conflicts.length
+        ? ` and remove ${conflicts.length < 3 ? conflicts.join(' and ') : `${conflicts.slice(0, -1).join(', ')} and ${conflicts.at(-1)}`}`
+        : '';
+      warnOnce(gqltype, `undeclaredVirtual:${fieldName}`, `Configuration issue: ${gqltype.name}.${fieldName} is `
+        + 'readOnly and has arguments and its own resolver, but it is not virtual, so Simfinity describes it as '
+        + 'stored data: backends may store it, and list queries get a filter argument for it. If its resolver '
+        + `computes it, declare extensions: { virtual: true }${removal}.`);
+    }
+  }
+};
+
 const getRegistrations = () => Object.values(typesDict.types);
 
 // Application types that a schema with these allowlists contains, whatever else it reaches: the
@@ -2713,6 +2789,8 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
   const schemaTypes = collectSchemaOutputTypes();
   schemaTypes.forEach(assertNotBoundElsewhere);
   schemaTypes.forEach(assertFieldsNotBoundElsewhere);
+  if (assertVirtualFields(schemaTypes)) virtualFieldsDeclared = true;
+  warnUndeclaredVirtualFields();
   assertCollectionConnections();
   // An application type with the name of a field metadata type that an earlier schema fixed; one that
   // only generated types or the fields of an input object reach is found when the schema is
@@ -2861,6 +2939,7 @@ const autoGenerateResolvers = (gqltype) => {
         await executeMiddleware(params);
         await executeScope(params);
         await applyJoinedScopes(joinedScopes, params);
+        assertStoredQueryPaths(relatedType, params.args, 'find');
         return loadChildren(relatedTypeInfo, connection, parent._id ?? parent.id, params.args, context);
       }, { simfinityQuery: { typeName: relatedType.name, operation: 'find' } });
       runtimeBoundTypes.set(gqltype, runtimeIdentity);
@@ -2961,11 +3040,12 @@ const LIST_QUERY_ARGS = ['pagination', 'sort', 'AND', 'OR'];
 
 // `omit` is a collection's back-reference field, which its parent supplies, so it gets no filter.
 // A field named like a generated argument gets no top-level filter either; it is reported once.
+// A virtual field is not part of the query language, so it gets no filter at all.
 const createArgsForQuery = (gqltype, omit = null) => {
     const argsObject = {};
     const argTypes = gqltype.getFields();
     for (const name of LIST_QUERY_ARGS) {
-      if (name !== omit && Object.hasOwn(argTypes, name)) {
+      if (name !== omit && Object.hasOwn(argTypes, name) && !isVirtualField(argTypes[name])) {
         warnOnce(gqltype, name, `Configuration issue: ${gqltype.name}.${name} has the name of a generated list `
           + 'query argument, so list queries and collection fields cannot filter it with a top-level argument; '
           + 'filter it in AND/OR group conditions or rename the field.');
@@ -2973,7 +3053,7 @@ const createArgsForQuery = (gqltype, omit = null) => {
     }
 
     for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
-      if (fieldEntryName === omit) continue;
+      if (fieldEntryName === omit || isVirtualField(fieldEntry)) continue;
       let filterType = null;
 
       if (fieldEntry.type instanceof GraphQLScalarType

@@ -11,6 +11,7 @@
 | Several creations in one transaction | Registered mutation and `saveObject(..., session, context)` | Its omitted coercion/auth/middleware/limits are addressed |
 | Counter, lock, lease, receipt or outbox | Native model/driver in application infrastructure | Conditional atomicity, supplied session, affected rows |
 | Summary | Scoped aggregate over stored facts, or application calculation/read model | Cardinality, rounding, visibility and ordering before pagination |
+| Read that filters cannot express, on the record it describes | After 3.7.0: a virtual field (`extensions.virtual`) on the type, read through its generated queries | The type's scope runs first; the resolver's native reads skip other types' scopes; batch per request for lists |
 | Request quota, deadline or query telemetry | Server/driver infrastructure configured centrally | Cancellation and observation preserve results and semantics |
 
 The schema is the common interface; Mongoose documents, SQL sessions and driver errors remain backend-specific. Native access is supported and bypasses Simfinity's lifecycle. Localize it and explicitly supply the checks its operation needs. A blanket ban on native calls can lead to worse replacements: hand-called resolvers, per-operation adapter overrides, or pipeline rewriting.

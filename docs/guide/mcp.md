@@ -167,6 +167,8 @@ const lean = mcp.generateMCPTools(schema, {
 });
 ```
 
+[Virtual fields](./queries#virtual-fields) cost a resolver call each, so list tools select one only when it sets `extensions: { virtual: { mcp: 'select' } }`, while get-by-id and mutation tools select every virtual field without required arguments, except inside the items of a nested collection or embedded list, where the same `mcp: 'select'` rule applies. A virtual field with a required argument, which no generated selection can include, gets its own read tool instead, named `<byIdQuery>_<field>`, such as `barbershop_busyRanges`: it takes the record's `id` and the field's arguments and returns the field under its record. Set `mcp: false` on the field to leave that tool out; see [virtual field tools](/reference/mcp#virtual-field-tools).
+
 An explicit selection omits that tool's generated `outputSchema`, because the generator can no longer promise a matching output contract. Tool annotations describe behavior to clients; they do not grant or restrict access. Generated updates are marked idempotent unless their input can add collection items, and deletes are marked destructive and idempotent; see [annotations](/reference/mcp#annotations).
 
 See the [MCP reference](/reference/mcp) for all options, remote execution, middleware, and error behavior.
