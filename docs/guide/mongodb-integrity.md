@@ -49,7 +49,7 @@ Calling `preventCreatingCollection(true)` before `createSchema()` suppresses the
 
 The protected graph comes from `extensions.relation`, using the same metadata description as the SQL planner:
 
-- Single references, including renamed and dotted Mongo storage keys.
+- Single references, including renamed storage keys (a `connectionField` names a field of the record, never a dotted path).
 - References inside embedded objects and arbitrarily deep supported embedded lists, including nullable items.
 - One-to-many child keys, including inferred scalar `GraphQLID` fields and private connection fields. A private connection field is also generated when the child type has a collection with the same `connectionField`, as in chained or self-referencing collections.
 - Explicit many-to-many link entities and self-references.

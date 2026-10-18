@@ -17,7 +17,7 @@ import { collectQueryPathEntries, collectQueryPaths, walkQueryPath } from './que
 import { relationFieldOwners } from './relation-owners.js';
 import { isThenable } from './auth/thenable.js';
 import {
-  getFieldStorageName, getListShape, markStoredIdentity, normalizeConnectionField,
+  assertPlainConnectionField, getFieldStorageName, getListShape, markStoredIdentity, normalizeConnectionField,
 } from './relation-storage.js';
 import {
   fieldMetadataNamesFixed, fieldMetadataTypes, fixFieldMetadataNames, renameFieldMetadataTypes,
@@ -2671,13 +2671,15 @@ const warnOnce = (gqltype, key, message) => {
   console.warn(message);
 };
 
-// A writable referenced collection without a child connectionField would store unlinked children
-// through generated nested writes and read none back, so it is rejected before anything is built.
+// A connectionField names a field, never a path (assertPlainConnectionField). A writable referenced
+// collection without a child connectionField would store unlinked children through generated nested
+// writes and read none back, so it is rejected before anything is built.
 // One with its own resolver only warns, and its nested writes are rejected per request; a readOnly
 // one warns unless it has its own resolver.
 const assertCollectionConnections = () => {
   for (const { gqltype } of Object.values(typesDict.types)) {
     for (const [fieldName, field] of Object.entries(gqltype.getFields())) {
+      assertPlainConnectionField(gqltype.name, fieldName, field);
       if (!isUnlinkedCollection(field)) continue;
       const problem = `${gqltype.name}.${fieldName} requires a child connectionField`;
       const readOnly = !!field.extensions.readOnly;

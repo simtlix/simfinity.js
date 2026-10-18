@@ -39,7 +39,6 @@ export const integrityFixture = ({
       id: { type: GraphQLID }, name: { type: GraphQLString },
       service: { type: types.Service, extensions: ref('service_id') },
       detail: { type: types.Detail, extensions: embedded },
-      dotted: { type: types.Service, extensions: ref('nested.target_id') },
       details: { type: new GraphQLList(types.Detail), extensions: embedded },
       children: { type: new GraphQLList(types.Child), extensions: ref('shop') },
       notes: { type: new GraphQLList(types.Note), extensions: ref('owner_id') },

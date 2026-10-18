@@ -35,6 +35,10 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22 or newer |
 
+## Upgrade notes for the next release
+
+- **`connectionField` names a field, not a path.** A relation's `extensions.relation.connectionField` must be the name of a field of the record that stores the link: the reference's own type, or a collection's item type. `createSchema()`, and `describeModels()` for PostgreSQL and MongoDB's `referentialIntegrity: 'transactional'`, now reject a `connectionField` that contains a dot, such as `meta.key`, or that is not a string, with `INVALID_MODEL` (400), before any model or table is built. Such a value was never documented and did not work: MongoDB stored the link inside the embedded value, overwriting its member, and read the reference back as `null`; a writable collection failed while its inputs were built; PostgreSQL named a column after the whole path. A link that belongs to an embedded value is declared there, as a reference field of the embedded type, which Simfinity stores, reads, writes and validates on both backends. Otherwise use a plain name, such as `metaKey`. An omitted or empty `connectionField` keeps its meaning.
+
 ## Upgrade to 3.7.0
 
 Version 3.7.0 can read generated collection fields in batches, opt-in on both PostgreSQL and MongoDB. Without the option, both adapters send 3.6.0's statements and commands. With it, rows in a total order, filters, scopes, errors and middleware calls are unchanged; unsorted rows and rows with equal sort keys can come in another order. It also gives `EnvelopSchemaPlugin` one TypeScript declaration across the packages. Keep all directly installed Simfinity packages at the same version. When upgrading from an earlier version, also review the [3.6.0 notes](#upgrade-to-3-6-0) below.
