@@ -18,7 +18,8 @@ concurrency:
 
 jobs:
   source:
-    if: github.repository == 'simtlix/simfinity.js' && !github.event.deleted
+    # Independently versioned tools have their own release tags.
+    if: github.repository == 'simtlix/simfinity.js' && !github.event.deleted && (github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v'))
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.release.outputs.tag }}

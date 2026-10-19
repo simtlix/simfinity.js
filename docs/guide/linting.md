@@ -7,19 +7,10 @@ with specific editor/CI diagnostics. It does not evaluate business authorization
 scopes, state machines or transaction correctness.
 
 The plugin is an independently versioned development tool (`0.1.0`), outside the
-five runtime packages. The initial implementation is available for local trials;
-this change does not publish it to npm. Build an archive from the repository:
+five runtime packages. Install it from npm in your application:
 
 ```sh
-cd tools/eslint-plugin-simfinity
-npm ci
-npm pack --pack-destination /tmp
-```
-
-Then, from your application directory:
-
-```sh
-npm install --save-dev 'eslint@^9.30.1' /tmp/simtlix-eslint-plugin-simfinity-0.1.0.tgz
+npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.1.0'
 ```
 
 Use Node.js 24 for development. The plugin supports ESLint 9.30.1–9.x, ESM flat
