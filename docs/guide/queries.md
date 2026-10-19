@@ -307,7 +307,8 @@ import {
 import { simfinity } from './runtime.js';
 import { listBusyRanges } from './busy-ranges.js';
 
-// Clients see approved shops only; administrators see every shop.
+// Clients see approved shops only; administrators see every shop. Lists, reads
+// by ID and aggregates each run their own scope, so all three get this one.
 const approvedShops = async ({ args, context }) => {
   if (context?.user?.role === 'admin') return;
   args.AND = [
@@ -328,7 +329,7 @@ const BusyRangeType = new GraphQLObjectType({
 
 export const BarbershopType = new GraphQLObjectType({
   name: 'Barbershop',
-  extensions: { scope: { find: approvedShops, get_by_id: approvedShops } },
+  extensions: { scope: { find: approvedShops, get_by_id: approvedShops, aggregate: approvedShops } },
   fields: () => ({
     id: { type: GraphQLID },
     name: { type: new GraphQLNonNull(GraphQLString) },

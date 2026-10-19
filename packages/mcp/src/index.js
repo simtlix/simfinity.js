@@ -788,23 +788,36 @@ const buildOperation = (kind, fieldName, field, selection) => {
 };
 
 /**
- * Build the operation of a virtual field tool: the by-ID query, with its `id`
- * argument, selecting only the virtual field with its arguments, such as
- * `query shop_busyRangesOperation($id: ID, $date: String!) { shop(id: $id) {
- * busyRanges(date: $date) { start end } } }` (over four lines).
+ * The `id` argument of a virtual field tool (see {@link buildVirtualFieldTools}):
+ * the by-ID query's, made non-null, because without it the query reads no
+ * record. The tool's input schema and its operation's variable both declare
+ * it, so a call that omits `id` or sends null fails variable coercion, as an
+ * invalid request, instead of returning the null of a missing record.
+ * @param {{ byIdField: import('graphql').GraphQLField }} target
+ * @returns {import('graphql').GraphQLArgument}
+ */
+const requiredIdArgument = ({ byIdField }) => {
+  const [idArg] = byIdField.args;
+  return idArg.type instanceof GraphQLNonNull ? idArg : { ...idArg, type: new GraphQLNonNull(idArg.type) };
+};
+
+/**
+ * Build the operation of a virtual field tool: the by-ID query, with the
+ * tool's required `id`, selecting only the virtual field with its arguments,
+ * such as `query shop_busyRangesOperation($id: ID!, $date: String!) {
+ * shop(id: $id) { busyRanges(date: $date) { start end } } }` (over four lines).
  * @param {string} operationName unprefixed tool name
- * @param {{ byIdName: string, byIdField: import('graphql').GraphQLField,
- *   fieldName: string, field: import('graphql').GraphQLField }} target
+ * @param {{ byIdName: string, fieldName: string,
+ *   field: import('graphql').GraphQLField }} target
+ * @param {import('graphql').GraphQLArgument} idArg from {@link requiredIdArgument},
+ *   the one the tool's input schema declares
  * @param {string} selection selection set (leading-space form) or empty string
  * @returns {string} GraphQL operation source
  */
-const buildVirtualFieldOperation = (operationName, {
-  byIdName, byIdField, fieldName, field,
-}, selection) => {
-  const rootArgs = byIdField.args;
+const buildVirtualFieldOperation = (operationName, { byIdName, fieldName, field }, idArg, selection) => {
   const fieldArgs = field.args;
-  const varDefs = [...rootArgs, ...fieldArgs].map(variableDefinition).join(', ');
-  return `query ${operationName}Operation(${varDefs}) {\n  ${byIdName}(${argumentUsage(rootArgs)}) {\n`
+  const varDefs = [idArg, ...fieldArgs].map(variableDefinition).join(', ');
+  return `query ${operationName}Operation(${varDefs}) {\n  ${byIdName}(${argumentUsage([idArg])}) {\n`
     + `    ${fieldName}(${argumentUsage(fieldArgs)})${selection}\n  }\n}`;
 };
 
@@ -2728,10 +2741,8 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
       const selection = override.selection
         ? normalizeSelection(override.selection)
         : buildSelectionSet(field.type, depth, collections, virtuals, new Set([entityType.name]));
-      // The tool's `id` is the by-ID query's, required here: without it the
-      // query reads no record.
-      const [idArg] = target.byIdField.args;
-      const requiredId = idArg.type instanceof GraphQLNonNull ? idArg : { ...idArg, type: new GraphQLNonNull(idArg.type) };
+      // The input schema and the operation declare the same required `id`.
+      const requiredId = requiredIdArgument(target);
 
       const tool = {
         name: toolName,
@@ -2748,13 +2759,13 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
       // A `pagination` argument of the field gets the limits a root field's does.
       const pagination = field.args.find((arg) => arg.name === 'pagination');
       toolIndex[toolName] = {
-        operation: buildVirtualFieldOperation(rawName, target, selection),
+        operation: buildVirtualFieldOperation(rawName, target, requiredId, selection),
         kind: 'query',
         op: 'virtualField',
         fieldName: target.byIdName,
         hasPagination: !!pagination,
         paginationType: pagination ? pagination.type : undefined,
-        argNames: new Set([idArg.name, ...field.args.map((arg) => arg.name)]),
+        argNames: new Set([requiredId.name, ...field.args.map((arg) => arg.name)]),
         countKey: undefined,
         truncationKey: undefined,
         idempotent: annotations.idempotentHint === true,

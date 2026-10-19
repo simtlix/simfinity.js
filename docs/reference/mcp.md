@@ -137,14 +137,14 @@ The per-field tool of `Barbershop.busyRanges(date: String!, professionalId: ID)`
 The tool reads the record through the by-ID query and selects only the field:
 
 ```graphql
-query barbershop_busyRangesOperation($id: ID, $date: String!, $professionalId: ID) {
+query barbershop_busyRangesOperation($id: ID!, $date: String!, $professionalId: ID) {
   barbershop(id: $id) {
     busyRanges(date: $date, professionalId: $professionalId) { startTime endTime professionalId }
   }
 }
 ```
 
-The operation name is never prefixed. The field's result is selected as a root field's is: `selectionDepth` counts from the result, `nestedCollections` applies, the list rule of the selection above applies to a list result, and the parent type is not expanded again. A call returns the GraphQL shape, `{ barbershop: { busyRanges: [ … ] } }`, after the type's middleware, `get_by_id` scope, root query rule and field rule have run; a record that the scope hides, or that does not exist, returns `{ barbershop: null }`, and the resolver does not run. In-process calls pass the call's context object to the resolver, and remote calls send the same operation.
+The operation name is never prefixed, and it declares `id` as non-null, as the input schema does, even when the by-ID query's own `id` argument is nullable, as the generated one is. The field's result is selected as a root field's is: `selectionDepth` counts from the result, `nestedCollections` applies, the list rule of the selection above applies to a list result, and the parent type is not expanded again. A call returns the GraphQL shape, `{ barbershop: { busyRanges: [ … ] } }`, after the type's middleware, `get_by_id` scope, root query rule and field rule have run; a record that the scope hides, or that does not exist, returns `{ barbershop: null }`, and the resolver does not run. A call that omits `id`, or sends `id: null`, is an invalid request instead: GraphQL rejects the variable before any resolver runs, and the result is `isError: true` with that error, such as `Variable "$id" of required type "ID!" was not provided.` In-process calls pass the call's context object to the resolver, and remote calls send the same operation.
 
 Options apply to the tool's own name:
 

@@ -171,7 +171,8 @@ const buildFixture = () => {
 const toolNamed = (tools, name) => tools.find((tool) => tool.name === name);
 const nullable = (type) => ({ type: [type, 'null'] });
 const VIRTUAL_TOOLS = ['vfmShop_busyRanges', 'vfmShop_openAt', 'vfmBooking_note'];
-const BUSY_RANGES_OPERATION = 'query vfmShop_busyRangesOperation($id: ID, $date: String!, $professionalId: ID) {\n'
+// The by-ID query's id is nullable, but the tool's operation requires it, as its input schema does.
+const BUSY_RANGES_OPERATION = 'query vfmShop_busyRangesOperation($id: ID!, $date: String!, $professionalId: ID) {\n'
   + '  vfmShop(id: $id) {\n'
   + '    busyRanges(date: $date, professionalId: $professionalId) { start end slot { label } }\n'
   + '  }\n'
@@ -202,6 +203,27 @@ const busyRangesOutputSchema = (withSlot = true) => ({
 });
 // The root field line of a generated operation, such as `vfmShop(id: $id) { id name }`.
 const selectionOf = (operation) => operation.split('\n')[1].trim();
+// GraphQL's errors for the tool's required id when a call omits it or sends null.
+const MISSING_ID_CALLS = [
+  ['omits id', { date: '2026-10-19' }, 'Variable "$id" of required type "ID!" was not provided.'],
+  ['sends a null id', { id: null, date: '2026-10-19' }, 'Variable "$id" of non-null type "ID!" must not be null.'],
+];
+const errorMessages = (result) => JSON.parse(result.content[0].text).errors.map((error) => error.message);
+
+// Runs body with an SDK client connected in memory to an SDK server of schema.
+const withClient = async (schema, options, body) => {
+  const server = await createMCPServer(schema, options);
+  const client = new Client({ name: 'virtual-fields-client', version: '1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    await body(client);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+};
 
 let warn;
 beforeEach(() => {
@@ -246,7 +268,7 @@ describe('virtual field tools', () => {
       outputSchema: busyRangesOutputSchema(),
     });
     expect(getOperation('vfmShop_busyRanges')).toBe(BUSY_RANGES_OPERATION);
-    expect(getOperation('vfmBooking_note')).toBe('query vfmBooking_noteOperation($id: ID, $locale: String!) {\n'
+    expect(getOperation('vfmBooking_note')).toBe('query vfmBooking_noteOperation($id: ID!, $locale: String!) {\n'
       + '  vfmBooking(id: $id) {\n    note(locale: $locale)\n  }\n}');
   });
 
@@ -310,14 +332,21 @@ describe('virtual field tools', () => {
     expect(calls.busyRanges).not.toHaveBeenCalled();
   });
 
+  test.each(MISSING_ID_CALLS)('a call that %s is an invalid request, not the null of a missing record', async (_, args, message) => {
+    const { schema, calls } = buildFixture();
+    const { callTool } = generateMCPTools(schema);
+
+    const result = await callTool('vfmShop_busyRanges', args);
+
+    expect(result.isError).toBe(true);
+    expect(result).not.toHaveProperty('structuredContent');
+    expect(errorMessages(result)).toEqual([message]);
+    expect(calls.busyRanges).not.toHaveBeenCalled();
+  });
+
   test('publishes the tool through an SDK server whose client validates the result against the output schema', async () => {
     const { schema } = buildFixture();
-    const server = await createMCPServer(schema, { context: { onlyOpen: true } });
-    const client = new Client({ name: 'virtual-fields-client', version: '1' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await server.connect(serverTransport);
-    await client.connect(clientTransport);
-    try {
+    await withClient(schema, { context: { onlyOpen: true } }, async (client) => {
       const listed = toolNamed((await client.listTools()).tools, 'vfmShop_busyRanges');
       expect(listed.outputSchema).toEqual(busyRangesOutputSchema());
       expect(listed.annotations.readOnlyHint).toBe(true);
@@ -327,10 +356,19 @@ describe('virtual field tools', () => {
       expect(found.structuredContent.vfmShop.busyRanges).toHaveLength(1);
       const hidden = await client.callTool({ name: 'vfmShop_busyRanges', arguments: { id: '2', date: '2026-10-18' } });
       expect(hidden.structuredContent).toEqual({ vfmShop: null });
-    } finally {
-      await client.close();
-      await server.close();
-    }
+    });
+  });
+
+  test.each(MISSING_ID_CALLS)('an SDK client whose call %s gets the invalid request error', async (_, args, message) => {
+    const { schema, calls } = buildFixture();
+    await withClient(schema, {}, async (client) => {
+      const result = await client.callTool({ name: 'vfmShop_busyRanges', arguments: args });
+
+      expect(result.isError).toBe(true);
+      expect(result).not.toHaveProperty('structuredContent');
+      expect(errorMessages(result)).toEqual([message]);
+    });
+    expect(calls.busyRanges).not.toHaveBeenCalled();
   });
 
   test('sends the virtual field operation to a remote endpoint', async () => {
