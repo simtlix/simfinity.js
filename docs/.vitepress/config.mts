@@ -86,6 +86,7 @@ export default defineConfig({
         { text: 'State machines', link: '/guide/state-machines' },
         { text: 'Server-side operations', link: '/guide/server-side-operations' },
         { text: 'Usage anti-patterns', link: '/guide/anti-patterns' },
+        { text: 'Optional application linting', link: '/guide/linting' },
       ] },
       { text: 'Protect & extend', collapsed: false, items: [
         { text: 'Authorization', link: '/guide/authorization' },
