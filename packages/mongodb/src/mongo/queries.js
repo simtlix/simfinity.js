@@ -9,6 +9,9 @@ import mongoose from 'mongoose';
 
 import { SimfinityError, QLOperator, paginationStages } from '@simtlix/simfinity-core';
 import {
+  TEXT_QUERY_OPERATORS, textQueryOperator, validateTextFilterValue,
+} from '@simtlix/simfinity-core/internal/query-operators';
+import {
   getFieldStorageName, getListShape, hasStoredIdentity, isVirtualField, normalizeConnectionField,
 } from '@simtlix/simfinity-core/internal/relation-storage';
 
@@ -25,6 +28,15 @@ const isGraphQLisoDate = (typeName) => (
 
 // GraphQL reserves `__` names, so these aliases never replace a stored field.
 const LOOKUP_ALIAS_PREFIX = '__sf_l';
+
+/**
+ * The filter operators this compiler supports, which the adapter declares as its queryFeatures. They
+ * are listed explicitly, so that a QLOperator value added later stays unsupported until it compiles.
+ */
+export const MONGO_QUERY_OPERATORS = Object.freeze([
+  'EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE',
+  'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ',
+]);
 
 export const createMongoQueries = ({ getModel, getRegistrations }) => {
 // One alias per relation path for each query build, keyed by the build's `included` accumulator.
@@ -61,6 +73,34 @@ const buildRelationLookup = ({
 });
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// MongoDB rejects a $regex pattern longer than 32,764 UTF-8 bytes on the server (Location51091),
+// which would report a client's long value as an internal error. Escaping adds a byte to each
+// metacharacter and the operators add their anchors, so the limit applies to the compiled pattern.
+const MAX_REGEX_PATTERN_BYTES = 32764;
+// A $regex match, rejected with INVALID_FILTER_VALUE before the query runs when MongoDB would reject
+// its pattern. `path` is the condition's GraphQL path, for the message.
+const regexMatch = (operator, pattern, ignoreCase, path) => {
+  const bytes = Buffer.byteLength(pattern, 'utf8');
+  if (bytes > MAX_REGEX_PATTERN_BYTES) {
+    const where = path == null ? '' : ` on ${path}`;
+    throw filterError(`${operator} value${where} is too long: MongoDB accepts regular expressions of at most ${MAX_REGEX_PATTERN_BYTES} bytes, and this one has ${bytes}`);
+  }
+  return ignoreCase ? { $regex: pattern, $options: 'i' } : { $regex: pattern };
+};
+
+// The literal text operators: the escaped value, anchored with `^` at the start of the string and
+// `\z` at its very end (`$` would also match before a final newline), with the `i` option to ignore
+// case. Without the `m` option, `^` never matches after a newline.
+const TEXT_PATTERNS = {
+  contains: (escaped) => escaped,
+  prefix: (escaped) => `^${escaped}`,
+  suffix: (escaped) => `${escaped}\\z`,
+  exact: (escaped) => `^${escaped}\\z`,
+};
+const textRegex = (operator, { match, ignoreCase }) => (value, path) => (
+  regexMatch(operator, TEXT_PATTERNS[match](escapeRegex(value)), ignoreCase, path)
+);
 
 const PATH_SEGMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -101,7 +141,8 @@ const OP_TO_MONGO = {
   GTE: (v) => ({ $gte: v }),
   NE: (v) => ({ $ne: v }),
   BTW: (v) => ({ $gte: v[0], $lte: v[1] }),
-  LIKE: (v) => ({ $regex: `.*${escapeRegex(v)}.*` }),
+  LIKE: (v, path) => regexMatch('LIKE', `.*${escapeRegex(v)}.*`, false, path),
+  ...Object.fromEntries(Object.entries(TEXT_QUERY_OPERATORS).map(([op, text]) => [op, textRegex(op, text)])),
 };
 
 const AGG_OP_TO_MONGO = {
@@ -225,10 +266,17 @@ const castFilterValue = (value, resolved) => {
   }
 };
 
-const buildMatchesClause = (resolved, operator, value) => {
+// `path` is the condition's GraphQL path, for messages.
+const buildMatchesClause = (resolved, operator, value, path) => {
   const op = operator ?? 'EQ';
   if (!QLOperator.getValues().some((entry) => entry.value === op)) {
     throw filterError(`Unsupported filter operator: ${op}`, 'INVALID_FILTER_OPERATOR');
+  }
+  // Text operators take the value as is, once core's shared rule accepts it: a String field (a
+  // validated scalar by its base scalar) and a string without U+0000.
+  if (textQueryOperator(op)) {
+    const text = validateTextFilterValue(op, value, getEffectiveTypeName(resolved.fieldType), path);
+    return { [resolved.mongoPath]: OP_TO_MONGO[op](text, path) };
   }
   const collectionOperator = op === 'IN' || op === 'NIN' || op === 'BTW';
   if (collectionOperator && (!Array.isArray(value) || (op === 'BTW' && value.length !== 2))) {
@@ -245,7 +293,7 @@ const buildMatchesClause = (resolved, operator, value) => {
   const coerced = collectionOperator ? value.map(cast) : op === 'LIKE' ? value : cast(value);
   if (op === 'EQ') return { [resolved.mongoPath]: coerced };
   if (op === 'IN' || op === 'NIN') return { [resolved.mongoPath]: { [op === 'IN' ? '$in' : '$nin']: coerced } };
-  return { [resolved.mongoPath]: OP_TO_MONGO[op](coerced) };
+  return { [resolved.mongoPath]: OP_TO_MONGO[op](coerced, path) };
 };
 
 const buildQueryTerms = async (filterField, qlField, fieldName, gqltype, aggregationsIncluded) => {
@@ -262,9 +310,10 @@ const buildQueryTerms = async (filterField, qlField, fieldName, gqltype, aggrega
   for (const term of terms) {
     if (!term || typeof term !== 'object' || Array.isArray(term)) throw filterError(`Invalid term for ${fieldName}`);
     if (isObject) assertValidFilterPath(term.path);
-    const resolved = resolveQueryPath(gqltype, isObject ? `${fieldName}.${term.path}` : fieldName, aggregationsIncluded);
+    const path = isObject ? `${fieldName}.${term.path}` : fieldName;
+    const resolved = resolveQueryPath(gqltype, path, aggregationsIncluded);
     Object.assign(aggregateClauses, resolved.aggregateClauses);
-    matchesClauses.push(buildMatchesClause(resolved, term.operator, term.value));
+    matchesClauses.push(buildMatchesClause(resolved, term.operator, term.value, path));
   }
   return { aggregateClauses, matchesClauses };
 };

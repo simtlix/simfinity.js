@@ -16,6 +16,9 @@ export const createSQLAdapter = (sourcePlugin) => {
   const { castId, createId } = plugin.values;
   const { driver } = plugin;
   const options = plugin.options;
+  // The operators the plugin's compileQuery compiles. Plans reject the others with UNSUPPORTED_QUERY, also for reads
+  // that do not go through the runtime, such as model.find().
+  const { operators } = plugin.queryFeatures;
   let configured = options ? Object.freeze({ ...options }) : null;
   let prepared = false;
   let ready = false;
@@ -51,7 +54,7 @@ export const createSQLAdapter = (sourcePlugin) => {
   };
   const execute = async (model, gqltype, args, session, mode, extra) => {
     const name = nameOf(model);
-    const plan = createQueryPlan(models, name, args, { mode });
+    const plan = createQueryPlan(models, name, args, { mode, operators });
     const compiled = plugin.compileQuery(models, database, plan, extra, configured);
     const { rows } = await query(compiled, session);
     if (mode === 'count') return Number(rows[0]?.size || 0);
@@ -103,7 +106,7 @@ export const createSQLAdapter = (sourcePlugin) => {
     const keys = parentIds.map((id) => castId(id));
     const ids = [...new Set(keys)];
     if (!ids.length) return [];
-    const plan = createQueryPlan(models, name, args, { mode: 'find' });
+    const plan = createQueryPlan(models, name, args, { mode: 'find', operators });
     const chunks = [];
     for (let start = 0; start < ids.length; start += CHILDREN_BATCH_SIZE) {
       const chunk = ids.slice(start, start + CHILDREN_BATCH_SIZE);
@@ -139,6 +142,8 @@ export const createSQLAdapter = (sourcePlugin) => {
     return this?.findChildren === findChildren;
   }
   const adapter = {
+    // What the runtime may send: the plugin's queryFeatures, or the operators of 3.7.0 for a plugin without them.
+    queryFeatures: plugin.queryFeatures,
     configure(value) {
       if (configured || prepared) throw new SimfinityError(`${plugin.displayName} configuration is already bound`, 'DATABASE_ALREADY_CONFIGURED', 409);
       configured = Object.freeze({ ...value });

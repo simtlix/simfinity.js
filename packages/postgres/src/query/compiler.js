@@ -1,8 +1,22 @@
 import { resolveModelPath, SimfinityError } from '@simtlix/simfinity-core';
+import { textQueryOperator, validateTextFilterValue } from '@simtlix/simfinity-core/internal/query-operators';
 import { identifier as q, literal, qualified } from '../schema/sql.js';
 import { encodeScalar, storageTypes, invalidValue } from '../codecs.js';
 
 const unsupported = (message) => { throw new SimfinityError(message, 'UNSUPPORTED_QUERY', 400); };
+
+// The case-insensitive text operators compare lower() of both sides under ICU's root collation, which folds every
+// script the same way on every server, whatever the database's default collation. Text paths are `C` columns, under
+// which lower() folds ASCII only. The fold is plain lower() on purpose, with a documented gap (the capital sigma in
+// docs/guide/queries.md): lower() turns a capital sigma that ends a word into ς and any other into σ, and the value
+// is lowered apart from the stored text, so a value that starts or ends with Σ can miss rows that its case-sensitive
+// form returns (ISTARTS_WITH "ΚΑΣ" misses "ΚΑΣΤΡΟ", which STARTS_WITH "ΚΑΣ" finds). An application index serves
+// them only on the same expression: lower("column" COLLATE "und-x-icu").
+const FOLD_COLLATION = '"pg_catalog"."und-x-icu"';
+const fold = (sql) => `lower(${sql} COLLATE ${FOLD_COLLATION})`;
+// LIKE's default escape character is the backslash, so escaping it, % and _ leaves only literal characters.
+const likeLiteral = (value) => value.replace(/[\\%_]/g, '\\$&');
+const likePatterns = { contains: (value) => `%${likeLiteral(value)}%`, prefix: (value) => `${likeLiteral(value)}%`, suffix: (value) => `%${likeLiteral(value)}` };
 
 // Alias of each per-parent statement in the batched children statement. The per-parent statement only uses t<n>,
 // f<n> and short subquery aliases, so it never shadows this one.
@@ -207,14 +221,15 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
           const sql = arrayFrom(vector, `${name}.value`);
           return { sql: type === 'text' ? `(${sql}) COLLATE "pg_catalog"."C"` : sql, field, type: dateNumeric ? 'double precision' : type, list: true, vector: true, dateNumeric, sortKey };
         }
-        let sql = context.vector ? arrayFrom(context.vector, expression) : expression;
-        if (type === 'text') sql = `(${sql}) COLLATE "pg_catalog"."C"`;
+        // `uncollated` is the value before the C collation, which the case-insensitive text operators replace.
+        const uncollated = context.vector ? arrayFrom(context.vector, expression) : expression;
+        const sql = type === 'text' ? `(${uncollated}) COLLATE "pg_catalog"."C"` : uncollated;
         // A NOT NULL column of the root row has no nulls to place, so its sort needs no NULLS clause and a
         // default-order btree (the primary key or a declared index) can return it in order. Joined and
         // embedded paths can be NULL even for NOT NULL columns, so they keep the clause.
         const notNull = !context.json && !context.vector && !field.list && context.alias === 't0'
           && context.table.columns.find((item) => item.name === (identity ? 'id' : field.storageName))?.nullable === false;
-        return { sql, field: identity ? { ...field, scalar: 'ID' } : field, type: dateNumeric ? 'double precision' : type, list: field.list || !!context.vector, vector: !!context.vector, dateNumeric, sortKey, notNull };
+        return { sql, uncollated, field: identity ? { ...field, scalar: 'ID' } : field, type: dateNumeric ? 'double precision' : type, list: field.list || !!context.vector, vector: !!context.vector, dateNumeric, sortKey, notNull };
       }
     }
     unsupported('Invalid query path');
@@ -266,15 +281,48 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
     }
     if (operator === 'BTW') return `(${predicate(expression, 'GTE', value[0], negated)} AND ${predicate(expression, 'LTE', value[1], negated)})`;
     if (value == null || Array.isArray(value)) invalidValue(`${operator} requires a non-null scalar value`);
+    const text = textQueryOperator(operator);
+    if (text) return textPredicate(expression, operator, text, value, negated);
+    const ordering = { LT: '<', LTE: '<=', GT: '>', GTE: '>=' }[operator];
+    if (!ordering && operator !== 'LIKE') unsupported(`Unsupported filter operator ${operator}`);
     const parameter = scalarBind(value);
     const compare = (left) => {
       if (operator === 'LIKE') {
         return `strpos(${left}, ${parameter}) > 0`;
       }
-      return `${left} ${{ LT: '<', LTE: '<=', GT: '>', GTE: '>=' }[operator]} ${parameter}`;
+      return `${left} ${ordering} ${parameter}`;
     };
     if (list) return `EXISTS (SELECT 1 FROM unnest(${sql}) v(value) WHERE ${compare('v.value')})`;
     return negated ? `COALESCE(${compare(sql)}, FALSE)` : compare(sql);
+  };
+  /**
+   * The literal text operators (ILIKE, STARTS_WITH, ISTARTS_WITH, ENDS_WITH, IENDS_WITH and IEQ) on a String leaf or
+   * list, where some element must match. Values stay bound parameters. The case-sensitive forms, STARTS_WITH and
+   * ENDS_WITH, compare code points with starts_with and right under the C collation of text paths, so a column's
+   * btree serves STARTS_WITH. The case-insensitive forms compare the folded form of both sides (see fold): IEQ with
+   * =, the others with LIKE and a bound pattern whose metacharacters are escaped, so that a btree on the folded column
+   * with text_pattern_ops serves IEQ and ISTARTS_WITH, and a trigram index on it serves ILIKE, ISTARTS_WITH and
+   * IENDS_WITH.
+   */
+  const textPredicate = ({ sql, uncollated, field, list }, operator, { match, ignoreCase }, value, negated) => {
+    // createQueryPlan has validated the value; a plan built by hand gets the same INVALID_FILTER_VALUE.
+    validateTextFilterValue(operator, value, field.scalar);
+    let compare;
+    if (!ignoreCase) {
+      const parameter = bind(value, 'text');
+      compare = match === 'prefix'
+        ? (left) => `starts_with(${left}, ${parameter})`
+        : (left) => `right(${left}, char_length(${parameter})) = ${parameter}`;
+    } else if (match === 'exact') {
+      const parameter = bind(value, 'text');
+      compare = (left) => `${fold(left)} = ${fold(parameter)}`;
+    } else {
+      const pattern = bind(likePatterns[match](value), 'text');
+      compare = (left) => `${fold(left)} LIKE ${fold(pattern)}`;
+    }
+    if (list) return `EXISTS (SELECT 1 FROM unnest(${sql}) v(value) WHERE ${compare(ignoreCase ? '(v.value)' : 'v.value')})`;
+    const left = ignoreCase ? `(${uncollated})` : sql;
+    return negated ? `COALESCE(${compare(left)}, FALSE)` : compare(left);
   };
   // A negation reaches every predicate below it, including those nested in AND/OR groups.
   const where = (node, negated = false) => {

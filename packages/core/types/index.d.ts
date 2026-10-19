@@ -8,9 +8,35 @@ import type {
   GraphQLSchema,
 } from 'graphql';
 
+/** The filter operator enum; its values are the {@link QueryOperator} names. */
 export const QLOperator: GraphQLEnumType;
 export const QLSort: GraphQLInputObjectType;
 export const QLValue: GraphQLScalarType<unknown, unknown>;
+
+/**
+ * A `QLOperator` value. The operators of 3.7.0 are `EQ`, `NE`, `LT`, `LTE`, `GT`, `GTE`, `BTW`, `IN`,
+ * `NIN` and `LIKE`. The literal text operators take a non-null string without U+0000 on a `String`
+ * field or `String` list (a validated scalar filters by its base scalar), and match it literally:
+ * `ILIKE` as a substring ignoring case, `STARTS_WITH` and `ISTARTS_WITH` as a prefix, `ENDS_WITH`
+ * and `IENDS_WITH` as a suffix, respecting or ignoring case, and `IEQ` as the whole value ignoring
+ * case. An empty value matches every non-null string, except for `IEQ`, where it matches only the
+ * empty string. On a list, some element must match.
+ */
+export type QueryOperator =
+  | 'EQ' | 'NE' | 'LT' | 'LTE' | 'GT' | 'GTE' | 'BTW' | 'IN' | 'NIN' | 'LIKE'
+  | 'ILIKE' | 'STARTS_WITH' | 'ISTARTS_WITH' | 'ENDS_WITH' | 'IENDS_WITH' | 'IEQ';
+
+/**
+ * The query language features a {@link DatabaseAdapter} compiles. Declare it so that the runtime
+ * sends the adapter only conditions it compiles; later releases add members for later features.
+ */
+export interface QueryFeatures {
+  /**
+   * The `QLOperator` values the adapter compiles, including an omitted operator's `EQ`. Names this
+   * version of Simfinity does not know are ignored.
+   */
+  operators: readonly (QueryOperator | (string & {}))[];
+}
 
 export interface ModelRegistration {
   gqltype: GraphQLObjectType;
@@ -331,6 +357,18 @@ export interface Runtime<Model = any, Session = any> {
 
 /** Driver adapter contract. GraphQL generation and lifecycle live in createRuntime. */
 export interface DatabaseAdapter<Model = any, Session = any> {
+  /**
+   * Optional. The filter operators this adapter compiles. `createRuntime` reads it once and throws
+   * `INVALID_QUERY_FEATURES` (500) unless it is undefined, null or an object whose `operators` is an
+   * array of strings. Without it the adapter supports the operators of 3.7.0 (`EQ`, `NE`, `LT`,
+   * `LTE`, `GT`, `GTE`, `BTW`, `IN`, `NIN` and `LIKE`). A list, aggregate or collection read, or a
+   * by-ID read through a `get_by_id` scope, whose arguments use a `QLOperator` value the adapter
+   * does not support fails with `UNSUPPORTED_QUERY` (400), before middleware runs for the client's
+   * arguments and before `find`, `count`, `aggregate`, `findChildren` or `findChildrenBatch` for
+   * conditions that middleware, scopes and joined scopes added. Operators outside `QLOperator` still
+   * reach the adapter, which reports them as before.
+   */
+  queryFeatures?: QueryFeatures | null | undefined;
   bind?(runtime: Pick<Runtime<Model, Session>, 'getModel' | 'getType' | 'getRegistrations'>): void;
   validateRegistration?(registration: RuntimeRegistration<Model, Session>): void;
   /**
@@ -448,6 +486,7 @@ export interface DatabaseAdapter<Model = any, Session = any> {
 }
 export function createRuntime<Model = any, Session = any>(adapter: DatabaseAdapter<Model, Session>): Runtime<Model, Session>;
 
+/** `operator` is a {@link QueryOperator}; the value of a text operator is a validated string. */
 export type QueryPredicate = { kind: 'predicate'; path: string[]; operator: string; value: any } | { kind: 'and' | 'or'; terms: QueryPredicate[] };
 export interface QueryPlan {
   entity: string;
@@ -457,7 +496,14 @@ export interface QueryPlan {
   pagination: { limit: number; offset: number } | null;
   aggregation?: { groupId: string[]; facts: Array<{ path: string[]; factName: string; operation: 'SUM' | 'COUNT' | 'AVG' | 'MIN' | 'MAX' }> };
 }
-export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode'] }): QueryPlan;
+/**
+ * Validates the arguments into a plan: paths, operators and values, with `INVALID_FILTER_VALUE` (400)
+ * for a text operator on a field that is not a `String` field or list, or with a value that is not
+ * a string or contains U+0000. With `operators`, the names the caller compiles, any other
+ * `QLOperator` value fails with `UNSUPPORTED_QUERY` (400); unknown operators fail with
+ * `INVALID_FILTER_OPERATOR` (400) either way.
+ */
+export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode']; operators?: Iterable<string> }): QueryPlan;
 export function resolveModelPath(models: ModelDescription, entityName: string, path: string | string[]): FieldDescription[];
 
 export function configureQueryLimits(options?: { maxPageSize?: number }): void;

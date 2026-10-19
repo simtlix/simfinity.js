@@ -51,11 +51,91 @@ The result is an array directly under `data.series`, rather than an `edges` / `n
 | `GT`, `GTE` | Greater than, greater than or equal | `2010` |
 | `IN`, `NIN` | In, or not in, a supplied list | `["Drama", "Comedy"]` |
 | `BTW` | Inclusive lower and upper bounds | `[2010, 2020]` |
-| `LIKE` | Case-sensitive literal substring match | `"Expanse"` |
+| `LIKE` | Literal substring, respecting case | `"Expanse"` |
+| `ILIKE` | Literal substring, ignoring case | `"expanse"` |
+| `STARTS_WITH`, `ISTARTS_WITH` | Literal prefix, respecting or ignoring case | `"The "`, `"the "` |
+| `ENDS_WITH`, `IENDS_WITH` | Literal suffix, respecting or ignoring case | `" fiction"` |
+| `IEQ` | Equal, ignoring case | `"science fiction"` |
 
-`LIKE` escapes regular expression characters; `.` or `*` in the value are literal characters. Use the value's actual JSON type: a number for a numeric comparison, a Boolean for a Boolean field, and an array for `IN`, `NIN`, or `BTW`.
+Use the value's actual JSON type: a number for a numeric comparison, a Boolean for a Boolean field, a string for the [text operators](#text-operators), and an array for `IN`, `NIN`, or `BTW`.
 
-`IN` and `NIN` require flat scalar lists; `BTW` requires exactly two non-null bounds. Null list elements, literal objects, nested lists, unsupported operators and invalid scalar values are rejected. Explicit `null` is supported by `EQ` and `NE`. Inline GraphQL values and variables follow the same rules. List items may be operation variables, as in `value: [$from, $to]`. Declare them as `QLValue` (or `QLValue!`): GraphQL rejects other declared types, such as `Int` or `String`, in that position. A list item whose variable the request leaves unset reads as `null`, as GraphQL reads list arguments, so it is rejected like an explicit null element. Enum literals such as `value: ACTIVE` or `value: [ACTIVE, INACTIVE]` are read as the enum names, like `"ACTIVE"`. Enum names or declared internal values are converted to the stored representation, including the state names used by state machines. Date values are converted without changing the input arguments. Validated scalars use their base scalar type for filters, allowing string fragments in `LIKE` and range bounds outside create/update constraints.
+`IN` and `NIN` require flat scalar lists; `BTW` requires exactly two non-null bounds. Null list elements, literal objects, nested lists, unsupported operators and invalid scalar values are rejected. Explicit `null` is supported by `EQ` and `NE`. Inline GraphQL values and variables follow the same rules. List items may be operation variables, as in `value: [$from, $to]`. Declare them as `QLValue` (or `QLValue!`): GraphQL rejects other declared types, such as `Int` or `String`, in that position. A list item whose variable the request leaves unset reads as `null`, as GraphQL reads list arguments, so it is rejected like an explicit null element. Enum literals such as `value: ACTIVE` or `value: [ACTIVE, INACTIVE]` are read as the enum names, like `"ACTIVE"`. Enum names or declared internal values are converted to the stored representation, including the state names used by state machines. Date values are converted without changing the input arguments. Validated scalars use their base scalar type for filters, allowing string fragments in the text operators and range bounds outside create/update constraints.
+
+### Text operators
+
+`LIKE`, `ILIKE`, `STARTS_WITH`, `ISTARTS_WITH`, `ENDS_WITH`, `IENDS_WITH` and `IEQ` compare a string with the value of a `String` field:
+
+```graphql
+query {
+  series(
+    name: { operator: ISTARTS_WITH, value: "the " }
+    category: { operator: IEQ, value: "science fiction" }
+  ) {
+    id
+    name
+  }
+}
+```
+
+- **Values are literal.** No character is a wildcard: `%`, `_`, `.`, `*`, `\`, `^`, `$` and `(` match themselves. A trailing newline is a character like any other, so `ENDS_WITH "a"` does not match `"a\n"`. MongoDB receives the value as an escaped regular expression and PostgreSQL as a bound parameter, so a value never becomes query syntax.
+- **Case.** `LIKE`, `STARTS_WITH` and `ENDS_WITH` compare characters exactly. `ILIKE`, `ISTARTS_WITH`, `IENDS_WITH` and `IEQ` ignore case; see [case folding](#case-folding).
+- **Empty values.** `""` matches every non-null string, except with `IEQ`, which matches only the empty string.
+- **Fields and lists.** The field must be a `String` field or a `String` list. A validated scalar filters by its base scalar, so an email scalar accepts a fragment without running the scalar's own check. On a list, a record matches when some element matches, and through an embedded list when some item's value matches. Null and missing values never match.
+- **Where they work.** Everywhere `LIKE` works: field filters, relationship `terms`, `AND`/`OR` conditions, paths through references and embedded values, collection fields, `pagination.count`, aggregate filters, [scopes](./query-scope) and joined scopes, and [MCP tools](./mcp). A path into a collection returns a record once for each matching child, as with every other operator.
+- **Invalid input.** A value that is not a string, and a field whose base scalar is not `String`, fail with `INVALID_FILTER_VALUE` (400) on both backends. `ILIKE`, `STARTS_WITH`, `ISTARTS_WITH`, `ENDS_WITH`, `IENDS_WITH` and `IEQ` also reject a value that contains U+0000 with `INVALID_FILTER_VALUE`, before the database is queried; `LIKE` keeps its earlier handling of that character. On MongoDB, a value too long for a regular expression fails with `INVALID_FILTER_VALUE` too, with every one of these operators; see [indexes for text filters](#indexes-for-text-filters).
+- **Custom adapters.** The MongoDB and PostgreSQL adapters support every operator. A custom `DatabaseAdapter` or SQL plugin supports only the operators of 3.7.0 until it declares `queryFeatures`, and so does a copy of `postgresPlugin()` that replaces its `compileQuery`; a request that uses another operator fails with `UNSUPPORTED_QUERY` (400); see [custom adapters and SQL plugins](../resources/compatibility#custom-adapters-and-sql-plugins).
+
+### Case folding
+
+Both backends ignore case through Unicode's case mappings. On both, `É` matches `é`, `ẞ` matches `ß`, the Kelvin sign `K` matches `k`, and `ǅ`, `ǆ` and `Ǆ` match each other, while `ß` does not match `ss`, `ﬁ` does not match `fi`, and `"istanbul"` does not find `İstanbul`.
+
+MongoDB uses the case-insensitive option of its regular expressions, and PostgreSQL compares `lower()` of both sides under the ICU root collation `und-x-icu`. A few characters therefore match differently, and the integration tests pin each difference:
+
+| Characters | MongoDB | PostgreSQL |
+| --- | --- | --- |
+| Lowercase variants that ICU `lower()` keeps: `ſ` (U+017F), `µ` (U+00B5), `ς` (U+03C2), `ϐ`, `ϑ`, `ϕ`, `ϖ`, `ϰ`, `ϱ`, `ϵ`, `ẛ`, U+0345, U+1FBE and U+1C80 to U+1C88 | Match their usual letters: `IEQ "sun"` finds `ſun`, and `IEQ "μm"` finds `µm` | Do not match their usual letters |
+| The capital sigma `Σ` (U+03A3) | `Σ`, `σ` and `ς` match each other wherever they appear, so each case-insensitive operator returns every record that its case-sensitive form returns | `lower()` turns a `Σ` that ends a word into `ς` and any other `Σ` into `σ`, so `IEQ "ΟΔΟΣ"` finds `οδος` but not `οδοσ`, and `ILIKE "Σ"` does not find `ς`. A value with a `Σ` at one of its ends can also miss records that the case-sensitive operator returns: `ISTARTS_WITH "ΚΑΣ"` does not find `ΚΑΣΤΡΟ`, which `STARTS_WITH "ΚΑΣ"` finds; see [the capital sigma on PostgreSQL](#the-capital-sigma-on-postgresql) |
+| `İ` (U+0130) | Matches only itself | `lower()` turns it into `i` followed by U+0307, so `ISTARTS_WITH "i"` finds `İstanbul`, and `IEQ "İSTANBUL"` also finds `i̇stanbul` |
+| Letters newer than the server's Unicode tables, such as U+A7DC, whose lowercase is U+019B (Unicode 16) | Do not match on MongoDB 8.0 | Match when the server's ICU version knows them |
+
+The case-insensitive operators need a PostgreSQL server built with ICU, which provides `und-x-icu`; on a server without it they fail with `DATABASE_ERROR` (500). Folding follows the Unicode version of the server's ICU library on PostgreSQL and of its regular-expression library on MongoDB.
+
+#### The capital sigma on PostgreSQL
+
+ICU's `lower()` turns a capital `Σ` into the final sigma `ς` when a letter comes before it and no letter comes after it, and into `σ` otherwise. Characters such as `.`, `'`, `:` and combining accents between `Σ` and a letter do not count, while a space, a hyphen, a digit, `%` or the end of the text do. PostgreSQL lowers the search value on its own, inside the `LIKE` pattern for `ILIKE`, `ISTARTS_WITH` and `IENDS_WITH`, without the stored text around it, so a `Σ` at an end of the value can lower to the other sigma than the same `Σ` in the stored text. The case-insensitive operators then miss the record, even when it is written in the same case as the value and the case-sensitive operator, or MongoDB, returns it:
+
+- **A value that ends in `Σ` after a letter**, or in `Σ` and a character such as `.`, misses stored text in which the word goes on: `ISTARTS_WITH "ΚΑΣ"` and `ILIKE "ΚΑΣ"` do not find `ΚΑΣΤΡΟ`, `ISTARTS_WITH "ΟΔΟΣ"` does not find `ΟΔΟΣΤΡΩΜΑ` or `ΟΔΟΣ.Α`, and `ILIKE "ΔΟΣ."` does not find `ΟΔΟΣ.Α`, although `STARTS_WITH "ΚΑΣ"`, `STARTS_WITH "ΟΔΟΣ"` and `LIKE "ΔΟΣ."` find them.
+- **A value that starts with `Σ`** misses stored text in which that `Σ` ends a word: `IENDS_WITH "Σ ΑΒ"` does not find `ΟΔΟΣ ΑΒ`, and `ILIKE "Σ"` and `IENDS_WITH "Σ"` do not find `ΟΔΟΣ`.
+
+`IEQ` compares whole values, so it can miss only text written with another sigma, as the table above shows, and never what `EQ` returns. A `Σ` with a letter on both sides within the value lowers as it does in the stored text, so `ISTARTS_WITH "ΚΑΣΤ"` finds `ΚΑΣΤΡΟ`. A lowercase `σ` or `ς` in the value stays as typed, so `ISTARTS_WITH "κασ"` finds `ΚΑΣΤΡΟ` but not `ΚΑΣ`, whose `Σ` lowers to `ς`. Lowering the value in the client does not help, because JavaScript's `toLowerCase()` applies the same rule as ICU. Where these searches matter, store a normalized copy of the text in a field that a [controller](./controllers) keeps up to date, such as `text.toLowerCase().replaceAll('ς', 'σ')`, and search that field with `STARTS_WITH`, `LIKE` or `EQ` and a value normalized the same way; both backends then return the same records, and an index on the field serves `STARTS_WITH` and `EQ`. Otherwise, avoid case-insensitive search values that start or end with a capital `Σ`.
+
+### Indexes for text filters
+
+On PostgreSQL, text columns use the `C` collation, and the operators compile to these conditions, where `$1` is a bound parameter:
+
+| Operator | Condition | Index that serves it |
+| --- | --- | --- |
+| `STARTS_WITH` | `starts_with("column" COLLATE "C", $1)` | Any btree index on the column |
+| `IEQ` | `lower("column" COLLATE "und-x-icu") = lower($1 COLLATE "und-x-icu")` | A btree index on `lower("column" COLLATE "und-x-icu")` |
+| `ISTARTS_WITH` | `lower("column" COLLATE "und-x-icu") LIKE lower($1 COLLATE "und-x-icu")`, with `$1` = `value%` | A btree index on the same expression with `text_pattern_ops`, or a trigram index |
+| `ILIKE`, `IENDS_WITH` | The same, with `$1` = `%value%` or `%value` | A trigram index |
+| `LIKE`, `ENDS_WITH` | `strpos("column" COLLATE "C", $1) > 0`, `right("column" COLLATE "C", char_length($1)) = $1` | None |
+
+In the `LIKE` patterns, `\`, `%` and `_` of the value are escaped. Simfinity creates no index for the text operators: create the ones your searches need in your own migration, on exactly the compiled expression, `lower("column" COLLATE "und-x-icu")`; an index on `lower("column")` without the collation does not serve them. Initialization keeps such indexes in both modes:
+
+```sql
+-- IEQ and ISTARTS_WITH
+CREATE INDEX series_name_ci ON "app"."Serie" (lower("name" COLLATE "und-x-icu") text_pattern_ops);
+-- ILIKE, ISTARTS_WITH and IENDS_WITH
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX series_name_trgm ON "app"."Serie" USING gin (lower("name" COLLATE "und-x-icu") gin_trgm_ops);
+-- IEQ on a member of an embedded value stored as jsonb
+CREATE INDEX series_label_ci ON "app"."Serie" (lower(("details" ->> 'label') COLLATE "und-x-icu"));
+```
+
+A btree index on `lower("column" COLLATE "und-x-icu")` with the default operator class serves `IEQ` but not `ISTARTS_WITH`. A trigram index narrows an `ILIKE` search only for values of three or more characters. For the `LIKE` patterns, PostgreSQL derives the index condition from the bound value when it plans the statement, which it does for the unnamed statements that Simfinity sends. Conditions on a `String` list read every element of the list, so these indexes do not serve them.
+
+On MongoDB, `STARTS_WITH` reads a prefix range of an index on the field. The other text operators, like `LIKE`, test every key of such an index, or every document without one. `$regex` ignores collations, so a case-insensitive collation index does not serve them; for frequent case-insensitive equality or prefix searches, store a normalized copy of the field, such as its lowercase form, and filter it with `EQ` or `STARTS_WITH`. MongoDB accepts regular expressions of at most 32,764 bytes of UTF-8, so on MongoDB a value whose pattern is longer fails with `INVALID_FILTER_VALUE` (400) before the query runs, with `LIKE` and with the text operators. Every escaped character counts one byte more, and the operators add up to four bytes of their own: `^` for the prefixes, `\z` for the suffixes, both for `IEQ` and `.*` twice for `LIKE`. So an `ILIKE` value of 32,764 ASCII letters runs, while 16,383 dots or 16,383 two-byte letters such as `é` fail. PostgreSQL has no such limit.
 
 ## Combine conditions with AND and OR
 

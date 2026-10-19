@@ -1,4 +1,4 @@
-import type { FieldDescription, ModelDescription, QueryPlan, Runtime } from '@simtlix/simfinity-core';
+import type { FieldDescription, ModelDescription, QueryFeatures, QueryPlan, Runtime } from '@simtlix/simfinity-core';
 import { auth, plugins, scalars, validators } from '@simtlix/simfinity-core';
 import type { GraphQLField, GraphQLObjectType } from 'graphql';
 
@@ -176,6 +176,23 @@ export interface SQLChildrenQueryCompiler<
    */
   readonly compileQuery?: (models: SQLModelDescription, description: Description, plan: QueryPlan, extra?: { column: string; id: Id } | null, configuration?: Configuration | null) => SQLCompiledQuery;
 }
+/**
+ * A SQL plugin's query language features: core's `QueryFeatures`, optionally tied to the `compileQuery` they describe,
+ * as a `compileChildrenQuery` names the `compileQuery` it reproduces.
+ */
+export interface SQLQueryFeatures<
+  Configuration extends object = SQLConfiguration,
+  Description extends SQLDatabaseDescription = SQLDatabaseDescription,
+  Id = string,
+> extends QueryFeatures {
+  /**
+   * The `compileQuery` these features describe. The declaration holds only when this is the plugin's own
+   * `compileQuery`, so a plugin copy that overrides `compileQuery` compiles the operators of 3.7.0 until it declares
+   * its own features. Without it, the declaration describes whichever `compileQuery` the plugin has. A value that is
+   * not a function throws `INVALID_SQL_PLUGIN` (400).
+   */
+  readonly compileQuery?: ((models: SQLModelDescription, description: Description, plan: QueryPlan, extra?: { column: string; id: Id } | null, configuration?: Configuration | null) => SQLCompiledQuery) | undefined;
+}
 export interface SQLQueryResult {
   rows: Array<Record<string, unknown>>;
   rowCount?: number | null;
@@ -283,6 +300,16 @@ export interface SQLPlugin<
   defaultSchema: string;
   options: Configuration | null;
   capabilities: readonly string[];
+  /**
+   * Optional: the query language features `compileQuery` and `compileChildrenQuery` compile. `operators` lists the
+   * `QLOperator` values they compile, including `EQ`, which a condition without an operator means; names Simfinity
+   * does not know are ignored. Without it, the plugin compiles the operators of 3.7.0 (`EQ`, `NE`, `LT`, `LTE`, `GT`,
+   * `GTE`, `BTW`, `IN`, `NIN` and `LIKE`). The runtime, and the query plans of reads that do not go through it, reject
+   * any other operator with `UNSUPPORTED_QUERY` (400) before compiling. A value that is not an object whose `operators`
+   * is an array of strings throws `INVALID_SQL_PLUGIN` (400). A declaration whose `compileQuery` is another function
+   * than this plugin's `compileQuery`, as in a copy that overrides it, gives the operators of 3.7.0.
+   */
+  queryFeatures?: SQLQueryFeatures<Configuration, Description, Id> | null | undefined;
   naming: SQLNaming;
   /** Receives the bound configuration, or null when there is none, as its last argument. */
   describeSchema(plan: RelationalPlan, configuration?: Configuration | null): Description;

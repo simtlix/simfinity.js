@@ -19,7 +19,8 @@ import {
 import { SimfinityError } from '@simtlix/simfinity-core';
 import { virtualFieldOptions } from '@simtlix/simfinity-core/internal/relation-storage';
 
-const FILTER_OPERATORS_TEXT = 'EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE';
+// Every QLOperator value; tests/mcp-text-operators.test.js fails when the enum gains one this text does not name.
+const FILTER_OPERATORS_TEXT = 'EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE, ILIKE, STARTS_WITH, ISTARTS_WITH, ENDS_WITH, IENDS_WITH, IEQ';
 
 /** Allowed shape for published MCP tool names (SEP-986). */
 const TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -32,7 +33,7 @@ const TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/;
  * either a type name (`QLFilter`) or a `TypeName.fieldName` pair.
  */
 const SIMFINITY_FILTER_DOCS = Object.assign(Object.create(null), {
-  QLOperator: 'Comparison operator: EQ (equals), NE (not equals), LT, LTE, GT, GTE, IN (value in list), NIN (value not in list), BTW (between, value is [min, max]), LIKE (substring match).',
+  QLOperator: 'Comparison operator: EQ (equals), NE (not equals), LT, LTE, GT, GTE, IN (value in list), NIN (value not in list), BTW (between, value is [min, max]), LIKE (substring), ILIKE (substring, ignoring case), STARTS_WITH (prefix), ISTARTS_WITH (prefix, ignoring case), ENDS_WITH (suffix), IENDS_WITH (suffix, ignoring case) and IEQ (equals, ignoring case). The text operators, LIKE to IEQ, take a string value and apply to String fields and String lists. They match the value literally, so % and _ are ordinary characters, and LIKE, STARTS_WITH and ENDS_WITH respect case.',
   QLValue: 'Filter value. Accepts a scalar, or an array for the IN, NIN and BTW operators.',
   QLFilter: 'Single-field filter: a comparison operator plus the value to compare against.',
   QLTypeFilter: 'Filter applied to a related-entity field, addressed by a dot-separated path.',

@@ -13,7 +13,10 @@ import { ForbiddenError } from './auth/errors.js';
 import QLOperator from './const/QLOperator.js';
 import QLValue from './const/QLValue.js';
 import QLSort from './const/QLSort.js';
-import { collectQueryPathEntries, collectQueryPaths, walkQueryPath } from './query-plan.js';
+import {
+  collectQueryOperators, collectQueryPathEntries, collectQueryPaths, walkQueryPath,
+} from './query-plan.js';
+import { QUERY_OPERATORS, isQueryOperator, resolveQueryFeatures } from './query-operators.js';
 import { relationFieldOwners } from './relation-owners.js';
 import { isThenable } from './auth/thenable.js';
 import {
@@ -451,6 +454,10 @@ export const createRuntime = (adapter) => {
   if (!adapter) {
     throw new SimfinityError('A database adapter is required', 'ADAPTER_REQUIRED', 500);
   }
+  // The filter operators the adapter compiles, read once: its queryFeatures.operators, or the 3.7.0
+  // operators when it declares none.
+  const supportedOperators = resolveQueryFeatures(adapter.queryFeatures).operators;
+  const supportsEveryOperator = QUERY_OPERATORS.every((operator) => supportedOperators.has(operator));
 
   const stateValue = adapter.stateValue || ((state) => state.name);
   const runtimeIdentity = {};
@@ -1787,6 +1794,21 @@ const assertStoredQueryPaths = (gqltype, args, operation) => {
   }
 };
 
+// Rejects a QLOperator value that the adapter does not declare in queryFeatures, with
+// UNSUPPORTED_QUERY (400), so an adapter never drops or misreads a condition it does not compile.
+// Runs on the client's arguments before middleware and on the final arguments before the adapter
+// call, which covers what middleware, scopes and joined scopes added. Operators that QLOperator does
+// not list are left to the adapter, which reports them as before.
+const assertSupportedOperators = (gqltype, args, operation) => {
+  if (supportsEveryOperator) return;
+  for (const { operator, path } of collectQueryOperators(args, operation)) {
+    if (isQueryOperator(operator) && !supportedOperators.has(operator)) {
+      throw new SimfinityError(`The database adapter does not support the ${operator} filter operator, used on `
+        + `${gqltype.name}.${path}`, 'UNSUPPORTED_QUERY', 400);
+    }
+  }
+};
+
 // A joined scope must not repeat the rows it restricts: its paths may not cross a collection, nor
 // reach a non-embedded relation inside an embedded list, which is joined once per list item.
 const assertJoinedScopePaths = (groups, prefix, target) => {
@@ -1941,6 +1963,7 @@ const resolveById = async (type, args, context, requiredId) => {
   const queryArgs = { id: { operator: 'EQ', value: args.id } };
   await executeScope({ type, args: queryArgs, operation: 'get_by_id', context });
   assertStoredQueryPaths(type.gqltype, queryArgs, 'find');
+  assertSupportedOperators(type.gqltype, queryArgs, 'find');
   const results = await adapter.find(type.model, type.gqltype, queryArgs, null, { requiredId, context });
   return results[0] || null;
 };
@@ -2448,6 +2471,7 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
           extensions: { simfinityQuery: { typeName: type.gqltype.name, operation: 'find', countSink: true } },
           async resolve(parent, args, context, info) {
             const joinedScopes = inspectClientPaths(type.gqltype, args, 'find');
+            assertSupportedOperators(type.gqltype, args, 'find');
             const params = {
               type,
               args,
@@ -2458,6 +2482,7 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
             await executeScope(params);
             await applyJoinedScopes(joinedScopes, params);
             assertStoredQueryPaths(type.gqltype, params.args, 'find');
+            assertSupportedOperators(type.gqltype, params.args, 'find');
             const queryArgs = params.args;
             const wantsCount = !!(queryArgs.pagination && queryArgs.pagination.count)
               && canReportCount(parent, info, context);
@@ -2494,6 +2519,7 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
           extensions: { simfinityQuery: { typeName: type.gqltype.name, operation: 'aggregate' } },
           async resolve(parent, args, context) {
             const joinedScopes = inspectClientPaths(type.gqltype, args, 'aggregate');
+            assertSupportedOperators(type.gqltype, args, 'aggregate');
             const params = {
               type,
               args,
@@ -2504,6 +2530,7 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
             await executeScope(params);
             await applyJoinedScopes(joinedScopes, params);
             assertStoredQueryPaths(type.gqltype, params.args, 'aggregate');
+            assertSupportedOperators(type.gqltype, params.args, 'aggregate');
             return adapter.aggregate(type.model, type.gqltype, params.args, null);
           },
         };
@@ -2953,11 +2980,13 @@ const autoGenerateResolvers = (gqltype) => {
           throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
         }
         const joinedScopes = inspectClientPaths(relatedType, args, 'find');
+        assertSupportedOperators(relatedType, args, 'find');
         const params = { type: relatedTypeInfo, args, operation: 'find', context };
         await executeMiddleware(params);
         await executeScope(params);
         await applyJoinedScopes(joinedScopes, params);
         assertStoredQueryPaths(relatedType, params.args, 'find');
+        assertSupportedOperators(relatedType, params.args, 'find');
         return loadChildren(relatedTypeInfo, connection, parent._id ?? parent.id, params.args, context);
       }, { simfinityQuery: { typeName: relatedType.name, operation: 'find' } });
       runtimeBoundTypes.set(gqltype, runtimeIdentity);

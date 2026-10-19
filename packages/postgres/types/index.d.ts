@@ -230,7 +230,11 @@ export interface PostgresRuntime extends Runtime<PostgresModel, PostgresSession>
   initializeDatabase(options?: InitializationOptions): Promise<InitializationResult>;
   withTransaction<T>(session: PostgresSession | null | undefined, callback: (session: PostgresSession) => Promise<T> | T): Promise<T>;
 }
-/** PostgreSQL 15+ plugin for createSQL; omitted options allow later runtime.configure. */
+/**
+ * PostgreSQL 15+ plugin for createSQL; omitted options allow later runtime.configure. Its `queryFeatures` lists every
+ * `QLOperator` value. The case-insensitive text operators need the ICU collation `und-x-icu`, so a server built
+ * without ICU fails them.
+ */
 export function postgresPlugin(options?: PostgresConfiguration): SQLPlugin<
   PostgresConfiguration,
   DatabaseQueryable,

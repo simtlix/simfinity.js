@@ -17,6 +17,13 @@ export const postgresPlugin = (options) => ({
   // singleStatementReads: one statement reads one snapshot at any isolation level, so a read without owned
   // tables needs no repeatable-read transaction.
   capabilities: ['transactions', 'foreignKeys', 'deferredForeignKeys', 'embeddedValues', 'ownedRecords', 'scalarLists', 'uniqueValues', 'nullableUnique', 'singleStatementReads'],
+  // Every filter operator compileQuery and compileChildrenQuery compile, listed one by one so that a later
+  // QLOperator value is rejected until the compiler supports it. The declaration names the compileQuery it describes,
+  // so a copy of this plugin with another compileQuery compiles the operators of 3.7.0 until it declares its own.
+  queryFeatures: {
+    operators: ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE', 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ'],
+    compileQuery,
+  },
   naming: { validateIdentifier: identifier, generatedName },
   // The runtime passes its bound configuration: createPostgres(options) or configure(value).
   describeSchema: (plan, configuration) => describeRelationalSchema(plan, { refreshTriggers: configuration?.refreshTriggers, ownerIndexes: configuration?.ownerIndexes }),

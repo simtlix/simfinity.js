@@ -15,6 +15,7 @@ import type {
 import type {
   DatabaseAdapter,
   MutationLimitsOptions,
+  QueryFeatures,
   RuntimeRegistration,
   SimfinityError,
 } from '@simtlix/simfinity-core';
@@ -88,6 +89,13 @@ export interface MongoAdapterOptions {
  */
 export interface MongoAdapter extends DatabaseAdapter {
   readonly referentialIntegrity: 'off' | 'transactional';
+  /**
+   * Frozen; lists every `QLOperator` value. The literal text operators compile to escaped regular
+   * expressions: `ILIKE` unanchored, `STARTS_WITH` and `ISTARTS_WITH` anchored with `^`, `ENDS_WITH` and
+   * `IENDS_WITH` with `\z`, and `IEQ` with both, with the `i` option for the case-insensitive ones. A
+   * copy of the adapter without this member supports only the operators of 3.7.0.
+   */
+  readonly queryFeatures: QueryFeatures;
   /**
    * Accepts only an ObjectId or a 24-character hexadecimal string, normalized to lowercase, and
    * throws `NOT_VALID_ID` (400) for anything else, including undefined, null and numbers. It never
