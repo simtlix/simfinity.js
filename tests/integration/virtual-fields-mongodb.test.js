@@ -317,8 +317,8 @@ withStandalone('virtual fields on a standalone MongoDB server', () => {
   });
 });
 
-// A MongoDB connectionField may be a dotted path into an embedded value. Such a path must not end at,
-// or pass through, a virtual member: the reference would store its link, and get an index, there.
+// Dotted connectionField declarations are rejected, whether their path reaches a virtual
+// member or a stored member. Neither case may build a model or an index.
 describe.each(['off', 'transactional'])('dotted connectionField aliases on MongoDB (%s integrity)', (referentialIntegrity) => {
   const build = (name, keyField, connectionField = 'meta.key') => {
     const Target = new GraphQLObjectType({ name: `${name}Target`, fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
@@ -360,12 +360,10 @@ describe.each(['off', 'transactional'])('dotted connectionField aliases on Mongo
     expect(mongoose.modelNames()).not.toContain(Owner.name);
   });
 
-  test('a dotted connectionField that ends at a stored member still builds its path and index', () => {
+  test('rejects a dotted connectionField ending at a stored member before building any model', () => {
     const { runtime, Owner } = build(`${prefix}Stored`, { type: GraphQLID });
-    runtime.createSchema();
-    const schema = runtime.getModel(Owner).schema;
-    expect(schema.path('meta.key')?.instance).toBe('ObjectId');
-    expect(schema.indexes()).toContainEqual([{ 'meta.key': 1 }, expect.anything()]);
+    expect(() => runtime.createSchema()).toThrow(`${prefix}StoredOwner.owner extensions.relation.connectionField meta.key must name a field of ${prefix}StoredOwner, not a path into an embedded value`);
+    expect(mongoose.modelNames()).not.toContain(Owner.name);
   });
 });
 

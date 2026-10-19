@@ -17,7 +17,7 @@ import { collectQueryPathEntries, collectQueryPaths, walkQueryPath } from './que
 import { relationFieldOwners } from './relation-owners.js';
 import { isThenable } from './auth/thenable.js';
 import {
-  getFieldStorageName, getListShape, isVirtualField, markStoredIdentity, normalizeConnectionField,
+  assertPlainConnectionField, getFieldStorageName, getListShape, isVirtualField, markStoredIdentity, normalizeConnectionField,
 } from './relation-storage.js';
 import {
   assertVirtualConnection, assertVirtualDeclaration, assertVirtualIndexes, assertVirtualStateField, virtualConflicts,
@@ -2703,6 +2703,23 @@ const warnOnce = (gqltype, key, message) => {
   console.warn(message);
 };
 
+// A connectionField names a field, never a path (assertPlainConnectionField), in every type a model
+// stores: the registered types and the embedded types they store, at any depth, whether or not an
+// embedded type is registered itself, as describeModels and MongoDB's generated models reach them.
+const assertPlainConnectionFields = () => {
+  const visited = new Set();
+  const visit = (gqltype) => {
+    if (visited.has(gqltype)) return;
+    visited.add(gqltype);
+    for (const [fieldName, field] of Object.entries(gqltype.getFields())) {
+      assertPlainConnectionField(gqltype.name, fieldName, field);
+      const named = field.extensions?.relation?.embedded && getNamedType(field.type);
+      if (named instanceof GraphQLObjectType) visit(named);
+    }
+  };
+  for (const { gqltype } of Object.values(typesDict.types)) visit(gqltype);
+};
+
 // A writable referenced collection without a child connectionField would store unlinked children
 // through generated nested writes and read none back, so it is rejected before anything is built.
 // One with its own resolver only warns, and its nested writes are rejected per request; a readOnly
@@ -2791,6 +2808,7 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
   schemaTypes.forEach(assertFieldsNotBoundElsewhere);
   if (assertVirtualFields(schemaTypes)) virtualFieldsDeclared = true;
   warnUndeclaredVirtualFields();
+  assertPlainConnectionFields();
   assertCollectionConnections();
   // An application type with the name of a field metadata type that an earlier schema fixed; one that
   // only generated types or the fields of an input object reach is found when the schema is

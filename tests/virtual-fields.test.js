@@ -367,7 +367,7 @@ describe('virtual field declarations', () => {
     }), 'An index of VfDecl names the virtual field VfDeclMeta.key (through meta.key), which is never stored');
   });
 
-  test('reads a non-string connectionField as its string form, as storage keys the link by it', () => {
+  test('rejects non-string connectionFields that name virtual members', () => {
     const Owner = new GraphQLObjectType({ name: 'VfDeclOwner', fields: { id: { type: GraphQLID } } });
     const Meta = new GraphQLObjectType({
       name: 'VfDeclMeta',
@@ -403,7 +403,7 @@ describe('virtual field declarations', () => {
     expect(build({ extensions: { readOnly: true, relation: {} }, resolve: () => [] })).not.toThrow();
   });
 
-  test('a dotted connectionField through a reference names a path of its own type, not the target field', () => {
+  test('rejects a dotted connectionField even when its path crosses a reference', () => {
     const Target = new GraphQLObjectType({
       name: 'VfDeclTarget',
       fields: { id: { type: GraphQLID }, vk: { type: GraphQLID, resolve, extensions: { virtual: true } } },
@@ -415,7 +415,7 @@ describe('virtual field declarations', () => {
     runtime.connect(null, singleType({ type: Owner, extensions: { relation: { connectionField: 'link.vk' } } }, {
       extraFields: { link: { type: Target, extensions: { relation: { connectionField: 'linkId' } } } },
     }), 'vfDecl', 'vfDecls');
-    expect(() => runtime.createSchema()).not.toThrow();
+    expect(() => runtime.createSchema()).toThrow('VfDecl.value extensions.relation.connectionField link.vk must name a field of VfDecl, not a path into an embedded value');
   });
 
   test('checks members of embedded types and types reached only through virtual fields', () => {

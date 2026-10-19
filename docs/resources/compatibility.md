@@ -37,7 +37,7 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 
 ## Upgrade notes for the next release
 
-These notes describe changes that the next release will include. They are additive and opt-in: an application that does not use them needs no change. Keep all directly installed Simfinity packages at the same version.
+These notes cover opt-in virtual fields and the rejection of dotted or non-string `connectionField` declarations. Applications using those declarations must migrate before upgrading. Keep all directly installed Simfinity packages at the same version.
 
 ### Virtual fields
 
@@ -58,7 +58,7 @@ These notes describe changes that the next release will include. They are additi
 A field that earlier versions stored, such as a `readOnly` field with arguments and its own resolver, can be declared virtual. That change is breaking for the application:
 
 - **Its stored values are no longer read or written.** Declare virtual only a field whose stored data nothing reads, and upgrade every process together: on PostgreSQL the new version cannot start until the database is migrated, and processes still on the earlier version fail once it is.
-- **GraphQL:** the generated filter argument disappears from list, `_aggregate` and collection fields, so clients that still send it fail validation (`Unknown argument …`), even with `null`. Client filter, sort, `groupId` and fact paths through the field fail with `FORBIDDEN_FILTER_PATH` (403), as they already did for a field with its own resolver unless it set `queryable: true`, which a virtual field cannot declare. Paths that middleware or a scope add through it fail with `INVALID_MODEL` (500). The field leaves the generated inputs, if it was not `readOnly` already, and introspection reads `virtual: true` and `readOnly: true` for it.
+- **GraphQL:** the generated filter argument disappears from list, `_aggregate` and collection fields, so clients that still send it fail validation (`Unknown argument …`), even with `null`. Client filter, sort, `groupId` and fact paths through the field fail with `FORBIDDEN_FILTER_PATH` (403), as they already did for a field with its own resolver unless it set `queryable: true`, which a virtual field cannot declare. Paths that middleware or a scope add through it fail with `INVALID_MODEL` (500). The field leaves the generated inputs, if it was not `readOnly` already, and introspection reads `readOnly: true` for it.
 - **MCP:** list and aggregate tools lose the field's input property, and callers that still send it get `MCP_UNKNOWN_ARGUMENT`. List tools stop selecting a field without required arguments unless it sets `mcp: 'select'`, and so does every tool inside the items of a nested collection or embedded list, such as the get-by-id tool of a type whose collection reaches the field. A field with a required argument gains its own read tool, `<byIdQuery>_<field>`, so the catalog grows by one tool per such field, unless it sets `mcp: false`; a field argument named `id` makes setup fail with `MCP_INVALID_OPTIONS` until you rename it, set `mcp: false` or exclude the tool.
 - **MongoDB:** generated models drop the field's path, `[]` default and indexes, and transactional reference integrity no longer checks it. Existing documents keep what was stored for the field, such as `[]`, and nothing reads it. Generated writes leave a stored top-level value alone, but a generated update that sets an embedded parent rewrites that object, which drops the stored keys of its virtual members at any depth. To remove leftovers, use a driver-level update, which strict mode does not filter, such as `getModel(Barbershop).collection.updateMany({}, { $unset: { busyRanges: '' } })`, or pass `{ strict: false }` to the model's `updateMany()`. Through the generated model, Mongoose drops an `$unset` of a path that the model no longer declares and sends nothing: `getModel(Barbershop).updateMany({}, { $unset: { busyRanges: '' } })` resolves to `{ acknowledged: false }` and changes no document. An index that Mongoose created for it, such as `busyRanges.professionalId_1`, stays until you drop it, because Simfinity never drops indexes. A supplied model keeps the paths it declares, and the defaults it applies on create.
 - **PostgreSQL:** both initialization modes keep failing with `SCHEMA_MISMATCH` (409) until the database is migrated. The runtime's `initializeDatabase()` appends to the message the fields that left storage behind and the statements that migrate them, for example:
@@ -80,6 +80,76 @@ A field that earlier versions stored, such as a `readOnly` field with arguments 
   - **A root that owns nothing afterwards,** after either of the two cases with their own tables above, the last member with its own table of an embedded value or a unique list: also drop its refresh triggers and guard table, `DROP TRIGGER IF EXISTS "<Root>__touch" ON …; DROP TRIGGER IF EXISTS "<Root>__deferred" ON …; DROP TABLE IF EXISTS …."<Root>__guard";`. Otherwise, with `refreshTriggers: 'perRoot'` the database validates but every write to the root fails with `Database operation failed`, and with `perRow` initialization keeps failing with `SCHEMA_MISMATCH` for the unexpected `<Root>__deferred` constraint. The functions those triggers called remain as cleanup.
 
   The message lists the statements that the database needs, in this order, with the table and function names of your schema.
+### Dotted connection fields
+
+**A dotted `connectionField` is rejected.** Versions up to 3.7.0 accepted a `connectionField` that is a path, such as `nested.targetId`, and the MongoDB integrity guide listed such dotted storage keys among the protected references. A relation's `extensions.relation.connectionField` must now name a field of the record that stores the link: the reference's own type, or a collection's item type. `createSchema()` rejects a `connectionField` that contains a dot, or that is not a string, with `INVALID_MODEL` (400) before any model or table is built, on PostgreSQL and in both MongoDB integrity modes, in every registered type and in every embedded type they store, whether or not that type is registered itself; `describeModels()` rejects it too. An omitted or empty `connectionField` keeps its meaning. An application that declares such a value fails at startup until its declaration changes, and changing the declaration does not move the links it stored: see [moving links of a dotted connectionField](#moving-links-of-a-dotted-connectionfield).
+
+### Moving links of a dotted connectionField
+
+Stop every process that runs the old declaration, move the links, then start the new version. Each migration below was verified on data that 3.7.0 wrote, with generated reads and writes, MongoDB's transactional checks and startup audit, and `initializeDatabase({ mode: 'validate' })` on PostgreSQL. The MongoDB statements are for `mongosh`, on the collection of each type's generated model, named after the type; the PostgreSQL ones use the schema `app` and the names that `compileDatabaseSchema()` prints for the new declaration. `initializeDatabase()` never alters an existing table, so it cannot do these steps. For another shape, such as an `Owner` that also declares an embedded `nested` value, compare `compileDatabaseSchema()` for the new declaration with the database.
+
+**A reference.** With `Owner.target: { type: Target, extensions: { relation: { connectionField: 'nested.targetId' } } }`, where `Owner` declares no `nested` field, MongoDB stored the link inside an object, `{ nested: { targetId } }`, which a cleared link left as `nested: {}`; the transactional mode protected it, but generated reads returned `target: null`. PostgreSQL stored it in a column named `"nested.targetId"`, with the foreign key `"Owner__nested.targetId__fk"` and the index `"Owner__nested.targetId__idx"`, and read it back. Choose one of two declarations.
+
+A plain name on the record, `connectionField: 'targetId'`, keeps the GraphQL field `target`, so clients do not change. On MongoDB, move the field; the second statement removes the objects that the move or a cleared link left empty, which is safe only because `Owner` declares no `nested` field:
+
+```javascript
+db.getCollection('Owner').updateMany({ 'nested.targetId': { $exists: true } }, { $rename: { 'nested.targetId': 'targetId' } });
+db.getCollection('Owner').updateMany({ nested: {} }, { $unset: { nested: '' } });
+```
+
+On PostgreSQL, rename the column, its foreign key and its index:
+
+```sql
+BEGIN;
+ALTER TABLE "app"."Owner" RENAME COLUMN "nested.targetId" TO "targetId";
+ALTER TABLE "app"."Owner" RENAME CONSTRAINT "Owner__nested.targetId__fk" TO "Owner__targetId__fk";
+ALTER INDEX "app"."Owner__nested.targetId__idx" RENAME TO "Owner__targetId__idx";
+COMMIT;
+```
+
+A reference of an embedded type fits a link that describes an embedded value: declare `Nested { target: { type: Target, extensions: { relation: { connectionField: 'targetId' } } } }`, register it with `addNoEndpointType()`, and give `Owner` the field `nested: { type: Nested, extensions: { relation: { embedded: true } } }`. Clients then read and write `nested { target { id } }` instead of `target`. MongoDB stores this link at the same path, `nested.targetId`, so its documents need no change. Lists read a document whose link was cleared as `nested: { target: null }` and one that never had a link as `nested: null`; the `$unset` statement above makes cleared links list as `nested: null` too. By-ID reads, reference reads and update responses read both as `nested: { target: null }`, with or without that statement, as [MongoDB embedded objects in hydrated documents](../guide/mutations#update-selected-fields) describes.
+
+On PostgreSQL, that embedded value has an owned table. In one transaction, add the state column and check of `Owner` and create the owned table, as `compileDatabaseSchema()` prints them, copy the links and drop the old column; then run `initializeDatabase()` once, which creates the remaining functions, triggers, foreign keys and indexes and checks the copied rows. Rows without a link read `nested: null`.
+
+```sql
+BEGIN;
+ALTER TABLE "app"."Owner"
+  ADD COLUMN "__nested_state" text COLLATE "pg_catalog"."C" NOT NULL DEFAULT 'missing'::text,
+  ADD CONSTRAINT "Owner____nested_state__state" CHECK ("__nested_state" = ANY (ARRAY['missing'::text, 'null'::text, 'present'::text]));
+CREATE TABLE "app"."Owner__nested" (
+  "__id" uuid NOT NULL DEFAULT gen_random_uuid(),
+  "__owner_id" uuid NOT NULL,
+  "targetId" uuid,
+  "__field__target__present" boolean NOT NULL DEFAULT false,
+  CONSTRAINT "Owner__nested__pk" PRIMARY KEY ("__id")
+);
+INSERT INTO "app"."Owner__nested" ("__owner_id", "targetId", "__field__target__present")
+  SELECT "id", "nested.targetId", true FROM "app"."Owner" WHERE "nested.targetId" IS NOT NULL;
+UPDATE "app"."Owner" SET "__nested_state" = 'present' WHERE "nested.targetId" IS NOT NULL;
+ALTER TABLE "app"."Owner" DROP COLUMN "nested.targetId";
+COMMIT;
+```
+
+**A collection.** With `Parent.children: { type: new GraphQLList(Child), extensions: { relation: { connectionField: 'meta.parent' }, readOnly: true } }`, where `Child.meta` is an embedded value with an ID member `parent`, a writable collection failed when the schema was built, and a `readOnly` one built. On MongoDB it read the children whose `meta.parent` held the parent's ID, as `Child`'s own writes stored it, and the transactional mode protected that path. On PostgreSQL it read no children: `Child`'s writes stored the ID in the JSON of `meta`, while the collection read a column named `"meta.parent"`, which stayed empty.
+
+A collection's link is a field of the child itself: remove `parent` from the embedded type, declare `Child.parent: { type: Parent, extensions: { relation: { connectionField: 'parentId' } } }`, and set the collection's `connectionField` to `'parentId'`. Clients write `parent: { id }` instead of `meta: { parent }`. On MongoDB, move the field:
+
+```javascript
+db.getCollection('Child').updateMany({ 'meta.parent': { $exists: true } }, { $rename: { 'meta.parent': 'parentId' } });
+```
+
+On PostgreSQL, rename the column, its foreign key and its index, copy the IDs out of the JSON, replace the shape function of `meta` with the `"Child__meta__json_valid"` statement that `compileDatabaseSchema()` prints, run as `CREATE OR REPLACE FUNCTION`, and drop the function of the removed member. An ID that names no parent fails the foreign key and rolls the transaction back.
+
+```sql
+BEGIN;
+ALTER TABLE "app"."Child" RENAME COLUMN "meta.parent" TO "parentId";
+ALTER TABLE "app"."Child" RENAME CONSTRAINT "Child__meta.parent__fk" TO "Child__parentId__fk";
+ALTER INDEX "app"."Child__meta.parent__idx" RENAME TO "Child__parentId__idx";
+UPDATE "app"."Child" SET "parentId" = ("meta" ->> 'parent')::uuid, "meta" = "meta" - 'parent' WHERE "meta" ? 'parent';
+-- CREATE OR REPLACE FUNCTION "app"."Child__meta__json_valid"(jsonb) ..., as compileDatabaseSchema() prints it
+DROP FUNCTION "app"."Child__meta__parent__json_valid"(jsonb);
+COMMIT;
+```
 
 ## Upgrade to 3.7.0
 
