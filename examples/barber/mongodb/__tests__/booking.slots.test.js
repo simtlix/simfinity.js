@@ -12,16 +12,15 @@ vi.mock('@simtlix/simfinity-js', () => ({
   SimfinityError,
   getType: vi.fn(),
   getModel: vi.fn(),
-  registerMutation: vi.fn(),
 }));
 
 vi.mock('../auth/permissions.js', () => ({ hasAnyRole: (context, roles) => roles.some((role) => context?.user?.roles?.includes(role)) }));
 
 const simfinity = await import('@simtlix/simfinity-js');
 const { bookingController, findSlotHoldingBookings } = await import('../types/booking.controller.js');
-const { listBusyRanges } = await import('../types/customMutations.js');
+const { busyRangesField, listBusyRanges } = await import('../types/barbershop.busyRanges.js');
 
-// bookingAvailability validates ObjectIds, so the shop uses a real one.
+// busyRanges validates ObjectIds, so the shop uses a real one.
 const SHOP = '64b7f0c2a1b2c3d4e5f60718';
 const hours = [0, 1, 2, 3, 4, 5, 6].map((dayOfWeek) => ({
   dayOfWeek, openTime: '09:00', closeTime: '18:00', isClosed: dayOfWeek === 0, breakStartTime: '13:00', breakEndTime: '14:00',
@@ -335,9 +334,9 @@ describe('booking update slot validation', () => {
   });
 });
 
-describe('bookingAvailability', () => {
+describe('barbershop.busyRanges', () => {
   it('returns only times and professional IDs of confirmed bookings for the date', async () => {
-    const ranges = await listBusyRanges({ barbershopId: SHOP, date: '2026-10-02' }, session);
+    const ranges = await listBusyRanges(SHOP, { date: '2026-10-02' });
     expect(ranges).toEqual([
       { startTime: '10:00', endTime: '10:30', professionalId: 'p1' },
       { startTime: '11:00', endTime: '11:30', professionalId: 'p1' },
@@ -346,20 +345,18 @@ describe('bookingAvailability', () => {
 
   it('orders ranges by clock time, including unpadded stored times', async () => {
     data.booking.push({ _id: 'legacy', barbershop: SHOP, professional: 'p2', scheduledDate: '2026-10-02', startTime: '9:00', endTime: '09:30', state: 'CONFIRMED' });
-    const ranges = await listBusyRanges({ barbershopId: SHOP, date: '2026-10-02' }, session);
+    const ranges = await listBusyRanges(SHOP, { date: '2026-10-02' });
     expect(ranges.map((range) => range.startTime)).toEqual(['9:00', '10:00', '11:00']);
   });
 
   it('filters by professional while keeping shop-wide bookings', async () => {
     data.booking.push({ _id: 'shop-wide', barbershop: SHOP, scheduledDate: '2026-10-02', startTime: '16:00', endTime: '16:30', state: 'CONFIRMED' });
-    expect(await listBusyRanges({ barbershopId: SHOP, date: '2026-10-02', professionalId: 'p2' }, session))
+    expect(await listBusyRanges(SHOP, { date: '2026-10-02', professionalId: 'p2' }))
       .toEqual([{ startTime: '16:00', endTime: '16:30', professionalId: null }]);
   });
 
-  it('rejects malformed barbershop IDs with a domain error instead of a cast error', async () => {
-    const error = await listBusyRanges({ barbershopId: 'not-an-id', date: '2026-10-02' }, session).catch((caught) => caught);
-    expect(error.extensions.code).toBe('NOT_VALID_ID');
-    const excluded = await listBusyRanges({ barbershopId: SHOP, date: '2026-10-02', excludeBookingId: 'mine' }, session).catch((caught) => caught);
+  it('rejects malformed booking IDs with a domain error instead of a cast error', async () => {
+    const excluded = await listBusyRanges(SHOP, { date: '2026-10-02', excludeBookingId: 'mine' }).catch((caught) => caught);
     expect(excluded.extensions.code).toBe('NOT_VALID_ID');
     expect(calls).toEqual([]);
   });
@@ -371,7 +368,7 @@ describe('bookingAvailability', () => {
       { _id: own, client: 'client', barbershop: SHOP, professional: 'p2', scheduledDate: '2026-10-02', startTime: '12:00', endTime: '12:30', state: 'CONFIRMED' },
       { _id: others, client: 'someone', barbershop: SHOP, professional: 'p2', scheduledDate: '2026-10-02', startTime: '15:00', endTime: '15:30', state: 'CONFIRMED' },
     );
-    const times = async (excludeBookingId, user) => (await listBusyRanges({ barbershopId: SHOP, date: '2026-10-02', excludeBookingId }, session, user && { user }))
+    const times = async (excludeBookingId, user) => (await listBusyRanges(SHOP, { date: '2026-10-02', excludeBookingId }, user && { user }))
       .map((range) => range.startTime);
     expect(await times(own, { id: 'client' })).toEqual(['10:00', '11:00', '15:00']);
     expect(await times(others, { id: 'client' })).toEqual(['10:00', '11:00', '12:00', '15:00']);
@@ -381,7 +378,7 @@ describe('bookingAvailability', () => {
   it('matches uppercase professional IDs to their stored canonical IDs', async () => {
     const professionalId = '64b7f0c2a1b2c3d4e5f60730';
     data.booking.filter((row) => row.professional === 'p1').forEach((row) => { row.professional = professionalId; });
-    expect(await listBusyRanges({ barbershopId: SHOP, date: '2026-10-02', professionalId: professionalId.toUpperCase() }, session))
+    expect(await listBusyRanges(SHOP, { date: '2026-10-02', professionalId: professionalId.toUpperCase() }))
       .toEqual([
         { startTime: '10:00', endTime: '10:30', professionalId },
         { startTime: '11:00', endTime: '11:30', professionalId },
@@ -389,8 +386,17 @@ describe('bookingAvailability', () => {
   });
 
   it('rejects malformed dates and unavailable barbershops', async () => {
-    expect(await rejection(listBusyRanges({ barbershopId: SHOP, date: '02/10/2026' }, session))).toBe('INVALID_BOOKING_TIME');
+    expect(await rejection(listBusyRanges(SHOP, { date: '02/10/2026' }))).toBe('INVALID_BOOKING_TIME');
     data.barbershop[0].state = 'SUSPENDED';
-    expect(await rejection(listBusyRanges({ barbershopId: SHOP, date: '2026-10-02' }, session))).toBe('Barbershop is not available for booking');
+    expect(await rejection(listBusyRanges(SHOP, { date: '2026-10-02' }))).toBe('Barbershop is not available for booking');
+  });
+
+  it('is a virtual field of the barbershop, which no backend stores', async () => {
+    expect(busyRangesField.extensions).toEqual({ virtual: true });
+    expect(Object.keys(busyRangesField.args)).toEqual(['date', 'professionalId', 'excludeBookingId']);
+    // The resolver reads the parent shop's stored ObjectId, whatever the client selected.
+    const objectId = { toString: () => SHOP };
+    const ranges = await busyRangesField.resolve({ _id: objectId }, { date: '2026-10-02', professionalId: 'p1' }, { user: { id: 'client' } });
+    expect(ranges.map((range) => range.startTime)).toEqual(['10:00', '11:00']);
   });
 });

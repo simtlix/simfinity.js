@@ -15,7 +15,7 @@ export type BusinessHour = {
   breakEndTime?: string | null;
 };
 
-/** Time held by a confirmed booking, as returned by the `bookingAvailability` mutation. */
+/** Time held by a confirmed booking, as returned by the barbershop's virtual `busyRanges` field. */
 export type BusyRange = {
   startTime?: string | null;
   endTime?: string | null;

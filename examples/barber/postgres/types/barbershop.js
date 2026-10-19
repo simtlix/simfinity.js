@@ -7,6 +7,7 @@ import contactInfoType from './contactInfo.js';
 import { barbershopScopes } from './barbershop.scopes.js';
 import { barbershopController } from './barbershop.controller.js';
 import { BarbershopStateEnum, barbershopStateMachine } from './barbershop.stateMachine.js';
+import { busyRangesField } from './barbershop.busyRanges.js';
 
 const {
   GraphQLObjectType,
@@ -133,6 +134,7 @@ const barbershopType = new GraphQLObjectType({
       description: 'Favorite bookmarks pointing to this barbershop.',
       extensions: { relation: { connectionField: 'barbershop' } },
     },
+    busyRanges: busyRangesField,
   }),
 });
 
