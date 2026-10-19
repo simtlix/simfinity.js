@@ -408,6 +408,23 @@ const postgresSource = `import assert from 'node:assert/strict';
   const copySchema = copySql.createSchema();
   const copied = await graphql({ schema: copySchema, source: '{ copyBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
   assert.equal(copied.errors[0].extensions.code, 'UNSUPPORTED_QUERY');
+  // foldFinalSigma takes true or false; createSchema() rejects any other value, as it rejects an unknown refreshTriggers.
+  const badSigma = createPostgres({ pool, schema: 'app', foldFinalSigma: 'yes' });
+  badSigma.connect(null, bookType, 'sigmaBook', 'sigmaBooks');
+  assert.throws(() => badSigma.createSchema(), (error) => error.extensions.code === 'INVALID_DATABASE_SCHEMA');
+  const sigmaSql = createSQL({ plugin: postgresPlugin({ pool, schema: 'app', foldFinalSigma: true }) });
+  sigmaSql.connect(null, bookType, 'sigmaSqlBook', 'sigmaSqlBooks');
+  sigmaSql.createSchema();
+  assert.deepEqual(sigmaSql.describeDatabase(), description);
+  // With foldFinalSigma: true, initialization rejects a server encoding without σ and ς, where its probe fails with 22P05.
+  const latinPool = {
+    async query() { throw Object.assign(new Error('untranslatable character'), { code: '22P05', severity: 'ERROR' }); },
+    async connect() { throw new Error('offline'); },
+  };
+  const latinSql = createSQL({ plugin: postgresPlugin({ pool: latinPool, schema: 'app', foldFinalSigma: true }) });
+  latinSql.connect(null, bookType, 'latinBook', 'latinBooks');
+  latinSql.createSchema();
+  await assert.rejects(() => latinSql.initializeDatabase(), (error) => error.extensions.code === 'INVALID_DATABASE_SCHEMA');
   assert(compileDatabaseSchema(description).some((sql) => sql.startsWith('CREATE TABLE')));
   assert.equal(describeDatabase([{ gqltype: bookType }]).tables.length, 1);
   assert.equal(typeof initializeDatabase, 'function');
@@ -1264,6 +1281,13 @@ const badRefresh: PostgresConfiguration = { pool, refreshTriggers: 'perTransacti
 const badOwnerIndexes: PostgresConfiguration = { pool, ownerIndexes: 'none' };
 // @ts-expect-error describeDatabase options take the same values.
 describeDatabase([], { refreshTriggers: 'yes' });
+const sigmaOptions: PostgresConfiguration = { pool, schema: 'app', foldFinalSigma: true };
+createPostgres(sigmaOptions);
+createPostgres().configure({ pool, foldFinalSigma: false });
+const sigmaPlugin: boolean | undefined = postgresPlugin(sigmaOptions).options?.foldFinalSigma;
+// @ts-expect-error foldFinalSigma is a boolean.
+const badSigma: PostgresConfiguration = { pool, foldFinalSigma: 'yes' };
+void [sigmaPlugin, badSigma];
 void [schema, model, ready, lowLevel, defaultSchema, defaultReady, rule, email, scalarName, countPlugin, scopes];
 void [itemRules, tagRules, sameItemValidators];
 void [batchLimit, batchCompiler, triggerEvents, triggerWhen, badNulls, badInserts, badRefresh, badOwnerIndexes];

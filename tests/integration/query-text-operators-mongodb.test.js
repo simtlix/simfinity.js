@@ -496,7 +496,8 @@ const NON_NULL_NAMES = PRODUCTS.filter((product) => typeof product.name === 'str
 // directions and ILIKE from the searched form. The regex `i` option applies the Unicode simple case
 // folding of the server's PCRE2 build, never a length-changing, Turkic or locale-dependent folding.
 // Rows noted `postgres` give the other answer on PostgreSQL, which compares lower(x COLLATE
-// "und-x-icu") of both sides; the shared parity test pins them on both backends.
+// "und-x-icu") of both sides (the three sigma rows only without its foldFinalSigma option); the
+// shared parity test pins them on both backends.
 const FOLDING = [
   ['A', 'a', true],
   ['\u00C9', '\u00E9', true], // É, é

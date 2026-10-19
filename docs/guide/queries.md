@@ -89,12 +89,12 @@ query {
 
 Both backends ignore case through Unicode's case mappings. On both, `É` matches `é`, `ẞ` matches `ß`, the Kelvin sign `K` matches `k`, and `ǅ`, `ǆ` and `Ǆ` match each other, while `ß` does not match `ss`, `ﬁ` does not match `fi`, and `"istanbul"` does not find `İstanbul`.
 
-MongoDB uses the case-insensitive option of its regular expressions, and PostgreSQL compares `lower()` of both sides under the ICU root collation `und-x-icu`. A few characters therefore match differently, and the integration tests pin each difference:
+MongoDB uses the case-insensitive option of its regular expressions, and PostgreSQL compares `lower()` of both sides under the ICU root collation `und-x-icu`, or, with the option [`foldFinalSigma: true`](#the-capital-sigma-on-postgresql), `lower()` followed by `translate()` of `ς` into `σ`. A few characters therefore match differently, and the integration tests pin each difference:
 
 | Characters | MongoDB | PostgreSQL |
 | --- | --- | --- |
-| Lowercase variants that ICU `lower()` keeps: `ſ` (U+017F), `µ` (U+00B5), `ς` (U+03C2), `ϐ`, `ϑ`, `ϕ`, `ϖ`, `ϰ`, `ϱ`, `ϵ`, `ẛ`, U+0345, U+1FBE and U+1C80 to U+1C88 | Match their usual letters: `IEQ "sun"` finds `ſun`, and `IEQ "μm"` finds `µm` | Do not match their usual letters |
-| The capital sigma `Σ` (U+03A3) | `Σ`, `σ` and `ς` match each other wherever they appear, so each case-insensitive operator returns every record that its case-sensitive form returns | `lower()` turns a `Σ` that ends a word into `ς` and any other `Σ` into `σ`, so `IEQ "ΟΔΟΣ"` finds `οδος` but not `οδοσ`, and `ILIKE "Σ"` does not find `ς`. A value with a `Σ` at one of its ends can also miss records that the case-sensitive operator returns: `ISTARTS_WITH "ΚΑΣ"` does not find `ΚΑΣΤΡΟ`, which `STARTS_WITH "ΚΑΣ"` finds; see [the capital sigma on PostgreSQL](#the-capital-sigma-on-postgresql) |
+| Lowercase variants that ICU `lower()` keeps: `ſ` (U+017F), `µ` (U+00B5), `ς` (U+03C2), `ϐ`, `ϑ`, `ϕ`, `ϖ`, `ϰ`, `ϱ`, `ϵ`, `ẛ`, U+0345, U+1FBE and U+1C80 to U+1C88 | Match their usual letters: `IEQ "sun"` finds `ſun`, and `IEQ "μm"` finds `µm` | Do not match their usual letters, except `ς`, which matches `σ` with `foldFinalSigma: true` |
+| The capital sigma `Σ` (U+03A3) | `Σ`, `σ` and `ς` match each other wherever they appear, so each case-insensitive operator returns every record that its case-sensitive form returns | By default, `lower()` turns a `Σ` that ends a word into `ς` and any other `Σ` into `σ`, so `IEQ "ΟΔΟΣ"` finds `οδος` but not `οδοσ`, and `ILIKE "Σ"` does not find `ς`. A value with a `Σ` at one of its ends can also miss records that the case-sensitive operator returns: `ISTARTS_WITH "ΚΑΣ"` does not find `ΚΑΣΤΡΟ`, which `STARTS_WITH "ΚΑΣ"` finds. With `foldFinalSigma: true`, `Σ`, `σ` and `ς` match each other wherever they appear, as on MongoDB; see [the capital sigma on PostgreSQL](#the-capital-sigma-on-postgresql) |
 | `İ` (U+0130) | Matches only itself | `lower()` turns it into `i` followed by U+0307, so `ISTARTS_WITH "i"` finds `İstanbul`, and `IEQ "İSTANBUL"` also finds `i̇stanbul` |
 | Letters newer than the server's Unicode tables, such as U+A7DC, whose lowercase is U+019B (Unicode 16) | Do not match on MongoDB 8.0 | Match when the server's ICU version knows them |
 
@@ -102,16 +102,35 @@ The case-insensitive operators need a PostgreSQL server built with ICU, which pr
 
 #### The capital sigma on PostgreSQL
 
-ICU's `lower()` turns a capital `Σ` into the final sigma `ς` when a letter comes before it and no letter comes after it, and into `σ` otherwise. Characters such as `.`, `'`, `:` and combining accents between `Σ` and a letter do not count, while a space, a hyphen, a digit, `%` or the end of the text do. PostgreSQL lowers the search value on its own, inside the `LIKE` pattern for `ILIKE`, `ISTARTS_WITH` and `IENDS_WITH`, without the stored text around it, so a `Σ` at an end of the value can lower to the other sigma than the same `Σ` in the stored text. The case-insensitive operators then miss the record, even when it is written in the same case as the value and the case-sensitive operator, or MongoDB, returns it:
+ICU's `lower()` turns a capital `Σ` into the final sigma `ς` when a letter comes before it and no letter comes after it, and into `σ` otherwise. Characters such as `.`, `'`, `:` and combining accents between `Σ` and a letter do not count, while a space, a hyphen, a digit, `%` or the end of the text do. PostgreSQL lowers the search value on its own, inside the `LIKE` pattern for `ILIKE`, `ISTARTS_WITH` and `IENDS_WITH`, without the stored text around it, so a `Σ` at an end of the value can lower to the other sigma than the same `Σ` in the stored text. With the default fold, the case-insensitive operators then miss the record, even when it is written in the same case as the value and the case-sensitive operator, or MongoDB, returns it:
 
 - **A value that ends in `Σ` after a letter**, or in `Σ` and a character such as `.`, misses stored text in which the word goes on: `ISTARTS_WITH "ΚΑΣ"` and `ILIKE "ΚΑΣ"` do not find `ΚΑΣΤΡΟ`, `ISTARTS_WITH "ΟΔΟΣ"` does not find `ΟΔΟΣΤΡΩΜΑ` or `ΟΔΟΣ.Α`, and `ILIKE "ΔΟΣ."` does not find `ΟΔΟΣ.Α`, although `STARTS_WITH "ΚΑΣ"`, `STARTS_WITH "ΟΔΟΣ"` and `LIKE "ΔΟΣ."` find them.
 - **A value that starts with `Σ`** misses stored text in which that `Σ` ends a word: `IENDS_WITH "Σ ΑΒ"` does not find `ΟΔΟΣ ΑΒ`, and `ILIKE "Σ"` and `IENDS_WITH "Σ"` do not find `ΟΔΟΣ`.
 
-`IEQ` compares whole values, so it can miss only text written with another sigma, as the table above shows, and never what `EQ` returns. A `Σ` with a letter on both sides within the value lowers as it does in the stored text, so `ISTARTS_WITH "ΚΑΣΤ"` finds `ΚΑΣΤΡΟ`. A lowercase `σ` or `ς` in the value stays as typed, so `ISTARTS_WITH "κασ"` finds `ΚΑΣΤΡΟ` but not `ΚΑΣ`, whose `Σ` lowers to `ς`. Lowering the value in the client does not help, because JavaScript's `toLowerCase()` applies the same rule as ICU. Where these searches matter, store a normalized copy of the text in a field that a [controller](./controllers) keeps up to date, such as `text.toLowerCase().replaceAll('ς', 'σ')`, and search that field with `STARTS_WITH`, `LIKE` or `EQ` and a value normalized the same way; both backends then return the same records, and an index on the field serves `STARTS_WITH` and `EQ`. Otherwise, avoid case-insensitive search values that start or end with a capital `Σ`.
+`IEQ` compares whole values, so it can miss only text written with another sigma, as the table above shows, and never what `EQ` returns. A `Σ` with a letter on both sides within the value lowers as it does in the stored text, so `ISTARTS_WITH "ΚΑΣΤ"` finds `ΚΑΣΤΡΟ`. A lowercase `σ` or `ς` in the value stays as typed, so `ISTARTS_WITH "κασ"` finds `ΚΑΣΤΡΟ` but not `ΚΑΣ`, whose `Σ` lowers to `ς`. Lowering the value in the client does not help, because JavaScript's `toLowerCase()` applies the same rule as ICU.
+
+To close the gap, set `foldFinalSigma: true` in `createPostgres(options)`, `postgresPlugin(options)` or `configure()`. PostgreSQL then folds both sides of `ILIKE`, `ISTARTS_WITH`, `IENDS_WITH` and `IEQ` with `translate(lower(x COLLATE "und-x-icu"), 'ς', 'σ')`, which turns every `ς` into `σ` after lowering, so `Σ`, `σ` and `ς` match each other wherever they appear, as on MongoDB: `ISTARTS_WITH "ΚΑΣ"` finds `ΚΑΣΤΡΟ`, `IEQ "ΟΔΟΣ"` finds `οδοσ`, `ILIKE "Σ"` finds `ς`, and each case-insensitive operator returns every record that its case-sensitive form returns. `LIKE`, `STARTS_WITH`, `ENDS_WITH` and the other operators compile the same statements with both settings, and the other characters of the table above keep their differences. The option is off by default so that the statements, and the indexes that serve them, stay as they are; a value other than `true` or `false` throws `INVALID_DATABASE_SCHEMA` (400) from `createSchema()`. Its statements and indexes contain `σ` and `ς`, which PostgreSQL converts to the server encoding, so the option needs an encoding that has both, such as `UTF8`, `ISO_8859_7` or `WIN1253`: on another, such as `LATIN1`, every case-insensitive filter would fail with `INVALID_VALUE` (400), even for an ASCII value, and the index statements below fail too, so initialization, in both modes, first checks the encoding and rejects such a database with `INVALID_DATABASE_SCHEMA` (400). The default statements contain neither character.
+
+An [index for text filters](#indexes-for-text-filters) serves these operators only when it is on the expression of the runtime's setting, so create the indexes of the setting you deploy. For the examples of that section, a `text_pattern_ops` btree for `IEQ` and `ISTARTS_WITH`, a trigram index for `ILIKE`, `ISTARTS_WITH` and `IENDS_WITH`, which needs the `pg_trgm` extension, and a btree for `IEQ` on a member of an embedded value stored as jsonb:
+
+```sql
+-- foldFinalSigma: false, the default
+CREATE INDEX series_name_ci ON "app"."Serie" (lower("name" COLLATE "und-x-icu") text_pattern_ops);
+CREATE INDEX series_name_trgm ON "app"."Serie" USING gin (lower("name" COLLATE "und-x-icu") gin_trgm_ops);
+CREATE INDEX series_label_ci ON "app"."Serie" (lower(("details" ->> 'label') COLLATE "und-x-icu"));
+-- foldFinalSigma: true
+CREATE INDEX series_name_ci_sigma ON "app"."Serie" (translate(lower("name" COLLATE "und-x-icu"), 'ς', 'σ') text_pattern_ops);
+CREATE INDEX series_name_trgm_sigma ON "app"."Serie" USING gin (translate(lower("name" COLLATE "und-x-icu"), 'ς', 'σ') gin_trgm_ops);
+CREATE INDEX series_label_ci_sigma ON "app"."Serie" (translate(lower(("details" ->> 'label') COLLATE "und-x-icu"), 'ς', 'σ'));
+```
+
+Changing the setting requires rebuilding these indexes on the new expression. An index on the other expression no longer serves the operators, and PostgreSQL then reads every row without any error, while `REINDEX` keeps the old expression. Create the indexes of the new setting under their own names, as above, for example with `CREATE INDEX CONCURRENTLY`, before instances with the new setting serve requests, keep the old ones while instances with the old setting still run, and drop them afterwards. Initialization keeps indexes on either expression in both modes.
+
+Without the option, store a normalized copy of the text in a field that a [controller](./controllers) keeps up to date, such as `text.toLowerCase().replaceAll('ς', 'σ')`, and search that field with `STARTS_WITH`, `LIKE` or `EQ` and a value normalized the same way; both backends then return the same records, and an index on the field serves `STARTS_WITH` and `EQ`. Otherwise, avoid case-insensitive search values that start or end with a capital `Σ`.
 
 ### Indexes for text filters
 
-On PostgreSQL, text columns use the `C` collation, and the operators compile to these conditions, where `$1` is a bound parameter:
+On PostgreSQL, text columns use the `C` collation, and the operators compile to these conditions, where `$1` is a bound parameter. With [`foldFinalSigma: true`](#the-capital-sigma-on-postgresql), `translate(lower(x COLLATE "und-x-icu"), 'ς', 'σ')` takes the place of `lower(x COLLATE "und-x-icu")`, on both sides and in the indexes:
 
 | Operator | Condition | Index that serves it |
 | --- | --- | --- |
@@ -121,7 +140,7 @@ On PostgreSQL, text columns use the `C` collation, and the operators compile to 
 | `ILIKE`, `IENDS_WITH` | The same, with `$1` = `%value%` or `%value` | A trigram index |
 | `LIKE`, `ENDS_WITH` | `strpos("column" COLLATE "C", $1) > 0`, `right("column" COLLATE "C", char_length($1)) = $1` | None |
 
-In the `LIKE` patterns, `\`, `%` and `_` of the value are escaped. Simfinity creates no index for the text operators: create the ones your searches need in your own migration, on exactly the compiled expression, `lower("column" COLLATE "und-x-icu")`; an index on `lower("column")` without the collation does not serve them. Initialization keeps such indexes in both modes:
+In the `LIKE` patterns, `\`, `%` and `_` of the value are escaped. Simfinity creates no index for the text operators: create the ones your searches need in your own migration, on exactly the compiled expression, `lower("column" COLLATE "und-x-icu")`, or `translate(lower("column" COLLATE "und-x-icu"), 'ς', 'σ')` with `foldFinalSigma: true`; an index on `lower("column")` without the collation does not serve them, and neither does an index on the expression of the other setting. Initialization keeps such indexes in both modes. These are the indexes of the default setting; [the capital sigma on PostgreSQL](#the-capital-sigma-on-postgresql) gives those of `foldFinalSigma: true`:
 
 ```sql
 -- IEQ and ISTARTS_WITH

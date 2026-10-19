@@ -189,7 +189,8 @@ ITEM_CASES.push(
 /**
  * `[operator, value, postgres, mongodb?, difference?]`: the words each backend returns. Both backends compare under
  * the Unicode simple case mappings, but PostgreSQL applies ICU lower() and MongoDB its regular expressions'
- * case-insensitive matching. A case with `mongodb` pins a documented difference.
+ * case-insensitive matching. A case with `mongodb` pins a documented difference. `postgres` is the default fold;
+ * with `foldFinalSigma: true`, PostgreSQL returns MongoDB's words for the differences in FINAL_SIGMA_DIFFERENCES.
  */
 export const FOLDING_CASES = [
   ['IEQ', 'ÉCLAIR', ['w01', 'w02', 'w03']], ['ILIKE', 'éCL', ['w01', 'w02', 'w03']],
@@ -201,14 +202,14 @@ export const FOLDING_CASES = [
   ['IEQ', 'ſun', ['w19'], ['w19', 'w20', 'w21'], 'ſ (U+017F)'],
   ['IEQ', 'μm', ['w23', 'w24'], ['w22', 'w23', 'w24'], 'µ (U+00B5)'],
   // ICU lower() keeps ς apart from σ, and turns a capital sigma that ends a word into ς and any other into σ;
-  // MongoDB matches Σ, σ and ς with each other wherever they are.
+  // MongoDB matches Σ, σ and ς with each other wherever they are, and so does PostgreSQL with foldFinalSigma.
   ['IEQ', 'οδοσ', ['w06'], ['w04', 'w05', 'w06'], 'ς (U+03C2)'],
   ['IEQ', 'ΟΔΟΣ', ['w04', 'w05'], ['w04', 'w05', 'w06'], 'ς (U+03C2)'],
   ['IEQ', 'Σ', [], ['w33'], 'ς (U+03C2)'],
   ['ILIKE', 'Σ', ['w06', 'w29', 'w31', 'w32'], ['w04', 'w05', 'w06', 'w29', 'w30', 'w31', 'w32', 'w33'], 'ς (U+03C2)'],
   // PostgreSQL lowers the value apart from the stored text, so a Σ at an end of the value can lower to the other
-  // sigma than the same Σ in the stored text: a case-insensitive operator then misses words that its case-sensitive
-  // form returns, even in the same case (STARTS_WITH "ΚΑΣ" finds ΚΑΣΤΡΟ).
+  // sigma than the same Σ in the stored text: by default, a case-insensitive operator then misses words that its
+  // case-sensitive form returns, even in the same case (STARTS_WITH "ΚΑΣ" finds ΚΑΣΤΡΟ).
   ['ISTARTS_WITH', 'ΚΑΣ', [], ['w29'], 'Σ (U+03A3) at an end of the value'],
   ['ILIKE', 'ΚΑΣ', [], ['w29'], 'Σ (U+03A3) at an end of the value'],
   ['ISTARTS_WITH', 'ΟΔΟΣ', ['w04', 'w05', 'w30'], ['w04', 'w05', 'w06', 'w30', 'w31', 'w32'], 'Σ (U+03A3) at an end of the value'],
@@ -220,3 +221,8 @@ export const FOLDING_CASES = [
   ['IEQ', 'İSTANBUL', ['w10', 'w13'], ['w10'], 'İ (U+0130)'],
   ['ISTARTS_WITH', 'i', ['w10', 'w11', 'w12', 'w13'], ['w11', 'w12', 'w13'], 'İ (U+0130)'],
 ];
+/**
+ * The FOLDING_CASES differences that PostgreSQL's `foldFinalSigma: true` removes: it folds both sides with
+ * translate(lower(x COLLATE "und-x-icu"), 'ς', 'σ'), so Σ, σ and ς match each other wherever they are, as on MongoDB.
+ */
+export const FINAL_SIGMA_DIFFERENCES = new Set(['ς (U+03C2)', 'Σ (U+03A3) at an end of the value']);

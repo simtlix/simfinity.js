@@ -207,6 +207,17 @@ export interface PostgresConfiguration {
    * value throws INVALID_DATABASE_SCHEMA (400) from createSchema or describeDatabase.
    */
   ownerIndexes?: 'all' | 'minimal';
+  /**
+   * Defaults to false: ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ compare `lower(x COLLATE "und-x-icu")` of both sides, and
+   * lower() turns a capital sigma that ends a word into ς and any other into σ, so a case-insensitive value with a Σ at
+   * either end can miss rows that its case-sensitive form returns. `true` compares
+   * `translate(lower(x COLLATE "und-x-icu"), 'ς', 'σ')` instead, so Σ, σ and ς match each other wherever they are, as on
+   * MongoDB. Indexes serve these operators only on the expression of the setting, so rebuild them when it changes. The
+   * case-sensitive operators and LIKE do not change. A value other than true or false throws INVALID_DATABASE_SCHEMA
+   * (400) from createSchema. `true` puts σ and ς in the statements, so it needs a server encoding that has both, such
+   * as UTF8: initializeDatabase rejects another, such as LATIN1, with INVALID_DATABASE_SCHEMA (400), in both modes.
+   */
+  foldFinalSigma?: boolean;
 }
 export interface InitializationOptions { mode?: 'create' | 'validate' }
 export interface InitializationResult { mode: 'create' | 'validate'; created: string[] }
