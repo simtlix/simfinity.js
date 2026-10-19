@@ -1,0 +1,28 @@
+{
+  "name": "@simtlix/eslint-plugin-simfinity",
+  "version": "0.1.0",
+  "description": "Optional static checks for Simfinity 3.8 application contracts",
+  "type": "module",
+  "exports": { ".": "./src/index.js" },
+  "files": ["src", "README.md", "LICENSE"],
+  "engines": { "node": "^18.18.0 || ^20.9.0 || >=21.1.0" },
+  "peerDependencies": { "eslint": "^9.30.1" },
+  "devDependencies": {
+    "@typescript-eslint/parser": "8.72.0",
+    "eslint": "9.39.5",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:consumer": "node tests/consumer.mjs",
+    "test:trial": "node scripts/trial.mjs",
+    "test:security": "npm audit"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/simtlix/simfinity.js",
+    "directory": "tools/eslint-plugin-simfinity"
+  },
+  "keywords": ["eslint", "eslintplugin", "simfinity", "graphql"]
+}
