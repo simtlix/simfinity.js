@@ -5,17 +5,10 @@ The plugin provides eight precise rules. It does not execute application
 code or load Simfinity, GraphQL, database drivers or the MCP SDK.
 
 The plugin has its own version (`0.1.0`) and is outside Simfinity's five runtime
-workspaces and their release workflow. This change prepares it for local trials;
-it does **not** publish it to npm. Use a packed archive from this checkout:
+workspaces and their release workflow. Install it from npm in your application:
 
 ```sh
-# From the repository root. Use Node.js 24 for development.
-cd tools/eslint-plugin-simfinity
-npm ci
-npm pack --pack-destination /tmp
-
-# From the consuming application's directory:
-npm install --save-dev 'eslint@^9.30.1' /tmp/simtlix-eslint-plugin-simfinity-0.1.0.tgz
+npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.1.0'
 ```
 
 ESLint **9.30.1 or later within 9.x**, ESM flat config and Node.js
@@ -98,7 +91,7 @@ Legitimate native database operations remain supported.
 
 ## Contributing and verification
 
-Run in this package:
+Use Node.js 24 for development. Run in this package:
 
 ```sh
 npm ci
@@ -107,6 +100,9 @@ npm test
 npm run test:consumer
 npm run test:trial
 ```
+
+To try an unpublished change, run `npm pack --pack-destination /tmp` in this
+directory and install the resulting archive in the consuming application.
 
 The isolated consumer packs/installs the actual archive, exercises JS/TS flat
 config and TypeScript config declarations, checks rule IDs/locations, and verifies

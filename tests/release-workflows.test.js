@@ -110,6 +110,22 @@ describe('release archives are packed before any dependency code runs (#28)', ()
 });
 
 describe('release source validation lives in release-state.js (#155)', () => {
+  it.each([
+    ['release', 'eslint-plugin-v0.1.0', false],
+    ['release', 'v3.8.1', true],
+    ['release', 'v3.9.0-rc.1', true],
+    ['push', 'v3.8.1', true],
+    ['workflow_dispatch', 'master', true],
+  ])('selects runtime release sources for %s / %s: %s', (event, tag, expected) => {
+    // This condition uses only JS-compatible Actions operators and startsWith.
+    const select = new Function('github', 'startsWith', `return (${release.jobs.source.if});`);
+    const context = { repository: 'simtlix/simfinity.js', event_name: event, event: { deleted: false, release: { tag_name: tag } } };
+    const startsWith = (value, prefix) => value.toLowerCase().startsWith(prefix.toLowerCase());
+    expect(select(context, startsWith)).toBe(expected);
+    expect(select({ ...context, repository: 'someone/fork' }, startsWith)).toBe(false);
+    expect(select({ ...context, event: { ...context.event, deleted: true } }, startsWith)).toBe(false);
+  });
+
   it('validates the selected tag and commit in Node and keeps only the ref check in shell', () => {
     const step = publish.jobs.pack.steps.find((item) => item.name === 'Validate release source');
     expect(step.env).toEqual({ RELEASE_TAG: '${{ inputs.tag }}', SOURCE_COMMIT: '${{ inputs.commit }}', DRY_RUN: '${{ inputs.dry_run }}' });
