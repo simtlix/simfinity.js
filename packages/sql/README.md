@@ -5,7 +5,7 @@ Driver-free relational planning, record reconstruction, and transaction orchestr
 PostgreSQL 15 or later is the first and only supported SQL plugin. Install the SQL runtime and PostgreSQL plugin at matching versions:
 
 ```sh
-npm install @simtlix/simfinity-sql@3.7.0 @simtlix/simfinity-postgres@3.7.0 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-sql@3.8.0 @simtlix/simfinity-postgres@3.8.0 graphql@^16.11.0 pg@^8.16.3
 ```
 
 ## Runtime
@@ -58,7 +58,7 @@ A plugin factory returns an object with `apiVersion: 1`, `name`, `displayName`, 
 | `naming` | Validate identifiers and generate engine-compatible names. |
 | `describeSchema(plan, configuration)` | Lower the logical plan into physical storage metadata. Receives the bound configuration, or `null`, as its last argument. |
 | `compileSchema(description)` | Return reviewable DDL statements. The runtime calls it only from `compileDatabaseSchema()`. |
-| `initialize(configuration, description, options)` | Create or validate storage and return `{ mode, created }`. Receives only `create`, `validate` or no mode, and must keep accepting indexes that earlier versions generated on its databases, such as the `[ID]` list index. |
+| `initialize(configuration, description, options, context)` | Create or validate storage and return `{ mode, created }`. Receives only `create`, `validate` or no mode, and must keep accepting indexes that earlier versions generated on its databases, such as the `[ID]` list index. Only when the runtime's types declare virtual fields does it receive `context`, `{ virtualFields }`: where each one would hold storage (`{ table, path, field, name }`), so that a schema mismatch can name a field whose storage from before it became virtual is still in the database. |
 | `compileQuery(models, description, queryPlan, extra, configuration)` | Return `{ text, values, aggregateFields? }`. Aggregate queries include the group field followed by each fact field in `aggregateFields`. Receives the bound configuration, or `null`, as its last argument. |
 | `compileChildrenQuery(models, description, queryPlan, { column, ids }, configuration)` | Optional; used only with `batchedCollections: true`. Return `{ text, values, parentColumn, setup? }`: one statement whose rows, for each parent in `ids`, are exactly the rows `compileQuery` returns for `{ column, id }`, in the same order, each with its parent's 1-based position in `ids` under `parentColumn`. The optional `setup`, which may also be `null`, lists statements (`{ text, values? }`) that run, in order, on the same connection right before it, such as transaction-scoped settings; their rows are ignored. Receives only paginated find plans and 1 to 100 distinct cast IDs. |
 | `compileRecord(description, operation)` | Compile one record operation into `{ text, values }`. |

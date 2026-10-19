@@ -20,7 +20,8 @@ export const postgresPlugin = (options) => ({
   naming: { validateIdentifier: identifier, generatedName },
   // The runtime passes its bound configuration: createPostgres(options) or configure(value).
   describeSchema: (plan, configuration) => describeRelationalSchema(plan, { refreshTriggers: configuration?.refreshTriggers, ownerIndexes: configuration?.ownerIndexes }),
-  initialize: (configuration, description, initialization) => initializeDatabase(configuration.pool, description, initialization),
+  // `context.virtualFields` locates virtual fields, so that SCHEMA_MISMATCH can name one whose earlier storage is left.
+  initialize: (configuration, description, initialization, context) => initializeDatabase(configuration.pool, description, initialization, context),
   compileSchema: compileDatabaseSchema,
   compileQuery,
   // Optional member: the find statements of many parents in one statement, for findChildrenBatch, which the SQL

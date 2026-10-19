@@ -31,7 +31,7 @@ import { postgresPlugin } from '@simtlix/simfinity-postgres';
 const simfinity = createSQL({ plugin: postgresPlugin({ pool, schema: 'library' }) });
 ```
 
-Install `@simtlix/simfinity-sql@3.7.0` as a direct dependency when importing its factory. PostgreSQL 15 or later is the only supported SQL plugin. The [SQL package guide](https://github.com/simtlix/simfinity.js/tree/master/packages/sql) documents relational planning and the versioned plugin contract.
+Install `@simtlix/simfinity-sql@3.8.0` as a direct dependency when importing its factory. PostgreSQL 15 or later is the only supported SQL plugin. The [SQL package guide](https://github.com/simtlix/simfinity.js/tree/master/packages/sql) documents relational planning and the versioned plugin contract.
 
 Both factories permanently bind one pool and schema, and five optional settings: `multiRowInserts: false` keeps one `INSERT` per owned row instead of multi-row statements; `explicitNullsOrder: true` keeps the `NULLS` clause on sorts of `id` and required fields, as 3.5.9 did, instead of letting indexes serve them; `batchedCollections: true` reads the generated collection fields of the parents that share their arguments with one statement per 100 parents, in a transaction that turns JIT off for that transaction only, instead of one statement per field as 3.6.0 did and as the default still does, and can return unsorted and tied rows in another order; the opt-in `refreshTriggers: 'perRoot'` refreshes each changed root's owned shape and unique keys once per transaction, while its guard trigger stays deferred, instead of once per changed row; and the opt-in `ownerIndexes: 'minimal'` leaves out the `(__owner_id)` indexes that the primary key or a unique index covers on new owned and guard tables. An unknown `refreshTriggers` or `ownerIndexes` value throws `INVALID_DATABASE_SCHEMA` (400). Read the [upgrade notes](https://simtlix.github.io/simfinity.js/resources/compatibility.html#upgrade-to-3-6-0) before enabling the opt-ins: versions up to 3.5.9 cannot validate databases created with them. The returned runtime supports registration, generated queries and mutations, middleware and scopes, controllers and validators, custom mutations, state machines, nested relationship writes, embedded reconstruction, and native PostgreSQL model handles. Native handles expose `findById`, `find`, `create`, `update`, and `delete`; they are not Mongoose models. `find(args, { session })` accepts the generated GraphQL list query arguments. Existing `pg.Pool` configuration and `pg.PoolClient` query interfaces remain compatible across both factories. A custom pool or client wrapper should pass `pg`'s `command` through in query results: the plugin reads it from the `COMMIT` result to detect a transaction that PostgreSQL rolled back because one of its statements failed, and without it such a transaction reports success with nothing stored.
 
@@ -62,7 +62,7 @@ The module and every `createPostgres` instance expose the shared `auth`, `valida
 MCP integration is an independent opt-in and does not add MCP dependencies to PostgreSQL applications:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.7.0 @modelcontextprotocol/sdk@^1.31.0
+npm install @simtlix/simfinity-mcp@3.8.0 @modelcontextprotocol/sdk@^1.31.0
 ```
 
 ```javascript
@@ -81,9 +81,11 @@ Errors that PostgreSQL reports become `SimfinityError`s without SQL details, wit
 
 PostgreSQL enforces required values, real FKs, JSONB/owned embedded shapes, root and embedded scalar/reference uniqueness, and scalar-list multikey uniqueness. Root unique indexes use `NULLS NOT DISTINCT`; private typed owner-key tables allow repeated keys within one owner but reject the same key across owners. Presence markers preserve missing versus explicit null fields. This is stronger and broader than generated Mongoose storage.
 
+Virtual fields (`extensions.virtual`), on entities and on members of embedded values, have no storage: no column, presence marker, check, JSON validation function, owned table, index or foreign key, and any output type works as their result. Adding one to a deployed type is therefore not a schema change. A field that a database already stores and that becomes virtual leaves its storage behind, so initialization keeps failing with `SCHEMA_MISMATCH` until the database is migrated. When the leftover is a column named after that field, its presence marker or owned-records state, its owned table, a validation or maintenance function of its own column or root, or the owned table of an embedded value whose last member with its own table it was, the error names the field and lists the migration. Storage named otherwise is not attributed: the `connectionField` column of a former reference, and the private back-reference column of a former collection in its child's table.
+
 Scalar-list leaves inside nested embedded lists support filters, sorts, ragged group projections, and array-valued facts. Array `MIN`/`MAX` compares complete arrays; result sorting uses immediate extrema. Date parameters use per-query UTC encoding without changing global `pg` behavior.
 
-The following mappings remain unsupported and fail explicitly: implicit many-to-many reciprocal lists, non-embedded collections inside embedded objects, embedded cycles, nested list wrappers, whole embedded-object uniqueness, conflicting relationship metadata, enum values that collide after text conversion, and custom scalars without a recognized base scalar. Query paths cannot sort or group whole embedded objects. Arbitrary MongoDB pipelines and Mongoose-native methods are outside the PostgreSQL contract.
+The following mappings remain unsupported and fail explicitly: implicit many-to-many reciprocal lists, non-embedded collections inside embedded objects, embedded cycles, nested list wrappers, whole embedded-object uniqueness, conflicting relationship metadata, enum values that collide after text conversion, and stored custom scalars without a recognized base scalar. Query paths cannot sort or group whole embedded objects. Arbitrary MongoDB pipelines and Mongoose-native methods are outside the PostgreSQL contract.
 
 ## Low-level schema API
 

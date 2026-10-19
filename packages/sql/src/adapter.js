@@ -1,5 +1,6 @@
 import { describeModels, createQueryPlan, SimfinityError } from '@simtlix/simfinity-core';
 import { planRelationalSchema } from './schema/plan.js';
+import { locateVirtualFields } from './schema/virtual.js';
 import { bindPlugin, assertCapabilities } from './plugin.js';
 import { createRecordStore } from './records.js';
 import { createTransactions } from './transactions.js';
@@ -21,6 +22,8 @@ export const createSQLAdapter = (sourcePlugin) => {
   let initializations = 0;
   let allowSchemaCreation = true;
   let models; let database; let records;
+  // Where virtual fields would hold storage; passed to plugin.initialize only when there are any.
+  let virtualFields = [];
   // Entities whose rows hydrate from owned child tables; reading one takes several statements.
   let snapshotEntities = new Set();
   const handles = new Map();
@@ -159,6 +162,7 @@ export const createSQLAdapter = (sourcePlugin) => {
       const plan = planRelationalSchema(models, { schema: configured?.schema || plugin.defaultSchema, naming: plugin.naming });
       assertCapabilities(plugin, plan);
       database = plugin.describeSchema(plan, configured);
+      virtualFields = locateVirtualFields(models, plan);
       allowSchemaCreation = createCollection;
       snapshotEntities = new Set(database.tables.filter((table) => table.ownership).map((table) => table.ownership.ownerTable));
       records = createRecordStore(models, database, query, plugin, { multiRowInserts: configured?.multiRowInserts });
@@ -218,7 +222,11 @@ export const createSQLAdapter = (sourcePlugin) => {
       // initialization decides readiness, and any failure of it marks storage unavailable.
       const attempt = ++initializations;
       try {
-        const result = await plugin.initialize(configured, database, effective);
+        // Plugins without virtual fields keep receiving three arguments; the context lets one name a virtual
+        // field whose earlier storage is still in the database when it reports SCHEMA_MISMATCH.
+        const result = await (virtualFields.length
+          ? plugin.initialize(configured, database, effective, { virtualFields: structuredClone(virtualFields) })
+          : plugin.initialize(configured, database, effective));
         if (attempt === initializations) ready = true;
         return result;
       } catch (error) {

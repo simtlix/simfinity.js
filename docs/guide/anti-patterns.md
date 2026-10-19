@@ -213,6 +213,38 @@ simfinity.registerMutation('sendinvoiceemail', 'Email an invoice.', SendInvoiceI
 
 **Do this instead.** Inside the mutation that changes the data, write an outbox record with the session, and deliver it from a worker after commit; see [transactions and side effects](./controllers#transactions-and-side-effects). Work that touches no data does not need a Simfinity operation: run it in your own service code or endpoint.
 
+## Reading stored records through a custom mutation
+
+**What it looks like.** A read of stored records gets a root field of its own, beside the generated queries of the type it reads. Simfinity registers custom mutations only, so the read becomes one, and its callback loads the records natively:
+
+```javascript
+simfinity.registerMutation(
+  'shopBusyTimes',
+  'Busy times of a barbershop on a date.',
+  ShopBusyTimesInput, // { barbershopId, date }
+  new GraphQLList(BusyRangeType),
+  async ({ barbershopId, date }, session, context) => {
+    await assertBarbershopVisible(barbershopId, context, session); // the shop's scope, again
+    return findBusyRanges(barbershopId, date, session);
+  },
+);
+```
+
+**Why it hurts.** The callback receives only its input, a session and the context, so it loads the shop itself and repeats the shop's scope and permission checks in code, where the copy drifts from the scope. Clients cannot select the read with the shop: a query field and a mutation field cannot share one operation, so a page that shows both sends two operations, and the read cannot appear under the shops of a list or a relationship. As a mutation, it runs in a transaction that Simfinity opens and retries for a read, GraphQL runs mutation root fields one at a time, and MCP publishes it with `readOnlyHint: false`, so `exclude: 'mutation'` also hides it from agents that may only read. Adding a query field to the built schema instead fails: graphql-js's `extendSchema()` throws `Schema must contain uniquely named types but contains multiple types named "FieldExtensionsType".`, and rebuilding the schema is not supported; see [work with the built schema](./schema#work-with-the-built-schema).
+
+**Do this instead.** Read stored records through generated queries: filters for what the client asks for, [query scopes](./query-scope) for what the caller may see, and [aggregate queries](./queries#aggregate-records) for totals. When a read needs logic that filters cannot express, add a [virtual field](./queries#virtual-fields) to the type it belongs to. The type's generated queries, its scope and the permission rules then decide which records reach the field, clients select it with the record, and generated MCP tools read it through a read-only per-field tool when it has required arguments:
+
+```graphql
+query ShopDay($id: ID!, $date: String!) {
+  barbershop(id: $id) {
+    name
+    busyRanges(date: $date) { startTime endTime professionalId }
+  }
+}
+```
+
+Its resolver still runs once per returned record, so batch its reads when lists select it, as that section shows. Keep custom mutations for writes, and run work that touches no data in your own service code.
+
 ## Raising the query limit for internal reads
 
 **What it looks like.** A module that needs large internal reads raises the page-size limit for itself:
@@ -241,7 +273,7 @@ delete schema.getTypeMap().RelationType;
 
 **Why it hurts.** graphql-js validates a schema once and caches the result, so later changes to field maps, arguments or the type map are never validated, and a type removed from the type map is still reachable through the fields that use it. Simfinity's introspection metadata is shared by the whole process: Simfinity installs `__Field.extensions` once and reads it again in every `createSchema()` call, so deleting that field makes the next `createSchema()` throw `TypeError`.
 
-**Do this instead.** Select root operations with the [`createSchema()` include lists](../reference/api#createschema), reject an operation such as `aggregate` for a type in [middleware](./middleware), mark fields that clients must not filter, sort or group by with [`queryable: false`](../reference/extensions#field-extensions), hide fields with [permission rules](./authorization), and keep storage-only data out of public types.
+**Do this instead.** Select root operations with the [`createSchema()` include lists](../reference/api#createschema), reject an operation such as `aggregate` for a type in [middleware](./middleware), mark fields that clients must not filter, sort or group by with [`queryable: false`](../reference/extensions#field-extensions), declare a field that your resolver computes [virtual](../reference/extensions#virtual) so that it gets no filter argument at all, hide fields with [permission rules](./authorization), and keep storage-only data out of public types.
 
 ## Depending on backend-specific shapes and errors
 

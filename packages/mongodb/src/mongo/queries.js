@@ -9,7 +9,7 @@ import mongoose from 'mongoose';
 
 import { SimfinityError, QLOperator, paginationStages } from '@simtlix/simfinity-core';
 import {
-  getFieldStorageName, getListShape, hasStoredIdentity, normalizeConnectionField,
+  getFieldStorageName, getListShape, hasStoredIdentity, isVirtualField, normalizeConnectionField,
 } from '@simtlix/simfinity-core/internal/relation-storage';
 
 import { castObjectId } from './ids.js';
@@ -140,6 +140,12 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
   for (const [index, part] of parts.entries()) {
     const field = Object.hasOwn(currentType.getFields(), part) ? currentType.getFields()[part] : null;
     if (!field) throw filterError(`Unknown query field: ${path}`, 'INVALID_FILTER_FIELD');
+    // Core rejects generated and trusted paths through a virtual field before the adapter runs. A
+    // native buildQuery() or buildFilterGroupMatch() call fails here, instead of matching storage
+    // that does not exist.
+    if (isVirtualField(field)) {
+      throw filterError(`Query path ${path} uses the virtual field ${currentType.name}.${part}, which is not stored`, 'INVALID_FILTER_FIELD');
+    }
     const fieldType = getNamedType(field.type);
     const relation = field.extensions?.relation;
     if (fieldType instanceof GraphQLObjectType) {

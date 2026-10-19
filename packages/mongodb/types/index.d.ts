@@ -46,6 +46,8 @@ export type {
   ScopeParams,
   TypePermissions,
   TypeScopes,
+  VirtualFieldDeclaration,
+  VirtualFieldOptions,
 } from '@simtlix/simfinity-core';
 export * from '@simtlix/simfinity-mcp';
 export { default as mcp } from '@simtlix/simfinity-mcp';
@@ -163,6 +165,13 @@ export function addNoEndpointType(gqltype: GraphQLObjectType): void;
  * Embedded types that contain each other throw INVALID_MODEL (400, `Embedded cycle at …`) when a
  * generated model's embedded fields reach them, and always in transactional mode; in default mode a
  * cycle that only supplied models reach is not checked.
+ * Invalid virtual field declarations (`extensions.virtual`, see `VirtualFieldOptions`) throw
+ * INVALID_MODEL (400) before models are created, in both referentialIntegrity modes. A virtual field
+ * gets no path, `[]` default or index in generated models, on entities and embedded types, and no
+ * entry in the transactional integrity registry, so it needs no `relation` in either mode; generated
+ * writes never set or unset it. A supplied model keeps the paths it declares. A readOnly field with
+ * arguments and its own resolver that is not virtual, and is not a reference or collection, logs a
+ * `Configuration issue` warning once.
  * A generated input that would have no fields is left out with a warning, together with the
  * collection operation, embedded field or add/update/state-action mutation that would take it; a
  * non-null embedded field whose embedded type has no writable fields throws INVALID_MODEL (400)
@@ -296,6 +305,7 @@ export interface FilterGroupInput {
  * pipeline. `input.aggregation` filters a field named `aggregation`; the aggregate stage is never
  * built here. An embedded `.id` path uses the declared `id` member, except for entity types embedded
  * as lists and supplied subdocument schemas without an `id` path, which use the subdocument `_id`.
+ * A filter, condition or sort path through a virtual field rejects with `INVALID_FILTER_FIELD` (400).
  */
 export function buildQuery(
   input: Record<string, any>,
@@ -303,7 +313,10 @@ export function buildQuery(
   isCount?: boolean,
 ): Promise<Array<Record<string, any>>>;
 
-/** Translate a QLFilterGroup into a MongoDB `$match` expression, collecting required lookups. */
+/**
+ * Translate a QLFilterGroup into a MongoDB `$match` expression, collecting required lookups. A
+ * condition path through a virtual field rejects with `INVALID_FILTER_FIELD` (400).
+ */
 export function buildFilterGroupMatch(
   filterGroup: FilterGroupInput,
   gqltype: GraphQLObjectType,

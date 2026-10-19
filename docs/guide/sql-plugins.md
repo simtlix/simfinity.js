@@ -14,8 +14,8 @@ Choose a plugin when constructing a runtime. Its configuration is bound once, an
 Install the SQL core and the PostgreSQL plugin as direct dependencies when importing both:
 
 ```sh
-npm install @simtlix/simfinity-sql@3.7.0 \
-  @simtlix/simfinity-postgres@3.7.0 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-sql@3.8.0 \
+  @simtlix/simfinity-postgres@3.8.0 graphql@^16.11.0 pg@^8.16.3
 ```
 
 ```javascript
@@ -92,7 +92,7 @@ The exported `SQLPlugin` TypeScript interface documents the complete contract. A
 | `naming.validateIdentifier(value)`, `naming.generatedName(...parts)` | Enforce the engine's identifier rules and deterministic generated names |
 | `describeSchema(logicalPlan, configuration)` | Lower logical storage into physical table/column/ownership metadata used by the record store. The bound configuration, or `null`, is the last argument; a plugin may ignore it |
 | `compileSchema(description)` | Return physical DDL statements for review or export. The runtime calls it only from `runtime.compileDatabaseSchema()`; storage is created and validated through `initialize` |
-| `initialize(configuration, description, options)` | Create or validate storage in the mode it receives, detecting incompatible existing definitions. The runtime rejects modes other than `create` and `validate` before calling it, and passes `validate` on a validation-only runtime. Match existing columns by name, and keep accepting indexes that earlier versions generated, such as the `[ID]` list index |
+| `initialize(configuration, description, options, context)` | Create or validate storage in the mode it receives, detecting incompatible existing definitions. The runtime rejects modes other than `create` and `validate` before calling it, and passes `validate` on a validation-only runtime. Match existing columns by name, and keep accepting indexes that earlier versions generated, such as the `[ID]` list index. Only when the runtime's types declare [virtual fields](/reference/extensions#virtual) does it pass a fourth argument, `context`, an `SQLInitializationContext` `{ virtualFields }`: one `SQLVirtualFieldLocation` `{ table, path, field, name }` per virtual field, where `table` is the table of the type that declares it, `path` the storage names of the embedded values between that table and the field, `field` the field as `Type.field` and `name` its name. Virtual fields have no storage and the description holds none of them; a plugin may use the locations to name, in a schema mismatch, a field whose storage from before it became virtual is still in the database, as the PostgreSQL plugin does, or ignore them. Otherwise the call keeps its three arguments |
 | `compileQuery(models, description, queryPlan, extra, configuration)` | Return `{ text, values, aggregateFields? }`; aggregate decoding requires metadata for the group and each fact. The bound configuration, or `null`, is the last argument |
 | `compileChildrenQuery(models, description, queryPlan, { column, ids }, configuration)` | Optional, used only with `batchedCollections: true`: one statement whose rows, for each parent in `ids`, are exactly the rows `compileQuery` returns for `{ column, id }`, in the same order, each tagged with its parent's 1-based position in `ids` in the column the returned `parentColumn` names, and optional `setup` statements to run before it in its transaction; `setup` may be `null` or absent. See [batched collection reads](#batched-collection-reads) |
 | `compileRecord(description, operation)` | Compile one record operation into `{ text, values }` |

@@ -7,6 +7,7 @@
 | Independent reference | Object field with `relation.connectionField`; input `{ id }`, stored ObjectId/UUID |
 | Referenced children | List field with `connectionField` identifying the child's stored parent link; input `{ added, updated, deleted }` |
 | Server-managed field | `readOnly: true`, populated by trusted hooks; still readable unless separately protected |
+| Computed read on a record | After 3.7.0: `extensions.virtual: true` with the field's own `resolve`; never stored, written, filtered or sorted, read after the type's scope. At 3.7.0 a `readOnly` field with its own resolver is still stored |
 | Sensitive output | Permission rule or omit from the public type; `queryable: false` independently forbids filter/sort/group paths |
 | Invariant | GraphQL shape plus `extensions.validations`, controller for persisted/context-dependent checks; unique database constraint for concurrency |
 

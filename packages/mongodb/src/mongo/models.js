@@ -12,7 +12,7 @@ import {
 } from 'graphql';
 import mongoose from 'mongoose';
 import { SimfinityError } from '@simtlix/simfinity-core';
-import { getFieldStorageName } from '@simtlix/simfinity-core/internal/relation-storage';
+import { getFieldStorageName, isVirtualField } from '@simtlix/simfinity-core/internal/relation-storage';
 
 const isNonNullOfType = (fieldEntryType, graphQLType) => (
   fieldEntryType instanceof GraphQLNonNull && fieldEntryType.ofType instanceof graphQLType
@@ -97,11 +97,24 @@ const assertNoEmbeddedCycle = (gqlType, entryType, ancestors, fieldPath) => {
   if (ancestors.includes(entryType)) throw new SimfinityError(`Embedded cycle at ${fieldPath}`, 'INVALID_MODEL', 400);
 };
 
+// Mongoose reads an empty definition, `{}` or `[{}]`, as Mixed, which stores any keys. An embedded
+// type whose members are all virtual has such a definition, so it gets a strict subdocument without
+// paths instead: no value of its virtual members, or any other key, is stored. A list item keeps its
+// `_id`, as other embedded list items do. Embedded types without virtual members keep their
+// definition, even an empty one.
+const storedEmbeddedDefinition = (entryType, definition, list) => {
+  if (Object.keys(definition).length || !Object.values(entryType.getFields()).some(isVirtualField)) return definition;
+  return list ? new mongoose.Schema({}) : new mongoose.Schema({}, { _id: false });
+};
+
 const generateSchemaDefinition = (gqlType, nested = false, ancestors = [], path = gqlType.name) => {
   const argTypes = gqlType.getFields();
   const schemaArg = {};
 
   for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
+    // A virtual field is resolved by its own resolver and stored nowhere, on entities and embedded
+    // types alike: it gets no path, so no `[]` default and no ObjectId index either.
+    if (isVirtualField(fieldEntry)) continue;
     const { type } = fieldEntry;
 
     if (matchesScalar(type, GraphQLID)) {
@@ -123,9 +136,10 @@ const generateSchemaDefinition = (gqlType, nested = false, ancestors = [], path 
           const entryType = unwrapNonNull(type);
           const fieldPath = `${path}.${fieldEntryName}`;
           assertNoEmbeddedCycle(gqlType, entryType, ancestors, fieldPath);
-          const definition = generateSchemaDefinition(entryType, true, [...ancestors, gqlType], fieldPath);
+          const definition = storedEmbeddedDefinition(entryType,
+            generateSchemaDefinition(entryType, true, [...ancestors, gqlType], fieldPath), false);
           // A nested object under a `type` key can only be a subdocument; like other embedded objects, it has no _id.
-          schemaArg[fieldEntryName] = nested && fieldEntryName === 'type'
+          schemaArg[fieldEntryName] = nested && fieldEntryName === 'type' && !(definition instanceof mongoose.Schema)
             ? new mongoose.Schema(definition, { _id: false })
             : definition;
         }
@@ -137,7 +151,8 @@ const generateSchemaDefinition = (gqlType, nested = false, ancestors = [], path 
           assertEmbeddedFieldName(gqlType, fieldEntryName);
           const fieldPath = `${path}.${fieldEntryName}`;
           assertNoEmbeddedCycle(gqlType, itemType, ancestors, fieldPath);
-          schemaArg[fieldEntryName] = [generateSchemaDefinition(itemType, true, [...ancestors, gqlType], fieldPath)];
+          schemaArg[fieldEntryName] = [storedEmbeddedDefinition(itemType,
+            generateSchemaDefinition(itemType, true, [...ancestors, gqlType], fieldPath), true)];
         }
       } else if (listItemMatchesScalar(type, GraphQLID)) {
         schemaArg[fieldEntryName] = [mongoose.Schema.Types.ObjectId];
@@ -186,7 +201,7 @@ const findObjectIdFields = (schemaDefinition, parentPath = '') => {
     if (definition === mongoose.Schema.Types.ObjectId) {
       objectIdFields.push(currentPath);
     } else if (Array.isArray(definition)) {
-      const arrayElement = definition[0];
+      const arrayElement = definition[0] instanceof mongoose.Schema ? definition[0].obj : definition[0];
       if (typeof arrayElement === 'object' && arrayElement !== null) {
         objectIdFields.push(...findObjectIdFields(arrayElement, currentPath));
       }

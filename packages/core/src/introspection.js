@@ -4,6 +4,7 @@ import {
   GraphQLString,
   __Field,
 } from 'graphql';
+import { isVirtualField } from './relation-storage.js';
 
 // The object types of `__Field.extensions`: FieldExtensionsType and the RelationType of its
 // `relation` field, under the given names.
@@ -27,6 +28,14 @@ const createFieldMetadataType = (extensionsName, relationName) => {
   });
 };
 
+// The metadata `__Field.extensions` returns: the field's own extensions, except that a virtual field
+// reads `readOnly: true`, which virtual implies. The metadata types keep their fields, so schemas
+// without virtual fields introspect exactly as before; client metadata about virtual fields belongs
+// in a descriptor of its own (#101), not in this process-wide extension.
+const fieldMetadataOf = (field) => (isVirtualField(field)
+  ? { ...field.extensions, readOnly: true }
+  : field.extensions);
+
 // getFields() supports both lazy and already materialized introspection fields.
 // Reuse the shared field on repeated module evaluation to preserve type identity.
 const introspectionFields = __Field.getFields();
@@ -34,7 +43,7 @@ if (!introspectionFields.extensions) {
   introspectionFields.extensions = {
     type: createFieldMetadataType('FieldExtensionsType', 'RelationType'),
     name: 'extensions',
-    resolve: (obj) => obj.extensions,
+    resolve: fieldMetadataOf,
     args: [],
     isDeprecated: false,
   };

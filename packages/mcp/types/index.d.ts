@@ -19,7 +19,11 @@ export type MCPToolKind = 'query' | 'mutation';
 
 /** A generated MCP tool definition. */
 export interface MCPTool {
-  /** Published tool name (GraphQL field name, optionally prefixed via `toolNamePrefix`). */
+  /**
+   * Published tool name (GraphQL field name, optionally prefixed via
+   * `toolNamePrefix`). The read tool of a virtual field is named
+   * `<byIdQuery>_<field>`, such as `barbershop_busyRanges`.
+   */
   name: string;
   title: string;
   description: string;
@@ -397,11 +401,18 @@ export interface GenerateMCPToolsOptions {
    * `(req, extra) => ctx` per request ({@link MCPHTTPContextFactory}).
    */
   context?: unknown;
-  /** Only expose these tool/field names or the categories 'query' / 'mutation'. */
+  /**
+   * Only expose these tool/field names or the categories 'query' / 'mutation'.
+   * A virtual field tool matches its own name (`<byIdQuery>_<field>`, with or
+   * without the prefix) and 'query', not its by-ID query's name.
+   */
   include?: string | string[];
   /** Never expose these tool/field names or categories. Wins over `include`. */
   exclude?: string | string[];
-  /** Only expose tools whose entity (return) type has one of these names. */
+  /**
+   * Only expose tools whose entity (return) type has one of these names. A
+   * virtual field tool's entity type is the type that declares the field.
+   */
   includeTypes?: string | string[];
   /** Never expose tools whose entity (return) type has one of these names. */
   excludeTypes?: string | string[];
@@ -409,7 +420,8 @@ export interface GenerateMCPToolsOptions {
    * Nesting depth for the auto-generated selection set and output schema.
    * Default 1. Each nested collection it reaches is read with one query per
    * returned row, or per batch of rows with an adapter that batches
-   * collection reads; see `nestedCollections`.
+   * collection reads; see `nestedCollections`. A virtual field tool counts
+   * it from the field's result, as a root field's tool does from its own.
    */
   selectionDepth?: number;
   /**
@@ -433,7 +445,11 @@ export interface GenerateMCPToolsOptions {
   includeId?: boolean;
   /** Prefix prepended to every published tool name (validated /^[a-zA-Z0-9_-]+$/). */
   toolNamePrefix?: string;
-  /** Per-tool overrides keyed by published tool name or unprefixed field name. */
+  /**
+   * Per-tool overrides keyed by published tool name or unprefixed field name
+   * (`<byIdQuery>_<field>` for a virtual field tool). An override's
+   * `selection` replaces a virtual field tool's selection of the field.
+   */
   toolOverrides?: Record<string, MCPToolOverride>;
   /**
    * Koa-style middleware run around every tool execution. A single function is
@@ -550,7 +566,16 @@ export type HTTPMCPRequestHandler = (req: any, res: any) => Promise<void>;
 
 /**
  * Generate MCP tool definitions and an executor from a Simfinity-generated
- * GraphQLSchema. Every root Query and Mutation field becomes a tool.
+ * GraphQLSchema. Every root Query and Mutation field becomes a tool. So does
+ * each virtual field (`extensions.virtual`) with a required argument that has
+ * no default, on a type with a by-ID query, unless its `mcp` option is false:
+ * a read-only tool named `<byIdQuery>_<field>` that takes the record's `id`
+ * and the field's arguments and comes after the root field tools. A
+ * duplicate name skips it with a warning, and a field argument named `id`
+ * throws SimfinityError MCP_INVALID_OPTIONS when the tool is published. Below
+ * any list position (the items of a root field that returns a list, of a
+ * nested collection or embedded list, or of a list-valued per-field tool's
+ * result), tools select only the virtual fields whose `mcp` option is 'select'.
  */
 export function generateMCPTools(
   schema: GraphQLSchema,

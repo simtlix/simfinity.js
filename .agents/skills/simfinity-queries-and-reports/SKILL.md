@@ -9,6 +9,6 @@ Check the installed version, selected engine, actual type relationships and acce
 
 Use the [report guide](references/reports.md) to distinguish response selection, stored-field aggregation, pure domain calculation and materialized read models. Apply visibility before counts, grouping and paging. Fields selected in GraphQL are not automatic database projection pushdown or authorization.
 
-Reuse generated filters/scopes/aggregates where they express the requirement. For unsupported calculations or traversal, use an explicitly authorized application report or read model; keep native engine details in infrastructure. Do not rewrite Simfinity's compiled pipeline to insert hidden query semantics.
+Reuse generated filters/scopes/aggregates where they express the requirement. For unsupported calculations or traversal, use an explicitly authorized application report or read model, or, after 3.7.0, a virtual field (`extensions.virtual`) on the type the read describes; keep native engine details in infrastructure. Do not rewrite Simfinity's compiled pipeline to insert hidden query semantics.
 
 Verify cross-tenant exclusions, adversarial client filters, aggregate cardinality, rounding, ties/page boundaries and revocation/staleness where relevant. Compare returned totals to authoritative stored/domain values. Deliver the metric definition, query/canonical calculation and evidence; distinguish latency, command count and query-plan cost when making performance claims.

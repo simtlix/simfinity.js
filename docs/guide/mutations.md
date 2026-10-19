@@ -120,7 +120,7 @@ The setting is process-wide and shared by every runtime. It is unlimited by defa
 
 ## Add a custom mutation
 
-Use `registerMutation()` for an operation that does not fit the generated CRUD shape. This example creates a serie through the same materialization and lifecycle pipeline while sharing the custom mutation's transaction:
+Use `registerMutation()` for a write that does not fit the generated CRUD shape. For a read that generated queries cannot express, add a [virtual field](./queries#virtual-fields) to the type it belongs to instead: a custom mutation's callback always runs in a transaction, and MCP publishes it as a write. This example creates a serie through the same materialization and lifecycle pipeline while sharing the custom mutation's transaction:
 
 ```javascript
 import {
