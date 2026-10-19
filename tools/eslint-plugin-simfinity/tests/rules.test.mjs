@@ -143,8 +143,8 @@ describe('flat preset and TypeScript', () => {
     const code = "import { configureQueryLimits as a0 } from '@simtlix/simfinity-core';\n" + aliases + '\na0({ maxPageSize: 0 });';
     assert.deepEqual(new Linter().verify(code, [plugin.configs['recommended-3.8']]), []);
   });
-  it('exports exactly five errors and the explicit 3.8 preset', () => {
-    assert.equal(Object.keys(plugin.rules).length, 5);
+  it('exports exactly eight errors and the explicit 3.8 preset', () => {
+    assert.equal(Object.keys(plugin.rules).length, 8);
     assert.deepEqual(Object.keys(plugin.configs), ['recommended-3.8']);
     assert.ok(Object.values(plugin.configs['recommended-3.8'].rules).every(level => level === 'error'));
     for (const rule of Object.values(plugin.rules)) {
