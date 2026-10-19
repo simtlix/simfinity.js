@@ -49,7 +49,7 @@ Calling `preventCreatingCollection(true)` before `createSchema()` suppresses the
 
 The protected graph comes from `extensions.relation`, using the same metadata description as the SQL planner:
 
-- Single references, including renamed storage keys (a `connectionField` names a field of the record, never a dotted path).
+- Single references, including renamed storage keys. Up to 3.7.0, this list also included dotted storage keys, such as `nested.targetId`; `createSchema()` now rejects them, and the [upgrade notes](../resources/compatibility#moving-links-of-a-dotted-connectionfield) show how to move their links.
 - References inside embedded objects and arbitrarily deep supported embedded lists, including nullable items.
 - One-to-many child keys, including inferred scalar `GraphQLID` fields and private connection fields. A private connection field is also generated when the child type has a collection with the same `connectionField`, as in chained or self-referencing collections.
 - Explicit many-to-many link entities and self-references.

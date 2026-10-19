@@ -37,7 +37,74 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 
 ## Upgrade notes for the next release
 
-- **`connectionField` names a field, not a path.** A relation's `extensions.relation.connectionField` must be the name of a field of the record that stores the link: the reference's own type, or a collection's item type. `createSchema()`, and `describeModels()` for PostgreSQL and MongoDB's `referentialIntegrity: 'transactional'`, now reject a `connectionField` that contains a dot, such as `meta.key`, or that is not a string, with `INVALID_MODEL` (400), before any model or table is built. Such a value was never documented and did not work: MongoDB stored the link inside the embedded value, overwriting its member, and read the reference back as `null`; a writable collection failed while its inputs were built; PostgreSQL named a column after the whole path. A link that belongs to an embedded value is declared there, as a reference field of the embedded type, which Simfinity stores, reads, writes and validates on both backends. Otherwise use a plain name, such as `metaKey`. An omitted or empty `connectionField` keeps its meaning.
+- **A dotted `connectionField` is rejected.** Versions up to 3.7.0 accepted a `connectionField` that is a path, such as `nested.targetId`, and the MongoDB integrity guide listed such dotted storage keys among the protected references. A relation's `extensions.relation.connectionField` must now name a field of the record that stores the link: the reference's own type, or a collection's item type. `createSchema()` rejects a `connectionField` that contains a dot, or that is not a string, with `INVALID_MODEL` (400) before any model or table is built, on PostgreSQL and in both MongoDB integrity modes, in every registered type and in every embedded type they store, whether or not that type is registered itself; `describeModels()` rejects it too. An omitted or empty `connectionField` keeps its meaning. An application that declares such a value fails at startup until its declaration changes, and changing the declaration does not move the links it stored: see [moving links of a dotted connectionField](#moving-links-of-a-dotted-connectionfield).
+
+### Moving links of a dotted connectionField
+
+Stop every process that runs the old declaration, move the links, then start the new version. Each migration below was verified on data that 3.7.0 wrote, with generated reads and writes, MongoDB's transactional checks and startup audit, and `initializeDatabase({ mode: 'validate' })` on PostgreSQL. The MongoDB statements are for `mongosh`, on the collection of each type's generated model, named after the type; the PostgreSQL ones use the schema `app` and the names that `compileDatabaseSchema()` prints for the new declaration. `initializeDatabase()` never alters an existing table, so it cannot do these steps. For another shape, such as an `Owner` that also declares an embedded `nested` value, compare `compileDatabaseSchema()` for the new declaration with the database.
+
+**A reference.** With `Owner.target: { type: Target, extensions: { relation: { connectionField: 'nested.targetId' } } }`, where `Owner` declares no `nested` field, MongoDB stored the link inside an object, `{ nested: { targetId } }`, which a cleared link left as `nested: {}`; the transactional mode protected it, but generated reads returned `target: null`. PostgreSQL stored it in a column named `"nested.targetId"`, with the foreign key `"Owner__nested.targetId__fk"` and the index `"Owner__nested.targetId__idx"`, and read it back. Choose one of two declarations.
+
+A plain name on the record, `connectionField: 'targetId'`, keeps the GraphQL field `target`, so clients do not change. On MongoDB, move the field; the second statement removes the objects that the move or a cleared link left empty, which is safe only because `Owner` declares no `nested` field:
+
+```javascript
+db.getCollection('Owner').updateMany({ 'nested.targetId': { $exists: true } }, { $rename: { 'nested.targetId': 'targetId' } });
+db.getCollection('Owner').updateMany({ nested: {} }, { $unset: { nested: '' } });
+```
+
+On PostgreSQL, rename the column, its foreign key and its index:
+
+```sql
+BEGIN;
+ALTER TABLE "app"."Owner" RENAME COLUMN "nested.targetId" TO "targetId";
+ALTER TABLE "app"."Owner" RENAME CONSTRAINT "Owner__nested.targetId__fk" TO "Owner__targetId__fk";
+ALTER INDEX "app"."Owner__nested.targetId__idx" RENAME TO "Owner__targetId__idx";
+COMMIT;
+```
+
+A reference of an embedded type fits a link that describes an embedded value: declare `Nested { target: { type: Target, extensions: { relation: { connectionField: 'targetId' } } } }`, register it with `addNoEndpointType()`, and give `Owner` the field `nested: { type: Nested, extensions: { relation: { embedded: true } } }`. Clients then read and write `nested { target { id } }` instead of `target`. MongoDB stores this link at the same path, `nested.targetId`, so its documents need no change. Lists read a document whose link was cleared as `nested: { target: null }` and one that never had a link as `nested: null`; the `$unset` statement above makes cleared links list as `nested: null` too. By-ID reads, reference reads and update responses read both as `nested: { target: null }`, with or without that statement, as [MongoDB embedded objects in hydrated documents](../guide/mutations#update-selected-fields) describes.
+
+On PostgreSQL, that embedded value has an owned table. In one transaction, add the state column and check of `Owner` and create the owned table, as `compileDatabaseSchema()` prints them, copy the links and drop the old column; then run `initializeDatabase()` once, which creates the remaining functions, triggers, foreign keys and indexes and checks the copied rows. Rows without a link read `nested: null`.
+
+```sql
+BEGIN;
+ALTER TABLE "app"."Owner"
+  ADD COLUMN "__nested_state" text COLLATE "pg_catalog"."C" NOT NULL DEFAULT 'missing'::text,
+  ADD CONSTRAINT "Owner____nested_state__state" CHECK ("__nested_state" = ANY (ARRAY['missing'::text, 'null'::text, 'present'::text]));
+CREATE TABLE "app"."Owner__nested" (
+  "__id" uuid NOT NULL DEFAULT gen_random_uuid(),
+  "__owner_id" uuid NOT NULL,
+  "targetId" uuid,
+  "__field__target__present" boolean NOT NULL DEFAULT false,
+  CONSTRAINT "Owner__nested__pk" PRIMARY KEY ("__id")
+);
+INSERT INTO "app"."Owner__nested" ("__owner_id", "targetId", "__field__target__present")
+  SELECT "id", "nested.targetId", true FROM "app"."Owner" WHERE "nested.targetId" IS NOT NULL;
+UPDATE "app"."Owner" SET "__nested_state" = 'present' WHERE "nested.targetId" IS NOT NULL;
+ALTER TABLE "app"."Owner" DROP COLUMN "nested.targetId";
+COMMIT;
+```
+
+**A collection.** With `Parent.children: { type: new GraphQLList(Child), extensions: { relation: { connectionField: 'meta.parent' }, readOnly: true } }`, where `Child.meta` is an embedded value with an ID member `parent`, a writable collection failed when the schema was built, and a `readOnly` one built. On MongoDB it read the children whose `meta.parent` held the parent's ID, as `Child`'s own writes stored it, and the transactional mode protected that path. On PostgreSQL it read no children: `Child`'s writes stored the ID in the JSON of `meta`, while the collection read a column named `"meta.parent"`, which stayed empty.
+
+A collection's link is a field of the child itself: remove `parent` from the embedded type, declare `Child.parent: { type: Parent, extensions: { relation: { connectionField: 'parentId' } } }`, and set the collection's `connectionField` to `'parentId'`. Clients write `parent: { id }` instead of `meta: { parent }`. On MongoDB, move the field:
+
+```javascript
+db.getCollection('Child').updateMany({ 'meta.parent': { $exists: true } }, { $rename: { 'meta.parent': 'parentId' } });
+```
+
+On PostgreSQL, rename the column, its foreign key and its index, copy the IDs out of the JSON, replace the shape function of `meta` with the `"Child__meta__json_valid"` statement that `compileDatabaseSchema()` prints, run as `CREATE OR REPLACE FUNCTION`, and drop the function of the removed member. An ID that names no parent fails the foreign key and rolls the transaction back.
+
+```sql
+BEGIN;
+ALTER TABLE "app"."Child" RENAME COLUMN "meta.parent" TO "parentId";
+ALTER TABLE "app"."Child" RENAME CONSTRAINT "Child__meta.parent__fk" TO "Child__parentId__fk";
+ALTER INDEX "app"."Child__meta.parent__idx" RENAME TO "Child__parentId__idx";
+UPDATE "app"."Child" SET "parentId" = ("meta" ->> 'parent')::uuid, "meta" = "meta" - 'parent' WHERE "meta" ? 'parent';
+-- CREATE OR REPLACE FUNCTION "app"."Child__meta__json_valid"(jsonb) ..., as compileDatabaseSchema() prints it
+DROP FUNCTION "app"."Child__meta__parent__json_valid"(jsonb);
+COMMIT;
+```
 
 ## Upgrade to 3.7.0
 
