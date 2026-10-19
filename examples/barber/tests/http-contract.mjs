@@ -39,6 +39,22 @@ async function mutate(name, input, selection = 'id', token, denied = false) {
   assert.equal(result.errors, undefined, `${name}: ${JSON.stringify(result.errors)}`);
   return result.data[name];
 }
+// Taken times come from the barbershop's virtual busyRanges field; `barbershopId` names the shop.
+async function busyRanges({ barbershopId, ...args }, selection, token, denied = false) {
+  const result = await request(
+    `query($id:ID, $date:String!, $professionalId:ID, $excludeBookingId:ID) { barbershop(id:$id) { busyRanges(date:$date, professionalId:$professionalId, excludeBookingId:$excludeBookingId) { ${selection} } } }`,
+    { id: barbershopId, ...args },
+    token,
+  );
+  checks++;
+  if (denied) {
+    const codes = [denied].flat();
+    assert.ok(codes.includes(result.errors?.[0]?.extensions?.code), `busyRanges must fail with ${codes.join(' or ')}: ${JSON.stringify(result)}`);
+    return;
+  }
+  assert.equal(result.errors, undefined, `busyRanges: ${JSON.stringify(result.errors)}`);
+  return result.data.barbershop.busyRanges;
+}
 const authFields = 'accessToken user { id role passwordHash }';
 const login = (email) => mutate('login', { email, password: 'demo1234' }, authFields);
 const admin = await login('admin@demo.com');
@@ -183,16 +199,22 @@ try {
   const rangeType = await request('{ __type(name:"BookingBusyRange") { fields { name } } }');
   assert.deepEqual(rangeType.data.__type.fields.map((field) => field.name).sort(), ['endTime', 'professionalId', 'startTime']);
   const availability = { barbershopId: shop.id, date: scheduledDate, professionalId };
-  await mutate('bookingAvailability', availability, 'startTime', undefined, 'UNAUTHENTICATED');
+  await busyRanges(availability, 'startTime', undefined, 'UNAUTHENTICATED');
+  // busyRanges is virtual, so list queries have no filter argument for it and no client path can name it.
+  const busyFilter = await request('{ barbershops(busyRanges: { terms: [{ path: "startTime", operator: EQ, value: "10:00" }] }) { id } }', {}, otherClient.accessToken);
+  assert.match(busyFilter.errors?.[0]?.message ?? '', /^Unknown argument "busyRanges" on field "\w+\.barbershops"\.$/, JSON.stringify(busyFilter));
+  const busySort = await request('{ barbershops(sort: { terms: [{ field: "busyRanges.startTime", order: ASC }] }) { id } }', {}, otherClient.accessToken);
+  assert.equal(busySort.errors?.[0]?.extensions?.code, 'FORBIDDEN_FILTER_PATH', JSON.stringify(busySort));
+  checks += 2;
   // The API derives endTime from the start time and lines; a sent endTime cannot shrink the held time.
   // #61: so do totalPrice and the confirmation code.
   const shrunk = await mutate('updatebooking', { id: booking.id, endTime: '10:00', totalPrice: 0, confirmationCode: 'AAAAAA' }, 'endTime totalPrice confirmationCode', client.accessToken);
   assert.equal(shrunk.endTime, '10:30');
   assert.equal(shrunk.totalPrice, 25, 'The API derives totalPrice from the lines');
   assert.notEqual(shrunk.confirmationCode, 'AAAAAA', 'The API owns the confirmation code');
-  const busy = await mutate('bookingAvailability', availability, 'startTime endTime professionalId', otherClient.accessToken);
+  const busy = await busyRanges(availability, 'startTime endTime professionalId', otherClient.accessToken);
   assert.deepEqual(busy.filter((range) => range.startTime === '10:00'), [{ startTime: '10:00', endTime: '10:30', professionalId }]);
-  const busyUppercase = await mutate('bookingAvailability', { ...availability, professionalId: professionalId.toUpperCase() }, 'startTime endTime professionalId', otherClient.accessToken);
+  const busyUppercase = await busyRanges({ ...availability, professionalId: professionalId.toUpperCase() }, 'startTime endTime professionalId', otherClient.accessToken);
   assert.deepEqual(busyUppercase, busy, 'Canonical IDs preserve professional availability');
   await mutate('addbooking', slot('10:15'), 'id', otherClient.accessToken, 'BOOKING_SLOT_UNAVAILABLE');
   await mutate('addbooking', slot('20:00'), 'id', otherClient.accessToken, 'BOOKING_OUTSIDE_HOURS');
@@ -205,13 +227,14 @@ try {
   await mutate('addbooking', {
     ...slot('17:45'), lines: [{ service: { id: service.id }, price: 25, durationMinutes: -60 }],
   }, 'id', otherClient.accessToken, 'INVALID_BOOKING_LINE');
-  await mutate('bookingAvailability', { ...availability, barbershopId: 'not-an-id' }, 'startTime', otherClient.accessToken, 'NOT_VALID_ID');
+  // A malformed shop ID fails in the generated barbershop(id) query, whose code differs by database.
+  await busyRanges({ ...availability, barbershopId: 'not-an-id' }, 'startTime', otherClient.accessToken, ['NOT_VALID_ID', 'INVALID_FILTER_VALUE']);
   // Nor can it stretch a booking, or make a booking without lines hold more than its start.
   const stretched = await mutate('updatebooking', { id: booking.id, endTime: '16:00' }, 'endTime', client.accessToken);
   assert.equal(stretched.endTime, '10:30');
   emptyBooking = await mutate('addbooking', { ...slot('14:30'), lines: [], endTime: '17:30' }, 'id endTime', otherClient.accessToken);
   assert.equal(emptyBooking.endTime, '14:30');
-  const emptyRange = await mutate('bookingAvailability', availability, 'startTime endTime', otherClient.accessToken);
+  const emptyRange = await busyRanges(availability, 'startTime endTime', otherClient.accessToken);
   assert.deepEqual(emptyRange.filter((range) => range.startTime === '14:30'), [{ startTime: '14:30', endTime: '14:30' }]);
   otherBooking = await mutate('addbooking', {
     ...slot('11:00'), lines: [{ service: { id: service.id }, price: 25, durationMinutes: 0 }],
@@ -228,15 +251,15 @@ try {
   assert.deepEqual(edited, { notes: 'Owner note', startTime: '11:00', endTime: '11:30' });
   const moved = await mutate('updatebooking', { id: otherBooking.id, startTime: '9:00' }, 'startTime endTime', otherClient.accessToken);
   assert.deepEqual(moved, { startTime: '09:00', endTime: '09:30' });
-  const ordered = await mutate('bookingAvailability', availability, 'startTime', otherClient.accessToken);
+  const ordered = await busyRanges(availability, 'startTime', otherClient.accessToken);
   assert.deepEqual(ordered.map((range) => range.startTime).filter((time) => ['09:00', '10:00'].includes(time)), ['09:00', '10:00']);
 
   // Availability leaves out a booking only for its own client, so the booking page can offer its new time.
-  const withoutOwn = await mutate('bookingAvailability', { ...availability, excludeBookingId: booking.id }, 'startTime', client.accessToken);
+  const withoutOwn = await busyRanges({ ...availability, excludeBookingId: booking.id }, 'startTime', client.accessToken);
   assert.ok(!withoutOwn.some((range) => range.startTime === '10:00'), "A client's own booking does not block its reschedule");
-  const notOthers = await mutate('bookingAvailability', { ...availability, excludeBookingId: booking.id }, 'startTime', otherClient.accessToken);
+  const notOthers = await busyRanges({ ...availability, excludeBookingId: booking.id }, 'startTime', otherClient.accessToken);
   assert.ok(notOthers.some((range) => range.startTime === '10:00'), "Another client's booking is never left out");
-  await mutate('bookingAvailability', { ...availability, excludeBookingId: 'not-an-id' }, 'startTime', client.accessToken, 'NOT_VALID_ID');
+  await busyRanges({ ...availability, excludeBookingId: 'not-an-id' }, 'startTime', client.accessToken, 'NOT_VALID_ID');
   // Choosing no professional turns a booking into one that holds the whole shop.
   const shopWide = await mutate('updatebooking', { id: otherBooking.id, professional: null }, 'startTime professional { id }', otherClient.accessToken);
   assert.deepEqual(shopWide, { startTime: '09:00', professional: null });
@@ -260,7 +283,7 @@ try {
   await mutate('reschedule_booking', { ...reschedule, startTime: '12:00' }, 'id', client.accessToken, 'BAD_REQUEST');
   const stillCompleted = await request('query($id:ID!) { booking(id:$id) { state startTime endTime } }', { id: booking.id }, client.accessToken);
   assert.deepEqual(stillCompleted.data.booking, { state: 'COMPLETED', startTime: '10:15', endTime: '10:45' });
-  const freed = await mutate('bookingAvailability', availability, 'startTime', otherClient.accessToken);
+  const freed = await busyRanges(availability, 'startTime', otherClient.accessToken);
   assert.ok(!freed.some((range) => range.startTime === '10:15'), 'Completed bookings no longer hold their time');
 
   // #58: a booking keeps its shop and its history. Nobody clears the shop, only the shop's owner clears
@@ -356,7 +379,15 @@ try {
   }
   await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'barber-contract', version: '1.0.0' } });
   const { tools } = await rpc('tools/list', {});
-  for (const name of ['barbershops', 'addbooking', 'updateuser', 'bookingAvailability', 'reschedule_booking']) assert.ok(tools.some((tool) => tool.name === name));
+  for (const name of ['barbershops', 'barbershop', 'barbershop_busyRanges', 'addbooking', 'updateuser', 'reschedule_booking']) assert.ok(tools.some((tool) => tool.name === name));
+  // The virtual busyRanges field, whose date is required, is its own read tool: barbershop(id) { busyRanges(...) }.
+  const busyRangesTool = tools.find((tool) => tool.name === 'barbershop_busyRanges');
+  assert.equal(busyRangesTool.annotations?.readOnlyHint, true);
+  assert.deepEqual(busyRangesTool.inputSchema.required, ['id', 'date']);
+  const busyCall = await rpc('tools/call', { name: 'barbershop_busyRanges', arguments: { id: shop.id, date: scheduledDate, professionalId } });
+  assert.ok(!busyCall.isError, JSON.stringify(busyCall));
+  const busyRead = await busyRanges({ barbershopId: shop.id, date: scheduledDate, professionalId }, 'startTime endTime professionalId', client.accessToken);
+  assert.deepEqual(busyCall.structuredContent, { barbershop: { busyRanges: busyRead } }, 'The MCP tool returns the GraphQL read');
   const catalogTool = await rpc('tools/call', { name: 'barbershops', arguments: {} });
   assert.ok(!catalogTool.isError, JSON.stringify(catalogTool));
   const forbiddenTool = await rpc('tools/call', { name: 'updateuser', arguments: { input: { id: client.user.id, role: 'PLATFORM_ADMIN' } } });

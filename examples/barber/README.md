@@ -2,7 +2,7 @@
 
 Run the same barbershop booking app with either MongoDB or PostgreSQL. Both backends demonstrate generated GraphQL operations, relationships, query scopes, JWT authorization, controllers, state machines, and MCP tools. A shared Next.js frontend provides customer booking, an owner dashboard, and administration screens.
 
-These are independent, private npm applications in the Simfinity monorepo, each with its own manifest and lockfile. Both backends install released Simfinity runtime packages at exactly **3.7.0** from npm; the frontend uses the published GraphQL client. They are outside the `packages/*` workspaces and are not published with the libraries.
+These are independent, private npm applications in the Simfinity monorepo, each with its own manifest and lockfile. Both backends install released Simfinity runtime packages at exactly **3.8.0** from npm; the frontend uses the published GraphQL client. They are outside the `packages/*` workspaces and are not published with the libraries.
 
 ## Start with Docker
 
@@ -100,17 +100,21 @@ Bookings and reviews keep the records they reference. The barbershop's owner can
 
 Only bookings and reviews are checked. On MongoDB, the owner can still delete a shop that has no bookings or reviews but still has services, service categories, professionals, bundles or favorites; those keep its ID too. PostgreSQL's foreign keys refuse that delete.
 
-Clients cannot read other clients' bookings, so the booking page asks `bookingAvailability` for taken times. It requires a signed-in user and returns only the start time, end time and professional ID of confirmed bookings for an approved shop and date, in clock order; `professionalId` narrows it to the ranges that block that professional. `excludeBookingId` leaves out one booking when the signed-in user is its client; other bookings are never left out. A malformed `barbershopId` or `excludeBookingId` returns `NOT_VALID_ID` from both APIs. When the API rejects the chosen time, the page explains why, reloads the taken times and returns to the time step. Simfinity 3.7.0 registers custom mutations but not custom queries, so this read-only operation is a mutation. It is also an MCP tool.
+Clients cannot read other clients' bookings, so the booking page reads taken times from the barbershop's `busyRanges` field. It requires a signed-in user and returns only the start time, end time and professional ID of the shop's confirmed bookings on a date, in clock order. `professionalId` narrows it to the ranges that block that professional. `excludeBookingId` leaves out one booking when the signed-in user is its client; other bookings are never left out. A shop that is not `APPROVED` takes no bookings: its owner and platform admins, who can read it, get `Barbershop is not available for booking`, and a shop the caller cannot read, or that does not exist, reads as `barbershop: null`. A malformed `excludeBookingId` returns `NOT_VALID_ID` from both APIs; a malformed shop ID fails in the generated `barbershop(id:)` query, with `NOT_VALID_ID` on PostgreSQL and `INVALID_FILTER_VALUE` on MongoDB. When the API rejects the chosen time, the page explains why, reloads the taken times and returns to the time step.
 
 ```graphql
-mutation BusyTimes {
-  bookingAvailability(input: { barbershopId: "<shop id>", date: "2026-10-15" }) {
-    startTime
-    endTime
-    professionalId
+query BusyTimes {
+  barbershop(id: "<shop id>") {
+    busyRanges(date: "2026-10-15") {
+      startTime
+      endTime
+      professionalId
+    }
   }
 }
 ```
+
+`busyRanges` is a [virtual field](../../docs/guide/queries.md#virtual-fields) with arguments on the barbershop type (`extensions: { virtual: true }`), not a custom root operation. The read goes through the generated `barbershop(id:)` query, so the barbershop's `get_by_id` scope and the field's own permission rule (`barbershop.busyRanges` in `auth/permissions.js`) apply, and it stays a read-only query. Its resolver reads bookings natively, outside the booking scope that shows clients only their own bookings, and returns no client or booking details. Neither backend stores the field: the barbershop table has no column for it and shop documents have no key for it. It is not part of the query language either: generated inputs leave it out, `barbershops`, `barbershops_aggregate` and `user.barbershops` have no `busyRanges` argument, so a client that sends one fails GraphQL validation (`Unknown argument "busyRanges"`), and a sort or aggregation path through it fails with `FORBIDDEN_FILTER_PATH`. Selected on a list of shops, it runs its reads once per shop. MCP agents read it through the [`barbershop_busyRanges` tool](#mcp). Earlier versions served the same read as the `bookingAvailability` mutation, because Simfinity registers custom mutations but not custom queries; that mutation and its MCP tool were removed.
 
 To reschedule, the booking page calls `reschedule_booking` with its new date, time, professional and services. This `CONFIRMED -> CONFIRMED` action checks the booking's current state inside the transaction, then validates and moves its slot. Its overlap check ignores the booking itself, so the new time may overlap the old one. A rejected slot leaves the booking at its original time; if the shop has cancelled or completed it since the form loaded, the action rejects with `BAD_REQUEST` and the page explains that it can no longer be rescheduled. The booking keeps its ID and confirmation code. A booking already known to be non-confirmed when the page loads only prefills the form; confirming that form creates a new booking. Generic `updatebooking` remains available for historical-record edits by the barbershop's owner and platform admins; clients may change only their `CONFIRMED` bookings.
 
@@ -238,6 +242,8 @@ The shared frontend's image fields accept the same four types. They preview the 
 
 Both APIs also expose `/mcp`. HTTP requests use the same bearer JWT context, permissions and scopes as GraphQL. The tools cover the GraphQL operations except `login`, `register`, `registerOwner` and `refreshSession`, which stay GraphQL-only over both HTTP and stdio; earlier versions published them as tools. Get an access token from the GraphQL `login` mutation, as shown in [accounts and access](#accounts-and-access), and renew it with `refreshSession`.
 
+Agents read taken times through `barbershop_busyRanges`, the read tool that Simfinity generates for the virtual [`busyRanges`](#booking-rules) field, because its `date` argument is required. The tool takes the shop's `id` plus `date`, `professionalId` and `excludeBookingId`, runs `barbershop(id:) { busyRanges(...) }` with the same scope and permission rules as GraphQL, so it needs a signed-in user's token, and returns `{ barbershop: { busyRanges: [...] } }`, or `{ barbershop: null }` for a shop the caller cannot read. Its annotations mark it read-only. The `barbershop` tool does not select `busyRanges`, since generated tools never select a field with a required argument, and the list and aggregate tools have no `busyRanges` input. Earlier versions published the same read as the `bookingAvailability` mutation tool.
+
 A tool call whose bearer token cannot sign in fails with a JSON-RPC error instead of running anonymously. Only a request without a bearer `Authorization` header runs as anonymous; the scheme is case-insensitive, and `Bearer` with no token fails verification. The error names the cause:
 
 | Token | `error.message` | `error.data.code` |
@@ -323,7 +329,7 @@ The scopes preserve caller filters and intersect them with server restrictions. 
 
 The catalog scopes (services, service categories, professionals, bundles and reviews) and the owner branch of the booking scope restrict through the `barbershop` relation. They use `barbershop.state` = `APPROVED` for anonymous callers and clients, and `barbershop.owner.id` = the caller for owners; the barbershop scope applies the same terms to the shop itself. The database applies the restriction in the same query that reads the records. Simfinity runs a scope for every parent row of a nested list and for every referenced record it resolves, so a scope must not load shop IDs itself. Earlier versions did, which added barbershop queries per row: for example, 401 barbershop reads for one nested catalog page with 106 shops on PostgreSQL. Referenced records whose type has a `get_by_id` scope are still read with one query per reference. The [MongoDB README](mongodb/README.md#application-layout) describes what the owner path costs there.
 
-**Reference integrity differs:** PostgreSQL FKs reject an embedded reference to a nonexistent service and roll back the mutation. The MongoDB example uses the default integrity mode and can store that reference and resolve it to null on reads; Mongoose references are not foreign keys. The matrix checks this difference explicitly. Since 3.4.0, Simfinity offers an opt-in [transactional Mongo integrity adapter](../../docs/guide/mongodb-integrity.md); the MongoDB example does not enable it, so the matrix expects the dangling reference on 3.7.0 too.
+**Reference integrity differs:** PostgreSQL FKs reject an embedded reference to a nonexistent service and roll back the mutation. The MongoDB example uses the default integrity mode and can store that reference and resolve it to null on reads; Mongoose references are not foreign keys. The matrix checks this difference explicitly. Since 3.4.0, Simfinity offers an opt-in [transactional Mongo integrity adapter](../../docs/guide/mongodb-integrity.md); the MongoDB example does not enable it, so the matrix expects the dangling reference on 3.8.0 too.
 
 These tests exercise login, scopes, booking rules and availability, and MCP against a real backend and create test records. The HTTP contract also covers:
 
@@ -357,7 +363,7 @@ npm run test:security --prefix examples/barber/postgres
 npm run test:security --prefix examples/barber/frontend
 ```
 
-Use Node.js 24 and the committed lockfiles. The MongoDB example requires Mongoose `^8.24.2`; both backends require Multer `^2.3.0` and GraphQL Yoga `^5.24.4`; Vitest and its browser/coverage packages require `^4.1.11`; the frontend requires Next.js `^16.3.8`. These minima exclude the reviewed vulnerable direct versions. The backends consume the exact released Simfinity 3.7.0 packages, whose MCP integration requires the `@modelcontextprotocol/sdk` peer at `^1.31.0`; both backend lockfiles resolve 1.32.1.
+Use Node.js 24 and the committed lockfiles. The MongoDB example requires Mongoose `^8.24.2`; both backends require Multer `^2.3.0` and GraphQL Yoga `^5.24.4`; Vitest and its browser/coverage packages require `^4.1.11`; the frontend requires Next.js `^16.3.8`. These minima exclude the reviewed vulnerable direct versions. The backends consume the exact released Simfinity 3.8.0 packages, whose MCP integration requires the `@modelcontextprotocol/sdk` peer at `^1.31.0`; both backend lockfiles resolve 1.32.1.
 
 The backend lockfiles also include the security fixes in `@graphql-tools/utils` 12.0.3, `@fastify/busboy` 3.2.2, `proxy-addr` 2.0.8 and `source-map-js` 1.2.2. The frontend uses patched `sharp` 0.35.5 and `source-map-js` 1.2.2, plus a temporary dependency override for Next.js linting described in its [security notes](frontend/README.md#verification). Preserve these fixes when refreshing dependencies and run all three application audits before merging.
 
@@ -367,6 +373,8 @@ The upgrade from 3.3.0 left database selection, seeding, the generated PostgreSQ
 - `/mcp` is mounted with `app.all`, so the handler answers methods other than `POST` with `405` and `Allow: POST`; with `app.post`, Express returned `404`, which MCP clients report as a transport error. See the [MCP Streamable HTTP handler](../../docs/resources/compatibility.md#mcp-streamable-http-handler) notes.
 
 The upgrade from 3.5.9 to 3.7.0 needed no change to application code. Both backends keep the same GraphQL schema and MCP tools and answer with the same data and error codes, while sending fewer database reads and statements, as the [MongoDB](mongodb/README.md#application-layout) and [PostgreSQL](postgres/README.md#storage-and-native-apis) READMEs describe. Both backends leave 3.7.0's opt-in [batched collection reads](../../docs/guide/relationships.md#batched-collection-reads) (`batchedCollections`) off: on list pages of about a dozen shops with their collections, batching returned the same results with up to about 5 times fewer database calls but was not consistently faster on a local database, and the MongoDB backend would first need its own adapter and runtime instead of the package-root one.
+
+The upgrade from 3.7.0 to 3.8.0 moved the booking page's taken-times read from the `bookingAvailability` custom mutation to 3.8.0's virtual fields: the `busyRanges` field described in [booking rules](#booking-rules) and its `barbershop_busyRanges` MCP tool. The mutation, its `BookingAvailabilityInput` and its MCP tool are gone; the rest of the GraphQL schema, the other MCP tools, the stored data and the PostgreSQL tables are unchanged, so databases created by earlier versions start without a migration.
 
 ## Stop or reset one stack
 
