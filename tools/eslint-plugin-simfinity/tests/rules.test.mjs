@@ -57,6 +57,9 @@ tester.run('valid-query-limits', plugin.rules['valid-query-limits'], {
     pg + 'decorate(sf); sf.configureQueryLimits({ maxPageSize: 0 });',
     pg + 'const box = { sf }; box.sf.configureQueryLimits = custom; sf.configureQueryLimits({ maxPageSize: 0 });',
     pg + 'const box = [sf]; box[0].configureQueryLimits = custom; sf.configureQueryLimits({ maxPageSize: 0 });',
+    pg + '({ custom: sf.configureQueryLimits } = { custom: () => {} }); sf.configureQueryLimits({ maxPageSize: 0 });',
+    pg + 'for (sf.configureQueryLimits of [() => {}]) {} sf.configureQueryLimits({ maxPageSize: 0 });',
+    pg + 'const other = createPostgres(); other.connect = target => { target.configureQueryLimits = () => {}; }; other.connect(sf); sf.configureQueryLimits({ maxPageSize: 0 });',
     'import * as unrelated from "other"; unrelated.configureQueryLimits({ maxPageSize: 0 });',
   ],
   invalid: [
@@ -121,6 +124,7 @@ tester.run('valid-connection-field', plugin.rules['valid-connection-field'], {
     mongo + gql + 'sf.connect(model, new ObjectType({ name: "Book", fields: () => { setup(); return { author: { extensions: { relation: { connectionField: "author.id" } } } }; } }));',
     mongo + gql + `const Book = ${relation('"author.id"')}; patch(Book); sf.connect(model, Book);`,
     mongo + gql + `const Book = ${relation('"author.id"')}; const box = { Book }; patch(box.Book); sf.connect(model, Book);`,
+    mongo + gql + `const Book = ${relation('"author.id"')}; const Alias = Book; const box = { Alias }; box.Alias.getFields().author.extensions.relation.connectionField = "authorId"; sf.connect(model, Book);`,
     mongo + gql + `sf.connect(...args, ${relation('"author.id"')});`,
   ],
   invalid: [
@@ -134,6 +138,11 @@ tester.run('valid-connection-field', plugin.rules['valid-connection-field'], {
 });
 
 describe('flat preset and TypeScript', () => {
+  it('bounds forward alias traversal even when the original binding is called', () => {
+    const aliases = Array.from({ length: 3000 }, (_, index) => `const a${index + 1} = a${index};`).join('\n');
+    const code = "import { configureQueryLimits as a0 } from '@simtlix/simfinity-core';\n" + aliases + '\na0({ maxPageSize: 0 });';
+    assert.deepEqual(new Linter().verify(code, [plugin.configs['recommended-3.8']]), []);
+  });
   it('exports exactly five errors and the explicit 3.8 preset', () => {
     assert.equal(Object.keys(plugin.rules).length, 5);
     assert.deepEqual(Object.keys(plugin.configs), ['recommended-3.8']);

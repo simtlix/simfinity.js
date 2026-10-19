@@ -22,7 +22,7 @@ export default {
     };
     const inspectType = input => {
       const type = analysis.resolve(input);
-      if (!type || visited.has(type) || visited.size > 200) return;
+      if (!type || visited.has(type) || visited.size >= 200) return;
       visited.add(type);
       if (type.type !== 'NewExpression' || type.arguments.some(argument => argument.type === 'SpreadElement')) return;
       const constructor = analysis.origin(type.callee);

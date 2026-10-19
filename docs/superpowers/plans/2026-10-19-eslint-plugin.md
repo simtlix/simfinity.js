@@ -1,6 +1,6 @@
 # Simfinity ESLint Plugin Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver a reviewable optional plugin for the five precise checks agreed in issue #112.
 
@@ -46,5 +46,7 @@
 - [x] Add and run the isolated packed consumer; prove expected rule IDs/locations and absence of runtime dependencies/application execution.
 - [x] Run the bounded Barber trial and document its coverage limits.
 - [x] Add installation/rule guidance, independent CI and package-boundary documentation.
-- [ ] Run package audit/tests/pack, root lint/tests/release metadata checks and docs build; inspect all results.
-- [ ] Obtain independent final review, fix demonstrated defects, commit and open a PR linked to #112; verify its CI.
+- [x] Run package audit/tests/pack, root lint/tests/release metadata checks and docs build; inspect all results.
+- [x] Obtain independent final review and fix demonstrated defects with regressions.
+
+Delivery: open the implementation PR linked to #112 and verify its CI; the PR records the final workflow results. Merge and publication are outside this task.

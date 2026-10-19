@@ -30,6 +30,21 @@ export const unwrap = input => {
 const keyName = node => !node.computed && (node.key?.name ?? node.key?.value);
 const memberName = node => !node.computed && node.property?.type === 'Identifier' ? node.property.name : null;
 
+const isWriteTarget = expression => {
+  let target = expression;
+  let parent = target.parent;
+  while ((parent?.type === 'Property' && parent.value === target && parent.parent.type === 'ObjectPattern')
+    || ['ArrayPattern', 'ObjectPattern'].includes(parent?.type)
+    || (parent?.type === 'RestElement' && parent.argument === target)
+    || (parent?.type === 'AssignmentPattern' && parent.left === target)) {
+    target = parent;
+    parent = target.parent;
+  }
+  return (['AssignmentExpression', 'ForOfStatement', 'ForInStatement'].includes(parent?.type) && parent.left === target)
+    || parent?.type === 'UpdateExpression'
+    || (parent?.type === 'UnaryExpression' && parent.operator === 'delete');
+};
+
 const moduleInfo = source => {
   if (roots.has(source)) return { kind: 'module', name: roots.get(source) };
   if (['graphql', 'graphql-middleware', '@graphql-tools/utils'].includes(source)) return { kind: 'module', name: source };
@@ -77,15 +92,25 @@ export const analyze = context => {
 
   // A binding is not an immutable object. Reject member writes, alias writes and
   // escapes to unknown functions before assigning an import/runtime identity.
+  const evaluating = new Set();
   const stable = (variable, seen = new Set()) => {
-    if (seen.has(variable)) return true;
-    seen.add(variable);
+    if (seen.has(variable) || evaluating.has(variable)) return true;
+    if (seen.size >= 40 || evaluating.size >= 40) return false;
+    evaluating.add(variable);
+    try {
+      return inspectStable(variable, new Set([...seen, variable]));
+    } finally {
+      evaluating.delete(variable);
+    }
+  };
+
+  const inspectStable = (variable, seen) => {
     const [definition] = variable.defs;
     const rawOrigin = definition?.type === 'ImportBinding'
       ? importOrigin(definition)
       : declarationOrigin(definition, variable.name, new Set(), false);
     const container = ['module', 'auth', 'runtime'].includes(rawOrigin?.kind)
-      || unwrap(definition?.node.init)?.type === 'NewExpression';
+      || resolve(definition?.node.init, new Set(), false)?.type === 'NewExpression';
     for (const ref of variable.references) {
       if (ref.isWrite() && !ref.init) return false;
       if (!ref.isRead()) continue;
@@ -96,9 +121,7 @@ export const analyze = context => {
         expression = parent;
         parent = expression.parent;
       }
-      if ((parent?.type === 'AssignmentExpression' && parent.left === expression)
-        || parent?.type === 'UpdateExpression'
-        || (parent?.type === 'UnaryExpression' && parent.operator === 'delete')) return false;
+      if (isWriteTarget(expression)) return false;
       if (parent?.type === 'VariableDeclarator' && parent.init === expression) {
         if (!['Identifier', 'ObjectPattern'].includes(parent.id.type) || parent.parent.kind !== 'const') return false;
         const aliases = source.getDeclaredVariables(parent);
@@ -107,7 +130,7 @@ export const analyze = context => {
       if ((parent?.type === 'CallExpression' || parent?.type === 'NewExpression') && parent.callee !== expression) {
         // These known consumers read declarations/functions; arbitrary calls may
         // replace methods or mutate a type's field configuration.
-        const callee = origin(parent.callee, new Set(), false);
+        const callee = origin(parent.callee);
         if (!callee || !['auth-function', 'runtime-function', 'cloner', 'graphql'].includes(callee.kind)) return false;
       }
       if (parent?.type === 'CallExpression' && parent.callee === expression && expression.type === 'MemberExpression') {
@@ -130,14 +153,15 @@ export const analyze = context => {
     return true;
   };
 
-  const resolve = (input, seen = new Set()) => {
+  const resolve = (input, seen = new Set(), checkStability = true) => {
     const node = unwrap(input);
     if (node?.type !== 'Identifier') return node;
     const variable = variableFor(node);
-    if (!variable || seen.has(variable) || seen.size > 40) return node;
+    if (!variable || seen.has(variable) || seen.size >= 40) return node;
     const [def] = variable.defs;
-    if (def?.type !== 'Variable' || def.parent.kind !== 'const' || def.node.id.type !== 'Identifier' || !stable(variable)) return node;
-    return resolve(def.node.init, new Set([...seen, variable]));
+    if (def?.type !== 'Variable' || def.parent.kind !== 'const' || def.node.id.type !== 'Identifier'
+      || (checkStability && !stable(variable))) return node;
+    return resolve(def.node.init, new Set([...seen, variable]), checkStability);
   };
 
   function importOrigin(def) {
@@ -158,7 +182,7 @@ export const analyze = context => {
 
   function origin(input, seen = new Set(), checkStability = true) {
     const node = unwrap(input);
-    if (!node || seen.size > 40) return null;
+    if (!node || seen.size >= 40) return null;
     if (node.type === 'Identifier') {
       const variable = variableFor(node);
       if (!variable || seen.has(variable)) return null;
