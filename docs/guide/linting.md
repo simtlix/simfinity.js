@@ -1,6 +1,6 @@
 # Optional application linting
 
-`@simtlix/eslint-plugin-simfinity` provides five optional ESLint rules for the
+`@simtlix/eslint-plugin-simfinity` provides eight optional ESLint rules for the
 **Simfinity 3.8.0** contract, shared by MongoDB and PostgreSQL. It complements the
 [application skills](./ai-project-bootstrap) and [usage guidance](./anti-patterns)
 with specific editor/CI diagnostics. It does not evaluate business authorization,
@@ -46,7 +46,7 @@ export default [
 ];
 ```
 
-All five rules are errors in the preset. To opt out of a rule, add a later flat
+All eight rules are errors in the preset. To opt out of a rule, add a later flat
 config entry, for example `{ rules: { 'simfinity/valid-query-limits': 'off' } }`.
 Each diagnostic reports the rule ID, source location, violated contract and
 suggested action. None supplies automatic source fixes.
@@ -106,6 +106,78 @@ createAuthPlugin({}, { defaultPolicy: 'ALLOW' }); // also valid configuration
 
 Review [authorization](./authorization) and [row visibility scopes](./query-scope)
 together. A valid default policy alone does not provide tenant isolation.
+
+## valid-permissions
+
+`createAuthPlugin` requires a plain or null-prototype object mapping type names
+to field-rule maps. A field rule can be a function, boolean, valid policy
+expression or nonempty dense array of rules (including nested arrays).
+
+```javascript
+import { createAuthPlugin, requireAuth } from '@simtlix/simfinity-core/auth';
+
+createAuthPlugin(null); // diagnostic: a permission map is required
+createAuthPlugin({ Book: [] }); // diagnostic: a type needs a field-rule map
+createAuthPlugin({ Book: { title: undefined } }); // diagnostic: invalid rule
+createAuthPlugin({ Book: { title: [requireAuth(), , true] } }); // diagnostic: hole
+
+createAuthPlugin({ Book: { title: [requireAuth(), { allOf: [] }] } });
+createAuthPlugin({ Book: { title: true, summary: false } });
+```
+
+An omitted field uses the default policy; explicit `undefined` is invalid even
+under `ALLOW`. Choose the intended rule before removing an entry. Empty maps are
+valid, while `{}` in a field-rule slot is not a valid expression.
+
+The check inspects inline maps/arrays and known primitive constants. It leaves
+constructor/call results, object/array aliases and nonempty policy-expression
+objects unknown. It does not validate the expression DSL, match permission keys
+against the schema or inspect the deprecated middleware factories. Nested rule
+inspection is bounded to 200 nodes per plugin call.
+
+## valid-auth-composition
+
+`composeRules` and `anyRule` require at least one argument, and every argument
+must be a function. `createRule` requires a predicate function as its first
+argument; its later error-message/code arguments are unaffected.
+
+```javascript
+import { anyRule, composeRules, createRule, createRuleFromExpression, requireAuth } from '@simtlix/simfinity-core/auth';
+
+anyRule(); // diagnostic: missing rules
+composeRules({ eq: [{ ref: 'ctx.user.role' }, 'editor'] }); // diagnostic: not a function
+createRule(false); // diagnostic: not a predicate function
+
+composeRules(requireAuth(), createRuleFromExpression({ eq: [{ ref: 'ctx.user.role' }, 'editor'] }));
+createRule(async (_parent, _args, ctx) => Boolean(await ctx.canRead()));
+```
+
+Booleans, arrays and expression objects are valid in the corresponding
+permission-map slots, but composition requires functions. Async/custom functions
+remain supported; the rule does not inspect their return values or business
+logic. Unknown arguments and spread calls are skipped. The existing
+`no-uncalled-auth-factory` rule separately detects a factory used as a rule.
+
+## valid-required-claims
+
+`requireRole` and `requirePermission` require a nonempty string or a nonempty
+dense array of nonempty strings. Role lists use OR; permission lists use AND.
+
+```javascript
+import { requireRole, requirePermission } from '@simtlix/simfinity-core/auth';
+
+requireRole([]); // diagnostic
+requirePermission(['read', '']); // diagnostic
+requirePermission(['read', undefined]); // diagnostic
+
+requireRole(['admin', 'editor']); // either role
+requirePermission(['read', 'write']); // both permissions
+```
+
+Whitespace is accepted without trimming, matching 3.8.0. The rule diagnoses
+known invalid names and inline lists; dynamic names, aliased lists and spreads
+remain unknown. It does not inspect the user's claims, recommend role names or
+validate the extractor options (a separate candidate in issue #117).
 
 ## valid-query-limits
 
@@ -174,8 +246,9 @@ outside this first release. Alias analysis is bounded to 40 and type traversal
 to 200 nodes per file. No application imports, factories or database connections
 run during analysis.
 
-The bounded consumer trial lints both Barber backends and checks injected policy
-and relation violations in memory. It does not certify their business policies
+The bounded consumer trial lints both Barber backends and checks six injected
+policy, relation and authorization-contract violations per backend in memory.
+It does not certify their business policies
 or measure accuracy against the entire candidate catalogue. Native operations
 remain an application option; consult [server-side operations](./server-side-operations)
 for their lifecycle and transaction responsibilities.
@@ -183,3 +256,7 @@ for their lifecycle and transaction responsibilities.
 The [source and verification commands](https://github.com/simtlix/simfinity.js/tree/master/tools/eslint-plugin-simfinity)
 include an isolated packed JS/TS consumer. The broader candidates in
 [issue #112](https://github.com/simtlix/simfinity.js/issues/112) are follow-up work.
+Authorization delivery and remaining candidates are tracked in
+[issue #117](https://github.com/simtlix/simfinity.js/issues/117). These three added
+rules cover AUTH-02/04/06/07 within the limits above; the issue is not completed
+by this batch.

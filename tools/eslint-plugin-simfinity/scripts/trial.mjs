@@ -36,6 +36,16 @@ for (const engine of ['mongodb', 'postgres']) {
   assert.match(book, /connectionField: '[^']+'/);
   const link = linter.verify(book.replace(/connectionField: '[^']+'/, "connectionField: 'invalid.path'"), [plugin.configs['recommended-3.8']]);
   assert.deepEqual(link.map(message => message.ruleId), ['simfinity/valid-connection-field']);
-  console.log(`${engine}: injected policy and relation violations detected in existing application files.`);
+  assert.ok(application.includes('createAuthPlugin(permissions,'));
+  for (const [permissions, rule] of [
+    ['null', 'valid-permissions'],
+    ['{ Book: { title: [] } }', 'valid-permissions'],
+    ['{ Book: { title: simfinity.auth.anyRule(false) } }', 'valid-auth-composition'],
+    ["{ Book: { title: simfinity.auth.requireRole(['admin', '']) } }", 'valid-required-claims'],
+  ]) {
+    const code = application.replace('createAuthPlugin(permissions,', `createAuthPlugin(${permissions},`);
+    assert.deepEqual(linter.verify(code, [plugin.configs['recommended-3.8']]).map(message => message.ruleId), [`simfinity/${rule}`]);
+  }
+  console.log(`${engine}: six injected policy, relation and authorization-contract violations detected in existing application files.`);
 }
 console.log('Bounded trial only: cross-file permission maps, dynamic configuration, lifecycle, scopes and transaction ownership are not certified. No application code was executed.');
