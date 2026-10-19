@@ -1,6 +1,6 @@
 # Simfinity ESLint Plugin Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Deliver a reviewable optional plugin for the five precise checks agreed in issue #112.
 
@@ -32,10 +32,10 @@
 
 **Interfaces:** Default plugin export with `rules` and `configs['recommended-3.8']`; shared helpers resolve import identities, literal values and local registered types without execution.
 
-- [ ] Add RuleTester cases for five rules, including aliases, shadowing, unknown spreads, duplicate keys, registered embedded and independent types, virtual fields and TypeScript.
-- [ ] Run the new tests and observe missing implementation fail.
-- [ ] Implement the bounded helpers, rules and preset; run tests until all cases pass.
-- [ ] Commit the standalone implementation and regression tests.
+- [x] Add RuleTester cases for five rules, including aliases, shadowing, unknown spreads, duplicate keys, registered embedded and independent types, virtual fields and TypeScript.
+- [x] Run the new tests and observe missing implementation fail.
+- [x] Implement the bounded helpers, rules and preset; run tests until all cases pass.
+- [x] Commit the standalone implementation and regression tests.
 
 ### Task 2: Packed consumer, documentation and CI
 
@@ -43,8 +43,8 @@
 
 **Interfaces:** The packed consumer installs the Task 1 package, imports its flat preset and runs ESLint on JS/TS; it requires no Simfinity runtime. CI runs the same commands documented for contributors.
 
-- [ ] Add and run the isolated packed consumer; prove expected rule IDs/locations and absence of runtime dependencies/application execution.
-- [ ] Run the bounded Barber trial and document its coverage limits.
-- [ ] Add installation/rule guidance, independent CI and package-boundary documentation.
+- [x] Add and run the isolated packed consumer; prove expected rule IDs/locations and absence of runtime dependencies/application execution.
+- [x] Run the bounded Barber trial and document its coverage limits.
+- [x] Add installation/rule guidance, independent CI and package-boundary documentation.
 - [ ] Run package audit/tests/pack, root lint/tests/release metadata checks and docs build; inspect all results.
 - [ ] Obtain independent final review, fix demonstrated defects, commit and open a PR linked to #112; verify its CI.

@@ -1,0 +1,45 @@
+name: ESLint plugin
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'tools/eslint-plugin-simfinity/**'
+      - 'examples/barber/mongodb/**'
+      - 'examples/barber/postgres/**'
+      - '.github/workflows/eslint-plugin.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'tools/eslint-plugin-simfinity/**'
+      - 'examples/barber/mongodb/**'
+      - 'examples/barber/postgres/**'
+      - '.github/workflows/eslint-plugin.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eslint-plugin-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: tools/eslint-plugin-simfinity
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tools/eslint-plugin-simfinity/package-lock.json
+      - run: npm ci
+      - run: npm run test:security
+      - run: npm test
+      - run: npm run test:consumer
+      - run: npm run test:trial

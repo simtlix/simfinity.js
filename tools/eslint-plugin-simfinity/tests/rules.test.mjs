@@ -39,6 +39,7 @@ tester.run('valid-default-policy', plugin.rules['valid-default-policy'], {
     invalid('import auth from "@simtlix/simfinity-js/src/auth/index.js"; auth.createAuthPlugin({}, { defaultPolicy: "deny" });'),
     invalid(auth + 'const alias = protect; alias({}, { defaultPolicy: "unknown" });'),
     invalid(mongo + 'const { createAuthPlugin: protect } = sf.auth; protect({}, { defaultPolicy: "deny" });'),
+    invalid(mongo + 'sf.getModel(sf.getType("Book")); sf.auth.createAuthPlugin(permissions, { defaultPolicy: "allow" });'),
   ],
 });
 

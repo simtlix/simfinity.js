@@ -13,6 +13,11 @@ export const factories = new Set([
   'createRule', 'createRuleFromExpression', 'composeRules', 'anyRule',
 ]);
 const runtimeMembers = new Set(['createSchema', 'connect', 'addNoEndpointType', 'configureQueryLimits']);
+const otherRuntimeMembers = new Set([
+  'configureMutationLimits', 'getModel', 'getType', 'getInputType', 'getRegistrations',
+  'use', 'registerMutation', 'saveObject', 'preventCreatingCollection',
+]);
+const sqlMembers = new Set(['configure', 'initializeDatabase', 'describeDatabase', 'compileDatabaseSchema', 'withTransaction']);
 const wrappers = new Set(['TSAsExpression', 'TSTypeAssertion', 'TSNonNullExpression', 'TSSatisfiesExpression', 'ChainExpression']);
 const unknown = Object.freeze({ known: false });
 
@@ -43,11 +48,13 @@ const member = (object, name) => {
   }
   if (object.kind === 'runtime') {
     if (name === 'auth' && object.auth) return { kind: 'auth', subset: 'index' };
-    return runtimeMembers.has(name) ? { kind: 'runtime-function', name } : null;
+    return runtimeMembers.has(name) || otherRuntimeMembers.has(name) || (object.auth && sqlMembers.has(name))
+      ? { kind: 'runtime-function', name } : null;
   }
   if (object.kind !== 'module') return null;
   if (['core', 'mongo', 'sql', 'postgres'].includes(object.name) && name === 'auth') return { kind: 'auth', subset: 'index' };
-  if ((['mongo', 'postgres'].includes(object.name) && runtimeMembers.has(name))
+  if ((['mongo', 'postgres'].includes(object.name) && (runtimeMembers.has(name) || otherRuntimeMembers.has(name)))
+    || (object.name === 'postgres' && sqlMembers.has(name))
     || (object.name === 'core' && name === 'configureQueryLimits')) return { kind: 'runtime-function', name };
   if ((['core', 'mongo'].includes(object.name) && name === 'createRuntime')
     || (object.name === 'sql' && name === 'createSQL')
@@ -105,7 +112,7 @@ export const analyze = context => {
       }
       if (parent?.type === 'CallExpression' && parent.callee === expression && expression.type === 'MemberExpression') {
         const name = memberName(expression);
-        if (!name || ![...runtimeMembers, ...factories, 'createAuthPlugin', 'createRuntime', 'createSQL', 'createPostgres', 'configure'].includes(name)) return false;
+        if (!name || ![...runtimeMembers, ...otherRuntimeMembers, ...sqlMembers, ...factories, 'createAuthPlugin', 'createRuntime', 'createSQL', 'createPostgres'].includes(name)) return false;
       }
       if (parent?.type === 'ReturnStatement' || parent?.type === 'SpreadElement'
         || (parent?.type === 'AssignmentExpression' && parent.right === expression)) return false;

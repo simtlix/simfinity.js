@@ -2725,6 +2725,8 @@ const BookInput = simfinity.getInputType(BookType);
 
 For jobs, workers, webhooks and other server code, read [server-side operations](docs/guide/server-side-operations.md): it shows when to use a mutation with nested writes, a controller hook, in-process execution of the generated schema, a custom mutation with `saveObject()` or the native model with the session, and what each of them runs. [Usage anti-patterns](docs/guide/anti-patterns.md) lists the approaches to avoid.
 
+The optional [application ESLint plugin](docs/guide/linting.md) checks five specific Simfinity 3.8.0 contracts. It is a separate development tool, available as a local packed archive for trials, with no automatic permission or storage fixes. It complements the application skills; it does not certify authorization, scopes or transaction safety.
+
 ## 🤖 MCP Generation
 
 Simfinity can automatically expose every generated GraphQL operation as a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) tool. For each connected type you get one MCP tool per generated query and mutation — exactly mirroring the GraphQL surface:
