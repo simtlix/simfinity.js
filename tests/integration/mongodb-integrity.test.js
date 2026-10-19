@@ -101,7 +101,6 @@ withMongo('MongoDB transactional reference integrity', () => {
 
   test.each([
     ['aliased reference', (id) => ({ service: { id } })],
-    ['dotted storage alias', (id) => ({ dotted: { id } })],
     ['embedded object', (id) => ({ detail: { primary: { id } } })],
     ['embedded list', (id) => ({ detail: { items: [null, { service: { id } }] } })],
     ['two embedded list levels', (id) => ({ details: [null, { items: [null, { service: { id } }] }] })],
@@ -491,7 +490,6 @@ withMongo('MongoDB transactional reference integrity', () => {
   });
 
   test.each([
-    ['dotted storage alias', 'Shop', (id) => ({ nested: { target_id: id } })],
     ['embedded object', 'Shop', (id) => ({ detail: { primary_id: id } })],
     ['two embedded list levels', 'Shop', (id) => ({ details: [null, { items: [null, { service_id: id }] }] })],
     ['string-typed reference', 'Shop', (id) => ({ service_id: id.toHexString() })],
@@ -557,7 +555,7 @@ withMongo('MongoDB transactional reference integrity', () => {
         const service = services[index % services.length];
         return {
           service_id: service, detail: { primary_id: service, items: [null, { service_id: service }] },
-          details: [null, { items: [null, { service_id: service }] }], nested: { target_id: service },
+          details: [null, { items: [null, { service_id: service }] }],
         };
       }));
       reads = [];
@@ -588,7 +586,7 @@ withMongo('MongoDB transactional reference integrity', () => {
     const prefix = 'RoundTrips';
     const shopController = {};
     // Shop's reference paths to Service, in declaration order, and the post-image projection.
-    const shopPaths = ['service_id', 'detail.primary_id', 'detail.items.service_id', 'nested.target_id',
+    const shopPaths = ['service_id', 'detail.primary_id', 'detail.items.service_id',
       'details.primary_id', 'details.items.service_id'];
     const referenceProjection = Object.fromEntries([['_id', 1], ...shopPaths.map((path) => [path, 1])]);
     let connection;
@@ -804,8 +802,8 @@ withMongo('MongoDB transactional reference integrity', () => {
     });
 
     test('a guarded update locks exactly the targets its stored document references, whatever their shape', async () => {
-      const ids = Array.from({ length: 12 }, () => new mongoose.Types.ObjectId());
-      const [a, b, c, d, e, f, g, h, i, j, k, l] = ids;
+      const ids = Array.from({ length: 10 }, () => new mongoose.Types.ObjectId());
+      const [a, b, c, d, e, f, g, h, i, j] = ids;
       await guarded.models.Service.collection.insertMany(ids.map((_id) => ({ _id, name: 'target' })));
       // Stored shapes generated writes never produce, and the targets each one locks; a value that
       // is not an ObjectId on a reference path is a violation.
@@ -830,10 +828,6 @@ withMongo('MongoDB transactional reference integrity', () => {
         [{ details: [{ items: [{ service_id: 'str' }] }] }, 'violation'],
         [{ details: [{ items: [{ service_id: { a: 1 } }] }] }, 'violation'],
         [{ details: [{ items: [{ service_id: [[j]] }] }] }, [j]],
-        [{ nested: { target_id: k, other: 1 } }, [k]],
-        [{ nested: [{ target_id: k }, { target_id: [l] }] }, [k, l]],
-        [{ nested: { target_id: [] } }, []],
-        [{ 'nested.target_id': a }, []],
         [{ details: [{ items: [{ service_id: b, service: { id: c } }] }], detail: { primary_id: a, title: 't' } }, [a, b]],
       ];
       const outcomes = [];
@@ -933,7 +927,7 @@ withMongo('MongoDB transactional reference integrity', () => {
         if (size) {
           await guarded.models.Shop.collection.insertMany(Array.from({ length: size }, () => ({
             service_id: other(), detail: { primary_id: other(), items: [{ service_id: other() }] },
-            nested: { target_id: other() }, details: [{ primary_id: other(), items: [{ service_id: other() }] }],
+            details: [{ primary_id: other(), items: [{ service_id: other() }] }],
           })));
           for (const name of ['Child', 'Link']) {
             await guarded.models[name].collection.insertMany(Array.from({ length: size }, () => ({ shop_id: other(), service_id: other() })));
@@ -954,7 +948,6 @@ withMongo('MongoDB transactional reference integrity', () => {
       ['Shop.service_id', 'Shop', (id) => ({ service_id: id })],
       ['Shop.detail.primary_id', 'Shop', (id) => ({ detail: { primary_id: id } })],
       ['Shop.detail.items.service_id', 'Shop', (id) => ({ detail: { items: [{ service_id: id }] } })],
-      ['Shop.nested.target_id', 'Shop', (id) => ({ nested: { target_id: id } })],
       ['Shop.details.primary_id', 'Shop', (id) => ({ details: [{ primary_id: id }] })],
       ['Shop.details.items.service_id', 'Shop', (id) => ({ details: [null, { items: [null, { service_id: id }] }] })],
       ['Child.service_id', 'Child', (id) => ({ service_id: id })],

@@ -2,6 +2,7 @@ import {
   isObjectType, isScalarType, isEnumType, isNonNullType, isListType,
 } from 'graphql';
 import SimfinityError from './errors/simfinity.error.js';
+import { assertPlainConnectionField } from './relation-storage.js';
 
 const invalid = (message) => {
   throw new SimfinityError(message, 'INVALID_MODEL', 400);
@@ -85,6 +86,7 @@ export const describeModels = (registrations) => {
           fields: fieldsOf(named, [...ancestors, type], `${path}.${field.name}`, true),
         };
       }
+      assertPlainConnectionField(type.name, field.name, field);
       addEntity(named);
       if (wrappers.list) {
         if (!relation.connectionField) invalid(`${path}.${field.name} requires a child connectionField`);
