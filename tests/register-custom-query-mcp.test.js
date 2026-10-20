@@ -19,10 +19,10 @@ const createTestRuntime = () => createRuntime({
   withTransaction: async (session, body) => body(session || { adapter: 'test' }),
 });
 
-describe('registered queries through GraphQL and MCP', () => {
+describe('custom queries through GraphQL and MCP', () => {
   it('executes a no-input scalar query through GraphQL and MCP without a mutation root', async () => {
     const runtime = createTestRuntime();
-    runtime.registerQuery('availabilityStatus', 'Read availability status', null, GraphQLString,
+    runtime.registerCustomQuery('availabilityStatus', 'Read availability status', null, GraphQLString,
       () => 'available');
     const schema = runtime.createSchema();
 
@@ -49,8 +49,8 @@ describe('registered queries through GraphQL and MCP', () => {
 
   it('enforces RootQueryType authorization before invoking a registered callback', async () => {
     const runtime = createTestRuntime();
-    const callback = vi.fn((input, session, context) => `shop:${context.user.shopId}`);
-    runtime.registerQuery('privateAvailability', 'Read shop availability', null, GraphQLString,
+    const callback = vi.fn((input, context) => `shop:${context.user.shopId}`);
+    runtime.registerCustomQuery('privateAvailability', 'Read shop availability', null, GraphQLString,
       callback);
     const schema = runtime.createSchema();
     const plugin = auth.createAuthPlugin({
@@ -75,6 +75,23 @@ describe('registered queries through GraphQL and MCP', () => {
     expect(callback).toHaveBeenCalledTimes(1);
   });
 
+  it('denies a custom query without a RootQueryType rule under the DENY default policy', async () => {
+    const runtime = createTestRuntime();
+    const callback = vi.fn(() => 'secret');
+    runtime.registerCustomQuery('unruledReport', 'Report without a rule', null, GraphQLString, callback);
+    runtime.registerCustomQuery('ruledReport', 'Report with a rule', null, GraphQLString, () => 'public');
+    const schema = runtime.createSchema();
+    const plugin = auth.createAuthPlugin({ RootQueryType: { ruledReport: true } }, { defaultPolicy: 'DENY' });
+    plugin.onSchemaChange({ schema });
+
+    const result = await graphql({ schema, source: '{ unruledReport ruledReport }', contextValue: { user: {} } });
+
+    expect(result.data).toEqual({ unruledReport: null, ruledReport: 'public' });
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toMatchObject({ path: ['unruledReport'], extensions: { code: 'FORBIDDEN' } });
+    expect(callback).not.toHaveBeenCalled();
+  });
+
   it('applies MCP schemaPlugins to the root and output fields of registered queries', async () => {
     const runtime = createTestRuntime();
     const output = new GraphQLObjectType({
@@ -85,7 +102,7 @@ describe('registered queries through GraphQL and MCP', () => {
       },
     });
     const callback = vi.fn(() => ({ startsAt: '10:00', privateNote: 'staff only' }));
-    runtime.registerQuery('privateAvailability', 'Read shop availability', null, output,
+    runtime.registerCustomQuery('privateAvailability', 'Read shop availability', null, output,
       callback);
     const schema = runtime.createSchema();
     const plugin = auth.createAuthPlugin({
@@ -152,7 +169,7 @@ describe('registered queries through GraphQL and MCP', () => {
       { startsAt: '10:00', endsAt: '10:30' },
       { startsAt: '11:00', endsAt: '11:30' },
     ]);
-    runtime.registerQuery('listBusyRanges', 'Read busy ranges for a shop', input,
+    runtime.registerCustomQuery('listBusyRanges', 'Read busy ranges for a shop', input,
       new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(output))),
       callback);
     const schema = runtime.createSchema();
@@ -197,14 +214,14 @@ describe('registered queries through GraphQL and MCP', () => {
     expect(callback).toHaveBeenCalledTimes(1);
   });
 
-  it('filters custom queries with the fourth schema allowlist without removing legacy mutations', async () => {
+  it('filters custom queries with includedCustomQueries without removing custom mutations', async () => {
     const runtime = createTestRuntime();
-    runtime.registerQuery('publicStatus', 'Read public status', null, GraphQLString,
+    runtime.registerCustomQuery('publicStatus', 'Read public status', null, GraphQLString,
       () => 'public');
-    runtime.registerQuery('privateStatus', 'Read private status', null, GraphQLString,
+    runtime.registerCustomQuery('privateStatus', 'Read private status', null, GraphQLString,
       () => 'private');
     runtime.registerMutation('legacyStatus', 'Legacy operation', null, GraphQLString, () => 'legacy');
-    const schema = runtime.createSchema(undefined, undefined, undefined, ['publicStatus']);
+    const schema = runtime.createSchema(undefined, undefined, undefined, { includedCustomQueries: ['publicStatus'] });
 
     const { tools, callTool } = generateMCPTools(schema);
     expect(tools.map((tool) => tool.name)).toEqual(['publicStatus', 'legacyStatus']);
@@ -214,7 +231,7 @@ describe('registered queries through GraphQL and MCP', () => {
 
   it('keeps query-first MCP collisions and the explicitly selected legacy mutation executable', async () => {
     const runtime = createTestRuntime();
-    runtime.registerQuery('bookingAvailability', 'Read availability', null, GraphQLString,
+    runtime.registerCustomQuery('bookingAvailability', 'Read availability', null, GraphQLString,
       () => 'query');
     runtime.registerMutation('bookingAvailability', 'Legacy availability', null, GraphQLString,
       () => 'legacy mutation');
@@ -240,6 +257,95 @@ describe('registered queries through GraphQL and MCP', () => {
       });
       expect((await mutationTools.callTool('bookingAvailability', {})).structuredContent)
         .toEqual({ bookingAvailability: 'legacy mutation' });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+  it('selects custom query tools by name, prefix, category, output type and overrides', async () => {
+    const runtime = createRuntime({
+      withTransaction: async (session, body) => body(session || { adapter: 'test' }),
+      createModel: (type) => ({ name: type.name }),
+    });
+    const Quote = new GraphQLObjectType({ name: 'CustomQueryQuote', fields: { total: { type: GraphQLInt } } });
+    const Shop = new GraphQLObjectType({
+      name: 'CustomQueryShop',
+      fields: {
+        id: { type: GraphQLID },
+        openSlots: {
+          type: new GraphQLList(GraphQLString),
+          args: { date: { type: new GraphQLNonNull(GraphQLString) } },
+          extensions: { virtual: true },
+          resolve: () => ['10:00'],
+        },
+      },
+    });
+    runtime.connect(null, Shop, 'shop', 'shops');
+    runtime.registerCustomQuery('quotePreview', 'Price a cart without storing it', null, Quote, () => ({ total: 3 }));
+    runtime.registerCustomQuery('serverTime', 'Read the server time', null, GraphQLString, () => 'now');
+    runtime.registerMutation('refreshQuotes', 'Refresh quotes', null, GraphQLString, () => 'ok');
+    const schema = runtime.createSchema();
+    const names = (options) => generateMCPTools(schema, options).tools.map((tool) => tool.name);
+    const custom = ['quotePreview', 'serverTime'];
+
+    const { tools } = generateMCPTools(schema);
+    const quote = tools.find((tool) => tool.name === 'quotePreview');
+    expect(quote).toMatchObject({
+      kind: 'query', title: 'quotePreview', description: 'Price a cart without storing it',
+      annotations: { readOnlyHint: true },
+    });
+    expect(names({ exclude: 'mutation' })).toEqual(expect.arrayContaining(custom));
+    expect(names({ exclude: 'query' })).not.toEqual(expect.arrayContaining(['quotePreview']));
+    expect(names({ exclude: 'query' })).toEqual(expect.arrayContaining(['refreshQuotes']));
+    expect(names({ include: 'query' })).toEqual(expect.arrayContaining(custom));
+    expect(names({ include: 'query' })).not.toContain('refreshQuotes');
+    expect(names({ include: ['quotePreview'] })).toEqual(['quotePreview']);
+    expect(names({ toolNamePrefix: 'app_', include: ['app_serverTime'] })).toEqual(['app_serverTime']);
+    expect(names({ toolNamePrefix: 'app_', include: 'query', exclude: ['quotePreview'] }))
+      .not.toContain('app_quotePreview');
+    expect(names({ includeTypes: ['CustomQueryQuote'] })).toEqual(['quotePreview']);
+    expect(names({ include: 'query', excludeTypes: ['CustomQueryQuote'] })).toContain('serverTime');
+    expect(names({ include: 'query', excludeTypes: ['CustomQueryQuote'] })).not.toContain('quotePreview');
+
+    const overridden = generateMCPTools(schema, {
+      toolNamePrefix: 'app_',
+      include: custom,
+      toolOverrides: { app_quotePreview: { title: 'Quote preview' }, serverTime: { description: 'Now' } },
+    });
+    expect(overridden.tools.map(({ name, title, description }) => ({ name, title, description }))).toEqual([
+      { name: 'app_quotePreview', title: 'Quote preview', description: 'Price a cart without storing it' },
+      { name: 'app_serverTime', title: 'serverTime', description: 'Now' },
+    ]);
+    expect((await overridden.callTool('app_quotePreview', {})).structuredContent)
+      .toEqual({ quotePreview: { total: 3 } });
+  });
+
+  it('gives a custom query named like a virtual field tool that tool name', async () => {
+    const runtime = createRuntime({
+      withTransaction: async (session, body) => body(session || { adapter: 'test' }),
+      createModel: (type) => ({ name: type.name }),
+    });
+    const Shop = new GraphQLObjectType({
+      name: 'CustomQueryVirtualShop',
+      fields: {
+        id: { type: GraphQLID },
+        openSlots: {
+          type: new GraphQLList(GraphQLString),
+          args: { date: { type: new GraphQLNonNull(GraphQLString) } },
+          extensions: { virtual: true },
+          resolve: () => ['10:00'],
+        },
+      },
+    });
+    runtime.connect(null, Shop, 'shop', 'shops');
+    runtime.registerCustomQuery('shop_openSlots', 'Open slots across shops', null, GraphQLString, () => 'custom');
+    const schema = runtime.createSchema();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { tools, callTool } = generateMCPTools(schema, { include: 'query' });
+      expect(tools.filter((tool) => tool.name === 'shop_openSlots')).toHaveLength(1);
+      expect((await callTool('shop_openSlots', {})).structuredContent).toEqual({ shop_openSlots: 'custom' });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('shop_openSlots');
     } finally {
       warn.mockRestore();
     }

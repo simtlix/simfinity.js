@@ -1290,11 +1290,11 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
   return { modelArgs, collectionFields };
 };
 
+// Custom queries run without a transaction or session; custom mutations run in one, which may retry.
 const executeRegisteredOperation = (args, registration, operation, context) => {
   const { inputModel, callback } = registration;
-  const transactional = operation === operations.CUSTOM_MUTATION || registration.transactional;
-  if (!transactional) {
-    return callback(cloneInput(args, inputModel), null, context);
+  if (operation === operations.CUSTOM_QUERY) {
+    return callback(cloneInput(args, inputModel), context);
   }
   const nextInput = attemptInputs(args, inputModel);
   return adapter.withTransaction(
@@ -2883,8 +2883,33 @@ const assertQueryNamesAvailable = (includedQueryTypes, includedCustomQueries) =>
   }
 };
 
-const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomMutations, includedCustomQueries) => {
+const invalidSchemaOptions = (detail) => new SimfinityError(
+  `createSchema options ${detail}`, 'INVALID_SCHEMA_OPTIONS', 500,
+);
+
+const SCHEMA_OPTION_KEYS = new Set(['includedCustomQueries']);
+
+// The fourth createSchema() argument: omitted, or a plain object with known keys only.
+const readSchemaOptions = (options) => {
+  if (options === undefined) return {};
+  if (options === null || typeof options !== 'object' || !isPlainObject(options)) {
+    throw invalidSchemaOptions('must be a plain object');
+  }
+  const unknown = Reflect.ownKeys(options).find((key) => !SCHEMA_OPTION_KEYS.has(key));
+  if (unknown !== undefined) {
+    throw invalidSchemaOptions(`has an unknown option ${String(unknown)}`);
+  }
+  const { includedCustomQueries } = options;
+  if (includedCustomQueries != null && (!Array.isArray(includedCustomQueries)
+    || includedCustomQueries.some((name) => typeof name !== 'string'))) {
+    throw invalidSchemaOptions('includedCustomQueries must be an array of strings, null or undefined');
+  }
+  return { includedCustomQueries };
+};
+
+const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomMutations, options) => {
   // Reject before models, resolvers or roots are built, so a rejected schema changes nothing.
+  const { includedCustomQueries } = readSchemaOptions(options);
   assertQueryNamesAvailable(includedQueryTypes, includedCustomQueries);
   Object.values(typesDict.types).forEach(({ gqltype }) => validateScope(gqltype));
   const schemaTypes = collectSchemaOutputTypes();
@@ -2994,7 +3019,7 @@ const registerMutation = (name, description, inputModel, outputModel, callback) 
 };
 
 const invalidQueryRegistration = (detail) => new SimfinityError(
-  `registerQuery ${detail}`, 'INVALID_QUERY_REGISTRATION', 500,
+  `registerCustomQuery ${detail}`, 'INVALID_QUERY_REGISTRATION', 500,
 );
 
 const validateQueryRegistration = (name, registration) => {
@@ -3016,19 +3041,7 @@ const validateQueryRegistration = (name, registration) => {
   }
 };
 
-const readQueryOptions = (options) => {
-  if (!options || typeof options !== 'object' || !isPlainObject(options)
-    || Reflect.ownKeys(options).some((key) => key !== 'transactional')) {
-    throw invalidQueryRegistration('options must be an object containing only transactional');
-  }
-  const { transactional = false } = options;
-  if (typeof transactional !== 'boolean') {
-    throw invalidQueryRegistration('options.transactional must be a boolean');
-  }
-  return { transactional };
-};
-
-const registerQuery = (name, description, inputModel, outputModel, callback, options = {}) => {
+const registerCustomQuery = (name, description, inputModel, outputModel, callback) => {
   const registration = {
     description,
     inputModel,
@@ -3036,11 +3049,10 @@ const registerQuery = (name, description, inputModel, outputModel, callback, opt
     callback,
   };
   validateQueryRegistration(name, registration);
-  const queryOptions = readQueryOptions(options);
   if (Object.hasOwn(registeredQueries, name)) {
     throw queryNameConflict(name);
   }
-  registeredQueries[name] = { ...registration, ...queryOptions };
+  registeredQueries[name] = registration;
 };
 
 // Gives the field a new extensions object as well as the resolver, so a copy made before keeps
@@ -3279,7 +3291,7 @@ function formatArgs(argsArray) {
     getRegistrations,
     use,
     registerMutation,
-    registerQuery,
+    registerCustomQuery,
     saveObject,
     preventCreatingCollection,
   };

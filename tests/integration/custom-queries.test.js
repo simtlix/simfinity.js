@@ -7,8 +7,7 @@ import mongoose from 'mongoose';
 import pg from 'pg';
 import { createRuntime, SimfinityError } from '../../packages/core/src/index.js';
 import { createMongoAdapter } from '../../packages/mongodb/src/mongo/adapter.js';
-import { createSQLAdapter } from '../../packages/sql/src/adapter.js';
-import { postgresPlugin } from '../../packages/postgres/src/index.js';
+import { createPostgres } from '../../packages/postgres/src/index.js';
 
 const deferred = () => {
   let resolve;
@@ -27,7 +26,7 @@ for (const [backend, uri] of [
   ['mongo', process.env.SIMFINITY_MONGODB_URI],
   ['postgres', process.env.SIMFINITY_POSTGRES_URI],
 ]) {
-  describe.skipIf(!uri)(`${backend} registered custom query reads`, () => {
+  describe.skipIf(!uri)(`${backend} custom query reads`, () => {
     const namespace = `custom_queries_${randomUUID().replaceAll('-', '')}`;
     const prefix = backend === 'mongo' ? 'CqMongo' : 'CqPostgres';
     let pool; let adapter; let runtime; let schema; let flatModel; let ownedModel; let flatId; let ownedId;
@@ -90,9 +89,9 @@ for (const [backend, uri] of [
             return nativeQuery(...args);
           };
         });
-        adapter = createSQLAdapter(postgresPlugin({ pool, schema: namespace }));
       }
-      runtime = createRuntime(adapter);
+      // The PostgreSQL instance's withTransaction() is the API that callbacks use to open a transaction.
+      runtime = backend === 'mongo' ? createRuntime(adapter) : createPostgres({ pool, schema: namespace });
       if (backend === 'mongo') runtime.preventCreatingCollection(true);
       runtime.connect(flatModel, Flat, 'flat', 'flats');
       runtime.addNoEndpointType(Line);
@@ -110,8 +109,9 @@ for (const [backend, uri] of [
           actor: { type: GraphQLString }, lines: { type: new GraphQLList(GraphQLString) },
         },
       });
-      const callback = async (input, session, context) => {
-        context.calls.push({ input, session, context, active: session?.inTransaction() ?? false });
+      // Two native reads of one record, in the session of a transaction the callback opened, or without one.
+      const readTwice = async (input, context, rest, session) => {
+        context.calls.push({ input, session, context, rest, active: session?.inTransaction() ?? false });
         const model = input.owned ? ownedModel : flatModel;
         const first = await read(model, input.id, session);
         if (context.afterFirstRead) await context.afterFirstRead(input, session);
@@ -119,8 +119,14 @@ for (const [backend, uri] of [
         const second = await read(model, input.id, session);
         return { first: first.name, second: second.name, marker: input.marker, actor: context.user.name, lines: (second.lines || []).map((line) => line.label) };
       };
-      runtime.registerQuery('readTransactional', 'Two native reads in one transaction', Input, Output, callback, { transactional: true });
-      runtime.registerQuery('readPlain', 'Two native reads without a custom-query transaction', Input, Output, callback);
+      // Each engine's own API: the Mongoose connection's transaction() on MongoDB, withTransaction() on PostgreSQL.
+      const inTransaction = backend === 'mongo'
+        ? (body) => mongoose.connection.transaction(body)
+        : (body) => runtime.withTransaction(null, body);
+      runtime.registerCustomQuery('readTransactional', 'Two native reads in a transaction the callback opens', Input, Output,
+        (input, context, ...rest) => inTransaction((session) => readTwice(input, context, rest, session)));
+      runtime.registerCustomQuery('readPlain', 'Two native reads without a transaction', Input, Output,
+        (input, context, ...rest) => readTwice(input, context, rest, null));
       schema = runtime.createSchema();
       if (backend === 'mongo') {
         await mongoose.connect(uri, { dbName: namespace, monitorCommands: true });
@@ -129,7 +135,7 @@ for (const [backend, uri] of [
       } else {
         flatModel = runtime.getModel(Flat);
         ownedModel = runtime.getModel(Owned);
-        await adapter.initialize();
+        await runtime.initializeDatabase();
       }
       storageReady = true;
     }, 30000);
@@ -157,7 +163,7 @@ for (const [backend, uri] of [
       }
     });
 
-    it.each([true, false])('passes input/context and preserves repeated native reads (transactional: %s)', async (transactional) => {
+    it.each([true, false])('passes input and context only and preserves repeated native reads (own transaction: %s)', async (transactional) => {
       const input = { id: flatId, marker: 'unchanged' };
       const context = { calls: [], user: { name: 'reader' } };
       const result = await query(transactional, input, context);
@@ -169,6 +175,7 @@ for (const [backend, uri] of [
       expect(context.calls).toHaveLength(1);
       expect(context.calls[0].input).toEqual(input);
       expect(context.calls[0].context).toBe(context);
+      expect(context.calls[0].rest).toEqual([]);
       expect(context.calls[0].active).toBe(transactional);
       const { session } = context.calls[0];
       if (transactional) assertClosed(session);
@@ -185,7 +192,7 @@ for (const [backend, uri] of [
       }
     });
 
-    it('keeps native owned-record read transactions when the custom query is nontransactional', async () => {
+    it('keeps native owned-record read transactions when the callback opens none', async () => {
       const context = { calls: [], user: { name: 'reader' } };
       const result = await query(false, { id: ownedId, owned: true }, context);
       expect(result.errors).toBeUndefined();
@@ -202,7 +209,7 @@ for (const [backend, uri] of [
       }
     });
 
-    it.each([true, false])('retains backend read visibility across an external commit (transactional: %s)', async (transactional) => {
+    it.each([true, false])('retains backend read visibility across an external commit (own transaction: %s)', async (transactional) => {
       const started = deferred();
       const resume = deferred();
       const context = {
@@ -212,7 +219,7 @@ for (const [backend, uri] of [
       const execution = query(transactional, { id: flatId }, context);
       try {
         await reached(started, execution);
-        // The test's independent writer commits between the reads. The registered query only reads.
+        // The test's independent writer commits between the reads. The custom query only reads.
         if (backend === 'mongo') await flatModel.updateOne({ _id: flatId }, { $set: { name: 'after' } });
         else await flatModel.update(flatId, { name: 'after' });
       } finally { resume.resolve(); await execution; }
@@ -222,7 +229,7 @@ for (const [backend, uri] of [
       if (transactional) assertClosed(context.calls[0].session);
     });
 
-    it('runs sibling query roots in independent sessions and releases the failed root without aborting the other', async () => {
+    it('runs the transactions of sibling query roots independently and rolls back only the failed one', async () => {
       const bothStarted = deferred();
       const resume = deferred();
       let arrivals = 0;

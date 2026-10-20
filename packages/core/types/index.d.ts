@@ -279,9 +279,16 @@ export interface MutationLimitsOptions {
   maxNestedOperations?: number | null;
 }
 
-export interface RegisterQueryOptions {
-  /** Run the callback in an adapter transaction. Defaults to false. */
-  transactional?: boolean | undefined;
+/**
+ * The fourth `createSchema()` argument. Any other key, or a value that is not a plain object,
+ * throws `INVALID_SCHEMA_OPTIONS` (500) before models are prepared.
+ */
+export interface CreateSchemaOptions {
+  /**
+   * Custom queries to include, by name. `null` or omission includes every registered custom query,
+   * `[]` includes none, and names that are not registered are ignored.
+   */
+  includedCustomQueries?: string[] | null;
 }
 
 export interface Runtime<Model = any, Session = any> {
@@ -336,10 +343,11 @@ export interface Runtime<Model = any, Session = any> {
    * an input object's fields. The check before `adapter.prepare()` never reads an input object's
    * fields, so a registered input's `fields` function may call `getInputType()`.
    *
-   * `includedCustomQueries` selects custom queries by name; null or omission includes all of them.
-   * Empty mutation roots are omitted.
+   * `options.includedCustomQueries` selects custom queries by name (see {@link CreateSchemaOptions});
+   * an included custom query named like an included generated query throws `QUERY_NAME_CONFLICT`
+   * (500). A schema without mutation fields has no `Mutation` root.
    */
-  createSchema(includedQueryTypes?: GraphQLObjectType[] | null, includedMutationTypes?: GraphQLObjectType[] | null, includedCustomMutations?: string[] | null, includedCustomQueries?: string[] | null): GraphQLSchema;
+  createSchema(includedQueryTypes?: GraphQLObjectType[] | null, includedMutationTypes?: GraphQLObjectType[] | null, includedCustomMutations?: string[] | null, options?: CreateSchemaOptions): GraphQLSchema;
   getModel(type: GraphQLObjectType | { name: string }): Model | null | undefined;
   getType(name: string | { name: string }): GraphQLObjectType | null | undefined;
   /**
@@ -359,12 +367,12 @@ export interface Runtime<Model = any, Session = any> {
   use(middleware: (params: MiddlewareContext, next: () => Promise<void>) => void | Promise<void>): void;
   registerMutation(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (args: any, session: Session, context: any) => any): void;
   /**
-   * Register a custom query. The session argument is null unless `transactional` is true, which
-   * supplies an adapter session. That transaction covers the callback and may retry it.
+   * Register a custom query on `RootQueryType`, for a result that is not a stored record. The
+   * callback receives the input and the request context; no transaction or session wraps it.
+   * Throws `INVALID_QUERY_REGISTRATION` (500) for invalid arguments and `QUERY_NAME_CONFLICT`
+   * (500) for a name already registered.
    */
-  registerQuery(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, session: null, context: any) => any, options?: { transactional?: false | undefined }): void;
-  registerQuery(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, session: Session, context: any) => any, options: { transactional: true }): void;
-  registerQuery(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, session: Session | null, context: any) => any, options: RegisterQueryOptions | undefined): void;
+  registerCustomQuery(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, context: any) => any): void;
   /** Owns the full workflow transaction unless an active caller session is supplied. */
   saveObject(typeName: string, args: Record<string, any>, session?: Session, context?: any): Promise<any>;
   preventCreatingCollection(prevent: boolean): void;

@@ -13,10 +13,10 @@ import type {
   GraphQLOutputType,
 } from 'graphql';
 import type {
+  CreateSchemaOptions,
   DatabaseAdapter,
   MutationLimitsOptions,
   QueryFeatures,
-  Runtime,
   RuntimeRegistration,
   SimfinityError,
 } from '@simtlix/simfinity-core';
@@ -36,6 +36,7 @@ export type {
   AuthRule,
   AuthRuleFunction,
   AuthSchemaPlugin,
+  CreateSchemaOptions,
   EnvelopSchemaPlugin,
   FieldValidations,
   FieldValidator,
@@ -43,7 +44,6 @@ export type {
   MutationLimitsOptions,
   PermissionSchema,
   PolicyExpression,
-  RegisterQueryOptions,
   ScopeFunction,
   ScopeOperation,
   ScopeParams,
@@ -193,13 +193,16 @@ export function addNoEndpointType(gqltype: GraphQLObjectType): void;
  * before models are created when it is an included endpoint type, a registered custom operation's input or
  * output type, an output type they reach or a field argument's type, and when the schema is
  * constructed otherwise.
- * Empty mutation roots are omitted.
+ * options.includedCustomQueries selects custom queries by name (see CreateSchemaOptions); an
+ * invalid options argument throws INVALID_SCHEMA_OPTIONS (500), and an included custom query named
+ * like an included generated query throws QUERY_NAME_CONFLICT (500), before models are created. A
+ * schema without mutation fields has no Mutation root.
  */
 export function createSchema(
   includedQueryTypes?: GraphQLObjectType[] | null,
   includedMutationTypes?: GraphQLObjectType[] | null,
   includedCustomMutations?: string[] | null,
-  includedCustomQueries?: string[] | null,
+  options?: CreateSchemaOptions,
 ): GraphQLSchema;
 
 /** Register a custom mutation executed inside a transaction. */
@@ -211,8 +214,14 @@ export function registerMutation(
   callback: (input: any, session: any, context: any) => any,
 ): void;
 
-/** Register a custom query. The session argument is null by default. */
-export const registerQuery: Runtime['registerQuery'];
+/** Register a custom query for a result that is not a stored record. No transaction or session wraps it. */
+export function registerCustomQuery(
+  name: string,
+  description: string,
+  inputModel: GraphQLInputObjectType | null | undefined,
+  outputModel: GraphQLOutputType,
+  callback: (input: any, context: any) => any,
+): void;
 
 /** Operation context for root operations, generated non-embedded relation reads, and nested collection writes. */
 export interface SimfinityMiddlewareContext {
