@@ -5,7 +5,7 @@ Driver-free relational planning, record reconstruction, and transaction orchestr
 PostgreSQL 15 or later is the first and only supported SQL plugin. Install the SQL runtime and PostgreSQL plugin at matching versions:
 
 ```sh
-npm install @simtlix/simfinity-sql@3.8.0 @simtlix/simfinity-postgres@3.8.0 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-sql@3.9.0 @simtlix/simfinity-postgres@3.9.0 graphql@^16.11.0 pg@^8.16.3
 ```
 
 ## Runtime
