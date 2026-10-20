@@ -28,6 +28,7 @@ Shared examples can import the selected instance from [your application’s runt
 | Create in an owned or existing transaction | [saveObject](#saveobject) | Saved object |
 | Set the maximum query page size | [configureQueryLimits](#configurequerylimits) | Process-wide configuration |
 | Cap nested collection operations | [configureMutationLimits](#configuremutationlimits) | Process-wide configuration |
+| Index a PostgreSQL column for case-insensitive filters | [caseFoldExpression](#casefoldexpression) | SQL expression text |
 
 ## createMongoAdapter
 
@@ -248,3 +249,7 @@ await postgres.initializeDatabase({ mode: 'create' });
 | `ownerIndexes` | `'all'` | `'minimal'` leaves out the `(__owner_id)` index of new owned and guard tables, which their primary key or a unique index covers. |
 
 `refreshTriggers` and `ownerIndexes` change the generated description and DDL, also through the low-level `describeDatabase(registrations, { schema, refreshTriggers, ownerIndexes })`. An unknown value throws `INVALID_DATABASE_SCHEMA` (400) from `createSchema()` or `describeDatabase()`. Initialization keeps each existing root on the refresh-trigger layout its database holds and accepts both layouts. With `ownerIndexes: 'minimal'` it accepts existing owner indexes; a database created with `'minimal'` fails validation under the default `'all'` (`SCHEMA_MISMATCH`, `index is missing`), and create mode adds the indexes back. Versions up to 3.5.9 cannot validate databases created with the opt-in values; read the [upgrade notes](/resources/compatibility#upgrade-to-3-6-0) before enabling them.
+
+### caseFoldExpression
+
+`caseFoldExpression(sqlExpression)`, exported by `@simtlix/simfinity-postgres`, returns the SQL text with which `ILIKE`, `ISTARTS_WITH`, `IENDS_WITH` and `IEQ` fold both sides of their comparison: `translate(lower((<sqlExpression>) COLLATE "pg_catalog"."und-x-icu"), from, to)`, where `from` and `to` are the 22 lowercase variants that ICU `lower()` keeps and their Unicode simple case foldings; see [case folding](/guide/queries#case-folding). PostgreSQL uses an index for these operators only when it is on exactly this expression, so build it with the function, as in `CREATE INDEX series_name_ci ON "app"."Serie" (${caseFoldExpression('"name"')} text_pattern_ops)`; [indexes for text filters](/guide/queries#indexes-for-text-filters) gives the statements. The expression is inserted as given, in parentheses, so that `COLLATE`, which binds more tightly than `->>` and the other binary operators, applies to all of it: `caseFoldExpression('"details" ->> \'label\'')` folds the whole jsonb member, with or without parentheses of its own, and an index on it serves the compiled conditions on that member. Pass trusted SQL with quoted identifiers, never request input. Anything other than a non-empty string throws a `TypeError`.

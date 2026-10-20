@@ -80,6 +80,7 @@ describe('core subpath type declarations', () => {
   it('keeps the internal subpaths untyped and unchanged', () => {
     expect(manifest.exports['./internal/object-id']).toBe('./src/auth/object-id.js');
     expect(manifest.exports['./internal/relation-storage']).toBe('./src/relation-storage.js');
+    expect(manifest.exports['./internal/query-operators']).toBe('./src/query-operators.js');
   });
 
   it('maps exactly the public subpaths in typesVersions, to the same declarations, for Node10 resolution', () => {

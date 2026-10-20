@@ -89,6 +89,7 @@ The exported `SQLPlugin` TypeScript interface documents the complete contract. A
 | --- | --- |
 | `apiVersion`, `name`, `displayName`, `defaultSchema` | Version `1` and nonempty identifying/default-schema strings |
 | `options`, `capabilities` | Initial connection configuration or null, and supported capability names |
+| `queryFeatures` | Optional: `{ operators, compileQuery? }`, the `QLOperator` values that `compileQuery` and `compileChildrenQuery` compile, and optionally the `compileQuery` the list describes. See [query features](#query-features) |
 | `naming.validateIdentifier(value)`, `naming.generatedName(...parts)` | Enforce the engine's identifier rules and deterministic generated names |
 | `describeSchema(logicalPlan, configuration)` | Lower logical storage into physical table/column/ownership metadata used by the record store. The bound configuration, or `null`, is the last argument; a plugin may ignore it |
 | `compileSchema(description)` | Return physical DDL statements for review or export. The runtime calls it only from `runtime.compileDatabaseSchema()`; storage is created and validated through `initialize` |
@@ -129,6 +130,16 @@ const simfinity = createSQL({
   plugin: { ...plugin, capabilities: plugin.capabilities.filter((name) => name !== 'singleStatementReads') },
 });
 ```
+
+### Query features
+
+`queryFeatures.operators` lists the filter operators the plugin's compilers support, including `EQ`, which a condition without an operator means. Names Simfinity does not know are ignored. The SQL runtime declares the list as its adapter's `queryFeatures` and passes it to `createQueryPlan` as `operators`, so the runtime, before middleware runs and again before it calls the adapter, and the plans of reads that do not go through it, such as `getModel(Type).find()`, reject any other operator with `UNSUPPORTED_QUERY` (400) before `compileQuery` sees it. A plugin without `queryFeatures`, or with `null`, compiles the operators of 3.7.0: `EQ`, `NE`, `LT`, `LTE`, `GT`, `GTE`, `BTW`, `IN`, `NIN` and `LIKE`. `bindPlugin` rejects a `queryFeatures` that is not an object whose `operators` is an array of strings with `INVALID_SQL_PLUGIN` (400), and binds a frozen copy.
+
+Like `compileChildrenQuery`, a declaration may name, as its `compileQuery`, the `compileQuery` it describes. It then holds only while that is the plugin's own `compileQuery`; otherwise the plugin compiles the operators of 3.7.0. A declaration without `compileQuery` describes whichever `compileQuery` the plugin has, so a copy of such a plugin that replaces its compiler inherits it. `bindPlugin` rejects a `queryFeatures.compileQuery` that is present and not a function with `INVALID_SQL_PLUGIN` (400).
+
+`postgresPlugin()` declares every operator, the [text operators](./queries#text-operators) included, and names its own `compileQuery`. So a copy that replaces the compiler, such as `{ ...postgresPlugin(options), compileQuery: myCompileQuery }`, keeps the operators of 3.7.0, and a request that uses another one fails with `UNSUPPORTED_QUERY` (400) before `myCompileQuery` runs. To let it compile more, declare what it supports: `queryFeatures: { operators: [...], compileQuery: myCompileQuery }`.
+
+A plan's text predicates carry values that core has validated: a string without U+0000 on a `String` field or list. The bundled compiler validates hand-built plans again, and rejects an operator it does not compile with `UNSUPPORTED_QUERY`.
 
 ### Batched collection reads
 

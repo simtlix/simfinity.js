@@ -1,8 +1,9 @@
 import { paginationStages } from './query-limits.js';
 import SimfinityError from './errors/simfinity.error.js';
+import { QUERY_OPERATORS, textQueryOperator, validateTextFilterValue } from './query-operators.js';
 
 const fail = (message, code = 'INVALID_FILTER_VALUE') => { throw new SimfinityError(message, code, 400); };
-const operators = new Set(['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE']);
+const operators = new Set(QUERY_OPERATORS);
 const reserved = new Set(['AND', 'OR', 'sort', 'pagination', 'aggregation']);
 // `aggregation` is a generated argument only on aggregate endpoints; on find and count a field of
 // that name is filtered like any other.
@@ -47,6 +48,40 @@ export const collectQueryPathEntries = (args, operation = 'find') => {
   return entries;
 };
 
+/**
+ * Internal: the operator of every condition the arguments hold, as `{ operator, path }` entries: field
+ * filters, relation terms and AND/OR group conditions at any depth, with an omitted operator read as
+ * `EQ`. `path` names the condition for messages. Sort, pagination and aggregation hold no operators.
+ * Malformed entries are skipped and left to the backends; a group reached twice is read once.
+ */
+export const collectQueryOperators = (args, operation = 'find') => {
+  const entries = [];
+  if (!args || typeof args !== 'object') return entries;
+  const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+  const add = (item, path) => {
+    if (isObject(item)) entries.push({ operator: item.operator ?? 'EQ', path });
+  };
+  const visited = new Set();
+  const visit = (group) => {
+    if (!isObject(group) || visited.has(group)) return;
+    visited.add(group);
+    for (const condition of listOf(group.conditions)) {
+      add(condition, condition?.path != null && condition.path !== '' ? `${condition.field}.${condition.path}` : condition?.field);
+    }
+    for (const item of [...listOf(group.AND), ...listOf(group.OR)]) visit(item);
+  };
+  const controls = controlArgs(operation);
+  for (const [name, value] of Object.entries(args)) {
+    if (controls.has(name) || !isObject(value)) continue;
+    // A relation filter's operators are in its terms; an operator beside them is read too, since a
+    // backend that reads the field as a scalar would compile it.
+    if (!Array.isArray(value.terms) || value.operator !== undefined) add(value, name);
+    if (Array.isArray(value.terms)) for (const term of value.terms) add(term, `${name}.${term?.path}`);
+  }
+  for (const item of [...listOf(args.AND), ...listOf(args.OR)]) visit(item);
+  return entries;
+};
+
 /** Internal: the segment arrays of {@link collectQueryPathEntries}. */
 export const collectQueryPaths = (args, operation = 'find') => (
   collectQueryPathEntries(args, operation).map((entry) => entry.segments)
@@ -87,8 +122,14 @@ export const resolveModelPath = (models, entityName, path) => {
   return steps;
 };
 
-/** Typed paths and logical groups; neither SQL nor Mongo pipeline objects are stored here. */
-export const createQueryPlan = (models, entityName, input = {}, { mode = 'find' } = {}) => {
+/**
+ * Typed paths and logical groups; neither SQL nor Mongo pipeline objects are stored here. Operators
+ * and values are validated here, text operators through validateTextFilterValue. With `operators`,
+ * the names a compiler supports, any other QLOperator value fails with UNSUPPORTED_QUERY (400);
+ * without it every QLOperator value is planned.
+ */
+export const createQueryPlan = (models, entityName, input = {}, { mode = 'find', operators: supported } = {}) => {
+  const allowed = supported == null ? null : new Set(supported);
   const combine = (kind, terms) => {
     const active = terms.filter(Boolean);
     return active.length > 1 ? { kind, terms: active } : active[0] || null;
@@ -99,11 +140,13 @@ export const createQueryPlan = (models, entityName, input = {}, { mode = 'find' 
     if (field.kind !== 'scalar' && !field.inferred) fail(`Filter on object field ${path} requires a scalar path`, 'MISSING_FILTER_PATH');
     const op = operator ?? 'EQ';
     if (!operators.has(op)) fail(`Unknown filter operator: ${op}`, 'INVALID_FILTER_OPERATOR');
+    if (allowed && !allowed.has(op)) fail(`The ${op} filter operator is not supported by this query compiler`, 'UNSUPPORTED_QUERY');
     const collection = ['IN', 'NIN', 'BTW'].includes(op);
     if (value === undefined || (!collection && Array.isArray(value)) || (value === null && !['EQ', 'NE'].includes(op))) fail('Expected a scalar filter value');
     if (collection && Array.isArray(value) && value.some((item) => item == null || Array.isArray(item))) fail('Filter lists require non-null scalar elements');
     if (['IN', 'NIN', 'BTW'].includes(op) && !Array.isArray(value)) fail(`${op} requires an array value`);
     if (op === 'BTW' && value.length !== 2) fail('BTW requires two values');
+    if (textQueryOperator(op)) validateTextFilterValue(op, value, field.scalar, path);
     return { kind: 'predicate', path: Array.isArray(path) ? path : path.split('.'), operator: op, value: value === undefined ? null : value };
   };
   const validateGroup = (value, keys = ['conditions', 'AND', 'OR']) => {

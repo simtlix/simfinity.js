@@ -13,6 +13,12 @@ const QLOperator = new GraphQLEnumType({
     IN: { value: 'IN' },
     NIN: { value: 'NIN' },
     LIKE: { value: 'LIKE' },
+    ILIKE: { value: 'ILIKE' },
+    STARTS_WITH: { value: 'STARTS_WITH' },
+    ISTARTS_WITH: { value: 'ISTARTS_WITH' },
+    ENDS_WITH: { value: 'ENDS_WITH' },
+    IENDS_WITH: { value: 'IENDS_WITH' },
+    IEQ: { value: 'IEQ' },
   },
 });
 
