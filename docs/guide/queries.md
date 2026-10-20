@@ -87,72 +87,63 @@ query {
 
 ### Case folding
 
-Both backends ignore case through Unicode's case mappings. On both, `É` matches `é`, `ẞ` matches `ß`, the Kelvin sign `K` matches `k`, and `ǅ`, `ǆ` and `Ǆ` match each other, while `ß` does not match `ss`, `ﬁ` does not match `fi`, and `"istanbul"` does not find `İstanbul`.
+Both backends ignore case through the Unicode simple case foldings, which map one character to one character, so that each case-insensitive operator returns every record that its case-sensitive form returns. On both, `É` matches `é`, `ẞ` matches `ß`, the Kelvin sign `K` matches `k`, `ǅ`, `ǆ` and `Ǆ` match each other, `Σ`, `σ` and the final sigma `ς` match each other wherever they appear, and lowercase variants match their usual letters, such as `ſ` and `s`, `µ` (micro sign) and `μ`, or `ϑ` and `θ`. Apart from PostgreSQL's lowering of `İ` (U+0130) to two characters, described below, neither backend applies length-changing or language-specific foldings: `ß` does not match `ss`, `ﬁ` does not match `fi`, and `"istanbul"` does not find `İstanbul`.
 
-MongoDB uses the case-insensitive option of its regular expressions, and PostgreSQL compares `lower()` of both sides under the ICU root collation `und-x-icu`, or, with the option [`foldFinalSigma: true`](#the-capital-sigma-on-postgresql), `lower()` followed by `translate()` of `ς` into `σ`. A few characters therefore match differently, and the integration tests pin each difference:
+MongoDB uses the case-insensitive option of its regular expressions. PostgreSQL folds both sides of `ILIKE`, `ISTARTS_WITH`, `IENDS_WITH` and `IEQ` with one expression, `translate(lower((x) COLLATE "pg_catalog"."und-x-icu"), from, to)`, which [`caseFoldExpression`](#indexes-for-text-filters) writes with its two lists of characters. `lower()` under the ICU root collation `und-x-icu` applies the case mappings of every script, whatever the database's locale, and `translate()` then maps the 22 lowercase variants that `lower()` keeps to the letters that simple case folding gives them:
+
+| Characters | Fold to |
+| --- | --- |
+| `µ` (U+00B5, micro sign), `ſ` (U+017F, long s), `ς` (U+03C2, final sigma) | `μ`, `s`, `σ` |
+| U+0345 (combining ypogegrammeni) and U+1FBE (prosgegrammeni) | `ι` |
+| The Greek symbols `ϐ`, `ϑ`, `ϕ`, `ϖ`, `ϰ`, `ϱ` and `ϵ` (U+03D0, U+03D1, U+03D5, U+03D6, U+03F0, U+03F1, U+03F5) | `β`, `θ`, `φ`, `π`, `κ`, `ρ`, `ε` |
+| The Cyrillic variants U+1C80 to U+1C88 | `в`, `д`, `о`, `с`, `т`, `т`, `ъ`, `ѣ`, `ꙋ` |
+| `ẛ` (U+1E9B, long s with dot above) | `ṡ` |
+
+Mapping `ς` to `σ` also matters for a capital `Σ` at an end of a search value. `lower()` turns a `Σ` that ends a word into `ς` and any other into `σ`, and PostgreSQL folds the value apart from the stored text, so `ΚΑΣ`, the value of `ISTARTS_WITH "ΚΑΣ"`, lowers to `κας` while `ΚΑΣΤΡΟ` lowers to `καστρο`; both fold to `σ`, so the search finds `ΚΑΣΤΡΟ`, as `STARTS_WITH "ΚΑΣ"` and MongoDB do.
+
+Two known differences remain, and the integration tests pin them:
 
 | Characters | MongoDB | PostgreSQL |
 | --- | --- | --- |
-| Lowercase variants that ICU `lower()` keeps: `ſ` (U+017F), `µ` (U+00B5), `ς` (U+03C2), `ϐ`, `ϑ`, `ϕ`, `ϖ`, `ϰ`, `ϱ`, `ϵ`, `ẛ`, U+0345, U+1FBE and U+1C80 to U+1C88 | Match their usual letters: `IEQ "sun"` finds `ſun`, and `IEQ "μm"` finds `µm` | Do not match their usual letters, except `ς`, which matches `σ` with `foldFinalSigma: true` |
-| The capital sigma `Σ` (U+03A3) | `Σ`, `σ` and `ς` match each other wherever they appear, so each case-insensitive operator returns every record that its case-sensitive form returns | By default, `lower()` turns a `Σ` that ends a word into `ς` and any other `Σ` into `σ`, so `IEQ "ΟΔΟΣ"` finds `οδος` but not `οδοσ`, and `ILIKE "Σ"` does not find `ς`. A value with a `Σ` at one of its ends can also miss records that the case-sensitive operator returns: `ISTARTS_WITH "ΚΑΣ"` does not find `ΚΑΣΤΡΟ`, which `STARTS_WITH "ΚΑΣ"` finds. With `foldFinalSigma: true`, `Σ`, `σ` and `ς` match each other wherever they appear, as on MongoDB; see [the capital sigma on PostgreSQL](#the-capital-sigma-on-postgresql) |
-| `İ` (U+0130) | Matches only itself | `lower()` turns it into `i` followed by U+0307, so `ISTARTS_WITH "i"` finds `İstanbul`, and `IEQ "İSTANBUL"` also finds `i̇stanbul` |
+| `İ` (U+0130, capital I with dot above) | Matches only itself | `lower()` turns it into `i` followed by U+0307, so `ISTARTS_WITH "i"` finds `İstanbul`, and `IEQ "İSTANBUL"` also finds `i̇stanbul` |
 | Letters newer than the server's Unicode tables, such as U+A7DC, whose lowercase is U+019B (Unicode 16) | Do not match on MongoDB 8.0 | Match when the server's ICU version knows them |
 
-The case-insensitive operators need a PostgreSQL server built with ICU, which provides `und-x-icu`; on a server without it they fail with `DATABASE_ERROR` (500). Folding follows the Unicode version of the server's ICU library on PostgreSQL and of its regular-expression library on MongoDB.
-
-#### The capital sigma on PostgreSQL
-
-ICU's `lower()` turns a capital `Σ` into the final sigma `ς` when a letter comes before it and no letter comes after it, and into `σ` otherwise. Characters such as `.`, `'`, `:` and combining accents between `Σ` and a letter do not count, while a space, a hyphen, a digit, `%` or the end of the text do. PostgreSQL lowers the search value on its own, inside the `LIKE` pattern for `ILIKE`, `ISTARTS_WITH` and `IENDS_WITH`, without the stored text around it, so a `Σ` at an end of the value can lower to the other sigma than the same `Σ` in the stored text. With the default fold, the case-insensitive operators then miss the record, even when it is written in the same case as the value and the case-sensitive operator, or MongoDB, returns it:
-
-- **A value that ends in `Σ` after a letter**, or in `Σ` and a character such as `.`, misses stored text in which the word goes on: `ISTARTS_WITH "ΚΑΣ"` and `ILIKE "ΚΑΣ"` do not find `ΚΑΣΤΡΟ`, `ISTARTS_WITH "ΟΔΟΣ"` does not find `ΟΔΟΣΤΡΩΜΑ` or `ΟΔΟΣ.Α`, and `ILIKE "ΔΟΣ."` does not find `ΟΔΟΣ.Α`, although `STARTS_WITH "ΚΑΣ"`, `STARTS_WITH "ΟΔΟΣ"` and `LIKE "ΔΟΣ."` find them.
-- **A value that starts with `Σ`** misses stored text in which that `Σ` ends a word: `IENDS_WITH "Σ ΑΒ"` does not find `ΟΔΟΣ ΑΒ`, and `ILIKE "Σ"` and `IENDS_WITH "Σ"` do not find `ΟΔΟΣ`.
-
-`IEQ` compares whole values, so it can miss only text written with another sigma, as the table above shows, and never what `EQ` returns. A `Σ` with a letter on both sides within the value lowers as it does in the stored text, so `ISTARTS_WITH "ΚΑΣΤ"` finds `ΚΑΣΤΡΟ`. A lowercase `σ` or `ς` in the value stays as typed, so `ISTARTS_WITH "κασ"` finds `ΚΑΣΤΡΟ` but not `ΚΑΣ`, whose `Σ` lowers to `ς`. Lowering the value in the client does not help, because JavaScript's `toLowerCase()` applies the same rule as ICU.
-
-To close the gap, set `foldFinalSigma: true` in `createPostgres(options)`, `postgresPlugin(options)` or `configure()`. PostgreSQL then folds both sides of `ILIKE`, `ISTARTS_WITH`, `IENDS_WITH` and `IEQ` with `translate(lower(x COLLATE "und-x-icu"), 'ς', 'σ')`, which turns every `ς` into `σ` after lowering, so `Σ`, `σ` and `ς` match each other wherever they appear, as on MongoDB: `ISTARTS_WITH "ΚΑΣ"` finds `ΚΑΣΤΡΟ`, `IEQ "ΟΔΟΣ"` finds `οδοσ`, `ILIKE "Σ"` finds `ς`, and each case-insensitive operator returns every record that its case-sensitive form returns. `LIKE`, `STARTS_WITH`, `ENDS_WITH` and the other operators compile the same statements with both settings, and the other characters of the table above keep their differences. The option is off by default so that the statements, and the indexes that serve them, stay as they are; a value other than `true` or `false` throws `INVALID_DATABASE_SCHEMA` (400) from `createSchema()`. Its statements and indexes contain `σ` and `ς`, which PostgreSQL converts to the server encoding, so the option needs an encoding that has both, such as `UTF8`, `ISO_8859_7` or `WIN1253`: on another, such as `LATIN1`, every case-insensitive filter would fail with `INVALID_VALUE` (400), even for an ASCII value, and the index statements below fail too, so initialization, in both modes, first checks the encoding and rejects such a database with `INVALID_DATABASE_SCHEMA` (400). The default statements contain neither character.
-
-An [index for text filters](#indexes-for-text-filters) serves these operators only when it is on the expression of the runtime's setting, so create the indexes of the setting you deploy. For the examples of that section, a `text_pattern_ops` btree for `IEQ` and `ISTARTS_WITH`, a trigram index for `ILIKE`, `ISTARTS_WITH` and `IENDS_WITH`, which needs the `pg_trgm` extension, and a btree for `IEQ` on a member of an embedded value stored as jsonb:
-
-```sql
--- foldFinalSigma: false, the default
-CREATE INDEX series_name_ci ON "app"."Serie" (lower("name" COLLATE "und-x-icu") text_pattern_ops);
-CREATE INDEX series_name_trgm ON "app"."Serie" USING gin (lower("name" COLLATE "und-x-icu") gin_trgm_ops);
-CREATE INDEX series_label_ci ON "app"."Serie" (lower(("details" ->> 'label') COLLATE "und-x-icu"));
--- foldFinalSigma: true
-CREATE INDEX series_name_ci_sigma ON "app"."Serie" (translate(lower("name" COLLATE "und-x-icu"), 'ς', 'σ') text_pattern_ops);
-CREATE INDEX series_name_trgm_sigma ON "app"."Serie" USING gin (translate(lower("name" COLLATE "und-x-icu"), 'ς', 'σ') gin_trgm_ops);
-CREATE INDEX series_label_ci_sigma ON "app"."Serie" (translate(lower(("details" ->> 'label') COLLATE "und-x-icu"), 'ς', 'σ'));
-```
-
-Changing the setting requires rebuilding these indexes on the new expression. An index on the other expression no longer serves the operators, and PostgreSQL then reads every row without any error, while `REINDEX` keeps the old expression. Create the indexes of the new setting under their own names, as above, for example with `CREATE INDEX CONCURRENTLY`, before instances with the new setting serve requests, keep the old ones while instances with the old setting still run, and drop them afterwards. Initialization keeps indexes on either expression in both modes.
-
-Without the option, store a normalized copy of the text in a field that a [controller](./controllers) keeps up to date, such as `text.toLowerCase().replaceAll('ς', 'σ')`, and search that field with `STARTS_WITH`, `LIKE` or `EQ` and a value normalized the same way; both backends then return the same records, and an index on the field serves `STARTS_WITH` and `EQ`. Otherwise, avoid case-insensitive search values that start or end with a capital `Σ`.
+Folding follows the Unicode version of the server's ICU library on PostgreSQL and of its regular-expression library on MongoDB. On PostgreSQL, the case-insensitive operators need a database whose encoding is `UTF8`, the only server encoding that has every character of the fold, on a server built with ICU, which provides `und-x-icu`. On another database, such as one in `LATIN1` or `SQL_ASCII`, or on a server without ICU, they fail with `UNSUPPORTED_QUERY` (400), `ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ need a UTF8 database with the ICU collation und-x-icu`, with the driver error as the cause, while initialization and every other operation keep working. The fold is part of each statement, not a database object, so initialization creates and checks nothing for it, and there is nothing to migrate.
 
 ### Indexes for text filters
 
-On PostgreSQL, text columns use the `C` collation, and the operators compile to these conditions, where `$1` is a bound parameter. With [`foldFinalSigma: true`](#the-capital-sigma-on-postgresql), `translate(lower(x COLLATE "und-x-icu"), 'ς', 'σ')` takes the place of `lower(x COLLATE "und-x-icu")`, on both sides and in the indexes:
+On PostgreSQL, text columns use the `C` collation, and the operators compile to these conditions, where `$1` is a bound parameter and `fold(x)` stands for the expression that `caseFoldExpression(x)` returns:
 
 | Operator | Condition | Index that serves it |
 | --- | --- | --- |
 | `STARTS_WITH` | `starts_with("column" COLLATE "C", $1)` | Any btree index on the column |
-| `IEQ` | `lower("column" COLLATE "und-x-icu") = lower($1 COLLATE "und-x-icu")` | A btree index on `lower("column" COLLATE "und-x-icu")` |
-| `ISTARTS_WITH` | `lower("column" COLLATE "und-x-icu") LIKE lower($1 COLLATE "und-x-icu")`, with `$1` = `value%` | A btree index on the same expression with `text_pattern_ops`, or a trigram index |
+| `IEQ` | `fold("column") = fold($1)` | A btree index on `fold("column")` |
+| `ISTARTS_WITH` | `fold("column") LIKE fold($1)`, with `$1` = `value%` | A btree index on `fold("column")` with `text_pattern_ops`, or a trigram index |
 | `ILIKE`, `IENDS_WITH` | The same, with `$1` = `%value%` or `%value` | A trigram index |
 | `LIKE`, `ENDS_WITH` | `strpos("column" COLLATE "C", $1) > 0`, `right("column" COLLATE "C", char_length($1)) = $1` | None |
 
-In the `LIKE` patterns, `\`, `%` and `_` of the value are escaped. Simfinity creates no index for the text operators: create the ones your searches need in your own migration, on exactly the compiled expression, `lower("column" COLLATE "und-x-icu")`, or `translate(lower("column" COLLATE "und-x-icu"), 'ς', 'σ')` with `foldFinalSigma: true`; an index on `lower("column")` without the collation does not serve them, and neither does an index on the expression of the other setting. Initialization keeps such indexes in both modes. These are the indexes of the default setting; [the capital sigma on PostgreSQL](#the-capital-sigma-on-postgresql) gives those of `foldFinalSigma: true`:
+In the `LIKE` patterns, `\`, `%` and `_` of the value are escaped. Simfinity creates no index for the text operators: create the ones your searches need in your own migration, on exactly the compiled expression. `caseFoldExpression(sqlExpression)`, exported by `@simtlix/simfinity-postgres`, returns it for a column or any other SQL expression. It inserts the expression as given, in parentheses, so that `COLLATE`, which binds more tightly than `->>` and the other binary operators, applies to all of it, as in the compiled statement; pass trusted SQL with quoted identifiers, never request input:
+
+```js
+import { caseFoldExpression } from '@simtlix/simfinity-postgres';
+
+await pool.query(`CREATE INDEX series_name_ci ON "app"."Serie" (${caseFoldExpression('"name"')} text_pattern_ops)`);
+await pool.query(`CREATE INDEX series_label_ci ON "app"."Serie" (${caseFoldExpression('"details" ->> \'label\'')})`);
+```
+
+These are the statements it gives for a column and for a member of an embedded value stored as jsonb. An index on `lower("column" COLLATE "und-x-icu")` alone, or on `lower("column")`, does not serve the operators. Initialization keeps such indexes in both modes:
 
 ```sql
 -- IEQ and ISTARTS_WITH
-CREATE INDEX series_name_ci ON "app"."Serie" (lower("name" COLLATE "und-x-icu") text_pattern_ops);
+CREATE INDEX series_name_ci ON "app"."Serie" (translate(lower(("name") COLLATE "pg_catalog"."und-x-icu"), 'µſͅςϐϑϕϖϰϱϵᲀᲁᲂᲃᲄᲅᲆᲇᲈẛι', 'μsισβθφπκρεвдосттъѣꙋṡι') text_pattern_ops);
 -- ILIKE, ISTARTS_WITH and IENDS_WITH
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
-CREATE INDEX series_name_trgm ON "app"."Serie" USING gin (lower("name" COLLATE "und-x-icu") gin_trgm_ops);
+CREATE INDEX series_name_trgm ON "app"."Serie" USING gin (translate(lower(("name") COLLATE "pg_catalog"."und-x-icu"), 'µſͅςϐϑϕϖϰϱϵᲀᲁᲂᲃᲄᲅᲆᲇᲈẛι', 'μsισβθφπκρεвдосттъѣꙋṡι') gin_trgm_ops);
 -- IEQ on a member of an embedded value stored as jsonb
-CREATE INDEX series_label_ci ON "app"."Serie" (lower(("details" ->> 'label') COLLATE "und-x-icu"));
+CREATE INDEX series_label_ci ON "app"."Serie" (translate(lower(("details" ->> 'label') COLLATE "pg_catalog"."und-x-icu"), 'µſͅςϐϑϕϖϰϱϵᲀᲁᲂᲃᲄᲅᲆᲇᲈẛι', 'μsισβθφπκρεвдосттъѣꙋṡι'));
 ```
 
-A btree index on `lower("column" COLLATE "und-x-icu")` with the default operator class serves `IEQ` but not `ISTARTS_WITH`. A trigram index narrows an `ILIKE` search only for values of three or more characters. For the `LIKE` patterns, PostgreSQL derives the index condition from the bound value when it plans the statement, which it does for the unnamed statements that Simfinity sends. Conditions on a `String` list read every element of the list, so these indexes do not serve them.
+A btree index on `fold("column")` with the default operator class serves `IEQ` but not `ISTARTS_WITH`. A trigram index narrows an `ILIKE` search only for values of three or more characters. For the `LIKE` patterns, PostgreSQL derives the index condition from the bound value when it plans the statement, which it does for the unnamed statements that Simfinity sends. Conditions on a `String` list read every element of the list, so these indexes do not serve them. If a later release changes the fold, its upgrade notes say so: an index on the earlier expression then stops serving the operators, without ever returning other rows, until you build it again with `caseFoldExpression`.
 
 On MongoDB, `STARTS_WITH` reads a prefix range of an index on the field. The other text operators, like `LIKE`, test every key of such an index, or every document without one. `$regex` ignores collations, so a case-insensitive collation index does not serve them; for frequent case-insensitive equality or prefix searches, store a normalized copy of the field, such as its lowercase form, and filter it with `EQ` or `STARTS_WITH`. MongoDB accepts regular expressions of at most 32,764 bytes of UTF-8, so on MongoDB a value whose pattern is longer fails with `INVALID_FILTER_VALUE` (400) before the query runs, with `LIKE` and with the text operators. Every escaped character counts one byte more, and the operators add up to four bytes of their own: `^` for the prefixes, `\z` for the suffixes, both for `IEQ` and `.*` twice for `LIKE`. So an `ILIKE` value of 32,764 ASCII letters runs, while 16,383 dots or 16,383 two-byte letters such as `é` fail. PostgreSQL has no such limit.
 

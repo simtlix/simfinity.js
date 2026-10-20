@@ -5,6 +5,7 @@ import { compileDatabaseSchema as compileSchemaSQL } from './schema/ddl.js';
 import { initializeDatabase as initializeSchema } from './schema/initialize.js';
 
 export { postgresPlugin } from './plugin.js';
+export { caseFoldExpression } from './query/case-fold.js';
 export {
   auth,
   buildErrorFormatter,

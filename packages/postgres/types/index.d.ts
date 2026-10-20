@@ -207,17 +207,6 @@ export interface PostgresConfiguration {
    * value throws INVALID_DATABASE_SCHEMA (400) from createSchema or describeDatabase.
    */
   ownerIndexes?: 'all' | 'minimal';
-  /**
-   * Defaults to false: ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ compare `lower(x COLLATE "und-x-icu")` of both sides, and
-   * lower() turns a capital sigma that ends a word into ς and any other into σ, so a case-insensitive value with a Σ at
-   * either end can miss rows that its case-sensitive form returns. `true` compares
-   * `translate(lower(x COLLATE "und-x-icu"), 'ς', 'σ')` instead, so Σ, σ and ς match each other wherever they are, as on
-   * MongoDB. Indexes serve these operators only on the expression of the setting, so rebuild them when it changes. The
-   * case-sensitive operators and LIKE do not change. A value other than true or false throws INVALID_DATABASE_SCHEMA
-   * (400) from createSchema. `true` puts σ and ς in the statements, so it needs a server encoding that has both, such
-   * as UTF8: initializeDatabase rejects another, such as LATIN1, with INVALID_DATABASE_SCHEMA (400), in both modes.
-   */
-  foldFinalSigma?: boolean;
 }
 export interface InitializationOptions { mode?: 'create' | 'validate' }
 export interface InitializationResult { mode: 'create' | 'validate'; created: string[] }
@@ -243,8 +232,9 @@ export interface PostgresRuntime extends Runtime<PostgresModel, PostgresSession>
 }
 /**
  * PostgreSQL 15+ plugin for createSQL; omitted options allow later runtime.configure. Its `queryFeatures` lists every
- * `QLOperator` value. The case-insensitive text operators need the ICU collation `und-x-icu`, so a server built
- * without ICU fails them.
+ * `QLOperator` value. The case-insensitive text operators fold case with {@link caseFoldExpression}, which needs a UTF8
+ * database with the ICU collation `und-x-icu`: on another database, such as one in LATIN1 or on a server built without
+ * ICU, they fail with UNSUPPORTED_QUERY (400), and every other operation works.
  */
 export function postgresPlugin(options?: PostgresConfiguration): SQLPlugin<
   PostgresConfiguration,
@@ -258,6 +248,17 @@ export function postgresPlugin(options?: PostgresConfiguration): SQLPlugin<
   }
 >;
 export function createPostgres(options?: PostgresConfiguration): PostgresRuntime;
+/**
+ * The SQL text with which ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ fold both sides of their comparison, for an SQL
+ * expression such as a quoted column name or a jsonb member: `translate(lower((<expression>) COLLATE
+ * "pg_catalog"."und-x-icu"), '<22 characters>', '<their simple case foldings>')`, the Unicode simple case foldings that
+ * MongoDB's case-insensitive matching applies. Indexes serve these operators only on exactly this expression, so build
+ * them with it, for example `CREATE INDEX ... (${caseFoldExpression('"name"')} text_pattern_ops)` or
+ * `CREATE INDEX ... (${caseFoldExpression('"details" ->> \'label\'')})`. The expression is inserted as given, in
+ * parentheses, so that COLLATE applies to all of it; pass trusted SQL, never request input. Throws a TypeError for
+ * anything other than a non-empty string.
+ */
+export function caseFoldExpression(sqlExpression: string): string;
 export const configure: PostgresRuntime['configure'];
 export const connect: PostgresRuntime['connect'];
 export const addNoEndpointType: PostgresRuntime['addNoEndpointType'];

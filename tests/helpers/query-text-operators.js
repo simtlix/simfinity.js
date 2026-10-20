@@ -94,6 +94,13 @@ export const WORDS = {
   w27: 'ﬁle', w28: 'file',
   // A capital sigma inside a word, before a space or a full stop, and alone as a final sigma.
   w29: 'ΚΑΣΤΡΟ', w30: 'ΟΔΟΣ ΑΒ', w31: 'ΟΔΟΣ.Α', w32: 'ΟΔΟΣΤΡΩΜΑ', w33: 'ς',
+  // The other lowercase variants that ICU lower() keeps, in their own words and in their usual letters: the Greek
+  // symbols ϐϑϕϖϰϱϵ, the Cyrillic variants U+1C80 to U+1C88, ẛ, and the iota of U+0345 COMBINING GREEK YPOGEGRAMMENI
+  // after an alpha and of U+1FBE GREEK PROSGEGRAMMENI.
+  w34: '\u03D0\u03D1\u03D5\u03D6\u03F0\u03F1\u03F5', w35: 'βθφπκρε', w36: 'ΒΘΦΠΚΡΕ',
+  w37: '\u1C80\u1C81\u1C82\u1C83\u1C84\u1C85\u1C86\u1C87\u1C88', w38: 'вдосттъѣꙋ', w39: 'ВДОСТТЪѢꙊ',
+  w40: '\u1E9B', w41: 'ṡ', w42: 'Ṡ',
+  w43: 'α\u0345', w44: 'αι', w45: 'ΑΙ', w46: 'α\u1FBE',
 };
 
 /**
@@ -187,42 +194,44 @@ ITEM_CASES.push(
 );
 
 /**
- * `[operator, value, postgres, mongodb?, difference?]`: the words each backend returns. Both backends compare under
- * the Unicode simple case mappings, but PostgreSQL applies ICU lower() and MongoDB its regular expressions'
- * case-insensitive matching. A case with `mongodb` pins a documented difference. `postgres` is the default fold;
- * with `foldFinalSigma: true`, PostgreSQL returns MongoDB's words for the differences in FINAL_SIGMA_DIFFERENCES.
+ * `[operator, value, words, mongodb?, difference?]`: the words each backend returns. Both backends fold case with the
+ * Unicode simple case foldings, MongoDB with its regular expressions' case-insensitive matching and PostgreSQL with
+ * caseFoldExpression, so they return the same words, except on the limitations that #108 (section 3.1) accepts: a case
+ * with `mongodb` pins one, where PostgreSQL returns `words` and MongoDB `mongodb`. The letters newer than MongoDB's
+ * Unicode tables depend on the server's ICU, so the parity and PostgreSQL suites pin them apart.
  */
 export const FOLDING_CASES = [
   ['IEQ', 'ÉCLAIR', ['w01', 'w02', 'w03']], ['ILIKE', 'éCL', ['w01', 'w02', 'w03']],
   ['IEQ', 'straße', ['w08', 'w09']], ['IEQ', 'strasse', ['w07']], ['ILIKE', 'SS', ['w07']],
   ['IEQ', 'istanbul', ['w11', 'w12']], ['IEQ', 'KELVIN', ['w14', 'w15']], ['IEQ', 'ǆemal', ['w16', 'w17', 'w18']],
   ['IEQ', 'ǅEMAL', ['w16', 'w17', 'w18']], ['IEQ', 'file', ['w28']], ['ILIKE', 'fi', ['w28']], ['IEQ', 'ﬁle', ['w27']],
-  // ICU lower() keeps these lowercase variants, which MongoDB matches with their usual forms.
-  ['IEQ', 'sun', ['w20', 'w21'], ['w19', 'w20', 'w21'], 'ſ (U+017F)'],
-  ['IEQ', 'ſun', ['w19'], ['w19', 'w20', 'w21'], 'ſ (U+017F)'],
-  ['IEQ', 'μm', ['w23', 'w24'], ['w22', 'w23', 'w24'], 'µ (U+00B5)'],
-  // ICU lower() keeps ς apart from σ, and turns a capital sigma that ends a word into ς and any other into σ;
-  // MongoDB matches Σ, σ and ς with each other wherever they are, and so does PostgreSQL with foldFinalSigma.
-  ['IEQ', 'οδοσ', ['w06'], ['w04', 'w05', 'w06'], 'ς (U+03C2)'],
-  ['IEQ', 'ΟΔΟΣ', ['w04', 'w05'], ['w04', 'w05', 'w06'], 'ς (U+03C2)'],
-  ['IEQ', 'Σ', [], ['w33'], 'ς (U+03C2)'],
-  ['ILIKE', 'Σ', ['w06', 'w29', 'w31', 'w32'], ['w04', 'w05', 'w06', 'w29', 'w30', 'w31', 'w32', 'w33'], 'ς (U+03C2)'],
-  // PostgreSQL lowers the value apart from the stored text, so a Σ at an end of the value can lower to the other
-  // sigma than the same Σ in the stored text: by default, a case-insensitive operator then misses words that its
-  // case-sensitive form returns, even in the same case (STARTS_WITH "ΚΑΣ" finds ΚΑΣΤΡΟ).
-  ['ISTARTS_WITH', 'ΚΑΣ', [], ['w29'], 'Σ (U+03A3) at an end of the value'],
-  ['ILIKE', 'ΚΑΣ', [], ['w29'], 'Σ (U+03A3) at an end of the value'],
-  ['ISTARTS_WITH', 'ΟΔΟΣ', ['w04', 'w05', 'w30'], ['w04', 'w05', 'w06', 'w30', 'w31', 'w32'], 'Σ (U+03A3) at an end of the value'],
-  ['ILIKE', 'ΔΟΣ.', [], ['w31'], 'Σ (U+03A3) at an end of the value'],
-  ['IENDS_WITH', 'Σ ΑΒ', [], ['w30'], 'Σ (U+03A3) at an end of the value'],
-  // A value whose sigma lowers as the stored one does matches on both backends.
+  // The lowercase variants that ICU lower() keeps match their usual letters, searched by either form.
+  ['IEQ', 'sun', ['w19', 'w20', 'w21']], ['IEQ', 'ſun', ['w19', 'w20', 'w21']],
+  ['IEQ', 'μm', ['w22', 'w23', 'w24']], ['IEQ', 'µM', ['w22', 'w23', 'w24']],
+  ['IEQ', 'βθφπκρε', ['w34', 'w35', 'w36']], ['IEQ', '\u03D0\u03D1\u03D5\u03D6\u03F0\u03F1\u03F5', ['w34', 'w35', 'w36']], ['ILIKE', 'Π', ['w34', 'w35', 'w36']],
+  ['IEQ', 'ВДОСТТЪѢꙊ', ['w37', 'w38', 'w39']], ['IEQ', '\u1C80\u1C81\u1C82\u1C83\u1C84\u1C85\u1C86\u1C87\u1C88', ['w37', 'w38', 'w39']], ['ILIKE', 'тт', ['w37', 'w38', 'w39']],
+  ['IEQ', 'ṡ', ['w40', 'w41', 'w42']], ['IEQ', '\u1E9B', ['w40', 'w41', 'w42']],
+  ['IEQ', 'ΑΙ', ['w43', 'w44', 'w45', 'w46']], ['ILIKE', '\u0345', ['w43', 'w44', 'w45', 'w46']], ['ISTARTS_WITH', 'α\u1FBE', ['w43', 'w44', 'w45', 'w46']],
+  // Σ, σ and ς match each other wherever they are.
+  ['IEQ', 'οδοσ', ['w04', 'w05', 'w06']], ['IEQ', 'ΟΔΟΣ', ['w04', 'w05', 'w06']], ['IEQ', 'Σ', ['w33']],
+  ['ILIKE', 'Σ', ['w04', 'w05', 'w06', 'w29', 'w30', 'w31', 'w32', 'w33']],
+  // A value that starts or ends with Σ finds the words that its case-sensitive form finds (STARTS_WITH "ΚΑΣ" finds
+  // ΚΑΣΤΡΟ), although ICU lower() turns a capital sigma that ends a word into ς and any other into σ, and PostgreSQL
+  // folds the value apart from the stored text.
+  ['ISTARTS_WITH', 'ΚΑΣ', ['w29']], ['ILIKE', 'ΚΑΣ', ['w29']], ['ISTARTS_WITH', 'ΟΔΟΣ', ['w04', 'w05', 'w06', 'w30', 'w31', 'w32']],
+  ['ILIKE', 'ΔΟΣ.', ['w31']], ['IENDS_WITH', 'Σ ΑΒ', ['w30']], ['IENDS_WITH', 'Σ', ['w04', 'w05', 'w06', 'w33']],
   ['IENDS_WITH', 'ος αβ', ['w30']], ['ISTARTS_WITH', 'κασ', ['w29']], ['ISTARTS_WITH', 'ΚΑΣΤ', ['w29']],
-  // ICU lowers İ to i followed by U+0307 COMBINING DOT ABOVE; MongoDB matches İ only with itself.
+  // The accepted difference of the dotted capital I: ICU lowers İ to i followed by U+0307 COMBINING DOT ABOVE, while
+  // MongoDB matches İ only with itself.
   ['IEQ', 'İSTANBUL', ['w10', 'w13'], ['w10'], 'İ (U+0130)'],
   ['ISTARTS_WITH', 'i', ['w10', 'w11', 'w12', 'w13'], ['w11', 'w12', 'w13'], 'İ (U+0130)'],
 ];
 /**
- * The FOLDING_CASES differences that PostgreSQL's `foldFinalSigma: true` removes: it folds both sides with
- * translate(lower(x COLLATE "und-x-icu"), 'ς', 'σ'), so Σ, σ and ς match each other wherever they are, as on MongoDB.
+ * The words whose rows may differ between the backends, each on a limitation that #108 (section 3.1) accepts, which
+ * FOLDING_CASES and the Unicode 16 tests pin: PostgreSQL can return them where MongoDB does not, never the other way
+ * round. `unicode16` holds the letters that PostgreSQL folds only when its ICU knows Unicode 16, as MongoDB 8.0 does not.
  */
-export const FINAL_SIGMA_DIFFERENCES = new Set(['ς (U+03C2)', 'Σ (U+03A3) at an end of the value']);
+export const ACCEPTED_FOLDING_DIFFERENCES = {
+  dottedCapitalI: ['w10', 'w13'],
+  unicode16: ['w25', 'w26'],
+};

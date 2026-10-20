@@ -4,7 +4,8 @@ import { identifier, generatedName } from './schema/sql.js';
 import { describeRelationalSchema } from './schema/describe.js';
 import { initializeDatabase } from './schema/initialize.js';
 import { compileDatabaseSchema } from './schema/ddl.js';
-import { assertQueryConfiguration, assertQueryDatabase, compileChildrenQuery, compileQuery } from './query/compiler.js';
+import { compileChildrenQuery, compileQuery } from './query/compiler.js';
+import { markCaseFoldFailure } from './query/case-fold.js';
 import { compileRecord, compileRecordBatch, MAX_RECORD_BATCH_VALUES } from './record-statements.js';
 import { castId, encodeScalar, decodeScalar, encodeParameter, isRetryableDatabaseError, normalizeDatabaseError } from './codecs.js';
 
@@ -25,19 +26,10 @@ export const postgresPlugin = (options) => ({
     compileQuery,
   },
   naming: { validateIdentifier: identifier, generatedName },
-  // The runtime passes its bound configuration: createPostgres(options) or configure(value). It also checks
-  // foldFinalSigma here, which only the query compilers (compileQuery and compileChildrenQuery) read, so that
-  // createSchema() rejects an invalid value.
-  describeSchema: (plan, configuration) => {
-    assertQueryConfiguration(configuration);
-    return describeRelationalSchema(plan, { refreshTriggers: configuration?.refreshTriggers, ownerIndexes: configuration?.ownerIndexes });
-  },
+  // The runtime passes its bound configuration: createPostgres(options) or configure(value).
+  describeSchema: (plan, configuration) => describeRelationalSchema(plan, { refreshTriggers: configuration?.refreshTriggers, ownerIndexes: configuration?.ownerIndexes }),
   // `context.virtualFields` locates virtual fields, so that SCHEMA_MISMATCH can name one whose earlier storage is left.
-  // With foldFinalSigma: true, a database whose server encoding lacks σ and ς is rejected first.
-  initialize: async (configuration, description, initialization, context) => {
-    await assertQueryDatabase(configuration.pool, configuration);
-    return initializeDatabase(configuration.pool, description, initialization, context);
-  },
+  initialize: (configuration, description, initialization, context) => initializeDatabase(configuration.pool, description, initialization, context),
   compileSchema: compileDatabaseSchema,
   compileQuery,
   // Optional member: the find statements of many parents in one statement, for findChildrenBatch, which the SQL
@@ -53,7 +45,15 @@ export const postgresPlugin = (options) => ({
     assertConfiguration(configuration) {
       if (!configuration?.pool?.connect || !configuration.pool.query) throw new SimfinityError('Configure a pg.Pool before creating the schema', 'DATABASE_NOT_CONFIGURED', 500);
     },
-    query: (configuration, statement, client) => (client || configuration.pool).query(statement.text, statement.values?.map(encodeParameter)),
+    // The error of a statement that folds case is marked, unchanged, so that normalizeError reports a database that
+    // cannot evaluate the fold as UNSUPPORTED_QUERY.
+    query: async (configuration, statement, client) => {
+      try {
+        return await (client || configuration.pool).query(statement.text, statement.values?.map(encodeParameter));
+      } catch (error) {
+        throw markCaseFoldFailure(statement, error);
+      }
+    },
     acquire: (configuration) => configuration.pool.connect(),
     begin: (client) => client.query('BEGIN ISOLATION LEVEL REPEATABLE READ'),
     // PostgreSQL answers COMMIT with ROLLBACK, and no error, when a statement in the transaction failed

@@ -1,7 +1,6 @@
 // The literal text operators (#108, part 1) on both backends: the same fixture, written by the same generated
-// mutations, returns the same rows for every case, except the case-folding differences that FOLDING_CASES and
-// POSTGRES_SIGMA_MISSES pin. PostgreSQL runs twice, with its default fold and with foldFinalSigma: true, which
-// returns MongoDB's rows for the sigma differences and misses nothing.
+// mutations, returns the same rows for every case, except the case-folding limitations that #108 accepts, which
+// FOLDING_CASES and the Unicode 16 test pin.
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { graphql } from 'graphql';
@@ -11,33 +10,27 @@ import { createRuntime } from '../../packages/core/src/index.js';
 import { createMongoAdapter } from '../../packages/mongodb/src/mongo/adapter.js';
 import { createPostgres } from '../../packages/postgres/src/index.js';
 import {
-  createTextOperatorFixture, FINAL_SIGMA_DIFFERENCES, FOLDING_CASES, ITEM_CASES, listOperation, registerTextOperatorFixture, seedTextOperatorFixture, WORDS,
+  ACCEPTED_FOLDING_DIFFERENCES, createTextOperatorFixture, FOLDING_CASES, ITEM_CASES, listOperation, registerTextOperatorFixture, seedTextOperatorFixture, WORDS,
 } from '../helpers/query-text-operators.js';
 
 const mongoUri = process.env.SIMFINITY_MONGODB_URI;
 const postgresUri = process.env.SIMFINITY_POSTGRES_URI;
 const TEXT = ['ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ'];
-// The PostgreSQL backend created with foldFinalSigma: true.
-const FOLDED = 'postgresFoldFinalSigma';
-// `[operator, value, words]`: the words that PostgreSQL's case-insensitive operator misses although its case-sensitive
-// form returns them, the documented sigma gap of its default fold. ICU lower() turns a capital sigma that ends a word
-// into ς and any other into σ, and PostgreSQL lowers the value apart from the stored text, so a Σ at an end of the
-// value can lower to the other sigma than the same Σ in the stored word. MongoDB, and PostgreSQL with
-// foldFinalSigma: true, miss none of them.
-const POSTGRES_SIGMA_MISSES = [
-  // The value ends in Σ, or in Σ and a full stop, after a letter, while the stored word goes on.
-  ['ISTARTS_WITH', 'ΚΑΣ', ['w29']], ['ILIKE', 'ΚΑΣ', ['w29']], ['ILIKE', 'ΑΣ', ['w29']],
-  ['ISTARTS_WITH', 'ΟΔΟΣ', ['w31', 'w32']], ['ILIKE', 'ΟΔΟΣ', ['w31', 'w32']], ['ILIKE', 'ΔΟΣ', ['w31', 'w32']], ['ILIKE', 'ΟΣ', ['w31', 'w32']],
-  ['ISTARTS_WITH', 'ΟΔΟΣ.', ['w31']], ['ILIKE', 'ΟΔΟΣ.', ['w31']], ['ILIKE', 'ΔΟΣ.', ['w31']], ['ILIKE', 'ΟΣ.', ['w31']],
-  // The value starts with Σ, while the stored Σ ends a word.
-  ['IENDS_WITH', 'Σ', ['w04']], ['ILIKE', 'Σ', ['w04', 'w30']],
-  ['ILIKE', 'Σ ', ['w30']], ['ILIKE', 'Σ Α', ['w30']], ['ILIKE', 'Σ ΑΒ', ['w30']], ['IENDS_WITH', 'Σ ΑΒ', ['w30']],
-];
-const missLine = (backend, operator, value, words) => `${backend}: ${operator} ${JSON.stringify(value)} misses ${words.join(', ')}`;
+// Every prefix, suffix and substring of every folding word, so that each letter, a capital sigma included, is searched
+// at both ends of a value and inside it: `[start, end, value]` for each word's code points.
+const substrings = () => {
+  const out = [];
+  for (const word of new Set(Object.values(WORDS))) {
+    const chars = [...word];
+    for (let start = 0; start < chars.length; start += 1) {
+      for (let end = start + 1; end <= chars.length; end += 1) out.push({ value: chars.slice(start, end).join(''), prefix: start === 0, suffix: end === chars.length });
+    }
+  }
+  return out;
+};
 
 describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL text operator parity', () => {
   const namespace = `qt_parity_${randomUUID().replaceAll('-', '')}`;
-  const foldedNamespace = `${namespace}_sigma`;
   let pool; let backends; let unicode16;
   const execute = (backend, source, variableValues, contextValue = {}) => graphql({ schema: backend.schema, source, variableValues, contextValue });
   // The keys each backend returns, by backend name.
@@ -60,7 +53,6 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL text operator par
     backends = [
       { name: 'mongodb', api: createRuntime(createMongoAdapter()) },
       { name: 'postgres', api: createPostgres({ pool, schema: namespace }) },
-      { name: FOLDED, api: createPostgres({ pool, schema: foldedNamespace, foldFinalSigma: true }) },
     ];
     for (const backend of backends) {
       if (!backend.api.initializeDatabase) backend.api.preventCreatingCollection(true);
@@ -74,11 +66,7 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL text operator par
   }, 60000);
   afterAll(async () => {
     if (mongoose.connection.readyState) { await mongoose.connection.db.dropDatabase(); await mongoose.disconnect(); }
-    if (pool) {
-      await pool.query(`DROP SCHEMA IF EXISTS "${namespace}" CASCADE`);
-      await pool.query(`DROP SCHEMA IF EXISTS "${foldedNamespace}" CASCADE`);
-      await pool.end();
-    }
+    if (pool) { await pool.query(`DROP SCHEMA IF EXISTS "${namespace}" CASCADE`); await pool.end(); }
   });
 
   it('lists the text operators in QLOperator on both backends', async () => {
@@ -157,54 +145,82 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL text operator par
         const result = await execute(backend, source, variables);
         return result.errors ? result.errors[0].extensions?.code : result.data.qtItems;
       }));
-      expect(outcomes, operator).toEqual(['INVALID_FILTER_VALUE', [], []]);
+      expect(outcomes, operator).toEqual(['INVALID_FILTER_VALUE', []]);
     }
   });
 
-  it.each(FOLDING_CASES.map(([operator, value, postgres, mongodb, difference]) => [`${operator} ${JSON.stringify(value)}${difference ? `, which differs on ${difference}` : ''}`, operator, value, postgres, mongodb, difference]))('folds case for %s', async (name, operator, value, postgres, mongodb, difference) => {
-    // foldFinalSigma: true returns MongoDB's words for the sigma differences, and the default fold's for the others.
-    expect(await keys('qtWords', { word: { operator, value } })).toEqual({ mongodb: mongodb ?? postgres, postgres, [FOLDED]: FINAL_SIGMA_DIFFERENCES.has(difference) ? mongodb : postgres });
-  });
-
-  it('returns, with each case-insensitive operator, every word that its case-sensitive form returns, except the sigma gap of PostgreSQL without foldFinalSigma', async () => {
-    // Every prefix, suffix and substring of every folding word, so that each letter, a capital sigma included, is
-    // searched at both ends of a value and inside it. Any miss outside POSTGRES_SIGMA_MISSES fails, and so does any
-    // miss of MongoDB or of PostgreSQL with foldFinalSigma: true.
-    const pairs = new Map();
-    for (const word of new Set(Object.values(WORDS))) {
-      const chars = [...word];
-      for (let start = 0; start < chars.length; start += 1) {
-        for (let end = start + 1; end <= chars.length; end += 1) {
-          const value = chars.slice(start, end).join('');
-          const add = (exact, folded) => pairs.set(`${exact} ${value}`, [exact, folded, value]);
-          if (start === 0) add('STARTS_WITH', 'ISTARTS_WITH');
-          if (end === chars.length) add('ENDS_WITH', 'IENDS_WITH');
-          add('LIKE', 'ILIKE');
-        }
-      }
-    }
-    const conditions = [...pairs.values()].flatMap(([exact, folded, value]) => [{ operator: exact, value }, { operator: folded, value }]);
-    const missing = [];
+  // Runs each condition on each backend, one operation per 200 conditions, each condition an aliased field, and
+  // returns the keys of the words each condition finds, by backend name.
+  const wordsOf = async (conditions) => {
+    const found = {};
     for (const backend of backends) {
-      // One operation per 200 conditions, each condition an aliased field.
-      const found = [];
+      found[backend.name] = [];
       for (let start = 0; start < conditions.length; start += 200) {
         const chunk = conditions.slice(start, start + 200);
-        const source = `query(${chunk.map((_, index) => `$f${index}:QLFilter`).join(',')}){${chunk.map((_, index) => `f${index}:qtWords(word:$f${index}){key}`).join(' ')}}`;
+        const source = `query(${chunk.map((_, index) => `$f${index}:QLFilter`).join(',')}){${chunk.map((_, index) => `f${index}:qtWords(word:$f${index},sort:{terms:[{field:"key",order:ASC}]}){key}`).join(' ')}}`;
         const result = await execute(backend, source, Object.fromEntries(chunk.map((condition, index) => [`f${index}`, condition])));
-        expect(result.errors).toBeUndefined();
-        chunk.forEach((_, index) => found.push(result.data[`f${index}`].map((row) => row.key)));
-      }
-      for (let index = 0; index < conditions.length; index += 2) {
-        const extra = found[index].filter((key) => !found[index + 1].includes(key));
-        if (extra.length) missing.push(missLine(backend.name, conditions[index + 1].operator, conditions[index].value, extra));
+        expect(result.errors, backend.name).toBeUndefined();
+        chunk.forEach((_, index) => found[backend.name].push(result.data[`f${index}`].map((row) => row.key)));
       }
     }
-    expect(missing.sort()).toEqual(POSTGRES_SIGMA_MISSES.map(([operator, value, words]) => missLine('postgres', operator, value, words)).sort());
+    return found;
+  };
+
+  it.each(FOLDING_CASES.map(([operator, value, words, mongodb, difference]) => [`${operator} ${JSON.stringify(value)}${difference ? `, which differs on ${difference}` : ''}`, operator, value, words, mongodb]))('folds case for %s', async (name, operator, value, words, mongodb) => {
+    expect(await keys('qtWords', { word: { operator, value } })).toEqual({ mongodb: mongodb ?? words, postgres: words });
   });
 
+  it('returns, with each case-insensitive operator, every word that its case-sensitive form returns, on both backends', async () => {
+    const pairs = new Map();
+    for (const { value, prefix, suffix } of substrings()) {
+      const add = (exact, folded) => pairs.set(`${exact} ${value}`, [exact, folded, value]);
+      if (prefix) add('STARTS_WITH', 'ISTARTS_WITH');
+      if (suffix) add('ENDS_WITH', 'IENDS_WITH');
+      add('LIKE', 'ILIKE');
+    }
+    const conditions = [...pairs.values()].flatMap(([exact, folded, value]) => [{ operator: exact, value }, { operator: folded, value }]);
+    const found = await wordsOf(conditions);
+    const missing = [];
+    for (const backend of backends) {
+      for (let index = 0; index < conditions.length; index += 2) {
+        const extra = found[backend.name][index].filter((key) => !found[backend.name][index + 1].includes(key));
+        if (extra.length) missing.push(`${backend.name}: ${conditions[index + 1].operator} ${JSON.stringify(conditions[index].value)} misses ${extra.join(', ')}`);
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it('returns the same words on both backends for every case-insensitive search of each substring of the folding words, in each case, except the accepted differences', async () => {
+    // Each substring as written, in upper case and in lower case, with ILIKE, and also with ISTARTS_WITH for prefixes,
+    // IENDS_WITH for suffixes and IEQ for whole words. The words of ACCEPTED_FOLDING_DIFFERENCES may only be extra
+    // rows on PostgreSQL, the Unicode 16 letters only when its ICU knows them.
+    const accepted = [...ACCEPTED_FOLDING_DIFFERENCES.dottedCapitalI, ...(unicode16 ? ACCEPTED_FOLDING_DIFFERENCES.unicode16 : [])];
+    const conditions = new Map();
+    for (const { value: written, prefix, suffix } of substrings()) {
+      for (const value of [written, written.toUpperCase(), written.toLowerCase()]) {
+        const add = (operator) => conditions.set(`${operator} ${value}`, { operator, value });
+        add('ILIKE');
+        if (prefix) add('ISTARTS_WITH');
+        if (suffix) add('IENDS_WITH');
+        if (prefix && suffix) add('IEQ');
+      }
+    }
+    const list = [...conditions.values()];
+    const found = await wordsOf(list);
+    const differences = [];
+    list.forEach(({ operator, value }, index) => {
+      const mongodb = found.mongodb[index];
+      const postgres = found.postgres[index];
+      const onlyMongo = mongodb.filter((key) => !postgres.includes(key));
+      const onlyPostgres = postgres.filter((key) => !mongodb.includes(key) && !accepted.includes(key));
+      if (onlyMongo.length || onlyPostgres.length) differences.push(`${operator} ${JSON.stringify(value)}: only MongoDB ${onlyMongo.join(', ') || '-'}, only PostgreSQL ${onlyPostgres.join(', ') || '-'}`);
+    });
+    expect(list.length).toBeGreaterThan(1000);
+    expect(differences).toEqual([]);
+  }, 60000);
+
   it('folds Unicode 16 letters on PostgreSQL only with an ICU that knows them, never on MongoDB 8.0', async () => {
-    const postgres = unicode16 ? ['w25', 'w26'] : ['w25'];
-    expect(await keys('qtWords', { word: { operator: 'IEQ', value: WORDS.w25 } })).toEqual({ mongodb: ['w25'], postgres, [FOLDED]: postgres });
+    expect(await keys('qtWords', { word: { operator: 'IEQ', value: WORDS.w25 } })).toEqual({ mongodb: ['w25'], postgres: unicode16 ? ['w25', 'w26'] : ['w25'] });
+    expect(await keys('qtWords', { word: { operator: 'IEQ', value: WORDS.w26 } })).toEqual({ mongodb: ['w26'], postgres: unicode16 ? ['w25', 'w26'] : ['w26'] });
   });
 });

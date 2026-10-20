@@ -1,22 +1,13 @@
 import { resolveModelPath, SimfinityError } from '@simtlix/simfinity-core';
 import { textQueryOperator, validateTextFilterValue } from '@simtlix/simfinity-core/internal/query-operators';
-import { identifier as q, invalid, literal, qualified } from '../schema/sql.js';
+import { identifier as q, literal, qualified } from '../schema/sql.js';
 import { encodeScalar, storageTypes, invalidValue } from '../codecs.js';
+import { caseFoldExpression as fold } from './case-fold.js';
 
 const unsupported = (message) => { throw new SimfinityError(message, 'UNSUPPORTED_QUERY', 400); };
 
-// The case-insensitive text operators compare lower() of both sides under ICU's root collation, which folds every
-// script the same way on every server, whatever the database's default collation. Text paths are `C` columns, under
-// which lower() folds ASCII only. By default the fold is plain lower(), with a documented gap (the capital sigma in
-// docs/guide/queries.md): lower() turns a capital sigma that ends a word into ς and any other into σ, and the value
-// is lowered apart from the stored text, so a value that starts or ends with Σ can miss rows that its case-sensitive
-// form returns (ISTARTS_WITH "ΚΑΣ" misses "ΚΑΣΤΡΟ", which STARTS_WITH "ΚΑΣ" finds). The opt-in
-// `foldFinalSigma: true` closes it: translate() then turns ς into σ on both sides, so Σ, σ and ς match each other
-// wherever they are, as on MongoDB. An application index serves them only on the expression of the runtime's
-// setting: lower("column" COLLATE "und-x-icu"), or translate(lower("column" COLLATE "und-x-icu"), 'ς', 'σ').
-const FOLD_COLLATION = '"pg_catalog"."und-x-icu"';
-const fold = (sql) => `lower(${sql} COLLATE ${FOLD_COLLATION})`;
-const foldSigma = (sql) => `translate(${fold(sql)}, 'ς', 'σ')`;
+// The case-insensitive text operators compare the case fold of both sides (see case-fold.js), so an application
+// index serves them only on that expression, which caseFoldExpression writes.
 // LIKE's default escape character is the backslash, so escaping it, % and _ leaves only literal characters.
 const likeLiteral = (value) => value.replace(/[\\%_]/g, '\\$&');
 const likePatterns = { contains: (value) => `%${likeLiteral(value)}%`, prefix: (value) => `${likeLiteral(value)}%`, suffix: (value) => `%${likeLiteral(value)}` };
@@ -33,37 +24,8 @@ const PARENT = '\u0000';
 const CHILDREN_SETUP = 'SET LOCAL jit = off';
 
 /**
- * Rejects a `foldFinalSigma` other than true, false or undefined with INVALID_DATABASE_SCHEMA (400), as createSchema()
- * rejects an unknown refreshTriggers or ownerIndexes. The plugin's describeSchema calls it, before any query.
- */
-export const assertQueryConfiguration = (configuration) => {
-  const value = configuration?.foldFinalSigma;
-  if (value !== undefined && typeof value !== 'boolean') invalid(`Unknown PostgreSQL foldFinalSigma option: ${String(value)}. Use true or false`);
-};
-
-/**
- * With `foldFinalSigma: true`, checks that the server encoding has the σ and ς that foldSigma writes into each
- * case-insensitive statement. PostgreSQL converts statement text to the server encoding, so on one without them, such
- * as LATIN1, every such statement would fail with 22P05, which reads as INVALID_VALUE (400) even for an ASCII value;
- * the probe fails the same way, and the database is rejected with INVALID_DATABASE_SCHEMA (400) instead. The plugin's
- * initialize calls it in both modes, before initializeDatabase; other errors pass through.
- */
-export const assertQueryDatabase = async (pool, configuration) => {
-  if (configuration?.foldFinalSigma !== true) return;
-  try {
-    await pool.query('SELECT translate(\'ς\', \'ς\', \'σ\') AS sigma');
-  } catch (error) {
-    if (error?.code === '22P05') invalid('PostgreSQL foldFinalSigma: true needs a server encoding that has σ and ς, such as UTF8');
-    throw error;
-  }
-};
-
-/**
  * Compiles validated paths; all caller values are parameters, identifiers come from metadata.
  * `configuration.explicitNullsOrder: true` keeps the NULLS clause on every sort term, as 3.5.9 did.
- * `configuration.foldFinalSigma: true` folds both sides of ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ with
- * translate(lower(x COLLATE "und-x-icu"), 'ς', 'σ') instead of lower(x COLLATE "und-x-icu"); any other value
- * compiles the default statements.
  */
 export const compileQuery = (models, database, plan, extra = null, configuration = null) => compileSelect(models, database, plan, extra, configuration, false);
 
@@ -110,7 +72,6 @@ Object.defineProperty(compileChildrenQuery, 'compileQuery', { value: compileQuer
 
 const compileSelect = (models, database, plan, extra, configuration, batched) => {
   const explicitNullsOrder = configuration?.explicitNullsOrder === true;
-  const foldText = configuration?.foldFinalSigma === true ? foldSigma : fold;
   const values = [];
   const joins = new Map();
   let serial = 0;
@@ -332,10 +293,10 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
    * The literal text operators (ILIKE, STARTS_WITH, ISTARTS_WITH, ENDS_WITH, IENDS_WITH and IEQ) on a String leaf or
    * list, where some element must match. Values stay bound parameters. The case-sensitive forms, STARTS_WITH and
    * ENDS_WITH, compare code points with starts_with and right under the C collation of text paths, so a column's
-   * btree serves STARTS_WITH. The case-insensitive forms compare the folded form of both sides (see fold and
-   * foldSigma): IEQ with =, the others with LIKE and a bound pattern whose metacharacters are escaped, so that a btree
-   * on the folded column with text_pattern_ops serves IEQ and ISTARTS_WITH, and a trigram index on it serves ILIKE,
-   * ISTARTS_WITH and IENDS_WITH.
+   * btree serves STARTS_WITH. The case-insensitive forms compare the case fold of both sides (see case-fold.js): IEQ
+   * with =, the others with LIKE and a bound pattern whose metacharacters are escaped, so that a btree on the folded
+   * column with text_pattern_ops serves IEQ and ISTARTS_WITH, and a trigram index on it serves ILIKE, ISTARTS_WITH and
+   * IENDS_WITH.
    */
   const textPredicate = ({ sql, uncollated, field, list }, operator, { match, ignoreCase }, value, negated) => {
     // createQueryPlan has validated the value; a plan built by hand gets the same INVALID_FILTER_VALUE.
@@ -348,13 +309,14 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
         : (left) => `right(${left}, char_length(${parameter})) = ${parameter}`;
     } else if (match === 'exact') {
       const parameter = bind(value, 'text');
-      compare = (left) => `${foldText(left)} = ${foldText(parameter)}`;
+      compare = (left) => `${fold(left)} = ${fold(parameter)}`;
     } else {
       const pattern = bind(likePatterns[match](value), 'text');
-      compare = (left) => `${foldText(left)} LIKE ${foldText(pattern)}`;
+      compare = (left) => `${fold(left)} LIKE ${fold(pattern)}`;
     }
-    if (list) return `EXISTS (SELECT 1 FROM unnest(${sql}) v(value) WHERE ${compare(ignoreCase ? '(v.value)' : 'v.value')})`;
-    const left = ignoreCase ? `(${uncollated})` : sql;
+    // fold puts its argument in parentheses, so the uncollated value goes in as it is.
+    if (list) return `EXISTS (SELECT 1 FROM unnest(${sql}) v(value) WHERE ${compare('v.value')})`;
+    const left = ignoreCase ? uncollated : sql;
     return negated ? `COALESCE(${compare(left)}, FALSE)` : compare(left);
   };
   // A negation reaches every predicate below it, including those nested in AND/OR groups.

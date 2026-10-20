@@ -495,9 +495,8 @@ const NON_NULL_NAMES = PRODUCTS.filter((product) => typeof product.name === 'str
 // Case folding on MongoDB: [stored, searched, whether they match, note]. IEQ is checked in both
 // directions and ILIKE from the searched form. The regex `i` option applies the Unicode simple case
 // folding of the server's PCRE2 build, never a length-changing, Turkic or locale-dependent folding.
-// Rows noted `postgres` give the other answer on PostgreSQL, which compares lower(x COLLATE
-// "und-x-icu") of both sides (the three sigma rows only without its foldFinalSigma option); the
-// shared parity test pins them on both backends.
+// PostgreSQL gives the same answers through caseFoldExpression, except on the rows noted `postgres`,
+// the limitations that #108 accepts; the shared parity test pins them on both backends.
 const FOLDING = [
   ['A', 'a', true],
   ['\u00C9', '\u00E9', true], // É, é
@@ -515,41 +514,40 @@ const FOLDING = [
   ['\u{10400}', '\u{10428}', true], // Deseret, outside the Basic Multilingual Plane
   ['\uA7C0', '\uA7C1', true], // Unicode 14
   ['\u2C2F', '\u2C5F', true], // Unicode 14
-  // The sigmas: lower() turns a capital sigma that ends a word into ς and keeps ς apart from σ, so
-  // PostgreSQL agrees only where both sides lower to the same sigma.
+  // The sigmas match each other wherever they are.
   ['\u039F\u0394\u039F\u03A3', '\u03BF\u03B4\u03BF\u03C2', true], // ΟΔΟΣ, οδος
-  ['\u03A3', '\u03C2', true, 'postgres'], // Σ, final ς
-  ['\u03C3', '\u03C2', true, 'postgres'], // σ, ς
-  ['\u039F\u0394\u039F\u03A3', '\u03BF\u03B4\u03BF\u03C3', true, 'postgres'], // ΟΔΟΣ, οδοσ
-  // Lowercase variants that lower() keeps, so that PostgreSQL matches each one only with itself.
-  ['\u00B5', '\u03BC', true, 'postgres'], // micro sign, μ
-  ['\u00B5', '\u039C', true, 'postgres'], // micro sign, Μ
-  ['\u017F', 's', true, 'postgres'], // long s
-  ['\u017F', 'S', true, 'postgres'],
-  ['\u0345', '\u03B9', true, 'postgres'], // combining ypogegrammeni, ι
-  ['\u03D0', '\u03B2', true, 'postgres'], // ϐ, β
-  ['\u03D1', '\u03B8', true, 'postgres'], // ϑ, θ
-  ['\u03D5', '\u03C6', true, 'postgres'], // ϕ, φ
-  ['\u03D6', '\u03C0', true, 'postgres'], // ϖ, π
-  ['\u03F0', '\u03BA', true, 'postgres'], // ϰ, κ
-  ['\u03F1', '\u03C1', true, 'postgres'], // ϱ, ρ
-  ['\u03F5', '\u03B5', true, 'postgres'], // ϵ, ε
-  ['\u1E9B', '\u1E61', true, 'postgres'], // ẛ, ṡ
-  ['\u1FBE', '\u03B9', true, 'postgres'], // prosgegrammeni, ι
-  ['\u1C80', '\u0432', true, 'postgres'], // the Cyrillic variants U+1C80 to U+1C88
-  ['\u1C81', '\u0434', true, 'postgres'],
-  ['\u1C82', '\u043E', true, 'postgres'],
-  ['\u1C83', '\u0441', true, 'postgres'],
-  ['\u1C84', '\u0442', true, 'postgres'],
-  ['\u1C85', '\u0442', true, 'postgres'],
-  ['\u1C86', '\u044A', true, 'postgres'],
-  ['\u1C87', '\u0463', true, 'postgres'],
-  ['\u1C88', '\uA64B', true, 'postgres'],
-  // Foldings that lower() applies and MongoDB does not.
+  ['\u03A3', '\u03C2', true], // Σ, final ς
+  ['\u03C3', '\u03C2', true], // σ, ς
+  ['\u039F\u0394\u039F\u03A3', '\u03BF\u03B4\u03BF\u03C3', true], // ΟΔΟΣ, οδοσ
+  // The lowercase variants that ICU lower() keeps, which PostgreSQL's case fold maps to their usual letters.
+  ['\u00B5', '\u03BC', true], // micro sign, μ
+  ['\u00B5', '\u039C', true], // micro sign, Μ
+  ['\u017F', 's', true], // long s
+  ['\u017F', 'S', true],
+  ['\u0345', '\u03B9', true], // combining ypogegrammeni, ι
+  ['\u03D0', '\u03B2', true], // ϐ, β
+  ['\u03D1', '\u03B8', true], // ϑ, θ
+  ['\u03D5', '\u03C6', true], // ϕ, φ
+  ['\u03D6', '\u03C0', true], // ϖ, π
+  ['\u03F0', '\u03BA', true], // ϰ, κ
+  ['\u03F1', '\u03C1', true], // ϱ, ρ
+  ['\u03F5', '\u03B5', true], // ϵ, ε
+  ['\u1E9B', '\u1E61', true], // ẛ, ṡ
+  ['\u1FBE', '\u03B9', true], // prosgegrammeni, ι
+  ['\u1C80', '\u0432', true], // the Cyrillic variants U+1C80 to U+1C88
+  ['\u1C81', '\u0434', true],
+  ['\u1C82', '\u043E', true],
+  ['\u1C83', '\u0441', true],
+  ['\u1C84', '\u0442', true],
+  ['\u1C85', '\u0442', true],
+  ['\u1C86', '\u044A', true],
+  ['\u1C87', '\u0463', true],
+  ['\u1C88', '\uA64B', true],
+  // The accepted limitations: foldings that ICU lower() applies and MongoDB does not.
   ['\u0130', 'i\u0307', false, 'postgres'], // ICU lowers İ to i followed by U+0307 COMBINING DOT ABOVE
   ['\uA7DC', '\u019B', false, 'postgres'], // Unicode 16, newer than the server's PCRE2 tables
-  // Neither backend applies length-changing or Turkic foldings.
-  ['\u0130', 'i', false], // İ
+  // Neither backend applies length-changing or Turkic foldings, apart from ICU's lowering of İ.
+  ['\u0130', 'i', false, 'postgres'], // İ, which ILIKE "i" finds on PostgreSQL, in i followed by U+0307
   ['\u0130stanbul', 'istanbul', false],
   ['\u00DF', 'ss', false], // ß
   ['\u1E9E', 'ss', false], // ẞ
@@ -918,7 +916,7 @@ describe.each(servers)('MongoDB text operators on a %s', (_label, uri, prefix) =
       expect((await words('ISTARTS_WITH', '\u0130')).sort()).toEqual(['\u0130', '\u0130stanbul']);
     });
 
-    // PostgreSQL returns fewer: lower() keeps the final ς apart from σ (see the parity suite).
+    // PostgreSQL returns the same words, as the parity suite checks.
     test('a final sigma folds with the other sigmas inside words', async () => {
       expect((await words('IEQ', '\u039F\u0394\u039F\u03A3')).sort())
         .toEqual(['\u039F\u0394\u039F\u03A3', '\u03BF\u03B4\u03BF\u03C2', '\u03BF\u03B4\u03BF\u03C3'].sort());

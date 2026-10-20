@@ -360,7 +360,7 @@ query {
 - `ENDS_WITH`, `IENDS_WITH` - Literal suffix, respecting or ignoring case
 - `IEQ` - Equal, ignoring case
 
-The text operators match their value literally, so `%`, `_` and regular-expression characters match themselves, and `""` matches every non-null string except with `IEQ`. On a `String` list, some element must match. The case-insensitive operators need a PostgreSQL server built with ICU, and a few characters fold differently on the two backends; see [text operators](docs/guide/queries.md#text-operators) for the rules, the differences and the PostgreSQL indexes that serve them. A custom database adapter or SQL plugin receives them only after it declares them in `queryFeatures`.
+The text operators match their value literally, so `%`, `_` and regular-expression characters match themselves, and `""` matches every non-null string except with `IEQ`. On a `String` list, some element must match. Both backends fold case with the Unicode simple case foldings, except for `İ` and letters newer than one side's Unicode tables, and on PostgreSQL the case-insensitive operators need a `UTF8` database on a server built with ICU; see [text operators](docs/guide/queries.md#text-operators) for the rules, the differences and the PostgreSQL indexes that serve them, which `caseFoldExpression()` writes. A custom database adapter or SQL plugin receives them only after it declares them in `queryFeatures`.
 
 ### Logical Filters (AND / OR)
 

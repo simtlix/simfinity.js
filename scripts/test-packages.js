@@ -349,6 +349,7 @@ const postgresSource = `import assert from 'node:assert/strict';
     SimfinityError,
     auth,
     buildErrorFormatter,
+    caseFoldExpression,
     compileDatabaseSchema,
     configure,
     connect,
@@ -408,23 +409,21 @@ const postgresSource = `import assert from 'node:assert/strict';
   const copySchema = copySql.createSchema();
   const copied = await graphql({ schema: copySchema, source: '{ copyBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
   assert.equal(copied.errors[0].extensions.code, 'UNSUPPORTED_QUERY');
-  // foldFinalSigma takes true or false; createSchema() rejects any other value, as it rejects an unknown refreshTriggers.
-  const badSigma = createPostgres({ pool, schema: 'app', foldFinalSigma: 'yes' });
-  badSigma.connect(null, bookType, 'sigmaBook', 'sigmaBooks');
-  assert.throws(() => badSigma.createSchema(), (error) => error.extensions.code === 'INVALID_DATABASE_SCHEMA');
-  const sigmaSql = createSQL({ plugin: postgresPlugin({ pool, schema: 'app', foldFinalSigma: true }) });
-  sigmaSql.connect(null, bookType, 'sigmaSqlBook', 'sigmaSqlBooks');
-  sigmaSql.createSchema();
-  assert.deepEqual(sigmaSql.describeDatabase(), description);
-  // With foldFinalSigma: true, initialization rejects a server encoding without σ and ς, where its probe fails with 22P05.
-  const latinPool = {
-    async query() { throw Object.assign(new Error('untranslatable character'), { code: '22P05', severity: 'ERROR' }); },
-    async connect() { throw new Error('offline'); },
-  };
-  const latinSql = createSQL({ plugin: postgresPlugin({ pool: latinPool, schema: 'app', foldFinalSigma: true }) });
-  latinSql.connect(null, bookType, 'latinBook', 'latinBooks');
-  latinSql.createSchema();
-  await assert.rejects(() => latinSql.initializeDatabase(), (error) => error.extensions.code === 'INVALID_DATABASE_SCHEMA');
+  // The case fold of ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ, for application indexes.
+  const fold = (sql) => \`translate(lower((\${sql}) COLLATE "pg_catalog"."und-x-icu"), '\\u00B5\\u017F\\u0345\\u03C2\\u03D0\\u03D1\\u03D5\\u03D6\\u03F0\\u03F1\\u03F5\\u1C80\\u1C81\\u1C82\\u1C83\\u1C84\\u1C85\\u1C86\\u1C87\\u1C88\\u1E9B\\u1FBE', '\\u03BC\\u0073\\u03B9\\u03C3\\u03B2\\u03B8\\u03C6\\u03C0\\u03BA\\u03C1\\u03B5\\u0432\\u0434\\u043E\\u0441\\u0442\\u0442\\u044A\\u0463\\uA64B\\u1E61\\u03B9')\`;
+  assert.equal(caseFoldExpression('"name"'), fold('"name"'));
+  assert.equal(caseFoldExpression('"details" ->> \\'label\\''), fold('"details" ->> \\'label\\''));
+  assert.throws(() => caseFoldExpression(''), TypeError);
+  // A statement that folds case on a database that cannot evaluate the fold, such as LATIN1 (22P05) or one without
+  // the ICU collation (42704), fails with UNSUPPORTED_QUERY; the same codes keep their mapping elsewhere.
+  const { driver } = postgresPlugin();
+  const failing = (code) => ({ async query() { throw Object.assign(new Error('driver'), { code, severity: 'ERROR' }); }, async connect() { throw new Error('offline'); } });
+  for (const code of ['22P05', '42704']) {
+    const folding = await driver.query({ pool: failing(code) }, { text: \`SELECT \${caseFoldExpression("'a'")}\`, values: [] }).catch((error) => error);
+    assert.equal(driver.normalizeError(folding).extensions.code, 'UNSUPPORTED_QUERY');
+    const plain = await driver.query({ pool: failing(code) }, { text: 'SELECT 1', values: [] }).catch((error) => error);
+    assert.equal(driver.normalizeError(plain).extensions.code, code === '22P05' ? 'INVALID_VALUE' : 'DATABASE_ERROR');
+  }
   assert(compileDatabaseSchema(description).some((sql) => sql.startsWith('CREATE TABLE')));
   assert.equal(describeDatabase([{ gqltype: bookType }]).tables.length, 1);
   assert.equal(typeof initializeDatabase, 'function');
@@ -1167,6 +1166,7 @@ const postgresTypes = `import { Pool, type PoolClient } from 'pg';
 import { createSQL, type SQLChildrenQueryCompiler, type SQLQueryFeatures, type SQLStatement } from '@simtlix/simfinity-sql';
 import {
   auth,
+  caseFoldExpression,
   configure,
   connect,
   createPostgres,
@@ -1281,13 +1281,10 @@ const badRefresh: PostgresConfiguration = { pool, refreshTriggers: 'perTransacti
 const badOwnerIndexes: PostgresConfiguration = { pool, ownerIndexes: 'none' };
 // @ts-expect-error describeDatabase options take the same values.
 describeDatabase([], { refreshTriggers: 'yes' });
-const sigmaOptions: PostgresConfiguration = { pool, schema: 'app', foldFinalSigma: true };
-createPostgres(sigmaOptions);
-createPostgres().configure({ pool, foldFinalSigma: false });
-const sigmaPlugin: boolean | undefined = postgresPlugin(sigmaOptions).options?.foldFinalSigma;
-// @ts-expect-error foldFinalSigma is a boolean.
-const badSigma: PostgresConfiguration = { pool, foldFinalSigma: 'yes' };
-void [sigmaPlugin, badSigma];
+const foldedName: string = caseFoldExpression('"name"');
+// @ts-expect-error caseFoldExpression takes an SQL expression string.
+caseFoldExpression(5);
+void foldedName;
 void [schema, model, ready, lowLevel, defaultSchema, defaultReady, rule, email, scalarName, countPlugin, scopes];
 void [itemRules, tagRules, sameItemValidators];
 void [batchLimit, batchCompiler, triggerEvents, triggerWhen, badNulls, badInserts, badRefresh, badOwnerIndexes];

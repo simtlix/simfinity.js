@@ -1,37 +1,39 @@
 // The literal text operators on PostgreSQL (#108, part 1): their statements in every place LIKE compiles, the
-// statements of the 3.7.0 operators, the plugin's queryFeatures, rows, plans and case folding, with and without
-// the foldFinalSigma option.
+// statements of the 3.7.0 operators, the plugin's queryFeatures, rows, plans, case folding, the caseFoldExpression
+// helper and the case-insensitive operators on databases that cannot evaluate the fold.
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { GraphQLID, GraphQLObjectType, GraphQLString, graphql } from 'graphql';
 import pg from 'pg';
 import QLOperator from '../../packages/core/src/const/QLOperator.js';
 import { describeModels } from '../../packages/core/src/metadata.js';
 import { createQueryPlan } from '../../packages/core/src/query-plan.js';
-import { encodeParameter } from '../../packages/postgres/src/codecs.js';
-import { createPostgres, postgresPlugin } from '../../packages/postgres/src/index.js';
+import { encodeParameter, normalizeDatabaseError } from '../../packages/postgres/src/codecs.js';
+import { caseFoldExpression, createPostgres, postgresPlugin } from '../../packages/postgres/src/index.js';
 import { compileChildrenQuery, compileQuery } from '../../packages/postgres/src/query/compiler.js';
 import { describeDatabase } from '../../packages/postgres/src/schema/describe.js';
 import { createSQLAdapter } from '../../packages/sql/src/adapter.js';
 import { createSQL } from '../../packages/sql/src/index.js';
 import { bindPlugin } from '../../packages/sql/src/plugin.js';
 import {
-  createTextOperatorFixture, FINAL_SIGMA_DIFFERENCES, FOLDING_CASES, ITEM_CASES, listOperation, registerTextOperatorFixture, seedTextOperatorFixture, WORDS,
+  createTextOperatorFixture, FOLDING_CASES, ITEM_CASES, listOperation, registerTextOperatorFixture, seedTextOperatorFixture, WORDS,
 } from '../helpers/query-text-operators.js';
 
 const uri = process.env.SIMFINITY_POSTGRES_URI;
 const LEGACY = ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE'];
 const TEXT = ['ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ'];
 const ICU = '"pg_catalog"."und-x-icu"';
-// The folded form of a column, as the compiler writes it and as an application index must repeat it: by default,
-// and with foldFinalSigma: true.
-const folded = (column) => `lower(${column} COLLATE "und-x-icu")`;
-const foldedSigma = (column) => `translate(${folded(column)}, 'ς', 'σ')`;
-const SIGMA = { foldFinalSigma: true };
-// The settings whose statements are the default ones, and every setting.
-const DEFAULT_SETTINGS = [undefined, null, {}, { foldFinalSigma: undefined }, { foldFinalSigma: false }];
-const SETTINGS = [...DEFAULT_SETTINGS, SIGMA];
+// The case fold of #108 section 3.1, spelled out apart from the compiler: the 22 characters that ICU lower() keeps
+// and simple case folding maps to another lowercase letter, then their foldings, U+00B5 to μ, U+017F to s, U+0345 to
+// ι, U+03C2 to σ, the Greek symbols to their letters, U+1C80 to U+1C88 to their Cyrillic letters, U+1E9B to ṡ and
+// U+1FBE to ι. The expression goes in parentheses, so COLLATE applies to all of it.
+const FOLD_FROM = '\u00B5\u017F\u0345\u03C2\u03D0\u03D1\u03D5\u03D6\u03F0\u03F1\u03F5\u1C80\u1C81\u1C82\u1C83\u1C84\u1C85\u1C86\u1C87\u1C88\u1E9B\u1FBE';
+const FOLD_TO = '\u03BC\u0073\u03B9\u03C3\u03B2\u03B8\u03C6\u03C0\u03BA\u03C1\u03B5\u0432\u0434\u043E\u0441\u0442\u0442\u044A\u0463\uA64B\u1E61\u03B9';
+const fold = (sql) => `translate(lower((${sql}) COLLATE ${ICU}), '${FOLD_FROM}', '${FOLD_TO}')`;
+const CASE_FOLD_UNSUPPORTED = { code: 'UNSUPPORTED_QUERY', status: 400, message: 'ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ need a UTF8 database with the ICU collation und-x-icu' };
 const code = (error) => error?.extensions?.code;
+const summary = (error) => ({ code: code(error), status: error.extensions?.status, message: error.message });
 const nodes = (plan) => [plan, ...(plan.Plans || []).flatMap(nodes)];
 
 const offline = () => ({ query: async () => { throw new Error('offline'); }, connect: async () => { throw new Error('offline'); } });
@@ -45,12 +47,11 @@ const compiled = () => {
   const ids = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'];
   // One statement per place and surface, from field filters, group conditions and OR branches to counts,
   // aggregate filters and the batched children statement of a collection field.
-  // Each takes the configuration that the SQL adapter passes as compileQuery's last argument.
   const surfaces = {
-    field: (args, configuration) => compileQuery(models, database, createQueryPlan(models, 'QtItem', { ...args, pagination: page }), null, configuration),
-    count: (args, configuration) => compileQuery(models, database, createQueryPlan(models, 'QtItem', args, { mode: 'count' }), null, configuration),
-    aggregate: (args, configuration) => compileQuery(models, database, createQueryPlan(models, 'QtItem', { ...args, aggregation: { groupId: 'rank', facts: [{ path: 'id', operation: 'COUNT', factName: 'n' }] } }, { mode: 'aggregate' }), null, configuration),
-    children: (args, configuration) => compileChildrenQuery(models, database, createQueryPlan(models, 'QtItem', { ...args, pagination: page }), { column: 'shop', ids }, configuration),
+    field: (args) => compileQuery(models, database, createQueryPlan(models, 'QtItem', { ...args, pagination: page })),
+    count: (args) => compileQuery(models, database, createQueryPlan(models, 'QtItem', args, { mode: 'count' })),
+    aggregate: (args) => compileQuery(models, database, createQueryPlan(models, 'QtItem', { ...args, aggregation: { groupId: 'rank', facts: [{ path: 'id', operation: 'COUNT', factName: 'n' }] } }, { mode: 'aggregate' })),
+    children: (args) => compileChildrenQuery(models, database, createQueryPlan(models, 'QtItem', { ...args, pagination: page }), { column: 'shop', ids }),
   };
   const shape = (path, operator, value, form) => {
     const [head, ...rest] = path.split('.');
@@ -66,13 +67,10 @@ const PLACES = ['name', 'code', 'tags', 'dims.label', 'dims.codes', 'lines.sku',
 
 describe('PostgreSQL text operator statements', () => {
   const { models, database, surfaces, shape } = compiled();
-  const lowered = (sql) => `lower(${sql} COLLATE ${ICU})`;
-  // The fold of the case-insensitive operators: lower(), or, with foldFinalSigma: true, translate() of lower().
-  const foldOf = (configuration) => (configuration?.foldFinalSigma === true ? (sql) => `translate(${lowered(sql)}, 'ς', 'σ')` : lowered);
   // The comparison each operator puts where LIKE puts strpos(left, $n), and the value it binds instead.
-  const expected = (operator, left, parameter, value, configuration) => {
-    const fold = foldOf(configuration);
-    const uncollated = left === 'v.value' ? '(v.value)' : left.replace(/ COLLATE "pg_catalog"\."C"$/, '');
+  const expected = (operator, left, parameter, value) => {
+    // The value before the C collation, which the case-insensitive operators fold.
+    const uncollated = left === 'v.value' ? left : left.replace(/^\((.+)\) COLLATE "pg_catalog"\."C"$/, '$1');
     const literal = value.replace(/[\\%_]/g, '\\$&');
     return {
       ILIKE: [`${fold(uncollated)} LIKE ${fold(parameter)}`, `%${literal}%`],
@@ -84,86 +82,71 @@ describe('PostgreSQL text operator statements', () => {
     }[operator];
   };
 
-  it.each(PLACES)('compiles each text operator on %s wherever LIKE compiles, inside the same statement, with each foldFinalSigma setting', (path) => {
+  it.each(PLACES)('compiles each text operator on %s wherever LIKE compiles, inside the same statement', (path) => {
     const value = 'v%_\\\'--';
-    for (const configuration of SETTINGS) {
-      for (const [surface, compile] of Object.entries(surfaces)) {
-        for (const form of ['field', 'condition', 'or']) {
-          if (form !== 'field' && surface !== 'field') continue;
-          const like = compile(shape(path, 'LIKE', value, form), configuration);
-          // LIKE compiles the same statement whatever the setting.
-          expect(like, `${path} LIKE ${surface} ${form}`).toEqual(compile(shape(path, 'LIKE', value, form)));
-          const [fragment, left, number] = like.text.match(/strpos\((.+?), \$(\d+)::text\) > 0/);
-          const position = Number(number);
-          const parameter = `$${position}::text`;
-          // The batched children statement repeats the per-parent statement once per parent.
-          expect(like.text.split(fragment), `${path} ${surface} ${form}`).toHaveLength(surface === 'children' ? 3 : 2);
-          for (const operator of TEXT) {
-            const label = `${path} ${operator} ${surface} ${form} ${JSON.stringify(configuration)}`;
-            const [comparison, bound] = expected(operator, left, parameter, value, configuration);
-            const statement = compile(shape(path, operator, value, form), configuration);
-            expect(statement.text, label).toBe(like.text.split(fragment).join(comparison));
-            expect(statement.values, label).toEqual(like.values.map((item, index) => (index === position - 1 ? bound : item)));
-            expect(statement.text, label).not.toContain(value);
-          }
+    for (const [surface, compile] of Object.entries(surfaces)) {
+      for (const form of ['field', 'condition', 'or']) {
+        if (form !== 'field' && surface !== 'field') continue;
+        const like = compile(shape(path, 'LIKE', value, form));
+        const [fragment, left, number] = like.text.match(/strpos\((.+?), \$(\d+)::text\) > 0/);
+        const position = Number(number);
+        const parameter = `$${position}::text`;
+        // The batched children statement repeats the per-parent statement once per parent.
+        expect(like.text.split(fragment), `${path} ${surface} ${form}`).toHaveLength(surface === 'children' ? 3 : 2);
+        for (const operator of TEXT) {
+          const label = `${path} ${operator} ${surface} ${form}`;
+          const [comparison, bound] = expected(operator, left, parameter, value);
+          const statement = compile(shape(path, operator, value, form));
+          expect(statement.text, label).toBe(like.text.split(fragment).join(comparison));
+          expect(statement.values, label).toEqual(like.values.map((item, index) => (index === position - 1 ? bound : item)));
+          expect(statement.text, label).not.toContain(value);
         }
       }
     }
   });
 
-  it('compiles the default statements unless foldFinalSigma is true, and changes only the case-insensitive operators with it', () => {
+  it('folds both sides of the four case-insensitive operators, and only theirs, with caseFoldExpression', () => {
     const values = { EQ: 'ΚΑΣ', NE: 'ΚΑΣ', LT: 'a', LTE: 'a', GT: 'a', GTE: 'a', BTW: ['a', 'b'], IN: ['a', 'Σ'], NIN: ['a', 'Σ'], LIKE: 'ΚΑΣ', ILIKE: 'ΚΑΣ', STARTS_WITH: 'ΚΑΣ', ISTARTS_WITH: 'ΚΑΣ', ENDS_WITH: 'Σ ΑΒ', IENDS_WITH: 'Σ ΑΒ', IEQ: 'ΟΔΟΣ' };
-    let changed = 0;
     for (const path of PLACES) {
       for (const [operator, value] of Object.entries(values)) {
         for (const [surface, compile] of Object.entries(surfaces)) {
           for (const form of ['field', 'condition', 'or']) {
             if (form !== 'field' && surface !== 'field') continue;
+            const { text } = compile(shape(path, operator, value, form));
             const label = `${path} ${operator} ${surface} ${form}`;
-            const statement = compile(shape(path, operator, value, form));
-            for (const configuration of DEFAULT_SETTINGS) expect(compile(shape(path, operator, value, form), configuration), `${label} ${JSON.stringify(configuration)}`).toEqual(statement);
-            // The other options keep their effect, and their statements do not depend on foldFinalSigma either.
-            expect(compile(shape(path, operator, value, form), { explicitNullsOrder: true, foldFinalSigma: false }), label).toEqual(compile(shape(path, operator, value, form), { explicitNullsOrder: true }));
-            const sigma = compile(shape(path, operator, value, form), SIGMA);
-            expect(sigma.values, label).toEqual(statement.values);
-            if (['ILIKE', 'ISTARTS_WITH', 'IENDS_WITH', 'IEQ'].includes(operator)) {
-              expect(sigma.text, label).not.toBe(statement.text);
-              expect(sigma.text.replaceAll(/translate\((lower\(.+? COLLATE "pg_catalog"\."und-x-icu"\)), 'ς', 'σ'\)/g, '$1'), label).toBe(statement.text);
-              changed += 1;
-            } else {
-              expect(sigma.text, label).toBe(statement.text);
-              expect(sigma.text, label).not.toContain('translate(');
-            }
+            // Both sides of each comparison, which the batched children statement repeats once per parent.
+            const folds = ['ILIKE', 'ISTARTS_WITH', 'IENDS_WITH', 'IEQ'].includes(operator) ? 2 * (surface === 'children' ? 2 : 1) : 0;
+            expect(text.split(`, '${FOLD_FROM}', '${FOLD_TO}')`).length - 1, label).toBe(folds);
+            expect(text.split(ICU).length - 1, label).toBe(folds);
           }
         }
       }
     }
-    expect(changed).toBe(PLACES.length * 4 * 6);
   });
 
-  it('pins the case-insensitive statements of both foldFinalSigma settings', () => {
-    const where = (path, operator, value, configuration) => {
-      const { text, values } = surfaces.count(shape(path, operator, value, 'field'), configuration);
+  it('pins the case-insensitive statements', () => {
+    const where = (path, operator, value) => {
+      const { text, values } = surfaces.count(shape(path, operator, value, 'field'));
       return { sql: text.slice(text.indexOf(' WHERE ') + 7), values };
     };
-    const name = '(t0."name")';
+    const name = 't0."name"';
     const parameter = '$1::text';
-    expect(where('name', 'IEQ', 'ΚΑΣ')).toEqual({ sql: `(${lowered(name)} = ${lowered(parameter)})`, values: ['ΚΑΣ'] });
-    expect(where('name', 'IEQ', 'ΚΑΣ', SIGMA)).toEqual({ sql: `(translate(${lowered(name)}, 'ς', 'σ') = translate(${lowered(parameter)}, 'ς', 'σ'))`, values: ['ΚΑΣ'] });
-    expect(where('name', 'ISTARTS_WITH', 'ΚΑΣ').sql).toBe('(lower((t0."name") COLLATE "pg_catalog"."und-x-icu") LIKE lower($1::text COLLATE "pg_catalog"."und-x-icu"))');
-    expect(where('name', 'ISTARTS_WITH', 'ΚΑΣ', SIGMA)).toEqual({
-      sql: '(translate(lower((t0."name") COLLATE "pg_catalog"."und-x-icu"), \'ς\', \'σ\') LIKE translate(lower($1::text COLLATE "pg_catalog"."und-x-icu"), \'ς\', \'σ\'))',
+    expect(where('name', 'IEQ', 'ΚΑΣ')).toEqual({ sql: `(${fold(name)} = ${fold(parameter)})`, values: ['ΚΑΣ'] });
+    expect(where('name', 'ISTARTS_WITH', 'ΚΑΣ')).toEqual({
+      sql: `(translate(lower((t0."name") COLLATE "pg_catalog"."und-x-icu"), '${FOLD_FROM}', '${FOLD_TO}') LIKE translate(lower(($1::text) COLLATE "pg_catalog"."und-x-icu"), '${FOLD_FROM}', '${FOLD_TO}'))`,
       values: ['ΚΑΣ%'],
     });
-    expect(where('name', 'IENDS_WITH', 'Σ ΑΒ', SIGMA).values).toEqual(['%Σ ΑΒ']);
-    expect(where('tags', 'ILIKE', 'Σ', SIGMA)).toEqual({
-      sql: '(EXISTS (SELECT 1 FROM unnest((t0."tags") COLLATE "pg_catalog"."C") v(value) WHERE translate(lower((v.value) COLLATE "pg_catalog"."und-x-icu"), \'ς\', \'σ\') LIKE translate(lower($1::text COLLATE "pg_catalog"."und-x-icu"), \'ς\', \'σ\')))',
+    expect(where('name', 'IENDS_WITH', 'Σ ΑΒ')).toEqual({ sql: `(${fold(name)} LIKE ${fold(parameter)})`, values: ['%Σ ΑΒ'] });
+    expect(where('name', 'ILIKE', '100%')).toEqual({ sql: `(${fold(name)} LIKE ${fold(parameter)})`, values: ['%100\\%%'] });
+    expect(where('tags', 'ILIKE', 'Σ')).toEqual({
+      sql: `(EXISTS (SELECT 1 FROM unnest((t0."tags") COLLATE "pg_catalog"."C") v(value) WHERE ${fold('v.value')} LIKE ${fold(parameter)}))`,
       values: ['%Σ%'],
     });
-    expect(where('dims.label', 'IEQ', 'Σ', SIGMA).sql).toBe('(translate(lower(((t0."dims" ->> \'label\')::text) COLLATE "pg_catalog"."und-x-icu"), \'ς\', \'σ\') = translate(lower($1::text COLLATE "pg_catalog"."und-x-icu"), \'ς\', \'σ\'))');
+    expect(where('dims.label', 'IEQ', 'Σ').sql).toBe(`(${fold('(t0."dims" ->> \'label\')::text')} = ${fold(parameter)})`);
     // The case-sensitive operators keep their statements.
-    expect(where('name', 'STARTS_WITH', 'ΚΑΣ', SIGMA).sql).toBe('(starts_with((t0."name") COLLATE "pg_catalog"."C", $1::text))');
-    expect(where('name', 'LIKE', 'ΚΑΣ', SIGMA).sql).toBe('(strpos((t0."name") COLLATE "pg_catalog"."C", $1::text) > 0)');
+    expect(where('name', 'STARTS_WITH', 'ΚΑΣ').sql).toBe('(starts_with((t0."name") COLLATE "pg_catalog"."C", $1::text))');
+    expect(where('name', 'ENDS_WITH', 'ΚΑΣ').sql).toBe('(right((t0."name") COLLATE "pg_catalog"."C", char_length($1::text)) = $1::text)');
+    expect(where('name', 'LIKE', 'ΚΑΣ').sql).toBe('(strpos((t0."name") COLLATE "pg_catalog"."C", $1::text) > 0)');
   });
 
   it('keeps the 3.7.0 statements of LIKE in every place', () => {
@@ -301,71 +284,79 @@ describe('SQL plugin queryFeatures', () => {
   });
 });
 
-describe('PostgreSQL foldFinalSigma option', () => {
-  const caught = (action) => {
-    try { action(); } catch (error) { return { code: code(error), status: error.extensions?.status, message: error.message }; }
-    return null;
-  };
-  const registered = (api) => { registerTextOperatorFixture(api, createTextOperatorFixture()); return api; };
+describe('PostgreSQL case fold', () => {
+  const { surfaces, shape } = compiled();
+  const databaseError = (sqlState) => Object.assign(new Error(`driver error ${sqlState}`), { code: sqlState, severity: 'ERROR' });
 
-  it.each([['yes'], ['true'], ['false'], [1], [0], [null], [{}]])('rejects foldFinalSigma %j with INVALID_DATABASE_SCHEMA (400) from createSchema, in createPostgres, configure and postgresPlugin', (value) => {
-    const expected = { code: 'INVALID_DATABASE_SCHEMA', status: 400, message: `Unknown PostgreSQL foldFinalSigma option: ${String(value)}. Use true or false` };
-    const pool = { connect: vi.fn(), query: vi.fn() };
-    expect(caught(() => registered(createPostgres({ pool, schema: 'app', foldFinalSigma: value })).createSchema())).toEqual(expected);
-    const fromConfigure = createPostgres();
-    fromConfigure.configure({ pool, schema: 'app', foldFinalSigma: value });
-    expect(caught(() => registered(fromConfigure).createSchema())).toEqual(expected);
-    expect(caught(() => registered(createSQL({ plugin: postgresPlugin({ pool, schema: 'app', foldFinalSigma: value }) })).createSchema())).toEqual(expected);
-    expect([pool.connect.mock.calls.length, pool.query.mock.calls.length]).toEqual([0, 0]);
+  it('writes the fold that the compiler writes, for any SQL expression', () => {
+    for (const expression of ['"name"', '"details" ->> \'label\'', '("details" ->> \'label\')', '$1::text', 't0."name"']) expect(caseFoldExpression(expression), expression).toBe(fold(expression));
+    // COLLATE binds more tightly than ->>, so an operator expression folds as a whole only in parentheses.
+    expect(caseFoldExpression('"details" ->> \'label\'')).toContain(`lower(("details" ->> 'label') COLLATE ${ICU})`);
+    const { text } = surfaces.count(shape('name', 'IEQ', 'x', 'field'));
+    expect(text).toContain(`${caseFoldExpression('t0."name"')} = ${caseFoldExpression('$1::text')}`);
+    for (const value of ['', '   ', null, undefined, 5, {}, ['"name"']]) expect(() => caseFoldExpression(value), JSON.stringify(value)).toThrow(TypeError);
   });
 
-  it('accepts true, false and no value, which describe the same storage and DDL', () => {
-    const pool = { connect: vi.fn(), query: vi.fn() };
-    const storage = (options) => {
-      const api = registered(createPostgres({ pool, schema: 'app', ...options }));
-      api.createSchema();
-      return { description: api.describeDatabase(), ddl: api.compileDatabaseSchema() };
+  it('maps 22 lowercase variants that lower() keeps, each one code point to one code point, to their simple case foldings', () => {
+    const from = [...FOLD_FROM];
+    const to = [...FOLD_TO];
+    expect([from.length, to.length, new Set(from).size]).toEqual([22, 22, 22]);
+    from.forEach((variant, index) => {
+      const label = `U+${variant.codePointAt(0).toString(16).toUpperCase()}`;
+      // The variant is lowercase and so is its folding, which ECMAScript's /iu, the simple case folding of
+      // CaseFolding.txt, matches with it, and which no other mapping changes again.
+      expect(variant.toLowerCase(), label).toBe(variant);
+      expect(to[index].toLowerCase(), label).toBe(to[index]);
+      expect(new RegExp(`^${variant}$`, 'iu').test(to[index]), label).toBe(true);
+      expect(from.includes(to[index]), label).toBe(false);
+    });
+  });
+
+  it('marks, unchanged, the errors of statements that fold case, and reports 22P05 and 42704 of those as UNSUPPORTED_QUERY (400)', async () => {
+    const { driver } = postgresPlugin();
+    const folding = surfaces.count(shape('name', 'ISTARTS_WITH', 'x', 'field'));
+    const children = surfaces.children(shape('tags', 'IEQ', 'x', 'field'));
+    const plain = surfaces.count(shape('name', 'STARTS_WITH', 'x', 'field'));
+    const failed = async (statement, sqlState) => {
+      const error = databaseError(sqlState);
+      const pool = { query: vi.fn(async () => { throw error; }), connect: vi.fn() };
+      const rejected = await driver.query({ pool }, statement).catch((caught) => caught);
+      // The driver's own error reaches retries and normalization.
+      expect(rejected).toBe(error);
+      expect(pool.query).toHaveBeenCalledWith(statement.text, statement.values);
+      return driver.normalizeError(rejected);
     };
-    const base = storage({});
-    for (const foldFinalSigma of [true, false, undefined]) expect(storage({ foldFinalSigma }), String(foldFinalSigma)).toEqual(base);
-    expect([pool.connect.mock.calls.length, pool.query.mock.calls.length]).toEqual([0, 0]);
-  });
-
-  // PostgreSQL converts each statement to the server encoding, so on one without σ and ς, such as LATIN1, every
-  // statement that holds them fails with 22P05, as this probe does there.
-  const PROBE = 'SELECT translate(\'ς\', \'ς\', \'σ\') AS sigma';
-  const untranslatable = () => Object.assign(new Error('character with byte sequence 0xcf 0x82 in encoding "UTF8" has no equivalent in encoding "LATIN1"'), { code: '22P05', severity: 'ERROR' });
-
-  it('rejects, with foldFinalSigma: true, a database whose server encoding lacks σ and ς with INVALID_DATABASE_SCHEMA (400) from initializeDatabase, in both modes, before initialization starts', async () => {
-    const expected = { code: 'INVALID_DATABASE_SCHEMA', status: 400, message: 'PostgreSQL foldFinalSigma: true needs a server encoding that has σ and ς, such as UTF8' };
-    const pool = { connect: vi.fn(async () => { throw new Error('offline'); }), query: vi.fn(async () => { throw untranslatable(); }) };
-    const fromConfigure = createPostgres();
-    fromConfigure.configure({ pool, schema: 'app', foldFinalSigma: true });
-    for (const api of [createPostgres({ pool, schema: 'app', foldFinalSigma: true }), fromConfigure, createSQL({ plugin: postgresPlugin({ pool, schema: 'app', foldFinalSigma: true }) })]) {
-      registered(api).createSchema();
-      for (const mode of ['create', 'validate']) {
-        const error = await api.initializeDatabase({ mode }).catch((failure) => failure);
-        expect({ code: code(error), status: error.extensions?.status, message: error.message }, mode).toEqual(expected);
+    for (const statement of [folding, children]) {
+      for (const sqlState of ['22P05', '42704']) {
+        const error = await failed(statement, sqlState);
+        expect(summary(error), sqlState).toEqual(CASE_FOLD_UNSUPPORTED);
+        // The driver error stays the cause, without being enumerable or serialized.
+        expect(error.getCause().code, sqlState).toBe(sqlState);
+        expect(Object.keys(error), sqlState).not.toContain('cause');
+        expect(JSON.stringify(error), sqlState).not.toContain('driver error');
       }
+      // The other errors of these statements keep their codes.
+      expect(code(await failed(statement, '57014'))).toBe('DATABASE_ERROR');
+      expect(code(await failed(statement, '22021'))).toBe('INVALID_VALUE');
+      const retryable = await failed(statement, '40001');
+      expect([driver.isRetryable(databaseError('40001')), code(retryable)]).toEqual([true, 'TRANSACTION_RETRY_EXCEEDED']);
     }
-    // Only the probe ran, once per initialization: the schema was neither read nor created.
-    expect(pool.connect).not.toHaveBeenCalled();
-    expect(pool.query.mock.calls).toEqual(Array(6).fill([PROBE]));
+    // A statement that does not fold case keeps the 3.8.0 mapping of both codes, as do errors that no statement raised.
+    expect(code(await failed(plain, '22P05'))).toBe('INVALID_VALUE');
+    expect(code(await failed(plain, '42704'))).toBe('DATABASE_ERROR');
+    expect(code(await failed({ text: 'SELECT 1', values: [] }, '42704'))).toBe('DATABASE_ERROR');
+    expect(code(normalizeDatabaseError(databaseError('22P05')))).toBe('INVALID_VALUE');
+    expect(code(normalizeDatabaseError(databaseError('42704')))).toBe('DATABASE_ERROR');
   });
 
-  it('runs the encoding probe only with foldFinalSigma: true, and passes its other errors through', async () => {
-    const refused = new Error('refused');
-    const pool = { connect: vi.fn(async () => { throw new Error('offline'); }), query: vi.fn(async () => { throw refused; }) };
-    for (const options of [{}, { foldFinalSigma: false }]) {
-      const api = registered(createPostgres({ pool, schema: 'app', ...options }));
-      api.createSchema();
-      await expect(api.initializeDatabase(), JSON.stringify(options)).rejects.toThrow('offline');
-    }
-    expect([pool.connect.mock.calls.length, pool.query.mock.calls.length]).toEqual([2, 0]);
-    const sigma = registered(createPostgres({ pool, schema: 'app', foldFinalSigma: true }));
-    sigma.createSchema();
-    await expect(sigma.initializeDatabase()).rejects.toBe(refused);
-    expect([pool.connect.mock.calls.length, pool.query.mock.calls]).toEqual([2, [[PROBE]]]);
+  it('gives index statements in the queries guide that are on exactly the expression caseFoldExpression writes', () => {
+    const guide = readFileSync(new URL('../../docs/guide/queries.md', import.meta.url), 'utf8');
+    const statements = guide.split('\n').filter((line) => line.startsWith('CREATE INDEX'));
+    expect(statements).toEqual([
+      `CREATE INDEX series_name_ci ON "app"."Serie" (${caseFoldExpression('"name"')} text_pattern_ops);`,
+      `CREATE INDEX series_name_trgm ON "app"."Serie" USING gin (${caseFoldExpression('"name"')} gin_trgm_ops);`,
+      `CREATE INDEX series_label_ci ON "app"."Serie" (${caseFoldExpression('"details" ->> \'label\'')});`,
+    ]);
   });
 });
 
@@ -373,18 +364,14 @@ describe.skipIf(!uri)('PostgreSQL text operators', () => {
   const namespace = `qt_${randomUUID().replaceAll('-', '')}`;
   const legacyNamespace = `${namespace}_legacy`;
   const copyNamespace = `${namespace}_copy`;
-  const sigmaNamespace = `${namespace}_sigma`;
-  let pool; let api; let schema; let fixture; let ids; let models; let database; let legacy; let copy; let sigma; let unicode16;
+  let pool; let api; let schema; let fixture; let ids; let models; let database; let legacy; let copy; let unicode16;
   const execute = (source, variableValues, contextValue = {}) => graphql({ schema, source, variableValues, contextValue });
-  const keysOf = async (target, endpoint, args, contextValue = {}) => {
+  const keys = async (endpoint, args, contextValue) => {
     const { source, variables } = listOperation(endpoint, args);
-    const result = await graphql({ schema: target, source, variableValues: variables, contextValue });
+    const result = await execute(source, variables, contextValue);
     expect(result.errors, JSON.stringify(args)).toBeUndefined();
     return result.data[endpoint].map((row) => row.key);
   };
-  const keys = (endpoint, args, contextValue) => keysOf(schema, endpoint, args, contextValue);
-  // The same fixture and data in a runtime created with foldFinalSigma: true.
-  const sigmaKeys = (endpoint, args, contextValue) => keysOf(sigma.schema, endpoint, args, contextValue);
   const failure = async (args) => {
     const { source, variables } = listOperation('qtItems', args);
     return code((await execute(source, variables)).errors?.[0]);
@@ -416,12 +403,6 @@ describe.skipIf(!uri)('PostgreSQL text operators', () => {
     await copy.initializeDatabase();
     await copy.getModel(CopyWord).create({ key: 'c1', word: 'Palermo' });
     copy.type = CopyWord;
-    sigma = createPostgres({ pool, schema: sigmaNamespace, foldFinalSigma: true });
-    sigma.fixture = createTextOperatorFixture();
-    registerTextOperatorFixture(sigma, sigma.fixture);
-    sigma.schema = sigma.createSchema();
-    await sigma.initializeDatabase();
-    await seedTextOperatorFixture((source, variableValues) => graphql({ schema: sigma.schema, source, variableValues, contextValue: {} }));
     // ICU folds the Unicode 16 letter U+A7DC to U+019B only when the server's ICU knows Unicode 16.
     unicode16 = (await pool.query(`SELECT lower(chr(42972) COLLATE ${ICU}) = chr(411) AS folds`)).rows[0].folds;
   }, 60000);
@@ -430,7 +411,6 @@ describe.skipIf(!uri)('PostgreSQL text operators', () => {
       await pool.query(`DROP SCHEMA IF EXISTS "${namespace}" CASCADE`);
       await pool.query(`DROP SCHEMA IF EXISTS "${legacyNamespace}" CASCADE`);
       await pool.query(`DROP SCHEMA IF EXISTS "${copyNamespace}" CASCADE`);
-      await pool.query(`DROP SCHEMA IF EXISTS "${sigmaNamespace}" CASCADE`);
       await pool.end();
     }
   });
@@ -440,9 +420,6 @@ describe.skipIf(!uri)('PostgreSQL text operators', () => {
     // Reads that do not go through the runtime plan the same statement.
     const records = await api.getModel(fixture.Item).find({ ...args, sort: { terms: [{ field: 'key', order: 'ASC' }] } });
     expect(records.map((record) => record.key)).toEqual(expected);
-    // foldFinalSigma changes no row of a value without a sigma.
-    expect(await sigmaKeys('qtItems', args)).toEqual(expected);
-    expect((await sigma.getModel(sigma.fixture.Item).find({ ...args, sort: { terms: [{ field: 'key', order: 'ASC' }] } })).map((record) => record.key)).toEqual(expected);
   });
 
   it('counts, aggregates and pages text conditions', async () => {
@@ -490,58 +467,47 @@ describe.skipIf(!uri)('PostgreSQL text operators', () => {
     }
   });
 
-  it.each(FOLDING_CASES.map(([operator, value, postgres]) => [`${operator} ${JSON.stringify(value)}`, operator, value, postgres]))('folds case with ICU lower() for %s', async (name, operator, value, postgres) => {
-    expect(await keys('qtWords', { word: { operator, value } })).toEqual(postgres);
+  it.each(FOLDING_CASES.map(([operator, value, words]) => [`${operator} ${JSON.stringify(value)}`, operator, value, words]))('folds case for %s', async (name, operator, value, words) => {
+    expect(await keys('qtWords', { word: { operator, value } })).toEqual(words);
   });
 
-  it.each(FOLDING_CASES.map(([operator, value, postgres, mongodb, difference]) => [`${operator} ${JSON.stringify(value)}`, operator, value, FINAL_SIGMA_DIFFERENCES.has(difference) ? mongodb : postgres]))('folds case with foldFinalSigma: true for %s', async (name, operator, value, expected) => {
-    expect(await sigmaKeys('qtWords', { word: { operator, value } })).toEqual(expected);
+  it('folds each lowercase variant that ICU lower() keeps as its simple case folding, on the server', async () => {
+    const { rows } = await pool.query(`SELECT v, lower(v COLLATE ${ICU}) AS lowered, ${caseFoldExpression('v')} AS folded FROM unnest($1::text[]) v`, [[...FOLD_FROM]]);
+    expect(rows.map((row) => row.lowered).join('')).toBe(FOLD_FROM);
+    expect(rows.map((row) => row.folded).join('')).toBe(FOLD_TO);
   });
 
-  // The documented sigma gap: lower() turns the value's last Σ into ς, where the stored word goes on with σ.
-  it('misses, with a case-insensitive value that ends in a capital Σ, a word that its case-sensitive form finds', async () => {
+  // lower() turns a capital sigma that ends a word into ς and any other into σ, and the value is folded apart from
+  // the stored text, so its last Σ can lower to ς where the stored word goes on with σ; the fold maps both to σ.
+  it('finds, with a case-insensitive value that starts or ends with a capital Σ, every word that its case-sensitive form finds', async () => {
     const lowered = await pool.query(`SELECT lower($1::text COLLATE ${ICU}) AS value, lower($2::text COLLATE ${ICU}) AS stored`, ['ΚΑΣ%', 'ΚΑΣΤΡΟ']);
     expect(lowered.rows[0]).toEqual({ value: 'κας%', stored: 'καστρο' });
-    expect(await keys('qtWords', { word: { operator: 'STARTS_WITH', value: 'ΚΑΣ' } })).toEqual(['w29']);
-    expect(await keys('qtWords', { word: { operator: 'ISTARTS_WITH', value: 'ΚΑΣ' } })).toEqual([]);
-    expect(await keys('qtWords', { word: { operator: 'ILIKE', value: 'ΚΑΣ' } })).toEqual([]);
-    // A value whose Σ has a letter after it, or that holds σ instead, finds the word.
-    expect(await keys('qtWords', { word: { operator: 'ISTARTS_WITH', value: 'ΚΑΣΤ' } })).toEqual(['w29']);
-    expect(await keys('qtWords', { word: { operator: 'ISTARTS_WITH', value: 'κασ' } })).toEqual(['w29']);
-  });
-
-  it('finds, with foldFinalSigma: true, the words that a value with a capital Σ at an end misses by default', async () => {
-    const translated = await pool.query(`SELECT translate(lower($1::text COLLATE ${ICU}), 'ς', 'σ') AS value, translate(lower($2::text COLLATE ${ICU}), 'ς', 'σ') AS stored`, ['ΚΑΣ%', 'ΚΑΣΤΡΟ']);
-    expect(translated.rows[0]).toEqual({ value: 'κασ%', stored: 'καστρο' });
+    const folded = await pool.query(`SELECT ${caseFoldExpression('$1::text')} AS value, ${caseFoldExpression('$2::text')} AS stored`, ['ΚΑΣ%', 'ΚΑΣΤΡΟ']);
+    expect(folded.rows[0]).toEqual({ value: 'κασ%', stored: 'καστρο' });
     for (const [operator, value, words] of [
-      ['ISTARTS_WITH', 'ΚΑΣ', ['w29']], ['ILIKE', 'ΚΑΣ', ['w29']], ['ISTARTS_WITH', 'ΟΔΟΣ', ['w04', 'w05', 'w06', 'w30', 'w31', 'w32']],
-      ['ILIKE', 'ΔΟΣ.', ['w31']], ['IENDS_WITH', 'Σ ΑΒ', ['w30']], ['IENDS_WITH', 'Σ', ['w04', 'w05', 'w06', 'w33']], ['IEQ', 'ΟΔΟΣ', ['w04', 'w05', 'w06']],
+      ['STARTS_WITH', 'ΚΑΣ', ['w29']], ['ISTARTS_WITH', 'ΚΑΣ', ['w29']], ['ILIKE', 'ΚΑΣ', ['w29']], ['ILIKE', 'ΑΣ', ['w29']],
+      ['ISTARTS_WITH', 'ΟΔΟΣ', ['w04', 'w05', 'w06', 'w30', 'w31', 'w32']], ['ISTARTS_WITH', 'ΟΔΟΣ.', ['w31']], ['ILIKE', 'ΔΟΣ.', ['w31']],
+      ['IENDS_WITH', 'Σ ΑΒ', ['w30']], ['ILIKE', 'Σ Α', ['w30']], ['IENDS_WITH', 'Σ', ['w04', 'w05', 'w06', 'w33']], ['IEQ', 'ΟΔΟΣ', ['w04', 'w05', 'w06']],
       ['IEQ', 'Σ', ['w33']], ['ISTARTS_WITH', 'κασ', ['w29']], ['ISTARTS_WITH', 'ΚΑΣΤ', ['w29']],
     ]) {
-      expect(await sigmaKeys('qtWords', { word: { operator, value } }), `${operator} ${value}`).toEqual(words);
-    }
-    // The case-sensitive operators and LIKE return the same words with both settings.
-    for (const [operator, value] of [['STARTS_WITH', 'ΚΑΣ'], ['LIKE', 'ΔΟΣ.'], ['ENDS_WITH', 'Σ ΑΒ'], ['EQ', 'ΟΔΟΣ'], ['LIKE', 'ς']]) {
-      expect(await sigmaKeys('qtWords', { word: { operator, value } }), `${operator} ${value}`).toEqual(await keys('qtWords', { word: { operator, value } }));
+      expect(await keys('qtWords', { word: { operator, value } }), `${operator} ${value}`).toEqual(words);
     }
   });
 
   it('folds the letters of the Unicode version of the server ICU', async () => {
     expect(await keys('qtWords', { word: { operator: 'IEQ', value: WORDS.w25 } })).toEqual(unicode16 ? ['w25', 'w26'] : ['w25']);
-    expect(await sigmaKeys('qtWords', { word: { operator: 'IEQ', value: WORDS.w25 } })).toEqual(unicode16 ? ['w25', 'w26'] : ['w25']);
+    expect(await keys('qtWords', { word: { operator: 'IEQ', value: WORDS.w26 } })).toEqual(unicode16 ? ['w25', 'w26'] : ['w26']);
   });
 
-  it('keeps an application index on the expression of foldFinalSigma: true in both initialization modes', async () => {
-    const index = `"${sigmaNamespace}"."qt_word_sigma"`;
-    await pool.query(`CREATE INDEX qt_word_sigma ON "${sigmaNamespace}"."QtWord" (${foldedSigma('"word"')} text_pattern_ops)`);
+  it('keeps an application index built with caseFoldExpression in both initialization modes, and it serves the operators', async () => {
+    await pool.query(`CREATE INDEX qt_word_fold ON "${namespace}"."QtWord" (${caseFoldExpression('"word"')} text_pattern_ops)`);
     try {
-      for (const mode of ['validate', 'create']) expect(await sigma.initializeDatabase({ mode }), mode).toEqual({ mode, created: [] });
-      const { rows } = await pool.query('SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexname = $2', [sigmaNamespace, 'qt_word_sigma']);
+      for (const mode of ['validate', 'create']) expect(await api.initializeDatabase({ mode }), mode).toEqual({ mode, created: [] });
+      const { rows } = await pool.query('SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexname = $2', [namespace, 'qt_word_fold']);
       expect(rows, JSON.stringify(rows)).toHaveLength(1);
-      expect(rows[0].indexdef).toContain('translate(lower(');
-      expect(await sigmaKeys('qtWords', { word: { operator: 'ISTARTS_WITH', value: 'ΚΑΣ' } })).toEqual(['w29']);
+      expect(await keys('qtWords', { word: { operator: 'ISTARTS_WITH', value: 'ΚΑΣ' } })).toEqual(['w29']);
     } finally {
-      await pool.query(`DROP INDEX IF EXISTS ${index}`);
+      await pool.query(`DROP INDEX IF EXISTS "${namespace}"."qt_word_fold"`);
     }
   });
 
@@ -568,9 +534,8 @@ describe.skipIf(!uri)('PostgreSQL text operators', () => {
 
   describe('plans', () => {
     const table = () => `"${namespace}"."QtItem"`;
-    // `configuration` is the runtime's, such as { foldFinalSigma: true }, which the SQL adapter passes to compileQuery.
-    const explain = async (args, setup, configuration = null) => {
-      const { text, values } = compileQuery(models, database, createQueryPlan(models, 'QtItem', args), null, configuration);
+    const explain = async (args, setup) => {
+      const { text, values } = compileQuery(models, database, createQueryPlan(models, 'QtItem', args));
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
@@ -587,53 +552,68 @@ describe.skipIf(!uri)('PostgreSQL text operators', () => {
     const served = (plan, index) => nodes(plan).some((node) => node['Index Name'] === index && node['Index Cond']);
     const conditions = (plan) => nodes(plan).filter((node) => node['Index Cond']);
 
+    // Each index is built with caseFoldExpression, as the queries guide shows.
+    const folded = caseFoldExpression;
+
     it('serves IEQ from a btree on the folded column, but not ISTARTS_WITH', async () => {
-      const index = `CREATE INDEX qt_name_lower ON ${table()} (${folded('"name"')})`;
-      const plan = await explain({ name: { operator: 'IEQ', value: 'PALERMO SOHO' } }, [index]);
-      expect(served(plan, 'qt_name_lower'), JSON.stringify(plan)).toBe(true);
+      const index = `CREATE INDEX qt_name_fold ON ${table()} (${folded('"name"')})`;
+      for (const value of ['PALERMO SOHO', 'ΟΔΟΣ', 'ſun']) {
+        const plan = await explain({ name: { operator: 'IEQ', value } }, [index]);
+        expect(served(plan, 'qt_name_fold'), `${value} ${JSON.stringify(plan)}`).toBe(true);
+      }
       const prefix = await explain({ name: { operator: 'ISTARTS_WITH', value: 'palermo' } }, [index]);
       expect(conditions(prefix), JSON.stringify(prefix)).toEqual([]);
     });
 
     it('serves IEQ and ISTARTS_WITH from a text_pattern_ops btree on the folded column', async () => {
       const index = `CREATE INDEX qt_name_pattern ON ${table()} (${folded('"name"')} text_pattern_ops)`;
-      for (const [operator, value] of [['IEQ', 'palermo soho'], ['ISTARTS_WITH', 'PALERMO'], ['ISTARTS_WITH', '100%'], ['ISTARTS_WITH', 'ΚΑΣ']]) {
+      for (const [operator, value] of [['IEQ', 'palermo soho'], ['ISTARTS_WITH', 'PALERMO'], ['ISTARTS_WITH', '100%'], ['ISTARTS_WITH', 'ΚΑΣ'], ['IEQ', 'ΟΔΟΣ'], ['ISTARTS_WITH', 'µ']]) {
         const plan = await explain({ name: { operator, value } }, [index]);
         expect(served(plan, 'qt_name_pattern'), `${operator} ${JSON.stringify(plan)}`).toBe(true);
       }
     });
 
-    it('serves IEQ and ISTARTS_WITH with foldFinalSigma: true from a text_pattern_ops btree on the translate() expression', async () => {
-      const index = `CREATE INDEX qt_name_sigma ON ${table()} (${foldedSigma('"name"')} text_pattern_ops)`;
-      for (const [operator, value] of [['IEQ', 'palermo soho'], ['ISTARTS_WITH', 'PALERMO'], ['ISTARTS_WITH', '100%'], ['ISTARTS_WITH', 'ΚΑΣ'], ['IEQ', 'ΟΔΟΣ']]) {
-        const plan = await explain({ name: { operator, value } }, [index], SIGMA);
-        expect(served(plan, 'qt_name_sigma'), `${operator} ${JSON.stringify(plan)}`).toBe(true);
-      }
-    });
-
-    it('serves IEQ and ISTARTS_WITH only from the index of the runtime\'s foldFinalSigma setting', async () => {
-      const plain = `CREATE INDEX qt_name_pattern ON ${table()} (${folded('"name"')} text_pattern_ops)`;
-      const translated = `CREATE INDEX qt_name_sigma ON ${table()} (${foldedSigma('"name"')} text_pattern_ops)`;
+    it('serves neither from an index on lower() alone, which is not the compiled expression', async () => {
+      const index = `CREATE INDEX qt_name_lower ON ${table()} (lower("name" COLLATE "und-x-icu") text_pattern_ops)`;
       for (const [operator, value] of [['IEQ', 'palermo soho'], ['ISTARTS_WITH', 'PALERMO']]) {
-        // The lower() index does not serve the translate() conditions of foldFinalSigma: true, and the other way round.
-        const sigmaPlan = await explain({ name: { operator, value } }, [plain], SIGMA);
-        expect(conditions(sigmaPlan), `${operator} ${JSON.stringify(sigmaPlan)}`).toEqual([]);
-        const defaultPlan = await explain({ name: { operator, value } }, [translated]);
-        expect(conditions(defaultPlan), `${operator} ${JSON.stringify(defaultPlan)}`).toEqual([]);
-        // With both indexes, each setting uses its own.
-        const both = [plain, translated];
-        expect(served(await explain({ name: { operator, value } }, both, SIGMA), 'qt_name_sigma'), operator).toBe(true);
-        expect(served(await explain({ name: { operator, value } }, both), 'qt_name_pattern'), operator).toBe(true);
+        const plan = await explain({ name: { operator, value } }, [index]);
+        expect(conditions(plan), `${operator} ${JSON.stringify(plan)}`).toEqual([]);
       }
     });
 
-    it('serves IEQ on an embedded value from an index on its folded expression, with each foldFinalSigma setting', async () => {
-      const index = `CREATE INDEX qt_label_lower ON ${table()} (${folded('("dims" ->> \'label\')')})`;
-      const plan = await explain({ dims: { terms: [{ path: 'label', operator: 'IEQ', value: 'LARGE BOX' }] } }, [index]);
-      expect(served(plan, 'qt_label_lower'), JSON.stringify(plan)).toBe(true);
-      const sigmaIndex = `CREATE INDEX qt_label_sigma ON ${table()} (${foldedSigma('("dims" ->> \'label\')')})`;
-      const sigmaPlan = await explain({ dims: { terms: [{ path: 'label', operator: 'IEQ', value: 'LARGE BOX' }] } }, [sigmaIndex], SIGMA);
-      expect(served(sigmaPlan, 'qt_label_sigma'), JSON.stringify(sigmaPlan)).toBe(true);
+    it('serves IEQ on an embedded value from an index on its folded expression, with or without parentheses of its own', async () => {
+      for (const member of ['"dims" ->> \'label\'', '("dims" ->> \'label\')', '(("dims" ->> \'label\'))']) {
+        const index = `CREATE INDEX qt_label_fold ON ${table()} (${folded(member)})`;
+        const plan = await explain({ dims: { terms: [{ path: 'label', operator: 'IEQ', value: 'LARGE BOX' }] } }, [index]);
+        expect(served(plan, 'qt_label_fold'), `${member} ${JSON.stringify(plan)}`).toBe(true);
+      }
+    });
+
+    // COLLATE binds more tightly than ->>, so the same text without the parentheses of caseFoldExpression collates
+    // the key 'label' instead of the member, and PostgreSQL builds an index that never serves the operators.
+    it('gives the same index expression for an SQL expression with or without parentheses, unlike COLLATE on the bare text', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        let serial = 0;
+        const tree = async (expression) => {
+          serial += 1;
+          await client.query(`CREATE INDEX qt_tree_${serial} ON ${table()} (${expression})`);
+          const { rows } = await client.query('SELECT regexp_replace(indexprs::text, \' :location -?[0-9]+\', \'\', \'g\') AS tree FROM pg_index WHERE indexrelid = $1::regclass', [`"${namespace}"."qt_tree_${serial}"`]);
+          return rows[0].tree;
+        };
+        const member = await tree(folded('"dims" ->> \'label\''));
+        expect(await tree(folded('("dims" ->> \'label\')'))).toBe(member);
+        expect(await tree(folded('(("dims" ->> \'label\'))'))).toBe(member);
+        expect(await tree(`translate(lower("dims" ->> 'label' COLLATE ${ICU}), '${FOLD_FROM}', '${FOLD_TO}')`)).not.toBe(member);
+        // A column folds the same with or without the parentheses.
+        const column = await tree(folded('"name"'));
+        expect(await tree(folded('("name")'))).toBe(column);
+        expect(await tree(`translate(lower("name" COLLATE ${ICU}), '${FOLD_FROM}', '${FOLD_TO}')`)).toBe(column);
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+      }
     });
 
     it('serves STARTS_WITH from the btree of the C column', async () => {
@@ -650,7 +630,7 @@ describe.skipIf(!uri)('PostgreSQL text operators', () => {
       }
     });
 
-    it('serves ILIKE, ISTARTS_WITH and IENDS_WITH from a trigram index on the folded column of each foldFinalSigma setting', async (context) => {
+    it('serves ILIKE, ISTARTS_WITH and IENDS_WITH from a trigram index on the folded column', async (context) => {
       const { rows } = await pool.query('SELECT 1 FROM pg_available_extensions WHERE name = \'pg_trgm\'');
       if (!rows.length) context.skip();
       const installed = (await pool.query('SELECT extnamespace::regnamespace::text AS schema FROM pg_extension WHERE extname = \'pg_trgm\'')).rows[0]?.schema;
@@ -659,17 +639,96 @@ describe.skipIf(!uri)('PostgreSQL text operators', () => {
         ...(installed ? [] : [`CREATE EXTENSION pg_trgm SCHEMA "${namespace}"`]),
         `CREATE INDEX qt_name_trgm ON ${table()} USING gin (${folded('"name"')} ${installed ?? `"${namespace}"`}.gin_trgm_ops)`,
       ];
-      for (const [operator, value] of [['ILIKE', 'ermo'], ['ISTARTS_WITH', 'PALERMO'], ['IENDS_WITH', 'WOOD']]) {
+      for (const [operator, value] of [['ILIKE', 'ermo'], ['ISTARTS_WITH', 'PALERMO'], ['IENDS_WITH', 'WOOD'], ['ILIKE', 'ΟΔΟΣ'], ['ILIKE', 'ſun']]) {
         const plan = await explain({ name: { operator, value } }, setup);
         expect(served(plan, 'qt_name_trgm'), `${operator} ${JSON.stringify(plan)}`).toBe(true);
       }
-      // With foldFinalSigma: true, the trigram index must be on the translate() expression.
-      const sigmaSetup = setup.map((statement) => statement.replace(folded('"name"'), foldedSigma('"name"')));
-      for (const [operator, value] of [['ILIKE', 'ermo'], ['ISTARTS_WITH', 'PALERMO'], ['IENDS_WITH', 'WOOD'], ['ILIKE', 'ΟΔΟΣ']]) {
-        const plan = await explain({ name: { operator, value } }, sigmaSetup, SIGMA);
-        expect(served(plan, 'qt_name_trgm'), `${operator} ${JSON.stringify(plan)}`).toBe(true);
-        expect(conditions(await explain({ name: { operator, value } }, setup, SIGMA)), operator).toEqual([]);
-      }
     });
   });
+});
+
+// Scratch databases on the test server, created and dropped by the suite: LATIN1, whose encoding lacks the fold's
+// characters, SQL_ASCII, which ICU does not support, and UTF8 without the ICU collation, as on a server built without
+// ICU. Each initializes and serves every other operation, and fails the four case-insensitive operators with
+// UNSUPPORTED_QUERY (400). They need a role that can create databases, and, for the last one, drop a collation.
+describe.skipIf(!uri)('PostgreSQL case-insensitive operators on databases that cannot evaluate the fold', () => {
+  const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
+  const KINDS = [
+    { kind: 'LATIN1', encoding: 'LATIN1', cause: '22P05' },
+    { kind: 'SQL_ASCII', encoding: 'SQL_ASCII', cause: '42704' },
+    { kind: 'UTF8 without und-x-icu', encoding: 'UTF8', cause: '42704', withoutIcu: true },
+  ].map((item, index) => ({ ...item, database: `qt_fold_${index}_${suffix}` }));
+  const FOLDING = ['ILIKE', 'ISTARTS_WITH', 'IENDS_WITH', 'IEQ'];
+  // Creating a database needs CREATEDB, and dropping the collation, which the bootstrap superuser owns, a superuser.
+  let admin; let role;
+  const allowed = ({ withoutIcu }) => Boolean(role && (withoutIcu ? role.rolsuper : role.rolsuper || role.rolcreatedb));
+  const uriOf = (name) => { const url = new URL(uri); url.pathname = `/${name}`; return url.toString(); };
+
+  beforeAll(async () => {
+    admin = new pg.Pool({ connectionString: uri, max: 1 });
+    role = (await admin.query('SELECT rolsuper, rolcreatedb FROM pg_roles WHERE rolname = current_user')).rows[0];
+    for (const kind of KINDS.filter(allowed)) await admin.query(`CREATE DATABASE "${kind.database}" TEMPLATE template0 ENCODING '${kind.encoding}' LC_COLLATE 'C' LC_CTYPE 'C'`);
+  }, 60000);
+  afterAll(async () => {
+    if (!admin) return;
+    for (const kind of KINDS.filter(allowed)) await admin.query(`DROP DATABASE IF EXISTS "${kind.database}"`);
+    await admin.end();
+  }, 60000);
+
+  it.each(KINDS.map((item) => [item.kind, item]))('initializes %s and serves every other operation, and fails only the case-insensitive operators, with UNSUPPORTED_QUERY', async (name, kind, context) => {
+    if (!allowed(kind)) context.skip();
+    const { database, cause, withoutIcu } = kind;
+    const pool = new pg.Pool({ connectionString: uriOf(database) });
+    try {
+      if (withoutIcu) await pool.query(`DROP COLLATION IF EXISTS ${ICU}`);
+      // Without the fold, lower() under ICU fails or succeeds as the database allows; the fold always fails.
+      const raw = await pool.query(`SELECT ${caseFoldExpression('\'a\'')} AS folded`).catch((error) => error);
+      expect(raw.code).toBe(cause);
+      const runtime = createPostgres({ pool, schema: 'qt', batchedCollections: true });
+      const fixture = createTextOperatorFixture();
+      registerTextOperatorFixture(runtime, fixture);
+      const schema = runtime.createSchema();
+      expect((await runtime.initializeDatabase()).mode).toBe('create');
+      expect(await runtime.initializeDatabase({ mode: 'validate' })).toEqual({ mode: 'validate', created: [] });
+      const run = (source, variableValues, contextValue = {}) => graphql({ schema, source, variableValues, contextValue });
+      const shop = await run('mutation($input:QtShopInput!){addqtShop(input:$input){id}}', { input: { key: 'S1', name: 'Open Market', tags: ['Fresh'] } });
+      expect(shop.errors).toBeUndefined();
+      const item = await run('mutation($input:QtItemInput!){addqtItem(input:$input){id}}', { input: { key: 'A', name: 'Palermo Soho', tags: ['Red'], dims: { label: 'Large Box' }, lines: [{ sku: 'SKU-1' }], shop: { id: shop.data.addqtShop.id } } });
+      expect(item.errors).toBeUndefined();
+      const rows = async (args, rest) => {
+        const { source, variables } = listOperation('qtItems', args, 'key', rest);
+        const result = await run(source, variables, {});
+        return result.errors ? summary(result.errors[0]) : result.data.qtItems.map((row) => row.key);
+      };
+      for (const [operator, value] of [['EQ', 'Palermo Soho'], ['NE', 'x'], ['IN', ['Palermo Soho']], ['LIKE', 'ermo'], ['STARTS_WITH', 'Pal'], ['ENDS_WITH', 'oho'], ['GT', 'A']]) {
+        expect(await rows({ name: { operator, value } }), operator).toEqual(['A']);
+      }
+      expect(await rows({ lines: { terms: [{ path: 'sku', operator: 'STARTS_WITH', value: 'SKU' }] } })).toEqual(['A']);
+      const counted = {};
+      await run(listOperation('qtItems', { name: { operator: 'LIKE', value: 'P' } }, 'key', 'pagination:{page:1,size:10,count:true}').source, { name: { operator: 'LIKE', value: 'P' } }, counted);
+      expect(counted.count).toBe(1);
+      const update = await run('mutation($input:QtItemInputForUpdate!){updateqtItem(input:$input){name}}', { input: { id: item.data.addqtItem.id, name: 'Palermo Hollywood' } });
+      expect(update.errors).toBeUndefined();
+      const collection = await run('query($name:QLFilter){qtShops{key items(name:$name){key}}}', { name: { operator: 'STARTS_WITH', value: 'Palermo' } });
+      expect(collection.errors).toBeUndefined();
+      expect(collection.data.qtShops).toEqual([{ key: 'S1', items: [{ key: 'A' }] }]);
+      // Each case-insensitive operator, whatever its value, wherever it is, and through every surface, fails clearly.
+      const expected = { code: 'UNSUPPORTED_QUERY', status: 400, message: CASE_FOLD_UNSUPPORTED.message };
+      for (const operator of FOLDING) {
+        for (const args of [{ name: { operator, value: 'palermo' } }, { tags: { operator, value: 'RED' } }, { dims: { terms: [{ path: 'label', operator, value: 'large' }] } }, { shop: { terms: [{ path: 'name', operator, value: 'open' }] } }]) {
+          expect(await rows(args), `${operator} ${JSON.stringify(args)}`).toEqual(expected);
+        }
+        const children = await run('query($name:QLFilter){qtShops{key items(name:$name){key}}}', { name: { operator, value: 'palermo' } });
+        expect(summary(children.errors[0]), operator).toEqual(expected);
+        const error = await runtime.withTransaction(null, (session) => runtime.getModel(fixture.Item).find({ name: { operator, value: 'p' } }, { session })).catch((failure) => failure);
+        expect(summary(error), operator).toEqual(expected);
+        expect(error.getCause().code, operator).toBe(cause);
+      }
+      // The database still serves everything else afterwards, and other errors keep their codes.
+      expect(await rows({ name: { operator: 'LIKE', value: 'Holly' } })).toEqual(['A']);
+      if (cause === '22P05') expect((await rows({ name: { operator: 'EQ', value: 'Σ' } })).code).toBe('INVALID_VALUE');
+    } finally {
+      await pool.end();
+    }
+  }, 60000);
 });
