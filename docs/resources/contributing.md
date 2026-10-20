@@ -7,6 +7,23 @@ description: Work on Simfinity.js, improve the documentation, and run the projec
 
 Simfinity.js is maintained by Simtlix and released under the Apache 2.0 License. Contributions to the library, examples, and documentation are welcome.
 
+## Explain the change in an issue
+
+Every pull request must link an issue in this repository explaining **why the change is needed**. Create or reuse the relevant issue before opening the PR; existing PRs must add it before approval or merge. This applies to features, bug fixes, documentation, examples, dependencies and maintenance, including automated PRs. Keep the explanation proportional to the change: a typo fix needs a short explanation, not a feature proposal. A maintainer can supply the issue for a bot-generated PR.
+
+For a feature or public behavior change, the issue must describe:
+
+1. The concrete use case, actor and desired outcome, with a minimal example and the affected package/version and database engine when relevant.
+2. The current behavior and what was tried with existing Simfinity capabilities. Consider relationships, generated operations, query scopes, aggregates, controllers and registered operations where relevant; explain why they do not solve the problem. Distinguish an experiment from an untested assumption.
+3. Why the missing capability belongs in the library rather than application business logic or infrastructure. Consider authorization, hooks, transaction ownership and MongoDB/PostgreSQL compatibility; identify engine-specific scope explicitly.
+4. Observable acceptance criteria and the proposed scope. Record uncertainties rather than inventing evidence or prescribing an implementation before understanding the need.
+
+Bug issues need expected/actual behavior and reproduction evidence. Documentation or maintenance issues need the current gap, its impact and the desired result. Remove credentials and private application data from all examples.
+
+The PR must link the issue, summarize the motivation, explain how the implementation addresses it, and report validation and relevant compatibility effects. Use `Closes #<issue-number>` only when the PR completes the issue; use `Refs #<issue-number>` for partial work. Update the issue when the scope changes; an unrelated issue or a bare feature name is insufficient.
+
+Reviewers read the issue and verify the claimed gap against the current library before recommending a new API. If the issue or rationale is missing, continue the technical review but withhold approval and merge until it is supplied. An existing capability may call for usage guidance, an application change or better documentation; a demonstrated gap may justify a library feature. A linked issue records the problem, not automatic design approval.
+
 ## Work on the library
 
 Clone the repository and install the locked dependencies:
@@ -28,7 +45,7 @@ npm run lint
 npm test
 ```
 
-Add focused coverage for critical behavior and regressions. Keep the public documentation synchronized with API changes. A useful pull request explains the affected behavior, the change, and how it was validated.
+Add focused coverage for critical behavior and regressions. Keep the public documentation synchronized with API changes. Follow the [issue and PR requirements](#explain-the-change-in-an-issue) when submitting the change.
 
 ### Package quality and dependency security
 
@@ -79,7 +96,7 @@ Check links, search, mobile navigation, code examples, and both color themes. Th
 
 This workflow is a shared repository rule for human contributors and coding agents. It is also required by [AGENTS.md](https://github.com/simtlix/simfinity.js/blob/master/AGENTS.md#shared-development-and-publication-rule) and the always-applied [Cursor rule](https://github.com/simtlix/simfinity.js/blob/master/.cursor/rules/simfinity-development-workflow.mdc), so it travels with every clone of the repository.
 
-Develop scoped changes on a branch, update the relevant documentation and tests, and merge through a reviewed pull request with passing checks. If the agreed task includes publishing a library change, the contributor or agent owns the complete release process below. Publication already requested in that task does not need a second request or confirmation of the same scope.
+Explain the need in a [linked issue](#explain-the-change-in-an-issue), develop scoped changes on a branch, update the relevant documentation and tests, and merge through a reviewed pull request with passing checks. If the agreed task includes publishing a library change, the contributor or agent owns the complete release process below. Publication already requested in that task does not need a second request or confirmation of the same scope.
 
 A publication task is complete only when all of these conditions hold:
 
@@ -95,7 +112,7 @@ This rule applies when publication is requested or explicitly included in the wo
 
 ## Release a new version
 
-**Release Simfinity** (`.github/workflows/release.yml`) publishes only when a `vX.Y.Z` tag is pushed or a GitHub release is published. Changing versions, merging into `master`, and saving a draft release do not publish packages. Prepare the version in a reviewed pull request first:
+**Release Simfinity** (`.github/workflows/release.yml`) publishes only when a `vX.Y.Z` tag is pushed or its GitHub release is published. Releases with other tag prefixes, including the independent ESLint plugin, are skipped. Changing versions, merging into `master`, and saving a draft release do not publish packages. Prepare the version in a reviewed pull request first:
 
 ```sh
 node scripts/release-packages.js version 3.4.1
@@ -148,6 +165,18 @@ The repository configuration expects these settings on **each** of `@simtlix/sim
 Use the **calling** workflow filename `release.yml`, even though its reusable `publish.yml` contains the publishing job. New npm trust entries default to staged publishing; direct publication must be enabled for this automatic flow. The GitHub `npm-release` environment allows only tags matching `v*`; the workflow additionally verifies that their source is merged into `master`. The `github-pages` environment allows `v*` tags for release deployments and `master` for documentation-only deployments. The publish job runs on GitHub-hosted runners with `id-token: write`, Node.js 24.21.0 and npm 11.21.0; Trusted Publishing needs npm 11.5.1 or later. These settings must be established once by a package maintainer; npm may require their passkey to save the trust relationship.
 
 A Trusted Publisher is configured from the package's own npm settings, so a new package must exist on npm before it joins the release set. A maintainer publishes it once, outside the workflow, and configures its Trusted Publisher; this one-time bootstrap is the only publication from a local login. Until then the freshness check refuses every release with `<name> is not on the registry; publish it once and configure its Trusted Publisher before releasing`.
+
+The independent `@simtlix/eslint-plugin-simfinity@0.1.0` uses that same first-publication
+exception without joining the five runtime packages. Pack committed, reviewed
+source from `master` with scripts disabled; validate the archive contents, plugin
+tests, isolated JS/TS consumer and both Barber trials before publishing it with
+public access. Verify npm's version, `latest` tag and archive integrity, then
+attach the archive and its checksum to an `eslint-plugin-v0.1.0` GitHub release
+on the same merge commit. Keep this tool release from becoming the repository's
+latest runtime release. Deploy the installation guide through the documentation-only
+flow after npm availability is verified. The plugin's existing workflow only
+tests it; subsequent versions require a separate OIDC publication workflow and
+Trusted Publisher before release, rather than repeating the local-login exception.
 
 The workflows call each other explicitly. A release created by this workflow uses `GITHUB_TOKEN` and does not recursively trigger publication. If another automation creates the initial tag or release, its `GITHUB_TOKEN` event will not start this workflow; use a suitably scoped GitHub App or maintainer credential for that initiating action. Keep publication permissions restricted to the owning jobs and preserve the `npm-release` environment restriction. The documentation gate and deployment jobs read deployments, so the release's documentation job grants `contents: read`, `pages: write`, `id-token: write` and `deployments: read`: a called workflow never gets a scope its caller lacks, and `tests/release-workflows.test.js` checks every call.
 

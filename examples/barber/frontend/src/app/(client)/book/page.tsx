@@ -109,6 +109,18 @@ type BarbershopData = {
 
 const HOURS_FIELDS = "businessHours { dayOfWeek openTime closeTime isClosed breakStartTime breakEndTime }";
 
+/** Taken times of a shop on a date, from the barbershop's virtual `busyRanges` field. */
+const BUSY_RANGES_QUERY = `query BusyRanges($id: ID, $date: String!, $excludeBookingId: ID) {
+  barbershop(id: $id) {
+    busyRanges(date: $date, excludeBookingId: $excludeBookingId) { startTime endTime professionalId }
+  }
+}`;
+
+type BusyRangesResponse = {
+  data?: { barbershop?: { busyRanges?: BusyRange[] | null } | null } | null;
+  errors?: unknown[];
+};
+
 const NO_PREFERENCE_ID = "__any__";
 
 function BookingFlow() {
@@ -291,7 +303,7 @@ function BookingFlow() {
   }, [client, barbershopId, bundleParam, rescheduleId]);
 
   // The booking scope limits a client's `bookings` query to their own rows, so taken
-  // times of every client come from the narrow `bookingAvailability` operation.
+  // times of every client come from the barbershop's virtual `busyRanges` field.
   useEffect(() => {
     if (!barbershop?.id || !selectedDate) {
       setBusy(null);
@@ -304,15 +316,14 @@ function BookingFlow() {
       setSlotsLoading(true);
       try {
         // The booking being rescheduled does not block its own new time, as on the server.
-        const input = rescheduleTarget
-          ? { barbershopId: barbershop.id, date, excludeBookingId: rescheduleTarget }
-          : { barbershopId: barbershop.id, date };
-        const ranges = (await client.customMutation(
-          "bookingAvailability",
-          { input },
-          "startTime endTime professionalId",
-        )) as BusyRange[] | null;
-        if (!cancelled) setBusy({ ranges: ranges ?? [], now: shopNow(barbershop.timezone) });
+        const response = (await client.execute(BUSY_RANGES_QUERY, {
+          id: barbershop.id,
+          date,
+          excludeBookingId: rescheduleTarget,
+        })) as BusyRangesResponse;
+        const ranges = response.data?.barbershop?.busyRanges;
+        if (response.errors?.length || !ranges) throw new Error("Taken times unavailable");
+        if (!cancelled) setBusy({ ranges, now: shopNow(barbershop.timezone) });
       } catch {
         if (!cancelled) setBusy(null);
       } finally {

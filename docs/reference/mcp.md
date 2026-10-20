@@ -17,7 +17,7 @@ The MCP functions are named exports of the opt-in `@simtlix/simfinity-mcp` packa
 | `startStdioMCPServer(schema, options = {})` | Promise of a connected server | Create and connect the stdio transport. |
 | `createHTTPMCPHandler(schema, options = {})` | Promise of `(req, res) => Promise<void>` | Create an Express-style Streamable HTTP handler. |
 
-Only the transport/server factories require `@modelcontextprotocol/sdk@^1.31.0`. Definitions are generated from root query and mutation fields; subscriptions are not exposed as tools.
+Only the transport/server factories require `@modelcontextprotocol/sdk@^1.31.0`. Definitions are generated from root query and mutation fields, and from the [virtual fields](#virtual-field-tools) that have required arguments; subscriptions are not exposed as tools.
 
 ### Generated result
 
@@ -41,6 +41,8 @@ const result = await callTool('series', {
 
 Input schemas accept explicit `null` at nullable arguments, input fields and list items. Non-null positions reject null, including opaque scalars; nullable `$ref` values use `anyOf` with a null alternative. Recursive input types retain shared `$defs`. Generated tools share one `$defs` entry object per input or enum type, so treat tool definitions as read-only and copy one, for example with `structuredClone()`, before changing it; `graphqlArgsToJSONSchema()` returns new objects on every call. Defaulted arguments are optional and generated variable defaults use GraphQL literals, including external enum names. Opaque scalar defaults without a literal representation use the field's default when the variable is omitted. Explicit null never substitutes for omission at non-null positions. Validated scalars, including chains built on other validated scalars, and custom scalars with a `baseScalarType` storage hint use the JSON type of their root scalar. `Date`, `DateTime` and `Time` roots carry a string `format` (`date`, `date-time` or `time`) as a hint for the value to send. A custom scalar's description is published unless the field or argument has its own.
 
+Filter conditions name their operator through the `QLOperator` `$defs` entry, a string enum of every operator, the [text operators](/guide/queries#text-operators) included, whose description says what each one matches; list and aggregate tool descriptions name every operator too. A call that uses an operator the database adapter does not support returns an `UNSUPPORTED_QUERY` tool error, and an invalid text value an `INVALID_FILTER_VALUE` one.
+
 The arguments object of every input schema is closed with `additionalProperties: false`, so hosts that validate tool input reject an undeclared key before the call reaches the server. `callTool` rejects an undeclared key that the caller sent with an [`MCP_UNKNOWN_ARGUMENT`](#unknown-arguments) result, without executing the tool. Nested input objects are not closed in the schema; GraphQL already rejects their unknown fields.
 
 ### Output schemas
@@ -61,12 +63,12 @@ Next to the root field, the output schema declares the optional keys MCP adds to
 
 | Option | Default | Behavior |
 | --- | --- | --- |
-| `include`, `exclude` | Unset | A name or array of raw GraphQL names, published tool names, or the categories `'query'` and `'mutation'`. Exclusion wins. |
-| `includeTypes`, `excludeTypes` | Unset | Filter by object return type name. Aggregate tools resolve their entity through their sibling list query. |
+| `include`, `exclude` | Unset | A name or array of raw GraphQL names, published tool names, or the categories `'query'` and `'mutation'`. Exclusion wins. A [virtual field tool](#virtual-field-tools) matches its own names only. |
+| `includeTypes`, `excludeTypes` | Unset | Filter by object return type name. Aggregate tools resolve their entity through their sibling list query, and virtual field tools use the type that declares the field. |
 | `toolNamePrefix` | `''` | Prefix published names; GraphQL field names remain unchanged. |
-| `selectionDepth` | `1` | Depth of automatically selected object relationships. Each nested collection it reaches is read with one query per returned row, or per batch of rows with an adapter that [batches collection reads](/guide/relationships#batched-collection-reads); see `nestedCollections`. |
+| `selectionDepth` | `1` | Depth of automatically selected object relationships, counted from the root field's result, or from the field's result for a virtual field tool. Each nested collection it reaches is read with one query per returned row, or per batch of rows with an adapter that [batches collection reads](/guide/relationships#batched-collection-reads); see `nestedCollections`. |
 | `nestedCollections` | `'all'` | `'none'` leaves nested collections, object list fields with a `pagination` argument such as non-embedded one-to-many relations, out of every generated selection and output schema. A tool's `toolOverrides` value wins. Other values throw `MCP_INVALID_OPTIONS` at setup. |
-| `includeId` | Ignored | Deprecated; it never changed the generated selection. Every scalar or enum field without required arguments, `id` included, is selected; an object type with none selects `__typename`. |
+| `includeId` | Ignored | Deprecated; it never changed the generated selection. Every scalar or enum field without required arguments, `id` included, is selected, except that virtual fields without `mcp: 'select'` are left out below a list position, as [virtual field tools](#virtual-field-tools) describes; an object type with none selects `__typename`. |
 | `toolOverrides` | `{}` | Per-tool title, description, annotations, selection depth, nested collections, or explicit selection. |
 | `limits` | Unset | Pagination and serialized result-size controls, validated at setup. |
 | `textFormat` | `'pretty'` | JSON format of the text content block of results: `'pretty'`, indented by two spaces, or `'compact'`. `maxResultBytes` measures that text. Other values throw `MCP_INVALID_OPTIONS` at setup. |
@@ -75,7 +77,7 @@ Next to the root field, the output schema declares the optional keys MCP adds to
 | `schemaPlugins` | Unset | Plugins whose `onSchemaChange` hook is invoked in in-process mode; validated before any hook runs, falsy entries skipped, a misspelling of `onSchemaChange` on a plugin that lacks it rejected, asynchronous hooks awaited. Typed as `EnvelopSchemaPlugin` or `SchemaPluginObject` entries, so Envelop and Yoga `Plugin` arrays and class instances compile, including ones with `call` or `apply` members; functions and promises do not. `EnvelopSchemaPlugin` is `@simtlix/simfinity-core`'s declaration, which this package re-exports, so both packages can be re-exported together with `export *`. |
 | `execution` | `{ mode: 'in-process' }` | Local schema execution or remote GraphQL HTTP execution. |
 
-Tool names must contain only letters, digits, underscores, and hyphens, with a maximum length of 128. A prefix must use the same character set. If query and mutation fields generate the same name, the first tool wins and the duplicate is skipped with a warning.
+Tool names must contain only letters, digits, underscores, and hyphens, with a maximum length of 128. A prefix must use the same character set. If query and mutation fields generate the same name, the first tool wins and the duplicate is skipped with a warning. Virtual field tools come after all of them, so they are the ones skipped; see [virtual field tools](#virtual-field-tools).
 
 An `includeTypes` allowlist also excludes tools without an object entity type. Excluding an entity type hides its recognized aggregate tool as well.
 
@@ -105,7 +107,7 @@ Every tool has `title` and `openWorldHint: false`. The behavioral hints depend o
 
 | Operation | Hints |
 | --- | --- |
-| List, get-by-id, aggregate and custom queries | `readOnlyHint: true` |
+| List, get-by-id, aggregate and custom queries, and virtual field tools | `readOnlyHint: true` |
 | Create | `readOnlyHint: false`; `destructiveHint` and `idempotentHint` are unset, so MCP's defaults apply |
 | Update | `readOnlyHint: false`, `idempotentHint: true`, or `idempotentHint: false` when its input can carry collection items to insert |
 | Delete | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: true` |
@@ -114,6 +116,50 @@ Every tool has `title` and `openWorldHint: false`. The behavioral hints depend o
 `idempotentHint` describes the stored data only. A repeated call runs tool middleware, Simfinity middleware and controller hooks again. An update input can carry items to insert through an `added` list, as the generated input of a non-embedded one-to-many collection does at any depth, including `updated[].<collection>.added`; every repeat inserts those items again, so such updates are not idempotent. Embedded lists, which an update replaces as a whole, and single references keep the hint, and so does a collection without `added`, which Simfinity leaves out when the child has no writable field besides its back-reference. A repeated delete deletes nothing more, but it still calls the controller's `onDelete` hook, with `null` because the record no longer exists, so `onDelete` hooks must tolerate `null`.
 
 `toolOverrides` annotations are merged over these hints, so you can mark a tool idempotent when your hooks make repeats harmless. A state-machine action is usually safe to mark idempotent, because a repeat fails the transition's from-state check, unless the action keeps the record in the same state and its input inserts collection items.
+
+## Virtual field tools
+
+[Virtual fields](/guide/queries#virtual-fields) (`extensions.virtual`) are read through the tools of their type, with two rules, because each one runs its own resolver:
+
+- **Selection.** Generated selections and output schemas never contain a field with a required argument that has no default. Of the virtual fields without one, a tool selects only those whose `mcp` option is `'select'` below any list position, because every item of a list runs their resolvers: inside the items of a root field that returns a list, such as list tools and list-returning custom queries and mutations, at every depth, and inside the items of any list that a tool's selection reaches, such as a nested collection or an embedded list. Elsewhere, such as at the top of get-by-id and mutation results, inside their single references and embedded objects, and in the result of a per-field tool below that is not a list, a tool selects every virtual field without required arguments, as any other field. Output schemas follow the selection. So the get-by-id tool of a shop selects `score` on the shop but not `fee` on the bookings of its nested collection, unless `fee` sets `mcp: 'select'`, and the per-field tool of a list-valued `busyRanges` selects the virtual fields of its ranges only when they set `mcp: 'select'`. List and aggregate tools have no input property for a virtual field, because their GraphQL fields have no argument for it.
+- **Per-field tools.** On the type of every by-ID query, a query classified as get-by-id whose only argument is `id` and that returns an object type, as core generates for each entity type, each virtual field with a required argument that has no default gets a read tool, unless its `mcp` option is `false`: `'tool'`, the default, and `'select'` both give one. Virtual fields of embedded and no-endpoint types have no by-ID query, so they get no tool, and agents read them through the tools that select their parents. Fields whose arguments are all optional or have defaults get no tool either, nor do fields that compute without being virtual.
+
+The per-field tool of `Barbershop.busyRanges(date: String!, professionalId: ID)`, whose type has the generated by-ID query `barbershop`:
+
+| Member | Value |
+| --- | --- |
+| `name` | `<toolNamePrefix><byIdQuery>_<field>`: `barbershop_busyRanges`. |
+| `title` | `Get Barbershop busyRanges`. |
+| `description` | The field's description, or ``Read the `busyRanges` field of a single Barbershop by id, passing the field's arguments. Returns the Barbershop with only that field, or null when no Barbershop with that id exists or is visible.`` followed by the type's description, when it has one. |
+| `inputSchema` | A required `id`, `{ type: 'string', description: 'Unique identifier (id) of the record.' }`, then the field's arguments converted as root arguments are. The schema is closed and lists `required: ['id', 'date']`; unknown keys fail with `MCP_UNKNOWN_ARGUMENT`. |
+| `annotations` | `{ title, openWorldHint: false, readOnlyHint: true }`, with `toolOverrides` annotations merged over them. |
+| `outputSchema` | `{ barbershop: { busyRanges: … } }`, where `barbershop` accepts `null` and carries the type's description, and `busyRanges` follows the field's result. |
+| `kind` | `query`. |
+
+The tool reads the record through the by-ID query and selects only the field:
+
+```graphql
+query barbershop_busyRangesOperation($id: ID!, $date: String!, $professionalId: ID) {
+  barbershop(id: $id) {
+    busyRanges(date: $date, professionalId: $professionalId) { startTime endTime professionalId }
+  }
+}
+```
+
+The operation name is never prefixed, and it declares `id` as non-null, as the input schema does, even when the by-ID query's own `id` argument is nullable, as the generated one is. The field's result is selected as a root field's is: `selectionDepth` counts from the result, `nestedCollections` applies, the list rule of the selection above applies to a list result, and the parent type is not expanded again. A call returns the GraphQL shape, `{ barbershop: { busyRanges: [ … ] } }`, after the type's middleware, `get_by_id` scope, root query rule and field rule have run; a record that the scope hides, or that does not exist, returns `{ barbershop: null }`, and the resolver does not run. A call that omits `id`, or sends `id: null`, is an invalid request instead: GraphQL rejects the variable before any resolver runs, and the result is `isError: true` with that error, such as `Variable "$id" of required type "ID!" was not provided.` In-process calls pass the call's context object to the resolver, and remote calls send the same operation.
+
+Options apply to the tool's own name:
+
+- `include` and `exclude` match its raw name, `barbershop_busyRanges`, its published name with the prefix, or `'query'`; the by-ID query's name, `barbershop`, does not match it.
+- `includeTypes` and `excludeTypes` match the type that declares the field.
+- `toolOverrides` keys are its published name, which wins, or its unprefixed name. A `selection` override replaces the selection of the field's result and drops the `outputSchema`.
+- When the field has a `pagination` argument, `limits.defaultPagination` is injected, `maxPageSize` is enforced and the default page is checked at setup, as for a root field's; no `totalCount` is added.
+
+Per-field tools come after every root query and mutation tool, so a name collision skips the per-field tool, never a root field's, with a warning such as `[simfinity-mcp] Duplicate tool name "shop_busy": the tool of virtual field "Shop.busy" collides with an existing query tool and is skipped — calls to "shop_busy" execute that query. Rename one of the fields, set extensions.virtual.mcp to false or use include/exclude to disambiguate.`
+
+A field argument named `id` would clash with the tool's own `id`, so it throws `MCP_INVALID_OPTIONS` at setup when the tool would be published, that is when `mcp` is not `false`, the tool is not excluded and its name is not already taken: `The virtual field Barbershop.busyRanges has an argument named id, which its MCP tool "barbershop_busyRanges" takes for the Barbershop id. Rename the argument, set extensions.virtual.mcp to false, or exclude the tool.` A derived name longer than 128 characters throws `MCP_INVALID_TOOL_NAME`.
+
+MCP reads `extensions.virtual` from the schema's field objects. A schema rebuilt from SDL or introspection carries no extensions, so it gets no per-field tools, and its tools select virtual fields as any other field.
 
 ## Tool overrides
 
@@ -372,8 +418,8 @@ A suggestion is given for a declared argument that matches the key ignoring lett
 | `MCP_MIDDLEWARE_ERROR` | Thrown during a call when middleware calls `next()` twice or the chain returns no result. |
 | `MCP_INVALID_MIDDLEWARE` | Invalid `toolMiddleware` configuration, including an empty slot in a sparse array; thrown at setup. |
 | `MCP_INVALID_SCHEMA_PLUGIN`, `MCP_UNSUPPORTED_SCHEMA_REPLACEMENT` | Invalid `schemaPlugins` configuration, including a misspelling of `onSchemaChange` on a plugin that lacks it, or a plugin replacing the schema; thrown at setup. |
-| `MCP_INVALID_OPTIONS` | A `textFormat` other than `'pretty'` or `'compact'`, or a `nestedCollections` other than `'all'` or `'none'`, globally or in any `toolOverrides` entry, published or not; thrown at setup, before `schemaPlugins` run. |
-| `MCP_INVALID_SCHEMA`, `MCP_INVALID_TOOL_NAME`, `MCP_INVALID_LIMITS` | Configuration or generation errors, thrown at setup. A `limits` cap changed after setup to an invalid value also makes calls reject with `MCP_INVALID_LIMITS`. |
+| `MCP_INVALID_OPTIONS` | A `textFormat` other than `'pretty'` or `'compact'`, or a `nestedCollections` other than `'all'` or `'none'`, globally or in any `toolOverrides` entry, published or not; also a virtual field with an argument named `id` whose [tool](#virtual-field-tools) would be published. Thrown at setup, before `schemaPlugins` run. |
+| `MCP_INVALID_SCHEMA`, `MCP_INVALID_TOOL_NAME`, `MCP_INVALID_LIMITS` | Configuration or generation errors, thrown at setup. `MCP_INVALID_TOOL_NAME` also covers a virtual field tool's derived name over 128 characters. A `limits` cap changed after setup to an invalid value also makes calls reject with `MCP_INVALID_LIMITS`. |
 | `MCP_INVALID_EXECUTION_MODE`, `MCP_MISSING_ENDPOINT` | Invalid execution configuration. |
 | `MCP_INVALID_EXECUTION_CONFIG` | A remote `endpoint` with a username or password, or an invalid `headers` container or `timeoutMs`, thrown at setup; the message never quotes the endpoint. A `timeoutMs` changed after setup to an invalid value makes calls reject with it. |
 | `MCP_INVALID_TRANSPORT_OPTIONS` | Stateful transport settings supplied to the stateless HTTP factory. |

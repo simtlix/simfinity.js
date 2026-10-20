@@ -1,0 +1,4 @@
+interface:
+  display_name: "Simfinity Access Control"
+  short_description: "Combine scopes, permissions and write ownership"
+  default_prompt: "Use $simfinity-access-control to implement and verify this application's visibility and authorization policy."

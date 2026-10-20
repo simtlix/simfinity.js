@@ -29,4 +29,3 @@ import './favorite.js';
 import './notification.js';
 import './notificationPreference.js';
 import './auth/registerMutations.js';
-import './customMutations.js';

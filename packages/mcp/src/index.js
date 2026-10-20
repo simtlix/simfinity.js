@@ -17,8 +17,10 @@ import {
   isSpecifiedScalarType,
 } from 'graphql';
 import { SimfinityError } from '@simtlix/simfinity-core';
+import { virtualFieldOptions } from '@simtlix/simfinity-core/internal/relation-storage';
 
-const FILTER_OPERATORS_TEXT = 'EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE';
+// Every QLOperator value; tests/mcp-text-operators.test.js fails when the enum gains one this text does not name.
+const FILTER_OPERATORS_TEXT = 'EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE, ILIKE, STARTS_WITH, ISTARTS_WITH, ENDS_WITH, IENDS_WITH, IEQ';
 
 /** Allowed shape for published MCP tool names (SEP-986). */
 const TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -31,7 +33,7 @@ const TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/;
  * either a type name (`QLFilter`) or a `TypeName.fieldName` pair.
  */
 const SIMFINITY_FILTER_DOCS = Object.assign(Object.create(null), {
-  QLOperator: 'Comparison operator: EQ (equals), NE (not equals), LT, LTE, GT, GTE, IN (value in list), NIN (value not in list), BTW (between, value is [min, max]), LIKE (substring match).',
+  QLOperator: 'Comparison operator: EQ (equals), NE (not equals), LT, LTE, GT, GTE, IN (value in list), NIN (value not in list), BTW (between, value is [min, max]), LIKE (substring), ILIKE (substring, ignoring case), STARTS_WITH (prefix), ISTARTS_WITH (prefix, ignoring case), ENDS_WITH (suffix), IENDS_WITH (suffix, ignoring case) and IEQ (equals, ignoring case). The text operators, LIKE to IEQ, take a string value and apply to String fields and String lists. They match the value literally, so % and _ are ordinary characters, and LIKE, STARTS_WITH and ENDS_WITH respect case.',
   QLValue: 'Filter value. Accepts a scalar, or an array for the IN, NIN and BTW operators.',
   QLFilter: 'Single-field filter: a comparison operator plus the value to compare against.',
   QLTypeFilter: 'Filter applied to a related-entity field, addressed by a dot-separated path.',
@@ -386,18 +388,18 @@ const createDefRegistry = () => {
 };
 
 /**
- * Build a field's inputSchema with the defs of `registry`; see
- * {@link graphqlArgsToJSONSchema}.
- * @param {import('graphql').GraphQLField} field
+ * Build the inputSchema of a list of arguments with the defs of `registry`;
+ * see {@link graphqlArgsToJSONSchema}.
+ * @param {ReadonlyArray<import('graphql').GraphQLArgument>} args
  * @param {{ shared: Object, collect: Function }} registry from {@link createDefRegistry}
  * @returns {Object}
  */
-const argsToJSONSchema = (field, registry) => {
+const argumentsToJSONSchema = (args, registry) => {
   const defs = Object.create(null);
   const properties = {};
   const required = [];
 
-  for (const arg of field.args || []) {
+  for (const arg of args) {
     const { schema, isRequired } = typeToJSONSchema(arg.type, registry.shared);
     registry.collect(getNamedType(arg.type), defs);
     let property = withDescription(schema, resolveArgDescription(arg));
@@ -426,6 +428,15 @@ const argsToJSONSchema = (field, registry) => {
 };
 
 /**
+ * Build a field's inputSchema with the defs of `registry`; see
+ * {@link graphqlArgsToJSONSchema}.
+ * @param {import('graphql').GraphQLField} field
+ * @param {{ shared: Object, collect: Function }} registry from {@link createDefRegistry}
+ * @returns {Object}
+ */
+const argsToJSONSchema = (field, registry) => argumentsToJSONSchema(field.args || [], registry);
+
+/**
  * Build the MCP `inputSchema` (JSON Schema) for a single GraphQL field by
  * converting every argument with full fidelity (scalars, enums, input objects,
  * lists, non-null wrappers and recursive types via `$defs`/`$ref`). Argument and
@@ -444,6 +455,49 @@ export const graphqlArgsToJSONSchema = (field) => argsToJSONSchema(field, create
 
 const hasRequiredArgs = (field) => (field.args || [])
   .some((arg) => arg.type instanceof GraphQLNonNull && arg.defaultValue === undefined);
+
+/**
+ * Which virtual fields (`extensions.virtual`, read with core's
+ * virtualFieldOptions) a generated selection set and output schema include.
+ * 'all' treats them like any other field; 'select' keeps only those whose
+ * `mcp` option is 'select'. A virtual field's resolver runs once per record,
+ * so tools whose root field returns a list, such as list tools, use 'select',
+ * and every tool switches to 'select' below a list position (see
+ * {@link virtualFieldsInside}).
+ * @param {import('graphql').GraphQLType} type the type the selection starts at
+ * @returns {'all'|'select'}
+ */
+const virtualFieldsFor = (type) => (isListType(type) ? 'select' : 'all');
+
+/**
+ * The {@link virtualFieldsFor} mode inside an object field's value: 'select'
+ * when the field holds a list, such as a nested collection or an embedded
+ * list, whose items would each run the resolvers of the virtual fields
+ * selected in them; otherwise the mode of the field's parent.
+ * @param {import('graphql').GraphQLField} field
+ * @param {'all'|'select'} virtuals the mode of the field's parent
+ * @returns {'all'|'select'}
+ */
+const virtualFieldsInside = (field, virtuals) => (isListType(field.type) ? 'select' : virtuals);
+
+/**
+ * Whether a generated selection set and output schema include a field: never
+ * with a required argument that has no default, and a virtual field only as
+ * {@link virtualFieldsFor} allows.
+ * @param {import('graphql').GraphQLField} field
+ * @param {'all'|'select'} virtuals
+ * @returns {boolean}
+ */
+const isSelectable = (field, virtuals) => {
+  if (hasRequiredArgs(field)) {
+    return false;
+  }
+  if (virtuals === 'all') {
+    return true;
+  }
+  const options = virtualFieldOptions(field);
+  return !options || options.mcp === 'select';
+};
 
 const NESTED_COLLECTIONS = ['all', 'none'];
 
@@ -481,12 +535,13 @@ const isNestedCollection = (field) => isListType(field.type) && hasArg(field, 'p
  * @param {import('graphql').GraphQLObjectType} fieldNamed the field's named type
  * @param {number} depth remaining nesting depth
  * @param {'all'|'none'} collections
+ * @param {'all'|'select'} virtuals from {@link virtualFieldsFor}
  * @param {Set<string>} visited already-expanded object type names
  * @returns {boolean}
  */
-const expandsObjectField = (field, fieldNamed, depth, collections, visited) => depth > 0
+const expandsObjectField = (field, fieldNamed, depth, collections, virtuals, visited) => depth > 0
   && !visited.has(fieldNamed.name)
-  && !hasRequiredArgs(field)
+  && isSelectable(field, virtuals)
   && !(collections === 'none' && isNestedCollection(field));
 
 /**
@@ -497,14 +552,17 @@ const expandsObjectField = (field, fieldNamed, depth, collections, visited) => d
  * selectable leaves fall back to `__typename` so the generated document is
  * always statically valid. Cycles are avoided via the `visited` set. With
  * `nestedCollections: 'none'`, nested collections (see
- * {@link isNestedCollection}) are left out.
+ * {@link isNestedCollection}) are left out, and with `virtuals: 'select'`,
+ * which applies below every list position (see {@link virtualFieldsInside}),
+ * virtual fields other than `mcp: 'select'` ones (see {@link isSelectable}).
  * @param {import('graphql').GraphQLType} type return type of the field
  * @param {number} depth remaining nesting depth for object expansion
  * @param {'all'|'none'} [collections] from {@link normalizeNestedCollections}
+ * @param {'all'|'select'} [virtuals] from {@link virtualFieldsFor}
  * @param {Set<string>} visited already-expanded object type names
  * @returns {string} selection set (with leading space) or empty string for leaves
  */
-const buildSelectionSet = (type, depth, collections = 'all', visited = new Set()) => {
+const buildSelectionSet = (type, depth, collections = 'all', virtuals = 'all', visited = new Set()) => {
   const named = getNamedType(type);
   if (named instanceof GraphQLScalarType || named instanceof GraphQLEnumType) {
     return '';
@@ -521,13 +579,13 @@ const buildSelectionSet = (type, depth, collections = 'all', visited = new Set()
   for (const [fieldName, field] of Object.entries(fields)) {
     const fieldNamed = getNamedType(field.type);
     if (fieldNamed instanceof GraphQLScalarType || fieldNamed instanceof GraphQLEnumType) {
-      if (!hasRequiredArgs(field)) {
+      if (isSelectable(field, virtuals)) {
         lines.push(fieldName);
       }
     } else if (fieldNamed instanceof GraphQLObjectType) {
-      if (expandsObjectField(field, fieldNamed, depth, collections, nextVisited)) {
+      if (expandsObjectField(field, fieldNamed, depth, collections, virtuals, nextVisited)) {
         // An object type always yields ' { ... }', at worst ' { __typename }'.
-        lines.push(`${fieldName}${buildSelectionSet(field.type, depth - 1, collections, nextVisited)}`);
+        lines.push(`${fieldName}${buildSelectionSet(field.type, depth - 1, collections, virtualFieldsInside(field, virtuals), nextVisited)}`);
       }
     }
   }
@@ -557,26 +615,28 @@ const normalizeSelection = (selection) => {
  * Build a JSON Schema describing a field's return type, mirroring the inclusion
  * rules of {@link buildSelectionSet} (scalars/enums always; object fields up to
  * `depth`, without nested collections under `nestedCollections: 'none'`;
- * `__typename` fallback) so the schema matches what the tool actually
- * returns. Every nullable GraphQL position accepts `null` in the schema.
- * Scalars use the output mapping of {@link scalarToJSONSchema}. GraphQL type
- * and field descriptions are propagated.
+ * virtual fields as `virtuals` allows; `__typename` fallback) so the schema
+ * matches what the tool actually returns. Every nullable GraphQL position
+ * accepts `null` in the schema. Scalars use the output mapping of
+ * {@link scalarToJSONSchema}. GraphQL type and field descriptions are
+ * propagated.
  * @param {import('graphql').GraphQLType} type
  * @param {number} depth
  * @param {'all'|'none'} [collections]
+ * @param {'all'|'select'} [virtuals] from {@link virtualFieldsFor}
  * @param {Set<string>} visited
  * @returns {Object} JSON Schema for the return type
  */
-const returnTypeToSchema = (type, depth, collections = 'all', visited = new Set()) => {
+const returnTypeToSchema = (type, depth, collections = 'all', virtuals = 'all', visited = new Set()) => {
   if (type instanceof GraphQLNonNull) {
-    return unwrappedReturnTypeToSchema(type.ofType, depth, collections, visited);
+    return unwrappedReturnTypeToSchema(type.ofType, depth, collections, virtuals, visited);
   }
-  return nullableSchema(unwrappedReturnTypeToSchema(type, depth, collections, visited));
+  return nullableSchema(unwrappedReturnTypeToSchema(type, depth, collections, virtuals, visited));
 };
 
-function unwrappedReturnTypeToSchema(type, depth, collections, visited) {
+function unwrappedReturnTypeToSchema(type, depth, collections, virtuals, visited) {
   if (type instanceof GraphQLList) {
-    return { type: 'array', items: returnTypeToSchema(type.ofType, depth, collections, visited) };
+    return { type: 'array', items: returnTypeToSchema(type.ofType, depth, collections, virtuals, visited) };
   }
   if (type instanceof GraphQLScalarType) {
     return scalarToJSONSchema(type, { output: true });
@@ -595,17 +655,17 @@ function unwrappedReturnTypeToSchema(type, depth, collections, visited) {
   for (const [fieldName, field] of Object.entries(fields)) {
     const fieldNamed = getNamedType(field.type);
     if (fieldNamed instanceof GraphQLScalarType || fieldNamed instanceof GraphQLEnumType) {
-      if (!hasRequiredArgs(field)) {
+      if (isSelectable(field, virtuals)) {
         properties[fieldName] = withDescription(
-          returnTypeToSchema(field.type, depth, collections, nextVisited),
+          returnTypeToSchema(field.type, depth, collections, virtuals, nextVisited),
           field.description,
         );
       }
     } else if (fieldNamed instanceof GraphQLObjectType) {
-      if (expandsObjectField(field, fieldNamed, depth, collections, nextVisited)) {
+      if (expandsObjectField(field, fieldNamed, depth, collections, virtuals, nextVisited)) {
         // Never empty: an object schema has at least the __typename fallback.
         properties[fieldName] = withDescription(
-          returnTypeToSchema(field.type, depth - 1, collections, nextVisited),
+          returnTypeToSchema(field.type, depth - 1, collections, virtualFieldsInside(field, virtuals), nextVisited),
           field.description,
         );
       }
@@ -632,14 +692,82 @@ function unwrappedReturnTypeToSchema(type, depth, collections, visited) {
  * @param {import('graphql').GraphQLField} field
  * @param {number} selectionDepth
  * @param {'all'|'none'} [collections]
+ * @param {'all'|'select'} [virtuals] from {@link virtualFieldsFor}
  * @returns {Object} JSON Schema describing the tool output
  */
-const buildOutputSchema = (fieldName, field, selectionDepth, collections = 'all') => ({
+const buildOutputSchema = (fieldName, field, selectionDepth, collections = 'all', virtuals = 'all') => ({
   type: 'object',
   properties: {
-    [fieldName]: returnTypeToSchema(field.type, selectionDepth, collections),
+    [fieldName]: returnTypeToSchema(field.type, selectionDepth, collections, virtuals),
   },
 });
+
+/**
+ * Build the `outputSchema` of a virtual field tool (see
+ * {@link buildVirtualFieldTools}): the GraphQL `data`
+ * `{ [byIdName]: { [fieldName]: value } | null }`. The field's value follows
+ * the rules of {@link returnTypeToSchema}, as a root field's does, starting
+ * with its parent type already visited, as in the by-ID tool's selection.
+ * @param {{ byIdName: string, byIdField: import('graphql').GraphQLField,
+ *   entityType: import('graphql').GraphQLObjectType, fieldName: string,
+ *   field: import('graphql').GraphQLField }} target
+ * @param {number} selectionDepth
+ * @param {'all'|'none'} collections
+ * @param {'all'|'select'} virtuals from {@link virtualFieldsFor}
+ * @returns {Object}
+ */
+const buildVirtualFieldOutputSchema = ({
+  byIdName, byIdField, entityType, fieldName, field,
+}, selectionDepth, collections, virtuals) => {
+  const parent = {
+    type: 'object',
+    properties: {
+      [fieldName]: withDescription(
+        returnTypeToSchema(field.type, selectionDepth, collections, virtuals, new Set([entityType.name])),
+        field.description,
+      ),
+    },
+  };
+  if (entityType.description) {
+    parent.description = entityType.description;
+  }
+  return {
+    type: 'object',
+    properties: {
+      [byIdName]: byIdField.type instanceof GraphQLNonNull ? parent : nullableSchema(parent),
+    },
+  };
+};
+
+/**
+ * The variable definition that feeds `arg`, with its default as a GraphQL
+ * literal when it has one.
+ * @param {import('graphql').GraphQLArgument} arg
+ * @returns {string}
+ */
+const variableDefinition = (arg) => {
+  const declaration = `$${arg.name}: ${arg.type.toString()}`;
+  if (arg.defaultValue === undefined) {
+    return declaration;
+  }
+  try {
+    const defaultAST = astFromValue(arg.defaultValue, arg.type);
+    if (defaultAST) {
+      return `${declaration} = ${print(defaultAST)}`;
+    }
+  } catch {
+    // Opaque custom scalar defaults may have no literal representation.
+  }
+  // A nullable variable may feed a non-null argument with a location
+  // default. Omission uses that default; explicit null still fails coercion.
+  const variableType = arg.type instanceof GraphQLNonNull ? arg.type.ofType : arg.type;
+  return `$${arg.name}: ${variableType.toString()}`;
+};
+
+/** `name: $name` for every argument, comma-separated. */
+const argumentUsage = (args) => args
+  .map((arg) => `${arg.name}: $${arg.name}`)
+  .join(', ');
 
 /**
  * Build the GraphQL operation document string for a field. All arguments are
@@ -652,33 +780,46 @@ const buildOutputSchema = (fieldName, field, selectionDepth, collections = 'all'
  */
 const buildOperation = (kind, fieldName, field, selection) => {
   const args = field.args || [];
-  const varDefs = args
-    .map((arg) => {
-      const declaration = `$${arg.name}: ${arg.type.toString()}`;
-      if (arg.defaultValue === undefined) {
-        return declaration;
-      }
-      try {
-        const defaultAST = astFromValue(arg.defaultValue, arg.type);
-        if (defaultAST) {
-          return `${declaration} = ${print(defaultAST)}`;
-        }
-      } catch {
-        // Opaque custom scalar defaults may have no literal representation.
-      }
-      // A nullable variable may feed a non-null argument with a location
-      // default. Omission uses that default; explicit null still fails coercion.
-      const variableType = arg.type instanceof GraphQLNonNull ? arg.type.ofType : arg.type;
-      return `$${arg.name}: ${variableType.toString()}`;
-    })
-    .join(', ');
-  const argUsage = args
-    .map((arg) => `${arg.name}: $${arg.name}`)
-    .join(', ');
+  const varDefs = args.map(variableDefinition).join(', ');
+  const argUsage = argumentUsage(args);
 
   const header = varDefs ? `${kind} ${fieldName}Operation(${varDefs})` : `${kind} ${fieldName}Operation`;
   const call = argUsage ? `${fieldName}(${argUsage})` : fieldName;
   return `${header} {\n  ${call}${selection}\n}`;
+};
+
+/**
+ * The `id` argument of a virtual field tool (see {@link buildVirtualFieldTools}):
+ * the by-ID query's, made non-null, because without it the query reads no
+ * record. The tool's input schema and its operation's variable both declare
+ * it, so a call that omits `id` or sends null fails variable coercion, as an
+ * invalid request, instead of returning the null of a missing record.
+ * @param {{ byIdField: import('graphql').GraphQLField }} target
+ * @returns {import('graphql').GraphQLArgument}
+ */
+const requiredIdArgument = ({ byIdField }) => {
+  const [idArg] = byIdField.args;
+  return idArg.type instanceof GraphQLNonNull ? idArg : { ...idArg, type: new GraphQLNonNull(idArg.type) };
+};
+
+/**
+ * Build the operation of a virtual field tool: the by-ID query, with the
+ * tool's required `id`, selecting only the virtual field with its arguments,
+ * such as `query shop_busyRangesOperation($id: ID!, $date: String!) {
+ * shop(id: $id) { busyRanges(date: $date) { start end } } }` (over four lines).
+ * @param {string} operationName unprefixed tool name
+ * @param {{ byIdName: string, fieldName: string,
+ *   field: import('graphql').GraphQLField }} target
+ * @param {import('graphql').GraphQLArgument} idArg from {@link requiredIdArgument},
+ *   the one the tool's input schema declares
+ * @param {string} selection selection set (leading-space form) or empty string
+ * @returns {string} GraphQL operation source
+ */
+const buildVirtualFieldOperation = (operationName, { byIdName, fieldName, field }, idArg, selection) => {
+  const fieldArgs = field.args;
+  const varDefs = [idArg, ...fieldArgs].map(variableDefinition).join(', ');
+  return `query ${operationName}Operation(${varDefs}) {\n  ${byIdName}(${argumentUsage([idArg])}) {\n`
+    + `    ${fieldName}(${argumentUsage(fieldArgs)})${selection}\n  }\n}`;
 };
 
 const isListType = (type) => {
@@ -840,6 +981,23 @@ const buildToolTitle = (op, fieldName, entityType) => {
 };
 
 /**
+ * Description of a virtual field tool (see {@link buildVirtualFieldTools}):
+ * the field's own description, or a generated one.
+ * @param {string} fieldName
+ * @param {import('graphql').GraphQLField} field
+ * @param {import('graphql').GraphQLObjectType} entityType the type that declares the field
+ * @returns {string}
+ */
+const buildVirtualFieldToolDescription = (fieldName, field, entityType) => {
+  if (field.description) {
+    return field.description;
+  }
+  const entity = entityType.name;
+  const entityDoc = entityType.description ? ` ${entityType.description}` : '';
+  return `Read the \`${fieldName}\` field of a single ${entity} by id, passing the field's arguments. Returns the ${entity} with only that field, or null when no ${entity} with that id exists or is visible.${entityDoc}`;
+};
+
+/**
  * MCP behavioral hints for a tool. `idempotentHint` describes the stored
  * data only: a repeated call runs middleware and controller hooks again.
  * An update is idempotent unless its input can carry collection items to
@@ -860,6 +1018,7 @@ const buildAnnotations = (op, title, field) => {
     case 'list':
     case 'aggregate':
     case 'customQuery':
+    case 'virtualField':
       return { ...base, readOnlyHint: true };
     case 'update':
       return { ...base, readOnlyHint: false, idempotentHint: !acceptsAddedItems(field) };
@@ -2349,8 +2508,46 @@ const createCallTool = ({
 };
 
 /**
+ * The virtual fields that get their own read tool, in schema order: on the
+ * type of every by-ID query (a query classified 'single' whose only argument
+ * is `id`, as core generates for each entity type), each virtual field with
+ * a required argument that has no default, unless its `mcp` option is false.
+ * Agents read other virtual fields through the tools that select them (see
+ * {@link isSelectable}); those of embedded and no-endpoint types have no
+ * by-ID query, so they get no tool.
+ * @param {import('graphql').GraphQLObjectType|null|undefined} queryType
+ * @returns {Array<{ byIdName: string, byIdField: import('graphql').GraphQLField,
+ *   entityType: import('graphql').GraphQLObjectType, fieldName: string,
+ *   field: import('graphql').GraphQLField }>}
+ */
+const virtualFieldTargets = (queryType) => {
+  const targets = [];
+  if (!queryType) {
+    return targets;
+  }
+  for (const [byIdName, byIdField] of Object.entries(queryType.getFields())) {
+    const entityType = getNamedType(byIdField.type);
+    if (!(entityType instanceof GraphQLObjectType)
+        || byIdField.args.length !== 1 || byIdField.args[0].name !== 'id'
+        || classifyOperation('query', byIdName, byIdField) !== 'single') {
+      continue;
+    }
+    for (const [fieldName, field] of Object.entries(entityType.getFields())) {
+      const options = virtualFieldOptions(field);
+      if (options && options.mcp !== false && hasRequiredArgs(field)) {
+        targets.push({
+          byIdName, byIdField, entityType, fieldName, field,
+        });
+      }
+    }
+  }
+  return targets;
+};
+
+/**
  * Build the context-independent tool definitions and the operation index from a
- * Simfinity-generated GraphQLSchema. Shared by {@link generateMCPTools} and the
+ * Simfinity-generated GraphQLSchema: one tool per root field, then one per
+ * {@link virtualFieldTargets} entry. Shared by {@link generateMCPTools} and the
  * transport factories so the (potentially expensive) schema traversal happens
  * once, while execution context can be bound per request.
  * @param {import('graphql').GraphQLSchema} schema
@@ -2449,9 +2646,10 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
       const title = override.title || buildToolTitle(op, fieldName, entityType);
       const description = override.description || buildToolDescription(op, fieldName, field, entityType);
       const annotations = { ...buildAnnotations(op, title, field), ...(override.annotations || {}) };
+      const virtuals = virtualFieldsFor(field.type);
       const selection = override.selection
         ? normalizeSelection(override.selection)
-        : buildSelectionSet(field.type, depth, collections);
+        : buildSelectionSet(field.type, depth, collections, virtuals);
 
       const tool = {
         name: toolName,
@@ -2469,7 +2667,7 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
       // An explicit selection override makes the mirrored output schema
       // unreliable, so it is omitted rather than published wrong.
       if (!override.selection) {
-        tool.outputSchema = buildOutputSchema(fieldName, field, depth, collections);
+        tool.outputSchema = buildOutputSchema(fieldName, field, depth, collections, virtuals);
         if (countKey) {
           tool.outputSchema.properties[countKey] = countPropertySchema(countKey);
         }
@@ -2499,8 +2697,87 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
     }
   };
 
+  /**
+   * Add a read tool named `<byIdQuery>_<field>` for each of
+   * {@link virtualFieldTargets}. They come after every root field's tool, so
+   * a name collision skips the virtual field tool, never a root field's.
+   */
+  const buildVirtualFieldTools = () => {
+    for (const target of virtualFieldTargets(queryType)) {
+      const { entityType, fieldName, field } = target;
+      const rawName = `${target.byIdName}_${fieldName}`;
+      const toolName = `${toolNamePrefix}${rawName}`;
+      if (!isIncluded({
+        names: [rawName, toolName],
+        kind: 'query',
+        entityName: entityType.name,
+        include,
+        exclude,
+        includeTypes,
+        excludeTypes,
+      })) {
+        continue;
+      }
+      if (!TOOL_NAME_RE.test(toolName)) {
+        throw new SimfinityError(`Generated MCP tool name "${toolName}" is invalid (allowed: letters, digits, underscore, hyphen; max 128 chars)`, 'MCP_INVALID_TOOL_NAME', 500);
+      }
+      if (toolIndex[toolName]) {
+        console.warn(`[simfinity-mcp] Duplicate tool name "${toolName}": the tool of virtual field "${entityType.name}.${fieldName}" collides with an existing ${toolIndex[toolName].kind} tool and is skipped — calls to "${toolName}" execute that ${toolIndex[toolName].kind}. Rename one of the fields, set extensions.virtual.mcp to false or use include/exclude to disambiguate.`);
+        continue;
+      }
+      // Only a tool that is published takes the record's id, so a skipped one cannot clash with it.
+      if (field.args.some((arg) => arg.name === 'id')) {
+        throw new SimfinityError(`The virtual field ${entityType.name}.${fieldName} has an argument named id, which its MCP tool "${toolName}" takes for the ${entityType.name} id. Rename the argument, set extensions.virtual.mcp to false, or exclude the tool.`, 'MCP_INVALID_OPTIONS', 500);
+      }
+
+      const override = toolOverrides[toolName] || toolOverrides[rawName] || {};
+      const depth = override.selectionDepth ?? selectionDepth;
+      const collections = override.nestedCollections == null
+        ? nestedCollections
+        : normalizeNestedCollections(override.nestedCollections, `toolOverrides.${toolName}.nestedCollections`);
+      const virtuals = virtualFieldsFor(field.type);
+      const title = override.title || `Get ${entityType.name} ${fieldName}`;
+      const description = override.description || buildVirtualFieldToolDescription(fieldName, field, entityType);
+      const annotations = { ...buildAnnotations('virtualField', title, field), ...(override.annotations || {}) };
+      const selection = override.selection
+        ? normalizeSelection(override.selection)
+        : buildSelectionSet(field.type, depth, collections, virtuals, new Set([entityType.name]));
+      // The input schema and the operation declare the same required `id`.
+      const requiredId = requiredIdArgument(target);
+
+      const tool = {
+        name: toolName,
+        title,
+        description,
+        inputSchema: argumentsToJSONSchema([requiredId, ...field.args], defRegistry),
+        annotations,
+        kind: 'query',
+      };
+      if (!override.selection) {
+        tool.outputSchema = buildVirtualFieldOutputSchema(target, depth, collections, virtuals);
+      }
+      tools.push(tool);
+      // A `pagination` argument of the field gets the limits a root field's does.
+      const pagination = field.args.find((arg) => arg.name === 'pagination');
+      toolIndex[toolName] = {
+        operation: buildVirtualFieldOperation(rawName, target, requiredId, selection),
+        kind: 'query',
+        op: 'virtualField',
+        fieldName: target.byIdName,
+        hasPagination: !!pagination,
+        paginationType: pagination ? pagination.type : undefined,
+        argNames: new Set([requiredId.name, ...field.args.map((arg) => arg.name)]),
+        countKey: undefined,
+        truncationKey: undefined,
+        idempotent: annotations.idempotentHint === true,
+        countSink: false,
+      };
+    }
+  };
+
   addToolsFromType(queryType, 'query');
   addToolsFromType(schema.getMutationType(), 'mutation');
+  buildVirtualFieldTools();
 
   return { tools, toolIndex };
 };
@@ -2556,6 +2833,21 @@ const prepareMCPTools = (schema, options = {}) => {
  * actionable `description` (reusing GraphQL type descriptions), an
  * `inputSchema`, an `outputSchema` and behavioral `annotations` (see
  * {@link classifyOperation} and {@link buildAnnotations}).
+ *
+ * Virtual fields (core's `extensions.virtual`) are read through their type's
+ * tools. A virtual field with a required argument that has no default is
+ * never selected by them, so the type's by-ID query also gets a read tool
+ * named `<byIdQuery>_<field>` (e.g. `barbershop_busyRanges`) for it, unless
+ * its `mcp` option is false. That tool takes the record's `id` and the
+ * field's arguments, runs the by-ID query selecting only the field, and comes
+ * after every root field's tool. `include`/`exclude`, `toolNamePrefix` and
+ * `toolOverrides` apply to its name, and `includeTypes`/`excludeTypes` to the
+ * type that declares the field. A field argument named `id` throws
+ * MCP_INVALID_OPTIONS when that tool is published. Below any list position,
+ * such as the records of list tools and the items of a nested collection or
+ * embedded list in any tool, tools select only the virtual fields whose `mcp`
+ * option is 'select'; elsewhere they select every virtual field without
+ * required arguments, as any other field.
  *
  * @param {import('graphql').GraphQLSchema} schema schema returned by createSchema()
  * @param {Object} [options]

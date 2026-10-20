@@ -3,7 +3,7 @@ import { SimfinityError } from '@simtlix/simfinity-core';
 import { getListShape, normalizeConnectionField } from '@simtlix/simfinity-core/internal/relation-storage';
 
 import { createMongoModel } from './models.js';
-import { createMongoQueries } from './queries.js';
+import { MONGO_QUERY_OPERATORS, createMongoQueries } from './queries.js';
 import { withMongoTransaction } from './transactions.js';
 import { createMongoIntegrity } from './integrity.js';
 import {
@@ -11,6 +11,9 @@ import {
 } from './ids.js';
 
 const withSession = (query, session) => (session ? query.session(session) : query);
+
+// Every filter operator the query compiler supports; the runtime rejects any other one.
+const QUERY_FEATURES = Object.freeze({ operators: MONGO_QUERY_OPERATORS });
 
 // A write that fails only on malformed ObjectId values reports NOT_VALID_ID, not a driver error.
 const mapIdCastErrors = async (write) => {
@@ -216,6 +219,7 @@ export const createMongoAdapter = (options) => {
   };
 
   const adapter = {
+    queryFeatures: QUERY_FEATURES,
     bind(binding) {
       integrity.bind(binding);
       getRegistrations = binding.getRegistrations;

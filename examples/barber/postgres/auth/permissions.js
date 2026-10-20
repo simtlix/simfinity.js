@@ -145,8 +145,6 @@ export const permissions = {
     cancelbyshop_booking: requireOwnerOrPlatformAdmin(),
     complete_booking: requireOwnerOrPlatformAdmin(),
     noshow_booking: requireOwnerOrPlatformAdmin(),
-    // Taken times only (no client data), for the signed-in booking flow
-    bookingAvailability: requireAuthenticated(),
 
     // Favorites — signed-in users only
     addfavorite: requireAuthenticated(),
@@ -170,5 +168,9 @@ export const permissions = {
     adduser: requirePlatformAdmin(),
     deleteuser: requirePlatformAdmin(),
     updateuser: requireAuthenticated(),
+  },
+  barbershop: {
+    // Taken times only (no client data), for the signed-in booking flow
+    busyRanges: requireAuthenticated(),
   },
 };

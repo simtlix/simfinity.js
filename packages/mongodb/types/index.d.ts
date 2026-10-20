@@ -15,6 +15,7 @@ import type {
 import type {
   DatabaseAdapter,
   MutationLimitsOptions,
+  QueryFeatures,
   Runtime,
   RuntimeRegistration,
   SimfinityError,
@@ -48,6 +49,8 @@ export type {
   ScopeParams,
   TypePermissions,
   TypeScopes,
+  VirtualFieldDeclaration,
+  VirtualFieldOptions,
 } from '@simtlix/simfinity-core';
 export * from '@simtlix/simfinity-mcp';
 export { default as mcp } from '@simtlix/simfinity-mcp';
@@ -88,6 +91,13 @@ export interface MongoAdapterOptions {
  */
 export interface MongoAdapter extends DatabaseAdapter {
   readonly referentialIntegrity: 'off' | 'transactional';
+  /**
+   * Frozen; lists every `QLOperator` value. The literal text operators compile to escaped regular
+   * expressions: `ILIKE` unanchored, `STARTS_WITH` and `ISTARTS_WITH` anchored with `^`, `ENDS_WITH` and
+   * `IENDS_WITH` with `\z`, and `IEQ` with both, with the `i` option for the case-insensitive ones. A
+   * copy of the adapter without this member supports only the operators of 3.7.0.
+   */
+  readonly queryFeatures: QueryFeatures;
   /**
    * Accepts only an ObjectId or a 24-character hexadecimal string, normalized to lowercase, and
    * throws `NOT_VALID_ID` (400) for anything else, including undefined, null and numbers. It never
@@ -165,6 +175,13 @@ export function addNoEndpointType(gqltype: GraphQLObjectType): void;
  * Embedded types that contain each other throw INVALID_MODEL (400, `Embedded cycle at …`) when a
  * generated model's embedded fields reach them, and always in transactional mode; in default mode a
  * cycle that only supplied models reach is not checked.
+ * Invalid virtual field declarations (`extensions.virtual`, see `VirtualFieldOptions`) throw
+ * INVALID_MODEL (400) before models are created, in both referentialIntegrity modes. A virtual field
+ * gets no path, `[]` default or index in generated models, on entities and embedded types, and no
+ * entry in the transactional integrity registry, so it needs no `relation` in either mode; generated
+ * writes never set or unset it. A supplied model keeps the paths it declares. A readOnly field with
+ * arguments and its own resolver that is not virtual, and is not a reference or collection, logs a
+ * `Configuration issue` warning once.
  * A generated input that would have no fields is left out with a warning, together with the
  * collection operation, embedded field or add/update/state-action mutation that would take it; a
  * non-null embedded field whose embedded type has no writable fields throws INVALID_MODEL (400)
@@ -303,6 +320,7 @@ export interface FilterGroupInput {
  * pipeline. `input.aggregation` filters a field named `aggregation`; the aggregate stage is never
  * built here. An embedded `.id` path uses the declared `id` member, except for entity types embedded
  * as lists and supplied subdocument schemas without an `id` path, which use the subdocument `_id`.
+ * A filter, condition or sort path through a virtual field rejects with `INVALID_FILTER_FIELD` (400).
  */
 export function buildQuery(
   input: Record<string, any>,
@@ -310,7 +328,10 @@ export function buildQuery(
   isCount?: boolean,
 ): Promise<Array<Record<string, any>>>;
 
-/** Translate a QLFilterGroup into a MongoDB `$match` expression, collecting required lookups. */
+/**
+ * Translate a QLFilterGroup into a MongoDB `$match` expression, collecting required lookups. A
+ * condition path through a virtual field rejects with `INVALID_FILTER_FIELD` (400).
+ */
 export function buildFilterGroupMatch(
   filterGroup: FilterGroupInput,
   gqltype: GraphQLObjectType,

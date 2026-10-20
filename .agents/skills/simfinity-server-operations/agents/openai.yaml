@@ -1,0 +1,4 @@
+interface:
+  display_name: "Simfinity Server Operations"
+  short_description: "Run workers, commands and native atomic operations"
+  default_prompt: "Use $simfinity-server-operations to implement this server-side operation with explicit authorization and transaction ownership."

@@ -6,7 +6,7 @@ A Node.js framework that turns GraphQL object types into generated queries, muta
 
 Read the [documentation website](https://simtlix.github.io/simfinity.js/): start with the [quick start](https://simtlix.github.io/simfinity.js/guide/getting-started.html), explore the [guides](https://simtlix.github.io/simfinity.js/guide/schema.html), or consult the [API reference](https://simtlix.github.io/simfinity.js/reference/api.html). The website source is in [`docs/`](docs/).
 
-For a complete application, run the [Barber examples](examples/barber/README.md): independent MongoDB and PostgreSQL backends with one shared Next.js frontend, synthetic demo data, Docker setup, and a dedicated CI workflow. Both backends consume released Simfinity 3.7.0 packages from npm. Their shared HTTP matrix verifies filters, aggregates, scopes and nested mutations; see the [API test commands and reference-integrity boundary](examples/barber/README.md#validate-changes).
+For a complete application, run the [Barber examples](examples/barber/README.md): independent MongoDB and PostgreSQL backends with one shared Next.js frontend, synthetic demo data, Docker setup, and a dedicated CI workflow. Both backends consume released Simfinity 3.8.0 packages from npm. Their shared HTTP matrix verifies filters, aggregates, scopes and nested mutations; see the [API test commands and reference-integrity boundary](examples/barber/README.md#validate-changes).
 
 Run the documentation website locally with Node.js 22+:
 
@@ -109,7 +109,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.7.0
+npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.9.0
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies. Keep them within the ranges above so your application and Simfinity share a single Mongoose and GraphQL instance; npm reports an out-of-range version as a peer conflict. The MCP transports need the optional peer `@modelcontextprotocol/sdk@^1.31.0`, which is not installed automatically, and `graphql-middleware` is not a Simfinity dependency.
@@ -153,7 +153,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.7.0 @modelcontextprotocol/sdk@^1.31.0
+npm install @simtlix/simfinity-mcp@3.9.0 @modelcontextprotocol/sdk@^1.31.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
@@ -326,7 +326,7 @@ Empty strings, `false`, `0`, and empty arrays are persisted after validators acc
 
 Every relationship or embedded `terms` entry is combined with AND, including repeated paths such as `age GTE 18` and `age LTE 30`. These conditions remain ANDed with top-level logical groups and scope filters. Filter and list-sort paths must resolve to declared scalar or enum fields. Client filter, sort and aggregation paths cannot name a field with `extensions.queryable: false` or an application-defined `resolve` unless it sets `extensions.queryable: true`; such paths fail with `FORBIDDEN_FILTER_PATH` (403). This covers masking resolvers, relationship fields with a manual resolver, and a custom `id` resolver. When upgrading, remove manual relationship resolvers that only load the related record, because Simfinity generates them, or set `queryable: true` on fields whose resolver returns the stored value. Paths through scoped relationships apply the target's scope, as described under [Query Scope](#-query-scope), and the authorization plugin checks field rules for every path segment. Root and relationship `id` paths refer to the stored `_id`. Inside an embedded object, `id` is the declared `id` member, except for entity types embedded as lists and supplied subdocument schemas without an `id` path, which use the subdocument `_id`; see [IDs in paths](docs/guide/queries.md#ids-in-paths). Comparisons use the connected Mongoose model's schema, so supplied string or numeric ID models retain their identifier representation.
 
-Filter values must use the field's JSON scalar type. `IN` and `NIN` require flat lists, `BTW` requires exactly two non-null bounds, and `LIKE` requires a string search fragment. Literal objects, nested lists, null list elements, invalid operators, unknown paths, and malformed groups are rejected with a structured 400 error instead of being ignored. Explicit `null` remains supported by `EQ` and `NE`. List items may be operation variables, as in `value: [$from, $to]`. Declare them as `QLValue` (or `QLValue!`): GraphQL rejects other declared types, such as `Int` or `String`, in that position. A list item whose variable the request leaves unset reads as `null`, as GraphQL reads list arguments, so it is rejected like an explicit null element. Enum literals such as `value: ACTIVE` or `value: [ACTIVE, INACTIVE]` are read as the enum names, like `"ACTIVE"`. Enum names or declared internal enum values are converted to the stored representation; state-machine `state` filters preserve stored state names. Date filters convert valid date values without mutating the query input. Validated string scalars support partial `LIKE` searches, and range filters use their base scalar type rather than the field's create/update validation constraints.
+Filter values must use the field's JSON scalar type. `IN` and `NIN` require flat lists, `BTW` requires exactly two non-null bounds, and `LIKE` and the other text operators require a string value on a `String` field or list. Literal objects, nested lists, null list elements, invalid operators, unknown paths, and malformed groups are rejected with a structured 400 error instead of being ignored. Explicit `null` remains supported by `EQ` and `NE`. List items may be operation variables, as in `value: [$from, $to]`. Declare them as `QLValue` (or `QLValue!`): GraphQL rejects other declared types, such as `Int` or `String`, in that position. A list item whose variable the request leaves unset reads as `null`, as GraphQL reads list arguments, so it is rejected like an explicit null element. Enum literals such as `value: ACTIVE` or `value: [ACTIVE, INACTIVE]` are read as the enum names, like `"ACTIVE"`. Enum names or declared internal enum values are converted to the stored representation; state-machine `state` filters preserve stored state names. Date filters convert valid date values without mutating the query input. Validated string scalars support partial text searches, and range filters use their base scalar type rather than the field's create/update validation constraints.
 
 Query with powerful filtering options:
 
@@ -353,10 +353,16 @@ query {
 - `LT` - Less than
 - `GTE` - Greater than or equal
 - `LTE` - Less than or equal
-- `LIKE` - Pattern matching
 - `IN` - In array
 - `NIN` - Not in array
 - `BTW` - Between two values
+- `LIKE` - Literal substring, respecting case
+- `ILIKE` - Literal substring, ignoring case
+- `STARTS_WITH`, `ISTARTS_WITH` - Literal prefix, respecting or ignoring case
+- `ENDS_WITH`, `IENDS_WITH` - Literal suffix, respecting or ignoring case
+- `IEQ` - Equal, ignoring case
+
+The text operators match their value literally, so `%`, `_` and regular-expression characters match themselves, and `""` matches every non-null string except with `IEQ`. On a `String` list, some element must match. Both backends fold case with the Unicode simple case foldings, except for `İ` and letters newer than one side's Unicode tables, and on PostgreSQL the case-insensitive operators need a `UTF8` database on a server built with ICU; see [text operators](docs/guide/queries.md#text-operators) for the rules, the differences and the PostgreSQL indexes that serve them, which `caseFoldExpression()` writes. A custom database adapter or SQL plugin receives them only after it declares them in `queryFeatures`.
 
 ### Logical Filters (AND / OR)
 
@@ -694,7 +700,7 @@ query {
 }
 ```
 
-**Note**: Collection field filtering uses the exact same format as main query filtering, ensuring consistency across your GraphQL API. All available operators (`EQ`, `NE`, `GT`, `LT`, `GTE`, `LTE`, `LIKE`, `IN`, `NIN`, `BTW`) work with collection fields.
+**Note**: Collection field filtering uses the exact same format as main query filtering, ensuring consistency across your GraphQL API. All available operators (`EQ`, `NE`, `GT`, `LT`, `GTE`, `LTE`, `IN`, `NIN`, `BTW`, `LIKE`, `ILIKE`, `STARTS_WITH`, `ISTARTS_WITH`, `ENDS_WITH`, `IENDS_WITH`, `IEQ`) work with collection fields.
 
 ## 🔗 Relationships
 
@@ -2637,10 +2643,20 @@ const BookType = new GraphQLObjectType({
       extensions: {
         unique: true
       }
+    },
+    readers: {
+      type: GraphQLInt,
+      args: { since: { type: new GraphQLNonNull(GraphQLString) } },
+      extensions: {
+        virtual: true        // Computed by its resolver; never stored, filtered or written
+      },
+      resolve: (book, { since }) => countReaders(book._id ?? book.id, since)
     }
   })
 });
 ```
+
+A virtual field (`extensions: { virtual: true }`) is computed by its own resolver on every read. No backend stores it, generated inputs leave it out, and list queries have no filter, sort or aggregation argument or path for it: client paths through it fail with `FORBIDDEN_FILTER_PATH`. Clients read it through the type's generated queries, after the type's middleware and scope, so use one for a read that the filter language cannot express. Its result can be any output type, registered or not, without `relation`. Generated MCP tools give a virtual field with a required argument its own read tool, here `book_readers`; `extensions: { virtual: { mcp: 'select' } }` lets list tools select a field without required arguments, and `{ mcp: false }` turns the tool off. See [virtual fields](https://simtlix.github.io/simfinity.js/guide/queries.html#virtual-fields).
 
 ### Custom Queries
 
@@ -2760,6 +2776,10 @@ console.log(UserType.getFields()); // Access GraphQL fields
 const BookInput = simfinity.getInputType(BookType);
 ```
 
+For jobs, workers, webhooks and other server code, read [server-side operations](docs/guide/server-side-operations.md): it shows when to use a mutation with nested writes, a controller hook, in-process execution of the generated schema, a custom mutation with `saveObject()` or the native model with the session, and what each of them runs. [Usage anti-patterns](docs/guide/anti-patterns.md) lists the approaches to avoid.
+
+The optional [application ESLint plugin](docs/guide/linting.md) provides eight rules for specific Simfinity 3.8.0 contracts, including permission-map shapes, rule composition and required role/permission names. Install the separate development tool with `npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.1.0'`. It has no automatic permission or storage fixes. It complements the application skills; it does not certify authorization, scopes or transaction safety.
+
 ## 🤖 MCP Generation
 
 Simfinity can automatically expose every generated GraphQL operation as a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) tool. For each connected type you get one MCP tool per generated query and mutation — exactly mirroring the GraphQL surface:
@@ -2774,10 +2794,11 @@ Simfinity can automatically expose every generated GraphQL operation as a [Model
 | Delete mutation | `deletebook` |
 | State-machine action | `publish_book` |
 | Custom mutation | _the registered name_ |
+| Virtual field with a required argument | `book_readers` (`<byIdQuery>_<field>`) |
 
 Each generated tool follows MCP best practices so an agent can use it without extra context:
 
-- **`description`**: reuses the GraphQL type/field descriptions and adds an actionable summary. List and aggregate tools spell out the available filter operators (`EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE`), `AND`/`OR` groups, pagination and sorting; aggregate tools additionally document the `SUM/COUNT/AVG/MIN/MAX` operations and the `aggregation` argument.
+- **`description`**: reuses the GraphQL type/field descriptions and adds an actionable summary. List and aggregate tools spell out the available filter operators (`EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE, ILIKE, STARTS_WITH, ISTARTS_WITH, ENDS_WITH, IENDS_WITH, IEQ`), `AND`/`OR` groups, pagination and sorting; aggregate tools additionally document the `SUM/COUNT/AVG/MIN/MAX` operations and the `aggregation` argument.
 - **`title`**: a human-readable label (e.g. `List Book`, `Create Book`, `Aggregate Book`). State-machine actions, custom mutations and custom queries are titled by their field name.
 - **`inputSchema`**: JSON Schema derived from the GraphQL arguments (scalars, enums, input objects, lists, non-null wrappers, and recursive filter types such as `QLFilterGroup` via `$defs`/`$ref`). Nullable arguments, input fields and list items accept explicit `null`; non-null positions reject it. Nullable references use `anyOf` with a null alternative. GraphQL type and field descriptions are propagated, with curated descriptions for synthetic types. `Date`/`DateTime`/`Time` scalars use the matching JSON Schema `format` as a hint for the value to send (input only; see `outputSchema`). Defaulted arguments are optional; representable defaults appear in the schema and generated GraphQL variables, with enum member names rather than internal values. Omitted opaque scalar defaults that have no GraphQL literal representation use the field's original default. Validated scalars, including chains built on other validated scalars, use the JSON type of their root scalar; a custom scalar's description is published unless the field or argument has its own. The arguments object is closed (`additionalProperties: false`): hosts that validate tool input reject undeclared keys, and `callTool` rejects an undeclared key the caller sent with `MCP_UNKNOWN_ARGUMENT` (see [Tool results and errors](#tool-results-and-errors)). Nested input objects are not closed in the schema; GraphQL already rejects their unknown fields.
 - **`outputSchema`**: JSON Schema describing the returned data (mirroring the auto-generated selection set), with type/field descriptions. Every nullable GraphQL position also accepts `null` (e.g. `type: ['string', 'null']`; enums get `null` appended), so validating MCP clients accept the `null`s GraphQL legitimately returns in `structuredContent` (get-by-id misses, unset optional fields). A scalar gets a JSON `type` only when it is a GraphQL spec scalar (`Int`, `Float`, `String`, `Boolean`, `ID`) or a `createValidatedScalar` chain ending at one. Any other scalar serializes with its own `serialize`, so it is published without a `type` or `format`: `Date`, `DateTime` and `Time` (an identity scalar sends an ISO instant, others epoch milliseconds or `YYYY-MM-DD`), custom scalars with a hand-set `baseScalarType` storage hint (such as a `Decimal` hinted as `Float` that sends `'12.30'`) and opaque scalars. Date/time scalars without a description get one saying their JSON form is defined by the server's scalar. Input schemas keep the `format` hints, so an input `Time` argument still advertises `format: 'time'` while outputs carry whatever `serialize` returns; hosts that validate input formats can reject a value copied from an output. Next to the root field, the schema declares the optional keys MCP adds: `totalCount` on list tools with a `pagination` argument, and `truncated` on mutation tools when `limits.maxResultBytes` is set (`__totalCount`/`__truncated` when the root field has that name).
@@ -2876,7 +2897,7 @@ The handler catches all errors itself: `onError` is for logging/metrics, and a J
 | --- | --- | --- |
 | `execution` | `{ mode: 'in-process' }` | `in-process` runs against the in-memory `schema`. `remote` issues HTTP GraphQL requests: `{ mode: 'remote', endpoint, headers, timeoutMs, retry: { attempts, backoffMs, retryAfter, maxRetryAfterMs, jitter } }`. Remote `endpoint` (for credentials only), `headers` and `timeoutMs` are validated at setup (`MCP_INVALID_EXECUTION_CONFIG`) and read again on every call. See [Remote execution](#remote-execution). |
 | `context` | `{}` | GraphQL context value, or a factory. For in-process/stdio it is called as `(extra) => context`; for the HTTP handler it is called as `(req, extra) => context` so you can authenticate per request. Passed through to execution so `scope` functions and auth rules work (they read `context.user`). |
-| `include` / `exclude` | — | String or array: raw GraphQL field names, prefixed tool names, or the categories `'query'` / `'mutation'`. `exclude` wins over `include`. |
+| `include` / `exclude` | — | String or array: raw GraphQL field names, prefixed tool names, or the categories `'query'` / `'mutation'`. `exclude` wins over `include`. A virtual field tool matches its own names (`book_readers`), not its by-ID query's. |
 | `includeTypes` / `excludeTypes` | — | String or array of entity (return) type names — one entry covers every tool for that entity (`'Book'` matches `book`, `books`, `books_aggregate`, `addbook`, ...). `excludeTypes` wins. |
 | `selectionDepth` | `1` | Nesting depth for the auto-generated output selection set (and the mirrored `outputSchema`). Each nested collection it reaches is read with one query per returned row, or, with an adapter that batches collection reads, one per nested collection field and batch of rows ([batched collection reads](https://simtlix.github.io/simfinity.js/guide/relationships.html#batched-collection-reads)). |
 | `nestedCollections` | `'all'` | `'none'` leaves nested collections (object list fields with a `pagination` argument, such as non-embedded one-to-many relations) out of the generated selection set and `outputSchema`. Also per tool in `toolOverrides`, where the tool's value wins; ignored with `selection`. Other values throw `MCP_INVALID_OPTIONS` at setup. |
@@ -2893,7 +2914,7 @@ The handler catches all errors itself: `onError` is for logging/metrics, and a J
 
 In TypeScript, the `options` parameter is typed `GenerateMCPToolsInit` (`generateMCPTools`), `MCPServerInit` (`createMCPServer`, `startStdioMCPServer`) or `HTTPMCPHandlerInit` (`createHTTPMCPHandler`). Each accepts every value of its option interface plus the wider forms the runtime takes. `limits` may be an `MCPLimitsInit`, whose caps are numbers, numeric strings, bigints, `null` or `false`. A remote `execution` may be an `MCPRemoteExecutionInit`, whose `headers` is a plain object, `Headers`, `Map` or `[name, value]` pairs and whose `timeoutMs` is a number, numeric string, bigint, `null` or `false`. `GenerateMCPToolsOptions`, `MCPServerOptions`, `HTTPMCPHandlerOptions`, `MCPLimits` and `MCPRemoteExecutionOptions` keep the 3.5.6 shapes of their existing members and gain only optional ones (`nestedCollections`, `textFormat` and the `retry` opt-ins), so code that reads options back compiles unchanged.
 
-Selection sets select every scalar/enum field without required arguments, `id` included. An object type with no such field selects `__typename`, and interface/union return types select `__typename`, so the generated documents are always statically valid — and the output schemas mirror the same fallbacks.
+Selection sets select every scalar/enum field without required arguments, `id` included, except that tools whose root field returns a list select only the virtual fields that set `mcp: 'select'`, since each listed record runs their resolvers. An object type with no such field selects `__typename`, and interface/union return types select `__typename`, so the generated documents are always statically valid — and the output schemas mirror the same fallbacks.
 
 ### Selecting and naming tools
 
@@ -2914,7 +2935,7 @@ console.log(getOperation('catalog_books'));
 
 - `include`/`exclude` entries match the raw GraphQL field name, the prefixed tool name, or the categories `'query'` / `'mutation'`. `exclude` always wins over `include`.
 - `includeTypes`/`excludeTypes` match the entity (return) type. Aggregate queries resolve their entity through the sibling list field (`books_aggregate` → `books`), so `excludeTypes: 'Book'` also hides the aggregate tool. With an `includeTypes` allowlist, tools without an object return type are dropped too.
-- Duplicate tool names (e.g. a Query field and a Mutation field sharing a name) are not allowed by MCP: the first tool wins and the later one is skipped with a `console.warn` — rename one of the GraphQL fields or use `include`/`exclude`.
+- Duplicate tool names (e.g. a Query field and a Mutation field sharing a name) are not allowed by MCP: the first tool wins and the later one is skipped with a `console.warn` — rename one of the GraphQL fields or use `include`/`exclude`. Virtual field tools come after every query and mutation tool, so they are the ones skipped.
 
 ### Customizing tools
 

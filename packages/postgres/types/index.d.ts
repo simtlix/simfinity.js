@@ -33,6 +33,8 @@ export type {
   StateMachine,
   TypePermissions,
   TypeScopes,
+  VirtualFieldDeclaration,
+  VirtualFieldOptions,
 } from '@simtlix/simfinity-core';
 
 export interface DatabaseColumn {
@@ -223,12 +225,18 @@ export interface PostgresRuntime extends Runtime<PostgresModel, PostgresSession>
    * Must be awaited before operations execute. Does not synchronize incompatible schemas. A request rejected before
    * storage is touched, such as an unknown mode (INVALID_INITIALIZATION_MODE, 400) or, on a validation-only runtime,
    * a non-empty mode other than validate (DATABASE_CREATION_DISABLED, 409), keeps the current readiness; a ready runtime keeps serving while it is initialized again, and any failure of the latest
-   * initialization makes it unavailable.
+   * initialization makes it unavailable. When the database still holds storage of a field that is now virtual (`extensions.virtual`), such as its column,
+   * the SCHEMA_MISMATCH (409) message also names the field and gives the migration.
    */
   initializeDatabase(options?: InitializationOptions): Promise<InitializationResult>;
   withTransaction<T>(session: PostgresSession | null | undefined, callback: (session: PostgresSession) => Promise<T> | T): Promise<T>;
 }
-/** PostgreSQL 15+ plugin for createSQL; omitted options allow later runtime.configure. */
+/**
+ * PostgreSQL 15+ plugin for createSQL; omitted options allow later runtime.configure. Its `queryFeatures` lists every
+ * `QLOperator` value. The case-insensitive text operators fold case with {@link caseFoldExpression}, which needs a UTF8
+ * database with the ICU collation `und-x-icu`: on another database, such as one in LATIN1 or on a server built without
+ * ICU, they fail with UNSUPPORTED_QUERY (400), and every other operation works.
+ */
 export function postgresPlugin(options?: PostgresConfiguration): SQLPlugin<
   PostgresConfiguration,
   DatabaseQueryable,
@@ -241,6 +249,17 @@ export function postgresPlugin(options?: PostgresConfiguration): SQLPlugin<
   }
 >;
 export function createPostgres(options?: PostgresConfiguration): PostgresRuntime;
+/**
+ * The SQL text with which ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ fold both sides of their comparison, for an SQL
+ * expression such as a quoted column name or a jsonb member: `translate(lower((<expression>) COLLATE
+ * "pg_catalog"."und-x-icu"), '<22 characters>', '<their simple case foldings>')`, the Unicode simple case foldings that
+ * MongoDB's case-insensitive matching applies. Indexes serve these operators only on exactly this expression, so build
+ * them with it, for example `CREATE INDEX ... (${caseFoldExpression('"name"')} text_pattern_ops)` or
+ * `CREATE INDEX ... (${caseFoldExpression('"details" ->> \'label\'')})`. The expression is inserted as given, in
+ * parentheses, so that COLLATE applies to all of it; pass trusted SQL, never request input. Throws a TypeError for
+ * anything other than a non-empty string.
+ */
+export function caseFoldExpression(sqlExpression: string): string;
 export const configure: PostgresRuntime['configure'];
 export const connect: PostgresRuntime['connect'];
 export const addNoEndpointType: PostgresRuntime['addNoEndpointType'];

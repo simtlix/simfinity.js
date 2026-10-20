@@ -109,8 +109,14 @@ test('confirmed bookings reject overlaps, expose only busy times and serialize c
   }
   const moved = await mutation('addbooking', add(second, '10:00'), 'id');
   assert.equal(code(await mutation('updatebooking', { id: moved.id, professional: { id: String(first._id) } }, 'id', true)), 'BOOKING_SLOT_UNAVAILABLE');
-  const busy = await mutation('bookingAvailability', { barbershopId: shop.id, date: scheduledDate, professionalId: String(first._id) }, 'startTime endTime professionalId');
-  assert.deepEqual(busy.map((range) => ({ ...range })), [{ startTime: '10:00', endTime: '10:30', professionalId: String(first._id) }]);
+  const busy = await graphql({
+    schema,
+    source: 'query($id: ID, $date: String!, $professionalId: ID) { barbershop(id: $id) { busyRanges(date: $date, professionalId: $professionalId) { startTime endTime professionalId } } }',
+    variableValues: { id: shop.id, date: scheduledDate, professionalId: String(first._id) },
+    contextValue: context,
+  });
+  assert.equal(busy.errors, undefined, JSON.stringify(busy.errors));
+  assert.deepEqual(busy.data.barbershop.busyRanges.map((range) => ({ ...range })), [{ startTime: '10:00', endTime: '10:30', professionalId: String(first._id) }]);
 
   const race = (inputs) => Promise.all(inputs.map((input) => graphql({ schema, source: 'mutation($input: bookingInput!) { addbooking(input: $input) { id } }', variableValues: { input }, contextValue: context })));
   for (const inputs of [[add(first, '14:00'), add(first, '14:00')], [add(null, '16:00'), add(second, '16:00')]]) {

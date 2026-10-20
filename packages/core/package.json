@@ -1,6 +1,6 @@
 {
   "name": "@simtlix/simfinity-core",
-  "version": "3.7.0",
+  "version": "3.9.0",
   "description": "Driver-free GraphQL runtime and model metadata for Simfinity",
   "type": "module",
   "main": "./src/index.js",
@@ -52,6 +52,7 @@
       "default": "./src/auth/rules.js"
     },
     "./internal/object-id": "./src/auth/object-id.js",
+    "./internal/query-operators": "./src/query-operators.js",
     "./internal/relation-storage": "./src/relation-storage.js",
     "./plugins": {
       "types": "./types/plugins.d.ts",

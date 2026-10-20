@@ -5,7 +5,7 @@ description: Model embedded objects and referenced collections, then create and 
 
 # Relationships
 
-Use `extensions.relation` on fields whose value is another GraphQL object or a list of objects. This metadata tells Simfinity how to store the relationship, generate inputs, and resolve related records.
+Use `extensions.relation` on fields whose value is another GraphQL object or a list of objects. This metadata tells Simfinity how to store the relationship, generate inputs, and resolve related records. A [virtual field](./queries#virtual-fields) that your resolver computes, even one that returns registered entities, stores nothing and takes no `relation`.
 
 <DomainDiagram kind="relationships" />
 

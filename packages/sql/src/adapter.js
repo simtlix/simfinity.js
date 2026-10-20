@@ -1,5 +1,6 @@
 import { describeModels, createQueryPlan, SimfinityError } from '@simtlix/simfinity-core';
 import { planRelationalSchema } from './schema/plan.js';
+import { locateVirtualFields } from './schema/virtual.js';
 import { bindPlugin, assertCapabilities } from './plugin.js';
 import { createRecordStore } from './records.js';
 import { createTransactions } from './transactions.js';
@@ -15,12 +16,17 @@ export const createSQLAdapter = (sourcePlugin) => {
   const { castId, createId } = plugin.values;
   const { driver } = plugin;
   const options = plugin.options;
+  // The operators the plugin's compileQuery compiles. Plans reject the others with UNSUPPORTED_QUERY, also for reads
+  // that do not go through the runtime, such as model.find().
+  const { operators } = plugin.queryFeatures;
   let configured = options ? Object.freeze({ ...options }) : null;
   let prepared = false;
   let ready = false;
   let initializations = 0;
   let allowSchemaCreation = true;
   let models; let database; let records;
+  // Where virtual fields would hold storage; passed to plugin.initialize only when there are any.
+  let virtualFields = [];
   // Entities whose rows hydrate from owned child tables; reading one takes several statements.
   let snapshotEntities = new Set();
   const handles = new Map();
@@ -48,7 +54,7 @@ export const createSQLAdapter = (sourcePlugin) => {
   };
   const execute = async (model, gqltype, args, session, mode, extra) => {
     const name = nameOf(model);
-    const plan = createQueryPlan(models, name, args, { mode });
+    const plan = createQueryPlan(models, name, args, { mode, operators });
     const compiled = plugin.compileQuery(models, database, plan, extra, configured);
     const { rows } = await query(compiled, session);
     if (mode === 'count') return Number(rows[0]?.size || 0);
@@ -100,7 +106,7 @@ export const createSQLAdapter = (sourcePlugin) => {
     const keys = parentIds.map((id) => castId(id));
     const ids = [...new Set(keys)];
     if (!ids.length) return [];
-    const plan = createQueryPlan(models, name, args, { mode: 'find' });
+    const plan = createQueryPlan(models, name, args, { mode: 'find', operators });
     const chunks = [];
     for (let start = 0; start < ids.length; start += CHILDREN_BATCH_SIZE) {
       const chunk = ids.slice(start, start + CHILDREN_BATCH_SIZE);
@@ -136,6 +142,8 @@ export const createSQLAdapter = (sourcePlugin) => {
     return this?.findChildren === findChildren;
   }
   const adapter = {
+    // What the runtime may send: the plugin's queryFeatures, or the operators of 3.7.0 for a plugin without them.
+    queryFeatures: plugin.queryFeatures,
     configure(value) {
       if (configured || prepared) throw new SimfinityError(`${plugin.displayName} configuration is already bound`, 'DATABASE_ALREADY_CONFIGURED', 409);
       configured = Object.freeze({ ...value });
@@ -159,6 +167,7 @@ export const createSQLAdapter = (sourcePlugin) => {
       const plan = planRelationalSchema(models, { schema: configured?.schema || plugin.defaultSchema, naming: plugin.naming });
       assertCapabilities(plugin, plan);
       database = plugin.describeSchema(plan, configured);
+      virtualFields = locateVirtualFields(models, plan);
       allowSchemaCreation = createCollection;
       snapshotEntities = new Set(database.tables.filter((table) => table.ownership).map((table) => table.ownership.ownerTable));
       records = createRecordStore(models, database, query, plugin, { multiRowInserts: configured?.multiRowInserts });
@@ -218,7 +227,11 @@ export const createSQLAdapter = (sourcePlugin) => {
       // initialization decides readiness, and any failure of it marks storage unavailable.
       const attempt = ++initializations;
       try {
-        const result = await plugin.initialize(configured, database, effective);
+        // Plugins without virtual fields keep receiving three arguments; the context lets one name a virtual
+        // field whose earlier storage is still in the database when it reports SCHEMA_MISMATCH.
+        const result = await (virtualFields.length
+          ? plugin.initialize(configured, database, effective, { virtualFields: structuredClone(virtualFields) })
+          : plugin.initialize(configured, database, effective));
         if (attempt === initializations) ready = true;
         return result;
       } catch (error) {

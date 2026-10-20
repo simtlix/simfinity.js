@@ -1,5 +1,6 @@
 import { getNamedType, isEnumType } from 'graphql';
 import { SimfinityError } from '@simtlix/simfinity-core';
+import { isCaseFoldUnsupported } from './query/case-fold.js';
 
 export const storageTypes = { ID: 'uuid', String: 'text', Enum: 'text', Int: 'integer', Float: 'double precision', Boolean: 'boolean', DateTime: 'timestamp with time zone' };
 export const invalidValue = (message) => { throw new SimfinityError(message, 'INVALID_FILTER_VALUE', 400); };
@@ -69,10 +70,14 @@ export const isRetryableDatabaseError = (error) => ['40001', '40P01'].includes(e
 // An application error that only has a `code`, such as ECONNREFUSED or a domain code, is not one.
 export const isPostgresError = (error) => typeof error?.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) && typeof error.severity === 'string';
 
+// A statement that folds case on a database that cannot evaluate the fold (see isCaseFoldUnsupported): the request
+// uses an operator that this database cannot run, while every other operation keeps working.
+const CASE_FOLD_UNSUPPORTED = ['ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ need a UTF8 database with the ICU collation und-x-icu', 'UNSUPPORTED_QUERY', 400];
+
 /** Maps PostgreSQL errors (and exhausted retries) without SQL details; returns every other value unchanged. */
 export const normalizeDatabaseError = (error) => {
   if (error instanceof SimfinityError || !(isPostgresError(error) || isRetryableDatabaseError(error))) return error;
-  const normalized = new SimfinityError(...(databaseErrors[error.code] || ['Database operation failed', 'DATABASE_ERROR', 500]));
+  const normalized = new SimfinityError(...(isCaseFoldUnsupported(error) ? CASE_FOLD_UNSUPPORTED : databaseErrors[error.code] || ['Database operation failed', 'DATABASE_ERROR', 500]));
   // Kept for server logging, but non-enumerable as on a native Error, so serializing or spreading the
   // client-facing error never copies the driver's detail, table or constraint.
   Object.defineProperty(normalized, 'cause', { value: error, writable: true, configurable: true, enumerable: false });

@@ -131,11 +131,11 @@ For a connected `Serie` type:
 | Root queries | `serie`, `series`, `series_aggregate` |
 | Root mutations | `addserie`, `updateserie`, `deleteserie` |
 
-Scalar and enum fields become filters on the list query. Object and collection fields receive relation-aware inputs. State machines add their own action mutations.
+Scalar and enum fields become filters on the list query, except [virtual fields](./queries#virtual-fields), which get neither filters nor inputs. Object and collection fields receive relation-aware inputs. State machines add their own action mutations.
 
 A GraphQL input object needs at least one field, so Simfinity leaves out a generated input that would have none, and logs a `Configuration issue` warning:
 
-- A type without writable fields, such as one with only `id` and `readOnly` fields, has no `add<type>` mutation; create its records with a registered mutation whose input is not `getInputType(Type)`, which has no fields. A state machine type whose only writable field is its managed `state` has none either; that registered mutation must set the initial state, as `saveObject()` does. Without a writable `id` (none, or a `readOnly` one), the type also has no `update<type>` mutation or state machine actions, only `delete<type>`.
+- A type without writable fields, such as one with only `id` and `readOnly` or virtual fields, has no `add<type>` mutation; create its records with a registered mutation whose input is not `getInputType(Type)`, which has no fields. A state machine type whose only writable field is its managed `state` has none either; that registered mutation must set the initial state, as `saveObject()` does. Without a writable `id` (none, or a `readOnly` one), the type also has no `update<type>` mutation or state machine actions, only `delete<type>`.
 - A referenced collection whose child has no writable field besides its back-reference has no `added` operation, and one whose child's update input would be empty has no `updated` operation; see [create children with their parent](./relationships#create-children-with-their-parent).
 - An embedded field whose embedded type has no writable fields is left out of the owner's create input, update input or both; an embedded type whose only writable field is `id` stays in update inputs only. When such a field is non-null (`stamp: Stamp!` or `stamps: [Stamp]!`), generated creates could not set it, so `createSchema()` throws `INVALID_MODEL` (400, `Doc.stamp is non-null but its embedded type Stamp has no writable fields, …`) when the schema's generated mutations reach the owner's create input; otherwise the field is only left out. Mark the field `readOnly` and set it in a controller, or make it nullable.
 
@@ -147,7 +147,7 @@ Interface and union fields are output-only on the default MongoDB runtime and wi
 - Resolve these fields yourself and mark them `readOnly`.
 - A type whose generated input would have no fields, such as a collection child with only `id`, the back-reference and `readOnly` or interface/union fields, loses the inputs and mutations that would take that input, with a warning, as described above. See the [upgrade notes](../resources/compatibility#generated-inputs-without-fields).
 
-PostgreSQL and `referentialIntegrity: 'transactional'` MongoDB reject these fields with `INVALID_MODEL` (400, `Unsupported field type at Type.field`).
+PostgreSQL and `referentialIntegrity: 'transactional'` MongoDB reject these fields with `INVALID_MODEL` (400, `Unsupported field type at Type.field`), unless they are [virtual](../reference/extensions#virtual): a virtual field stores nothing, so any output type, interfaces and unions included, works as its result on every backend.
 
 Every schema also contains `RelationType` and `FieldExtensionsType`, which describe field extensions in introspection. When the first Simfinity schema of a process has an application type with either name, Simfinity names its own types `SimfinityFieldExtensionsType` and `SimfinityRelationType` instead, with a number appended when those names are taken too, in every schema the process constructs from then on, and logs a `Configuration issue` warning; use these names in named fragments and permission maps. The first Simfinity schema of the process fixes the names, so a later `createSchema()` with a type that has one of the current names throws `RESERVED_TYPE_NAME` (500), before models are created when the type is an included endpoint type, a registered mutation's input or output type, an output type they reach or a field argument's type, and when the schema is constructed otherwise, such as for a type inside an input object's fields: create the schema that has such a type first, or rename the type. Test suites and processes with several runtimes depend on that order. See the [upgrade notes](../resources/compatibility#application-types-named-relationtype-or-fieldextensionstype). An application scalar named `JSON` is reused for [aggregation results](../reference/aggregation#input-types); any other application type named `JSON` makes `createSchema()` fail with `Schema must contain uniquely named types`.
 
@@ -179,10 +179,11 @@ Use standard GraphQL `extensions` to configure Simfinity behavior:
 | --- | --- | --- |
 | `relation` | Describe embedded objects and references | [Relationships](./relationships) |
 | `readOnly` | Exclude a field from create and update inputs | [Controllers](./controllers) |
+| `virtual` | Compute a field with its own resolver and store nothing | [Virtual fields](./queries#virtual-fields) |
 | `unique` | Add a unique index for supported generated string and number fields | [Field extensions](../reference/extensions) |
 | `validations` | Run validators during create and update materialization | [Validation](./validation) |
 
-A read-only field remains queryable. Set its persisted value in a controller or through your own model logic:
+A read-only field without its own resolver remains stored and queryable. Set its persisted value in a controller or through your own model logic:
 
 ```javascript
 const controller = {
@@ -195,6 +196,8 @@ simfinity.connect(null, SerieType, 'serie', 'series', controller);
 ```
 
 This registration replaces the earlier `connect()` line; perform it before building the schema.
+
+A field that your resolver computes on every read, optionally from arguments, is a [virtual field](./queries#virtual-fields): declare it with `extensions: { virtual: true }`, and no backend stores it, no generated input contains it, and client filter, sort and aggregation paths cannot name it. Clients read it through the type's generated queries, after the type's scope. Use one for a read that the filter language cannot express.
 
 ## Supporting types without endpoints
 
@@ -246,7 +249,7 @@ PostgreSQL applications call and await `initializeDatabase()` after `createSchem
 
 ## Work with the built schema
 
-Pass the schema directly to your server. Extend it through custom resolvers, Simfinity middleware, or Envelop plugins.
+Pass the schema directly to your server. Extend it through custom resolvers, such as [virtual fields](./queries#virtual-fields) on registered types, Simfinity middleware, or Envelop plugins.
 
 ::: warning Preserve schema identity
 Do not wrap a Simfinity schema with `graphql-middleware`'s `applyMiddleware()` or rebuild it with `mapSchema()`. Simfinity extends GraphQL introspection with relation metadata, and schema cloning can duplicate those types. Use the [Envelop authorization plugin](./authorization) and in-place resolver wrapping instead.

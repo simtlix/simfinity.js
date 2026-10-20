@@ -1,0 +1,4 @@
+interface:
+  display_name: "Simfinity Application Design"
+  short_description: "Design domain-driven Simfinity applications"
+  default_prompt: "Use $simfinity-application-design to design this application or migration around its domain and supported Simfinity lifecycle."

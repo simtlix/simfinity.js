@@ -1,6 +1,6 @@
 # Barber MongoDB backend
 
-An independent, private application using `@simtlix/simfinity-js@3.7.0`, Mongoose, Express, and GraphQL Yoga. It installs released packages from npm and is outside the monorepo's library workspaces. Use the [Barber quick start](../README.md) to run the complete Docker stack with the shared frontend.
+An independent, private application using `@simtlix/simfinity-js@3.8.0`, Mongoose, Express, and GraphQL Yoga. It installs released packages from npm and is outside the monorepo's library workspaces. Use the [Barber quick start](../README.md) to run the complete Docker stack with the shared frontend.
 
 ## Host development
 
@@ -105,7 +105,7 @@ Simfinity's MongoDB adapter adds one `$lookup` per relation hop before the `$mat
 
 PostgreSQL compiles the same terms to joins and is faster on all owner reads.
 
-`types/booking.schedule.js` holds the [booking rules](../README.md#booking-rules) shared by the booking controller and the `bookingAvailability` mutation in `types/customMutations.js`. Both read bookings with native Mongoose queries, outside the client booking scope. Before its overlap query, the controller increments a hidden `_bookingScheduleLock` counter on the professional document, or on the shop and all its professionals for a booking without one, in the same transaction. A concurrent booking for that schedule then hits a write conflict; Simfinity retries it with a fresh snapshot that sees the committed booking. Simfinity retries up to five times, each after a short random backoff, and the controller first waits another 20–100 ms at random to spread concurrent retries further apart. If every retry conflicts, the API returns `BOOKING_SCHEDULE_BUSY`.
+`types/booking.schedule.js` holds the [booking rules](../README.md#booking-rules) shared by the booking controller and the barbershop's virtual `busyRanges` field in `types/barbershop.busyRanges.js`. Both read bookings with native Mongoose queries, outside the client booking scope; the field reads without a session, since a query runs outside a transaction. The field is virtual, so the generated barbershop model has no path for it. Before its overlap query, the controller increments a hidden `_bookingScheduleLock` counter on the professional document, or on the shop and all its professionals for a booking without one, in the same transaction. A concurrent booking for that schedule then hits a write conflict; Simfinity retries it with a fresh snapshot that sees the committed booking. Simfinity retries up to five times, each after a short random backoff, and the controller first waits another 20–100 ms at random to spread concurrent retries further apart. If every retry conflicts, the API returns `BOOKING_SCHEDULE_BUSY`.
 
 The review controller recomputes the shop's `averageRating` and `reviewCount` with one aggregate in the review mutation's transaction and writes them with the same session. That write to the shop document also serializes concurrent reviews of one booking, so reviews need no lock field; see the [review rules](../README.md#review-rules).
 

@@ -10,7 +10,7 @@ Simfinity uses the standard GraphQL `extensions` property on fields and types to
 
 ## Introspection Initialization
 
-At import time, Simfinity adds an `extensions` field through `__Field.getFields()` if one is not already present. It preserves the existing field map and metadata type identity across repeated module evaluation with a shared GraphQL peer, including after fields or schemas have been materialized. The resolver returns the source field's original extensions; introspection exposes only `relation`, `stateMachine`, and `readOnly`, without removing arbitrary application metadata.
+At import time, Simfinity adds an `extensions` field through `__Field.getFields()` if one is not already present. It preserves the existing field map and metadata type identity across repeated module evaluation with a shared GraphQL peer, including after fields or schemas have been materialized. The resolver returns the source field's original extensions, except that a virtual field reads `readOnly: true` (`fieldMetadataOf` in `introspection.js`); introspection exposes only `relation`, `stateMachine` and `readOnly`, without removing arbitrary application metadata. `FieldExtensionsType` has no `virtual` field, so schemas without virtual fields introspect as before.
 
 This is still a global GraphQL extension. Schemas constructed afterward register `FieldExtensionsType` and `RelationType` (or their fallback names `SimfinityFieldExtensionsType` and `SimfinityRelationType`, numbered when taken, after an application type with one of those names was in the process's first Simfinity schema; a later clash throws `RESERVED_TYPE_NAME`); earlier schemas retain their original type maps and cannot validate named fragments on those new types. Schema cloning and `buildClientSchema()` roundtrips in a process that imported Simfinity remain unsupported; see the architecture rule.
 
@@ -18,7 +18,7 @@ This is still a global GraphQL extension. Schemas constructed afterward register
 
 ### `extensions.relation`
 
-Defines relationships between types. Required on every field whose type is another `GraphQLObjectType` or `GraphQLList` of one.
+Defines relationships between types. Required on every stored field whose type is another `GraphQLObjectType` or `GraphQLList` of one; a virtual field must not declare it.
 
 ```javascript
 fields: () => ({
@@ -68,7 +68,27 @@ internalCode: {
 }
 ```
 
-Controls client filter, sort, `groupId` and fact paths, which compare stored values. `inspectClientPaths` in `runtime.js` runs before middleware and throws `SimfinityError(..., 'FORBIDDEN_FILTER_PATH', 403)` when any path segment names a field with `queryable: false`, or a field with an application `resolve` unless it sets `queryable: true` (masking resolvers, manual relation resolvers, a custom `id` resolver). Only resolvers wrapped with `markGenerated` count as Simfinity's; `createSchema` snapshots application resolvers per type, so later in-place wrapping such as the auth plugin does not change the result. The generated filter argument remains in the schema; introspection does not expose `queryable`. `queryable: true` does not bypass auth path rules or joined `find` scopes. Paths added by middleware or scopes are trusted.
+Controls client filter, sort, `groupId` and fact paths, which compare stored values. A virtual field is never queryable, and `queryable: true` on one throws `INVALID_MODEL`. `inspectClientPaths` in `runtime.js` runs before middleware and throws `SimfinityError(..., 'FORBIDDEN_FILTER_PATH', 403)` when any path segment names a field with `queryable: false`, or a field with an application `resolve` unless it sets `queryable: true` (masking resolvers, manual relation resolvers, a custom `id` resolver). Only resolvers wrapped with `markGenerated` count as Simfinity's; `createSchema` snapshots application resolvers per type, so later in-place wrapping such as the auth plugin does not change the result. The generated filter argument remains in the schema; introspection does not expose `queryable`. `queryable: true` does not bypass auth path rules or joined `find` scopes. Paths added by middleware or scopes are trusted.
+
+### `extensions.virtual`
+
+```javascript
+busyRanges: {
+  type: new GraphQLList(new GraphQLNonNull(BusyRangeType)),
+  args: { date: { type: new GraphQLNonNull(GraphQLString) } },
+  extensions: { virtual: true },              // or { virtual: { mcp: 'tool' | 'select' | false } }
+  resolve: (shop, { date }, context) => listBusyRanges(shop, date, context),
+}
+```
+
+A field computed by its own resolver and stored nowhere, on every backend and mode. `virtualFieldOptions(field)` and `isVirtualField(field)` in `packages/core/src/relation-storage.js` (exported through the internal `./internal/relation-storage` subpath, and as public root exports of `@simtlix/simfinity-core` for custom adapters, whose `prepare()`/`createModel()` types still contain virtual fields) read the declaration; `packages/core/src/virtual-fields.js` holds the shared checks that `createSchema()` (before `adapter.prepare()`, on every object type the schema reaches) and `describeModels()` run, throwing `INVALID_MODEL` (400) for a value other than `true` or a plain `{ mcp }` object, an unknown option or `mcp` value, a missing own resolver, `relation`/`unique: true`/`validations`/`queryable: true`/`readOnly: false` alongside it, and a virtual `id`/`_id`, `extensions.indexes` entry, state-machine `state` or `connectionField`.
+
+- Storage: `describeModels()` leaves virtual fields, and types only they reach, out of entities and embedded types, so the SQL planner, PostgreSQL DDL and MongoDB transactional integrity never see them; `packages/mongodb/src/mongo/models.js` skips them (no path, `[]` default or index). `entity.gqltype.getFields()` and the registrations passed to `adapter.prepare()` still contain them: any code that walks GraphQL fields for storage must filter with `isVirtualField`.
+- Inputs and writes: virtual implies `readOnly` (`isReadOnlyField` in `runtime.js`); `materializeModel` and the embedded completion/clear helpers skip them, so no generated write sets or unsets them.
+- Query language: `createArgsForQuery` gives them no argument; `inspectClientPaths` rejects client paths with `FORBIDDEN_FILTER_PATH` (403), and `assertStoredQueryPaths` rejects middleware/scope paths with `INVALID_MODEL` (500) before the adapter runs, only when a schema of the runtime declared a virtual field. Native SQL reads (`resolveModelPath` in core's `query-plan.js`) and MongoDB's `queries.js` builders report `INVALID_FILTER_FIELD` (400) for such paths.
+- PostgreSQL: the SQL adapter passes `initialize(configuration, description, options, { virtualFields })` only when virtual fields exist (`packages/sql/src/schema/virtual.js`); `explainMismatch` in `packages/postgres/src/schema/initialize.js` appends the migration of storage they left to a `SCHEMA_MISMATCH`, from the catalog already read.
+- MCP: list-returning tools select only `mcp: 'select'` virtual fields; each virtual field with a required argument on a by-ID query's type gets a `<byIdQuery>_<field>` tool unless `mcp: false` (`virtualFieldTargets` in `packages/mcp/src/index.js`).
+- `createSchema()` warns once per field (`warnUndeclaredVirtualFields`) about a `readOnly` field with arguments and its own resolver that is not virtual, a reference or a collection.
 
 ### `extensions.unique`
 

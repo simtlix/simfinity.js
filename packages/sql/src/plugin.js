@@ -1,4 +1,5 @@
 import { SimfinityError } from '@simtlix/simfinity-core';
+import { LEGACY_QUERY_OPERATORS } from '@simtlix/simfinity-core/internal/query-operators';
 
 const invalid = (message) => { throw new SimfinityError(message, 'INVALID_SQL_PLUGIN', 400); };
 const methods = {
@@ -41,6 +42,23 @@ export const bindPlugin = (plugin) => {
     if (!Number.isSafeInteger(plugin.maxRecordBatchValues) || plugin.maxRecordBatchValues < 1) invalid('SQL plugin maxRecordBatchValues must be a positive safe integer');
     bound.maxRecordBatchValues = plugin.maxRecordBatchValues;
   }
+  // Optional query language features: the QLOperator values compileQuery compiles, an omitted operator's EQ
+  // included. A plugin without them compiles the operators of 3.7.0, so the runtime and the adapter's query plans
+  // reject the others with UNSUPPORTED_QUERY before they reach compileQuery. Names Simfinity does not know are kept
+  // and ignored. Like compileChildrenQuery, a declaration may name, as its `compileQuery`, the compileQuery it
+  // describes, and then holds only for that one: a copy such as { ...postgresPlugin(options), compileQuery } inherits
+  // the bundled declaration, which does not describe its compiler, and compiles the operators of 3.7.0 until it
+  // declares its own. A declaration that names none describes the plugin's compileQuery, whichever it is.
+  const { queryFeatures } = plugin;
+  if (queryFeatures != null && (typeof queryFeatures !== 'object' || Array.isArray(queryFeatures)
+    || !Array.isArray(queryFeatures.operators) || queryFeatures.operators.some((value) => typeof value !== 'string'))) {
+    invalid('SQL plugin queryFeatures must be an object whose operators are strings');
+  }
+  if (queryFeatures?.compileQuery !== undefined && typeof queryFeatures.compileQuery !== 'function') {
+    invalid('SQL plugin queryFeatures.compileQuery must be a function');
+  }
+  const declared = queryFeatures != null && (queryFeatures.compileQuery === undefined || queryFeatures.compileQuery === bound.compileQuery);
+  bound.queryFeatures = Object.freeze({ operators: Object.freeze([...(declared ? queryFeatures.operators : LEGACY_QUERY_OPERATORS)]) });
   for (const [group, names] of Object.entries(methods)) {
     const members = {};
     for (const key of names) {

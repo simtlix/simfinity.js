@@ -8,9 +8,35 @@ import type {
   GraphQLSchema,
 } from 'graphql';
 
+/** The filter operator enum; its values are the {@link QueryOperator} names. */
 export const QLOperator: GraphQLEnumType;
 export const QLSort: GraphQLInputObjectType;
 export const QLValue: GraphQLScalarType<unknown, unknown>;
+
+/**
+ * A `QLOperator` value. The operators of 3.7.0 are `EQ`, `NE`, `LT`, `LTE`, `GT`, `GTE`, `BTW`, `IN`,
+ * `NIN` and `LIKE`. The literal text operators take a non-null string without U+0000 on a `String`
+ * field or `String` list (a validated scalar filters by its base scalar), and match it literally:
+ * `ILIKE` as a substring ignoring case, `STARTS_WITH` and `ISTARTS_WITH` as a prefix, `ENDS_WITH`
+ * and `IENDS_WITH` as a suffix, respecting or ignoring case, and `IEQ` as the whole value ignoring
+ * case. An empty value matches every non-null string, except for `IEQ`, where it matches only the
+ * empty string. On a list, some element must match.
+ */
+export type QueryOperator =
+  | 'EQ' | 'NE' | 'LT' | 'LTE' | 'GT' | 'GTE' | 'BTW' | 'IN' | 'NIN' | 'LIKE'
+  | 'ILIKE' | 'STARTS_WITH' | 'ISTARTS_WITH' | 'ENDS_WITH' | 'IENDS_WITH' | 'IEQ';
+
+/**
+ * The query language features a {@link DatabaseAdapter} compiles. Declare it so that the runtime
+ * sends the adapter only conditions it compiles; later releases add members for later features.
+ */
+export interface QueryFeatures {
+  /**
+   * The `QLOperator` values the adapter compiles, including an omitted operator's `EQ`. Names this
+   * version of Simfinity does not know are ignored.
+   */
+  operators: readonly (QueryOperator | (string & {}))[];
+}
 
 export interface ModelRegistration {
   gqltype: GraphQLObjectType;
@@ -43,7 +69,65 @@ export interface ModelDescription {
     indexes: Array<{ fields: string[]; unique: boolean }>;
   }>;
 }
+/**
+ * Describes the stored data of the registered entities and the embedded types they reach. Virtual
+ * fields are left out of every entity and embedded type, and the types only they reach are not
+ * described. Throws `INVALID_MODEL` (400) for an invalid `extensions.virtual` declaration, as
+ * `createSchema()` does (see {@link VirtualFieldOptions}).
+ */
 export function describeModels(registrations: ModelRegistration[]): ModelDescription;
+/**
+ * Options of a virtual field. A field declares itself virtual with `extensions: { virtual: true }` or
+ * `extensions: { virtual: { mcp } }` (see {@link VirtualFieldDeclaration}), and must have its own
+ * `resolve`, which receives the record, the field's arguments and the request context. No backend
+ * stores it, generated inputs leave it out, and it is not part of the query language: list,
+ * aggregate and collection fields have no filter argument for it, a client filter, sort, `groupId`
+ * or fact path through it fails with `FORBIDDEN_FILTER_PATH` (403), and a path that middleware or a
+ * scope adds through it fails with `INVALID_MODEL` (500). Virtual implies `readOnly`, and
+ * introspection reads `extensions { readOnly }` as true for it. Any output type may be its
+ * result, registered or not; a registered type needs no `relation`, and gets no reference or
+ * collection storage and no inferred inverse reference.
+ *
+ * `createSchema()` and `describeModels()` throw `INVALID_MODEL` (400), naming the type and field, for
+ * a value other than `true` or a plain options object, an unknown option, an invalid `mcp` value, a
+ * field without its own `resolve`, a field that also declares `relation`, `unique: true`,
+ * `validations`, `queryable: true` or `readOnly: false`, an identity field (`id` or `_id`), and for a
+ * virtual field named in the type's `extensions.indexes`, used as the `state` field of its state
+ * machine, or used as the `connectionField` of a reference or a collection.
+ */
+export interface VirtualFieldOptions {
+  /**
+   * How generated MCP tools read the field. `'tool'`, the default, generates a
+   * `<byIdQuery>_<field>` read tool for a field with a required argument on a type with a generated
+   * by-ID query. `'select'` also lets tools select a field without required arguments below a list
+   * position, as in the records of list tools and the items of nested collections, where each item
+   * runs its resolver; elsewhere, such as at the top of by-ID results, tools always select it. A
+   * field with a required argument still gets its tool. `false` generates no per-field tool, and
+   * changes nothing else: by-ID and mutation tools still select a field without required
+   * arguments, so for such a field `'tool'` and `false` behave the same.
+   */
+  mcp?: 'tool' | 'select' | false;
+}
+/** The value of a virtual field's `extensions.virtual`. */
+export type VirtualFieldDeclaration = true | VirtualFieldOptions;
+/** A GraphQL field, or its configuration, as far as the virtual field helpers read it. */
+export interface VirtualFieldCandidate {
+  readonly extensions?: Readonly<{ [name: string]: unknown }> | null;
+}
+/**
+ * Whether a field is virtual: its `extensions.virtual` is `true`, or a plain object whose only key is
+ * a valid `mcp`. The GraphQL types that `DatabaseAdapter.prepare()` and `createModel()` receive still
+ * contain virtual fields, so an adapter that builds storage from a type's fields skips the fields for
+ * which this returns true, on entities and embedded types alike. In a schema that `createSchema()`
+ * accepted, every field that declares `extensions.virtual` (other than `undefined`) is virtual,
+ * because it rejects every other value.
+ */
+export function isVirtualField(field: VirtualFieldCandidate | null | undefined): boolean;
+/**
+ * The normalized options of a virtual field, `{ mcp }` with `mcp` defaulting to `'tool'`, or null
+ * when the field is not virtual (see {@link isVirtualField}).
+ */
+export function virtualFieldOptions(field: VirtualFieldCandidate | null | undefined): Required<VirtualFieldOptions> | null;
 /**
  * Creates the scalar `${name}_${baseScalarType.name}`. `validate` throws to reject a value and
  * receives the base scalar's internal value: the base's `parseValue` result for variables, the
@@ -227,7 +311,10 @@ export interface Runtime<Model = any, Session = any> {
    * non-empty child `connectionField`, whose resolver this runtime would generate, throws
    * `INVALID_MODEL` (400) before `adapter.prepare()`; one with an application resolver or
    * `readOnly` only logs a `Configuration issue` warning, and its nested writes fail with
-   * `INVALID_MODEL` (500). Fields named like generated query arguments also log a warning. The
+   * `INVALID_MODEL` (500). Fields named like generated query arguments also log a warning. Invalid
+   * virtual field declarations throw `INVALID_MODEL` (400) before `adapter.prepare()` (see
+   * {@link VirtualFieldOptions}), and a `readOnly` field with arguments and its own resolver that is
+   * not virtual, and is not a reference or collection, logs a `Configuration issue` warning once. The
    * first schema binds the types whose relation resolvers it generates to this runtime and
    * reserves reachable types that still have a
    * non-embedded relation field without a resolver, such as an unregistered custom operation result.
@@ -285,9 +372,30 @@ export interface Runtime<Model = any, Session = any> {
 
 /** Driver adapter contract. GraphQL generation and lifecycle live in createRuntime. */
 export interface DatabaseAdapter<Model = any, Session = any> {
+  /**
+   * Optional. The filter operators this adapter compiles. `createRuntime` reads it once and throws
+   * `INVALID_QUERY_FEATURES` (500) unless it is undefined, null or an object whose `operators` is an
+   * array of strings. Without it the adapter supports the operators of 3.7.0 (`EQ`, `NE`, `LT`,
+   * `LTE`, `GT`, `GTE`, `BTW`, `IN`, `NIN` and `LIKE`). A list, aggregate or collection read, or a
+   * by-ID read through a `get_by_id` scope, whose arguments use a `QLOperator` value the adapter
+   * does not support fails with `UNSUPPORTED_QUERY` (400), before middleware runs for the client's
+   * arguments and before `find`, `count`, `aggregate`, `findChildren` or `findChildrenBatch` for
+   * conditions that middleware, scopes and joined scopes added. Operators outside `QLOperator` still
+   * reach the adapter, which reports them as before.
+   */
+  queryFeatures?: QueryFeatures | null | undefined;
   bind?(runtime: Pick<Runtime<Model, Session>, 'getModel' | 'getType' | 'getRegistrations'>): void;
   validateRegistration?(registration: RuntimeRegistration<Model, Session>): void;
+  /**
+   * Optional. Receives every registration before models are created. Their GraphQL types, like the
+   * type that `createModel()` receives, still contain virtual fields (`extensions.virtual`), which
+   * must never be stored: an adapter that builds storage from a type's fields skips each field for
+   * which {@link isVirtualField} returns true, on the types its embedded fields reach as well, or
+   * builds it from `describeModels(registrations)`, which leaves them out. Generated writes, filters,
+   * sorts and aggregations never name a virtual field; a controller hook can still assign one.
+   */
   prepare?(registrations: RuntimeRegistration<Model, Session>[], options: { createCollection: boolean }): void;
+  /** Creates the model of a registered type. Its fields include virtual fields; see `prepare()`. */
   createModel(type: GraphQLObjectType, callback: ((model: Model) => void) | null | undefined, options: { createCollection: boolean }): Model;
   /**
    * Casts a reference or batch key to the stored identifier type. Throw a `SimfinityError` with
@@ -311,8 +419,8 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * value unchanged. It must depend only on the value: these resolvers read no data and do not bind
    * their types, so a runtime that reaches a shared type may read through another runtime's hook.
    * Simfinity then reads as null an object that holds no data when a non-null member would read as
-   * null, whatever the selection. These members do not count: `id`, readOnly members, interface and
-   * union members, members with their own resolver and referenced collections. An object whose type
+   * null, whatever the selection. These members do not count: `id`, readOnly and virtual members,
+   * interface and union members, members with their own resolver and referenced collections. An object whose type
    * has no member that counts is returned untouched. Otherwise Simfinity reads the stored members
    * (see `rawEmbeddedValue`), never calling a getter, and counts a stored `_id` as `id`; an error
    * while reading them returns the object unchanged. Runtimes that share the type read through the
@@ -393,6 +501,7 @@ export interface DatabaseAdapter<Model = any, Session = any> {
 }
 export function createRuntime<Model = any, Session = any>(adapter: DatabaseAdapter<Model, Session>): Runtime<Model, Session>;
 
+/** `operator` is a {@link QueryOperator}; the value of a text operator is a validated string. */
 export type QueryPredicate = { kind: 'predicate'; path: string[]; operator: string; value: any } | { kind: 'and' | 'or'; terms: QueryPredicate[] };
 export interface QueryPlan {
   entity: string;
@@ -402,7 +511,14 @@ export interface QueryPlan {
   pagination: { limit: number; offset: number } | null;
   aggregation?: { groupId: string[]; facts: Array<{ path: string[]; factName: string; operation: 'SUM' | 'COUNT' | 'AVG' | 'MIN' | 'MAX' }> };
 }
-export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode'] }): QueryPlan;
+/**
+ * Validates the arguments into a plan: paths, operators and values, with `INVALID_FILTER_VALUE` (400)
+ * for a text operator on a field that is not a `String` field or list, or with a value that is not
+ * a string or contains U+0000. With `operators`, the names the caller compiles, any other
+ * `QLOperator` value fails with `UNSUPPORTED_QUERY` (400); unknown operators fail with
+ * `INVALID_FILTER_OPERATOR` (400) either way.
+ */
+export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode']; operators?: Iterable<string> }): QueryPlan;
 export function resolveModelPath(models: ModelDescription, entityName: string, path: string | string[]): FieldDescription[];
 
 export function configureQueryLimits(options?: { maxPageSize?: number }): void;

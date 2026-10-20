@@ -35,6 +35,144 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22 or newer |
 
+## Upgrade to 3.9.0
+
+Version 3.9.0 adds literal text filters to both backends. Filters that are valid in 3.8.0 keep their results, and the bundled adapters compile them to the same MongoDB pipelines and PostgreSQL statements. Custom adapters and SQL plugins need a declaration before they receive the new operators. Keep all directly installed Simfinity packages at the same version.
+
+### Text operators
+
+`QLOperator` gains six operators for literal text filters: `ILIKE`, `STARTS_WITH`, `ISTARTS_WITH`, `ENDS_WITH`, `IENDS_WITH` and `IEQ`. They work wherever `LIKE` works, on `String` fields and `String` lists, on both backends; see [text operators](../guide/queries#text-operators).
+
+- **Schema.** The six enum values, listed after `LIKE`, are the only schema change, so introspection, SDL and schema snapshots show them, and clients that handle every `QLOperator` value must handle them too. MCP list and aggregate tools list them in their input schemas and descriptions, and the `QLOperator` description now says that the text operators match literally and which of them respect case.
+- **Existing filters.** The ten operators of 3.7.0 keep their validation, errors, MongoDB pipelines and PostgreSQL statements. `LIKE` stays a case-sensitive literal substring. One error changes, on MongoDB only: a `LIKE` value whose pattern is longer than the 32,764 bytes MongoDB accepts, which the server rejected and [`buildErrorFormatter`](../reference/errors#builderrorformatter) reported as `INTERNAL_SERVER_ERROR` (500), now fails with `INVALID_FILTER_VALUE` (400) before the query runs.
+- **PostgreSQL.** `ILIKE`, `ISTARTS_WITH`, `IENDS_WITH` and `IEQ` fold both sides with one expression in each statement, `translate(lower((x) COLLATE "pg_catalog"."und-x-icu"), from, to)`, which the new export `caseFoldExpression(sqlExpression)` of `@simtlix/simfinity-postgres` returns. It needs a database whose encoding is `UTF8` on a server built with ICU, which provides `und-x-icu`, whatever the database's locale. On another database, such as one in `LATIN1` or `SQL_ASCII`, or without the collation, these four operators fail with `UNSUPPORTED_QUERY` (400), `ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ need a UTF8 database with the ICU collation und-x-icu`, and every other operation, initialization included, works as in 3.8.0. The fold is not a database object, so initialization creates and checks nothing new and existing databases need no migration. Simfinity creates no index for these operators: create the [expression indexes](../guide/queries#indexes-for-text-filters) that your searches need on exactly the expression that `caseFoldExpression` returns, which initialization keeps in both modes; an index on `lower()` alone does not serve them.
+- **MongoDB.** The operators compile to escaped regular expressions. Only `STARTS_WITH` reads a prefix range of an index, and `$regex` ignores collations, so a case-insensitive collation index does not serve the case-insensitive operators. A value whose escaped pattern is longer than the 32,764 bytes MongoDB accepts fails with `INVALID_FILTER_VALUE` (400) before the query runs; PostgreSQL has no such limit.
+- **Case folding.** Both backends ignore case through the Unicode simple case foldings, so each case-insensitive operator returns every record that its case-sensitive form returns, and each character folds to one character, apart from PostgreSQL's lowering of `İ`, below. On PostgreSQL, `lower()` under ICU applies them except for 22 lowercase variants, such as `ſ`, `µ` and the final sigma `ς`, which `translate()` then maps to their usual letters; this also makes a value that starts or ends with a capital `Σ` match as on MongoDB, so `ISTARTS_WITH "ΚΑΣ"` finds `ΚΑΣΤΡΟ`. Two differences remain: PostgreSQL's `lower()` turns `İ` into `i` followed by U+0307, which MongoDB matches only with itself, and each backend folds letters newer than its Unicode tables, such as U+A7DC (Unicode 16), only when its library knows them. See [case folding](../guide/queries#case-folding).
+
+### Custom adapters and SQL plugins
+
+- **`DatabaseAdapter.queryFeatures`.** A new optional member, `{ operators }`, lists the `QLOperator` values that an adapter compiles. Without it, or with `null`, the adapter supports the ten operators of 3.7.0, so a 3.8.0 adapter keeps receiving only filters it understands: a list, count, aggregate or collection read, or a by-ID read through a `get_by_id` scope, that uses another operator fails with `UNSUPPORTED_QUERY` (400). The runtime checks the client's arguments before middleware runs and the final arguments, with what middleware, scopes and joined scopes added, before it calls the adapter. Operators outside `QLOperator` still reach the adapter, which reports them as before.
+- **Declaring operators.** An adapter that declares `queryFeatures` supports exactly the operators it lists, so list every one it compiles, `EQ` included, because a condition without an operator is `EQ`. Names that Simfinity does not know are ignored. `createRuntime()` throws `INVALID_QUERY_FEATURES` (500) for a declaration that is not an object whose `operators` is an array of strings. `createMongoAdapter()` declares every operator, and so does a copy such as `{ ...createMongoAdapter() }`; a wrapper that compiles filters itself should declare what it compiles.
+- **`SQLPlugin.queryFeatures`.** SQL plugins declare their operators the same way, beside `capabilities`. A version 1 plugin without the member compiles the operators of 3.7.0: the runtime rejects the others, and so do the SQL adapter's own query plans, for reads such as `getModel(Type).find()` that do not go through the runtime, all with `UNSUPPORTED_QUERY` (400) before `compileQuery` runs. A malformed declaration throws `INVALID_SQL_PLUGIN` (400). A declaration may name, as `queryFeatures.compileQuery`, the `compileQuery` it describes, and then holds only while that is the plugin's own. `postgresPlugin()` declares every operator for its own `compileQuery`, so a copy that replaces its compiler, such as `{ ...postgresPlugin(options), compileQuery: myCompileQuery }`, keeps the operators of 3.7.0 and does not pass the new ones to `myCompileQuery`; declare `queryFeatures: { operators, compileQuery: myCompileQuery }` with what your compiler supports to accept more. See the [plugin contract](../guide/sql-plugins#plugin-contract-version-1).
+- **Query plans.** `createQueryPlan(models, entity, args, { operators })` accepts the names a compiler supports and rejects any other `QLOperator` value with `UNSUPPORTED_QUERY` (400). Plans validate the six operators' values with `INVALID_FILTER_VALUE` (400). PostgreSQL's `compileQuery` now rejects a plan built by hand with an operator it does not compile with `UNSUPPORTED_QUERY` instead of producing invalid SQL.
+- **TypeScript.** Core exports the new `QueryOperator` and `QueryFeatures` types, and the SQL package `SQLQueryFeatures`, which adds the optional `compileQuery`. `DatabaseAdapter.queryFeatures` and `SQLPlugin.queryFeatures` are optional and typed `QueryFeatures | null | undefined` and `SQLQueryFeatures | null | undefined`, so 3.8.0 adapter and plugin objects compile unchanged, also under `exactOptionalPropertyTypes`; `createQueryPlan`'s options gain `operators?: Iterable<string>`, `MongoAdapter` declares its `queryFeatures` as readonly, and `@simtlix/simfinity-postgres` declares `caseFoldExpression(sqlExpression: string): string`.
+
+## Upgrade to 3.8.0
+
+These notes cover opt-in virtual fields and the rejection of dotted or non-string `connectionField` declarations. Applications using those declarations must migrate before upgrading. Keep all directly installed Simfinity packages at the same version.
+
+### Virtual fields
+
+[Virtual fields](../guide/queries#virtual-fields) are new: `extensions: { virtual: true }`, or `extensions: { virtual: { mcp } }`, on a field with its own `resolve` declares a field that no backend stores and that is not part of the query language. Clients read it through its type's generated queries, and generated MCP tools read it too. See [virtual](../reference/extensions#virtual) for the rules and errors.
+
+- **For the virtual-field feature alone, schemas without virtual fields** keep their storage descriptions, PostgreSQL DDL and statements, Mongoose models and commands, inputs, filter arguments and MCP tools. Two things change for every schema:
+  - Introspection: a virtual field reads `__Field.extensions { readOnly }` as `true`. `FieldExtensionsType` gains no field, so the SDL and introspection of schemas without virtual fields do not change.
+  - A warning: `createSchema()` logs `Configuration issue: Type.field is readOnly and has arguments and its own resolver, but it is not virtual, so Simfinity describes it as stored data: …` once per runtime for each such field of a registered type, unless it is a reference or a collection. Its advice also names the settings that the field would have to drop to become virtual, such as `extensions.relation` on an embedded value. Nothing else changes for these fields; declare them virtual only as described below.
+- **An `extensions.virtual` that your application already sets** for its own tooling now has a meaning. `true`, or a plain object with no key other than `mcp`, makes the field virtual, which removes its storage, its input and its filter argument, and requires the field's own resolver; any other value except `undefined` fails `createSchema()` with `INVALID_MODEL` (400). Rename such an extension before upgrading.
+- **Adding a virtual field** to a deployed type is not a schema change: PostgreSQL validates a database created before the field existed, in both modes, and MongoDB documents written with and without it are identical. Non-null fields, custom scalars without `baseScalarType`, interfaces, unions and registered entities without `relation` all work as their results, also on PostgreSQL and with `referentialIntegrity: 'transactional'`, which rejected them before as stored fields.
+- **TypeScript:** `VirtualFieldOptions` and `VirtualFieldDeclaration` are new, exported by `@simtlix/simfinity-core`, `@simtlix/simfinity-js`, `@simtlix/simfinity-sql` and `@simtlix/simfinity-postgres`.
+- **Custom adapters:** `@simtlix/simfinity-core` exports two new functions, `isVirtualField(field)` and `virtualFieldOptions(field)`. The GraphQL types that `DatabaseAdapter.prepare()` and `createModel()` receive still contain virtual fields, top-level and in embedded types. An adapter that builds its storage from a type's fields, as the bundled MongoDB model generator does, must skip each field for which `isVirtualField(field)` is true, or build its storage from `describeModels()`, which leaves them out. Otherwise it stores them: it creates paths or columns that nothing writes, and a non-null virtual field can make its writes fail. Generated writes, filters, sorts and aggregations never name a virtual field, but a controller hook can still assign one. Adapters built on `describeModels()`, such as the SQL adapter, need no change.
+- **SQL plugins:** `initialize(configuration, description, options, context)` receives an optional fourth argument, `context`, typed `SQLInitializationContext`, with one `SQLVirtualFieldLocation` per virtual field, only when the runtime's types declare virtual fields; otherwise the call keeps its three arguments. A plugin may ignore it. See the [plugin contract](../guide/sql-plugins#plugin-contract-version-1).
+- **Native query builds:** PostgreSQL's `getModel(Type).find()` and MongoDB's `buildQuery()` and `buildFilterGroupMatch()` reject a path through a virtual field with `INVALID_FILTER_FIELD` (400).
+
+### Declaring an existing field virtual
+
+A field that earlier versions stored, such as a `readOnly` field with arguments and its own resolver, can be declared virtual. That change is breaking for the application:
+
+- **Its stored values are no longer read or written.** Declare virtual only a field whose stored data nothing reads, and upgrade every process together: on PostgreSQL the new version cannot start until the database is migrated, and processes still on the earlier version fail once it is.
+- **GraphQL:** the generated filter argument disappears from list, `_aggregate` and collection fields, so clients that still send it fail validation (`Unknown argument …`), even with `null`. Client filter, sort, `groupId` and fact paths through the field fail with `FORBIDDEN_FILTER_PATH` (403), as they already did for a field with its own resolver unless it set `queryable: true`, which a virtual field cannot declare. Paths that middleware or a scope add through it fail with `INVALID_MODEL` (500). The field leaves the generated inputs, if it was not `readOnly` already, and introspection reads `readOnly: true` for it.
+- **MCP:** list and aggregate tools lose the field's input property, and callers that still send it get `MCP_UNKNOWN_ARGUMENT`. List tools stop selecting a field without required arguments unless it sets `mcp: 'select'`, and so does every tool inside the items of a nested collection or embedded list, such as the get-by-id tool of a type whose collection reaches the field. A field with a required argument gains its own read tool, `<byIdQuery>_<field>`, so the catalog grows by one tool per such field, unless it sets `mcp: false`; a field argument named `id` makes setup fail with `MCP_INVALID_OPTIONS` until you rename it, set `mcp: false` or exclude the tool.
+- **MongoDB:** generated models drop the field's path, `[]` default and indexes, and transactional reference integrity no longer checks it. Existing documents keep what was stored for the field, such as `[]`, and nothing reads it. Generated writes leave a stored top-level value alone, but a generated update that sets an embedded parent rewrites that object, which drops the stored keys of its virtual members at any depth. To remove leftovers, use a driver-level update, which strict mode does not filter, such as `getModel(Barbershop).collection.updateMany({}, { $unset: { busyRanges: '' } })`, or pass `{ strict: false }` to the model's `updateMany()`. Through the generated model, Mongoose drops an `$unset` of a path that the model no longer declares and sends nothing: `getModel(Barbershop).updateMany({}, { $unset: { busyRanges: '' } })` resolves to `{ acknowledged: false }` and changes no document. An index that Mongoose created for it, such as `busyRanges.professionalId_1`, stays until you drop it, because Simfinity never drops indexes. A supplied model keeps the paths it declares, and the defaults it applies on create.
+- **PostgreSQL:** both initialization modes keep failing with `SCHEMA_MISMATCH` (409) until the database is migrated. The runtime's `initializeDatabase()` appends to the message the fields that left storage behind and the statements that migrate them, for example:
+
+  ```text
+  Schema mismatch at app.Barbershop: column set differs. Apply an explicit migration before startup. Barbershop.busyRanges is virtual (extensions.virtual), so it is never stored, but this database still holds its earlier storage. Once nothing reads that storage, migrate it: ALTER TABLE "app"."Barbershop" DROP COLUMN "busyRanges", DROP COLUMN "__field__busyRanges__present"; See the upgrade notes at https://simtlix.github.io/simfinity.js/resources/compatibility.html
+  ```
+
+  It finds this storage in the catalog that initialization has already read, without another statement, and adds nothing to a mismatch that no virtual field explains. It compares only the functions of the field's own column or root, so a changed function of another entity's value is never blamed on a virtual field that shares a member name. The low-level `initializeDatabase(pool, description)` reports the original message only. Run the statements once nothing reads the storage, then initialize again. They depend on how the field was stored:
+
+  - **A scalar, scalar list, enum or ID field:** `ALTER TABLE … DROP COLUMN "<field>"`. Its checks and indexes go with the column. For a unique scalar list, the keys table `<Table>__<field>__keys` that remains is cleanup.
+  - **An object or object list stored as JSON:** `DROP COLUMN "<field>", DROP COLUMN "__field__<field>__present"`. Its validation functions, such as `<Table>__<field>__json_valid` and one per member, remain, because initialization does not check functions that it no longer describes; dropping them is optional cleanup.
+  - **A member of an embedded value stored as JSON:** replace the embedded value's validation function with its `CREATE FUNCTION` statement from `compileDatabaseSchema()`, run as `CREATE OR REPLACE FUNCTION`; the member's own function is cleanup. Stored values keep the member's key until a generated update rewrites them.
+  - **A member of an embedded value with its own table,** while the value keeps another member with its own table: drop the member's column and presence marker in that table, and replace `<Root>__owned_valid` the same way.
+  - **An embedded field with its own table:** drop its `__<field>_state` column, then the table, with `DROP TABLE IF EXISTS … CASCADE`. Owned tables nested below it remain as cleanup.
+  - **The last member with its own table of an embedded value**, such as the only reference of an embedded list's item type: the embedded value then owns no table, so it is stored as JSON in its own column `<field>` and the presence marker `__field__<field>__present` of the table that holds it, rather than in `<Table>__<field>`. This needs a data migration, and the message describes it instead of listing `DROP` statements. Create the value's validation functions with their `CREATE FUNCTION` statements from `compileDatabaseSchema()`. Add the two columns with the types and default that `describeDatabase()` gives them. Fill them from the owned rows: the presence marker is `"__<field>_state" <> 'missing'`; when the state is `'present'`, the value is a JSON array of the item objects in `__position` order (JSON `null` for an item whose `__item_present` is false), each built from the members whose presence markers are set, or for a singular value the one row's object; otherwise leave it `NULL`. Then add the table's missing checks with the expressions that `describeDatabase()` gives, drop the `__<field>_state` column and run `DROP TABLE IF EXISTS … CASCADE` on the owned table. When the root still owns other tables, also replace `<Root>__owned_valid`.
+  - **A reference:** its link is a column, with a foreign key and an index that go with it when you drop it. Without a `connectionField`, the column is named after the field, and the message names the field and its `DROP COLUMN`. With one, the column is named after the `connectionField`, which the virtual declaration no longer gives, so the message reports only the mismatch, such as `column set differs` on the field's table: drop that column yourself.
+  - **A collection:** it stores nothing in its own table. When the child type declared a field for its `connectionField`, that field keeps the link and nothing is left. Otherwise the child's table holds a private back-reference column named after the `connectionField`, with its foreign key and index: drop it. The message reports only `column set differs` on the child's table and does not name the field.
+  - **A root that owns nothing afterwards,** after either of the two cases with their own tables above, the last member with its own table of an embedded value or a unique list: also drop its refresh triggers and guard table, `DROP TRIGGER IF EXISTS "<Root>__touch" ON …; DROP TRIGGER IF EXISTS "<Root>__deferred" ON …; DROP TABLE IF EXISTS …."<Root>__guard";`. Otherwise, with `refreshTriggers: 'perRoot'` the database validates but every write to the root fails with `Database operation failed`, and with `perRow` initialization keeps failing with `SCHEMA_MISMATCH` for the unexpected `<Root>__deferred` constraint. The functions those triggers called remain as cleanup.
+
+  The message lists the statements that the database needs, in this order, with the table and function names of your schema.
+### Dotted connection fields
+
+**A dotted `connectionField` is rejected.** Versions up to 3.7.0 accepted a `connectionField` that is a path, such as `nested.targetId`, and the MongoDB integrity guide listed such dotted storage keys among the protected references. A relation's `extensions.relation.connectionField` must now name a field of the record that stores the link: the reference's own type, or a collection's item type. `createSchema()` rejects a `connectionField` that contains a dot, or that is not a string, with `INVALID_MODEL` (400) before any model or table is built, on PostgreSQL and in both MongoDB integrity modes, in every registered type and in every embedded type they store, whether or not that type is registered itself; `describeModels()` rejects it too. An omitted or empty `connectionField` keeps its meaning. An application that declares such a value fails at startup until its declaration changes, and changing the declaration does not move the links it stored: see [moving links of a dotted connectionField](#moving-links-of-a-dotted-connectionfield).
+
+### Moving links of a dotted connectionField
+
+Stop every process that runs the old declaration, move the links, then start the new version. Each migration below was verified on data that 3.7.0 wrote, with generated reads and writes, MongoDB's transactional checks and startup audit, and `initializeDatabase({ mode: 'validate' })` on PostgreSQL. The MongoDB statements are for `mongosh`, on the collection of each type's generated model, named after the type; the PostgreSQL ones use the schema `app` and the names that `compileDatabaseSchema()` prints for the new declaration. `initializeDatabase()` never alters an existing table, so it cannot do these steps. For another shape, such as an `Owner` that also declares an embedded `nested` value, compare `compileDatabaseSchema()` for the new declaration with the database.
+
+**A reference.** With `Owner.target: { type: Target, extensions: { relation: { connectionField: 'nested.targetId' } } }`, where `Owner` declares no `nested` field, MongoDB stored the link inside an object, `{ nested: { targetId } }`, which a cleared link left as `nested: {}`; the transactional mode protected it, but generated reads returned `target: null`. PostgreSQL stored it in a column named `"nested.targetId"`, with the foreign key `"Owner__nested.targetId__fk"` and the index `"Owner__nested.targetId__idx"`, and read it back. Choose one of two declarations.
+
+A plain name on the record, `connectionField: 'targetId'`, keeps the GraphQL field `target`, so clients do not change. On MongoDB, move the field; the second statement removes the objects that the move or a cleared link left empty, which is safe only because `Owner` declares no `nested` field:
+
+```javascript
+db.getCollection('Owner').updateMany({ 'nested.targetId': { $exists: true } }, { $rename: { 'nested.targetId': 'targetId' } });
+db.getCollection('Owner').updateMany({ nested: {} }, { $unset: { nested: '' } });
+```
+
+On PostgreSQL, rename the column, its foreign key and its index:
+
+```sql
+BEGIN;
+ALTER TABLE "app"."Owner" RENAME COLUMN "nested.targetId" TO "targetId";
+ALTER TABLE "app"."Owner" RENAME CONSTRAINT "Owner__nested.targetId__fk" TO "Owner__targetId__fk";
+ALTER INDEX "app"."Owner__nested.targetId__idx" RENAME TO "Owner__targetId__idx";
+COMMIT;
+```
+
+A reference of an embedded type fits a link that describes an embedded value: declare `Nested { target: { type: Target, extensions: { relation: { connectionField: 'targetId' } } } }`, register it with `addNoEndpointType()`, and give `Owner` the field `nested: { type: Nested, extensions: { relation: { embedded: true } } }`. Clients then read and write `nested { target { id } }` instead of `target`. MongoDB stores this link at the same path, `nested.targetId`, so its documents need no change. Lists read a document whose link was cleared as `nested: { target: null }` and one that never had a link as `nested: null`; the `$unset` statement above makes cleared links list as `nested: null` too. By-ID reads, reference reads and update responses read both as `nested: { target: null }`, with or without that statement, as [MongoDB embedded objects in hydrated documents](../guide/mutations#update-selected-fields) describes.
+
+On PostgreSQL, that embedded value has an owned table. In one transaction, add the state column and check of `Owner` and create the owned table, as `compileDatabaseSchema()` prints them, copy the links and drop the old column; then run `initializeDatabase()` once, which creates the remaining functions, triggers, foreign keys and indexes and checks the copied rows. Rows without a link read `nested: null`.
+
+```sql
+BEGIN;
+ALTER TABLE "app"."Owner"
+  ADD COLUMN "__nested_state" text COLLATE "pg_catalog"."C" NOT NULL DEFAULT 'missing'::text,
+  ADD CONSTRAINT "Owner____nested_state__state" CHECK ("__nested_state" = ANY (ARRAY['missing'::text, 'null'::text, 'present'::text]));
+CREATE TABLE "app"."Owner__nested" (
+  "__id" uuid NOT NULL DEFAULT gen_random_uuid(),
+  "__owner_id" uuid NOT NULL,
+  "targetId" uuid,
+  "__field__target__present" boolean NOT NULL DEFAULT false,
+  CONSTRAINT "Owner__nested__pk" PRIMARY KEY ("__id")
+);
+INSERT INTO "app"."Owner__nested" ("__owner_id", "targetId", "__field__target__present")
+  SELECT "id", "nested.targetId", true FROM "app"."Owner" WHERE "nested.targetId" IS NOT NULL;
+UPDATE "app"."Owner" SET "__nested_state" = 'present' WHERE "nested.targetId" IS NOT NULL;
+ALTER TABLE "app"."Owner" DROP COLUMN "nested.targetId";
+COMMIT;
+```
+
+**A collection.** With `Parent.children: { type: new GraphQLList(Child), extensions: { relation: { connectionField: 'meta.parent' }, readOnly: true } }`, where `Child.meta` is an embedded value with an ID member `parent`, a writable collection failed when the schema was built, and a `readOnly` one built. On MongoDB it read the children whose `meta.parent` held the parent's ID, as `Child`'s own writes stored it, and the transactional mode protected that path. On PostgreSQL it read no children: `Child`'s writes stored the ID in the JSON of `meta`, while the collection read a column named `"meta.parent"`, which stayed empty.
+
+A collection's link is a field of the child itself: remove `parent` from the embedded type, declare `Child.parent: { type: Parent, extensions: { relation: { connectionField: 'parentId' } } }`, and set the collection's `connectionField` to `'parentId'`. Clients write `parent: { id }` instead of `meta: { parent }`. On MongoDB, move the field:
+
+```javascript
+db.getCollection('Child').updateMany({ 'meta.parent': { $exists: true } }, { $rename: { 'meta.parent': 'parentId' } });
+```
+
+On PostgreSQL, rename the column, its foreign key and its index, copy the IDs out of the JSON, replace the shape function of `meta` with the `"Child__meta__json_valid"` statement that `compileDatabaseSchema()` prints, run as `CREATE OR REPLACE FUNCTION`, and drop the function of the removed member. An ID that names no parent fails the foreign key and rolls the transaction back.
+
+```sql
+BEGIN;
+ALTER TABLE "app"."Child" RENAME COLUMN "meta.parent" TO "parentId";
+ALTER TABLE "app"."Child" RENAME CONSTRAINT "Child__meta.parent__fk" TO "Child__parentId__fk";
+ALTER INDEX "app"."Child__meta.parent__idx" RENAME TO "Child__parentId__idx";
+UPDATE "app"."Child" SET "parentId" = ("meta" ->> 'parent')::uuid, "meta" = "meta" - 'parent' WHERE "meta" ? 'parent';
+-- CREATE OR REPLACE FUNCTION "app"."Child__meta__json_valid"(jsonb) ..., as compileDatabaseSchema() prints it
+DROP FUNCTION "app"."Child__meta__parent__json_valid"(jsonb);
+COMMIT;
+```
+
 ## Upgrade to 3.7.0
 
 Version 3.7.0 can read generated collection fields in batches, opt-in on both PostgreSQL and MongoDB. Without the option, both adapters send 3.6.0's statements and commands. With it, rows in a total order, filters, scopes, errors and middleware calls are unchanged; unsorted rows and rows with equal sort keys can come in another order. It also gives `EnvelopSchemaPlugin` one TypeScript declaration across the packages. Keep all directly installed Simfinity packages at the same version. When upgrading from an earlier version, also review the [3.6.0 notes](#upgrade-to-3-6-0) below.
@@ -835,7 +973,7 @@ Keep all directly installed Simfinity packages at 3.5.0 and review these behavio
 - MongoDB uses the application's GraphQL and Mongoose peers. Install the optional MCP SDK explicitly for transports; `graphql-middleware` is no longer installed by Simfinity. See [installation](../guide/databases#install-from-npm).
 - Embedded updates enforce required fields when constructing replacement objects or list items; existing embedded objects still accept valid partial patches. SQL sessions reject statements after their callback settles, and a failed rollback discards the connection. See [mutations](../guide/mutations) and the [SQL plugin contract](../guide/sql-plugins#plugin-contract-version-1).
 
-The current [downloadable starters](../guide/databases#download-the-starters) use 3.7.0. The [Barber examples](./barber) state their own exact package pin, and historical archives retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
+The current [downloadable starters](../guide/databases#download-the-starters) use 3.9.0. The [Barber examples](./barber) state their own exact package pin, and historical archives retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
 
 ## Upgrade from 3.2.0
 

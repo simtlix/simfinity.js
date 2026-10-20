@@ -62,6 +62,12 @@ const check = (archives, name) => {
   return archive;
 };
 
+// Every QLOperator value, in declaration order: the ten of 3.7.0, then the literal text operators (#108, part 1).
+// The bundled adapters list the same names in an order of their own, so their checks sort both lists.
+const LEGACY_OPERATORS = ['EQ', 'LT', 'GT', 'LTE', 'GTE', 'BTW', 'NE', 'IN', 'NIN', 'LIKE'];
+const QUERY_OPERATORS = [...LEGACY_OPERATORS, 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ'];
+const SORTED_OPERATORS = [...QUERY_OPERATORS].sort();
+
 const adapterSource = `const adapter = {
   bind() {},
   prepare() {},
@@ -159,8 +165,8 @@ const quotedUnion = (names) => names.map((name) => `'${name}'`).join(' | ');
 const coreRootValues = [
   'ForbiddenError', 'InternalServerError', 'QLOperator', 'QLSort', 'QLValue', 'SimfinityError',
   'UnauthenticatedError', 'auth', 'buildErrorFormatter', 'configureMutationLimits', 'configureQueryLimits',
-  'createQueryPlan', 'createRuntime', 'createValidatedScalar', 'describeModels', 'paginationStages',
-  'plugins', 'resolveModelPath', 'scalars', 'validators',
+  'createQueryPlan', 'createRuntime', 'createValidatedScalar', 'describeModels', 'isVirtualField',
+  'paginationStages', 'plugins', 'resolveModelPath', 'scalars', 'validators', 'virtualFieldOptions',
 ];
 // MongoDB's legacy deep imports of the core subpaths, which re-export them unchanged, as do their
 // sibling declarations.
@@ -190,9 +196,11 @@ const coreSource = `import assert from 'node:assert/strict';
     createRuntime,
     createValidatedScalar,
     describeModels,
+    isVirtualField,
     plugins,
     scalars,
     validators,
+    virtualFieldOptions,
   } from '@simtlix/simfinity-core';
   import {
     GraphQLError,
@@ -225,6 +233,9 @@ const coreSource = `import assert from 'node:assert/strict';
   assert.equal(introspection.errors, undefined);
   assert(introspection.data.__type.fields.some((field) => field.name === 'extensions'));
   assert.equal(describeModels([]).entities.length, 0);
+  assert.equal(isVirtualField({ extensions: { virtual: true } }), true);
+  assert.equal(isVirtualField(type.getFields().title), false);
+  assert.deepEqual(virtualFieldOptions({ extensions: { virtual: { mcp: 'select' } } }), { mcp: 'select' });
   assert.equal(createValidatedScalar('Count', '', GraphQLInt, () => {}).parseValue(3), 3);
   assert.equal(QLOperator.name, 'QLOperator');
   assert.equal(QLSort.name, 'QLSort');
@@ -270,7 +281,23 @@ const coreSource = `import assert from 'node:assert/strict';
     assert(new ErrorClass() instanceof SimfinityError, name);
     assert.equal(new ErrorClass().getStatus(), status, name);
   }
-  assert.deepEqual(Object.keys(await import('@simtlix/simfinity-core')).sort(), ${JSON.stringify([...coreRootValues].sort())});`;
+  assert.deepEqual(Object.keys(await import('@simtlix/simfinity-core')).sort(), ${JSON.stringify([...coreRootValues].sort())});
+  // The text operators: QLOperator lists them, the archive ships the internal module the backends import, and an
+  // adapter without queryFeatures gets only the operators of 3.7.0.
+  assert.deepEqual(QLOperator.getValues().map((value) => value.name), ${JSON.stringify(QUERY_OPERATORS)});
+  const queryOperators = await import('@simtlix/simfinity-core/internal/query-operators');
+  assert.deepEqual(queryOperators.QUERY_OPERATORS, ${JSON.stringify(QUERY_OPERATORS)});
+  assert.deepEqual([...queryOperators.LEGACY_QUERY_OPERATORS].sort(), ${JSON.stringify([...LEGACY_OPERATORS].sort())});
+  assert.equal(queryOperators.validateTextFilterValue('ILIKE', '', 'String'), '');
+  assert.throws(() => queryOperators.validateTextFilterValue('ILIKE', 5, 'String'), (error) => error.getCode() === 'INVALID_FILTER_VALUE');
+  const unsupported = await graphql({ schema, source: '{ coreBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
+  assert.equal(unsupported.errors[0].extensions.code, 'UNSUPPORTED_QUERY');
+  assert.equal((await graphql({ schema, source: '{ coreBooks(title: { operator: LIKE, value: "a" }) { id } }' })).errors, undefined);
+  assert.throws(() => createRuntime({ ...adapter, queryFeatures: { operators: 'ILIKE' } }), (error) => error.getCode() === 'INVALID_QUERY_FEATURES');
+  const textRuntime = createRuntime({ ...adapter, queryFeatures: { operators: QLOperator.getValues().map((value) => value.name) } });
+  textRuntime.connect(null, new GraphQLObjectType({ name: 'CoreTextBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } }), 'coreTextBook', 'coreTextBooks');
+  const textResult = await graphql({ schema: textRuntime.createSchema(), source: '{ coreTextBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
+  assert.equal(textResult.errors, undefined);`;
 
 const sqlSource = `import assert from 'node:assert/strict';
   import { createRequire } from 'node:module';
@@ -312,7 +339,21 @@ const sqlSource = `import assert from 'node:assert/strict';
   assert.equal(result.errors, undefined);
   assert.deepEqual(result.data.sqlBooks, []);
   assert.equal(result.data.sqlRead, 'sql');
-  assert.deepEqual(calls, ['find']);`;
+  assert.deepEqual(calls, ['find']);
+  // A plugin without queryFeatures compiles the operators of 3.7.0; plans reject the others before compileQuery,
+  // also in reads that do not go through the runtime.
+  const unsupported = await graphql({ schema, source: '{ sqlBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
+  assert.equal(unsupported.errors[0].extensions.code, 'UNSUPPORTED_QUERY');
+  await assert.rejects(() => api.getModel(book).find({ title: { operator: 'IEQ', value: 'a' } }), (error) => error.getCode() === 'UNSUPPORTED_QUERY');
+  assert.deepEqual(calls, ['find']);
+  assert.throws(() => createSQL({ plugin: { ...plugin, queryFeatures: { operators: [1] } } }), (error) => error.getCode() === 'INVALID_SQL_PLUGIN');
+  const textApi = createSQL({ plugin: { ...plugin, queryFeatures: { operators: ${JSON.stringify(QUERY_OPERATORS)} } } });
+  const textBook = new GraphQLObjectType({ name: 'SQLTextBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+  textApi.connect(null, textBook, 'sqlTextBook', 'sqlTextBooks');
+  const textSchema = textApi.createSchema();
+  await textApi.initializeDatabase();
+  assert.equal((await graphql({ schema: textSchema, source: '{ sqlTextBooks(title: { operator: ILIKE, value: "a" }) { id } }' })).errors, undefined);
+  assert.deepEqual(calls, ['find', 'find']);`;
 
 const postgresSource = `import assert from 'node:assert/strict';
   import {
@@ -320,6 +361,7 @@ const postgresSource = `import assert from 'node:assert/strict';
     SimfinityError,
     auth,
     buildErrorFormatter,
+    caseFoldExpression,
     compileDatabaseSchema,
     configure,
     connect,
@@ -370,6 +412,31 @@ const postgresSource = `import assert from 'node:assert/strict';
   sql.connect(null, bookType, 'sqlBook', 'sqlBooks');
   sql.createSchema();
   assert.deepEqual(sql.describeDatabase(), description);
+  assert.deepEqual([...postgresPlugin().queryFeatures.operators].sort(), ${JSON.stringify(SORTED_OPERATORS)});
+  // The declaration names the compileQuery it describes, so a copy that replaces compileQuery compiles the operators
+  // of 3.7.0 until it declares its own.
+  assert.equal(postgresPlugin().queryFeatures.compileQuery, postgresPlugin().compileQuery);
+  const copySql = createSQL({ plugin: { ...postgresPlugin({ pool, schema: 'app' }), compileQuery: (...args) => postgresPlugin().compileQuery(...args) } });
+  const copyBook = new GraphQLObjectType({ name: 'CopyPostgresBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+  copySql.connect(null, copyBook, 'copyBook', 'copyBooks');
+  const copySchema = copySql.createSchema();
+  const copied = await graphql({ schema: copySchema, source: '{ copyBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
+  assert.equal(copied.errors[0].extensions.code, 'UNSUPPORTED_QUERY');
+  // The case fold of ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ, for application indexes.
+  const fold = (sql) => \`translate(lower((\${sql}) COLLATE "pg_catalog"."und-x-icu"), '\\u00B5\\u017F\\u0345\\u03C2\\u03D0\\u03D1\\u03D5\\u03D6\\u03F0\\u03F1\\u03F5\\u1C80\\u1C81\\u1C82\\u1C83\\u1C84\\u1C85\\u1C86\\u1C87\\u1C88\\u1E9B\\u1FBE', '\\u03BC\\u0073\\u03B9\\u03C3\\u03B2\\u03B8\\u03C6\\u03C0\\u03BA\\u03C1\\u03B5\\u0432\\u0434\\u043E\\u0441\\u0442\\u0442\\u044A\\u0463\\uA64B\\u1E61\\u03B9')\`;
+  assert.equal(caseFoldExpression('"name"'), fold('"name"'));
+  assert.equal(caseFoldExpression('"details" ->> \\'label\\''), fold('"details" ->> \\'label\\''));
+  assert.throws(() => caseFoldExpression(''), TypeError);
+  // A statement that folds case on a database that cannot evaluate the fold, such as LATIN1 (22P05) or one without
+  // the ICU collation (42704), fails with UNSUPPORTED_QUERY; the same codes keep their mapping elsewhere.
+  const { driver } = postgresPlugin();
+  const failing = (code) => ({ async query() { throw Object.assign(new Error('driver'), { code, severity: 'ERROR' }); }, async connect() { throw new Error('offline'); } });
+  for (const code of ['22P05', '42704']) {
+    const folding = await driver.query({ pool: failing(code) }, { text: \`SELECT \${caseFoldExpression("'a'")}\`, values: [] }).catch((error) => error);
+    assert.equal(driver.normalizeError(folding).extensions.code, 'UNSUPPORTED_QUERY');
+    const plain = await driver.query({ pool: failing(code) }, { text: 'SELECT 1', values: [] }).catch((error) => error);
+    assert.equal(driver.normalizeError(plain).extensions.code, code === '22P05' ? 'INVALID_VALUE' : 'DATABASE_ERROR');
+  }
   assert(compileDatabaseSchema(description).some((sql) => sql.startsWith('CREATE TABLE')));
   assert.equal(describeDatabase([{ gqltype: bookType }]).tables.length, 1);
   assert.equal(typeof initializeDatabase, 'function');
@@ -445,6 +512,9 @@ const mongoSource = `import assert from 'node:assert/strict';
   if (simfinity.SimfinityError !== SimfinityError) throw new Error('shared error export failed');
   if (typeof simfinity.connect !== 'function') throw new Error('Mongo exports failed');
   if (typeof simfinity.createMongoAdapter !== 'function') throw new Error('Mongo adapter export failed');
+  const { queryFeatures } = simfinity.createMongoAdapter();
+  assert.deepEqual([...queryFeatures.operators].sort(), ${JSON.stringify(SORTED_OPERATORS)});
+  assert(Object.isFrozen(queryFeatures) && Object.isFrozen(queryFeatures.operators));
   assert.equal(simfinity.auth, auth);
   assert.equal(simfinity.plugins, plugins);
   assert.equal(simfinity.scalars, scalars);
@@ -546,15 +616,23 @@ const coreTypes = `import {
   auth,
   buildErrorFormatter,
   configureMutationLimits,
+  createQueryPlan,
   createRuntime,
+  describeModels,
+  isVirtualField,
   plugins,
   scalars,
   validators,
+  virtualFieldOptions,
   type AuthRuleFunction,
   type DatabaseAdapter,
   type FieldValidations,
   type MutationLimitsOptions,
+  type QueryFeatures,
+  type QueryOperator,
   type TypeScopes,
+  type VirtualFieldDeclaration,
+  type VirtualFieldOptions,
 } from '@simtlix/simfinity-core';
 import {
   GraphQLEnumType,
@@ -669,7 +747,46 @@ const validations: FieldValidations = validators.email();
 const scalarName: string = scalars.EmailScalar.name;
 const countPlugin = plugins.envelopCountPlugin();
 void [model, formatted, graphQLError, shape, scopes, misspelledScopes, owner, roleRule, known, operator, sort, valueName, rule, validations, scalarName, countPlugin, conditionalScopes];
-void [readonlyRoles, frozenPermissions];`;
+void [readonlyRoles, frozenPermissions];
+// extensions.virtual is true or an options object whose only option is mcp.
+const virtualField: VirtualFieldDeclaration = true;
+const virtualOptions: VirtualFieldOptions[] = [{}, { mcp: 'tool' }, { mcp: 'select' }, { mcp: false }];
+const virtualDeclarations: VirtualFieldDeclaration[] = [virtualField, ...virtualOptions];
+// @ts-expect-error extensions.virtual is true or an options object, never false.
+const notVirtual: VirtualFieldDeclaration = false;
+// @ts-expect-error mcp is 'tool', 'select' or false.
+const badMcp: VirtualFieldOptions = { mcp: 'list' };
+// @ts-expect-error mcp is the only option.
+const unknownOption: VirtualFieldOptions = { batch: () => [] };
+void [virtualDeclarations, notVirtual, badMcp, unknownOption];
+// Custom adapters skip virtual fields of the GraphQL types they receive.
+const storedFieldNames = (type: GraphQLObjectType): string[] => Object.entries(type.getFields())
+  .filter(([, field]) => !isVirtualField(field)).map(([name]) => name);
+const virtualMode: 'tool' | 'select' | false | undefined = virtualFieldOptions({ extensions: { virtual: true } })?.mcp;
+// @ts-expect-error the helpers read a field, not its name.
+isVirtualField('busyRanges');
+void [storedFieldNames, virtualMode];
+// queryFeatures is optional: the 3.7-shaped adapter above compiles without it, and null or undefined mean the same.
+const textOperators: readonly QueryOperator[] = ['LIKE', 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ'];
+const textAdapter: DatabaseAdapter<Model, Session> = { ...adapter, queryFeatures: { operators: ['EQ', ...textOperators] } };
+const legacyAdapters: DatabaseAdapter<Model, Session>[] = [{ ...adapter, queryFeatures: null }, { ...adapter, queryFeatures: undefined }];
+// Names that this version does not know, such as those of later releases, still compile.
+const laterFeatures: QueryFeatures = { operators: Object.freeze(['EQ', 'IS_EMPTY']) };
+// @ts-expect-error operators is a list of operator names.
+const oneOperator: QueryFeatures = { operators: 'ILIKE' };
+// @ts-expect-error a declaration is an object with operators, not the list itself.
+const bareList: DatabaseAdapter<Model, Session> = { ...adapter, queryFeatures: ['ILIKE'] };
+// @ts-expect-error QueryOperator names the QLOperator values only.
+const unknownOperator: QueryOperator = 'CONTAINS';
+const featureMembers: {
+  adapter: Equals<DatabaseAdapter['queryFeatures'], QueryFeatures | null | undefined>;
+  operator: Equals<QueryOperator, 'EQ' | 'NE' | 'LT' | 'LTE' | 'GT' | 'GTE' | 'BTW' | 'IN' | 'NIN' | 'LIKE' | 'ILIKE' | 'STARTS_WITH' | 'ISTARTS_WITH' | 'ENDS_WITH' | 'IENDS_WITH' | 'IEQ'>;
+} = { adapter: true, operator: true };
+const textPlan = createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', { title: { operator: 'ISTARTS_WITH', value: 'a' } }, { mode: 'count', operators: new Set<QueryOperator>(['EQ', 'ISTARTS_WITH']) });
+const planOperators = createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', {}, { operators: textOperators });
+// @ts-expect-error operators is an iterable of operator names.
+createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', {}, { operators: 5 });
+void [textAdapter, legacyAdapters, laterFeatures, oneOperator, bareList, unknownOperator, featureMembers, textPlan.mode, planOperators, createRuntime(textAdapter)];`;
 
 // The expected type of a subpath's default export.
 const subpathDefaultType = ({ namespace, values, defaultExport, defaultExtras }) => {
@@ -898,14 +1015,24 @@ const sqlTypes = `import {
   type SQLInsertManyOperation,
   type SQLModelDescription,
   type SQLPlugin,
+  type SQLQueryFeatures,
   type SQLRecordOperation,
   type SQLStatement,
   type MutationLimitsOptions,
   type TypeScopes,
   type ItemValidators,
+  type VirtualFieldDeclaration,
+  type VirtualFieldOptions,
   validators,
 } from '@simtlix/simfinity-sql';
-import { describeModels, type ItemValidators as CoreItemValidators, type QueryPlan } from '@simtlix/simfinity-core';
+import {
+  describeModels,
+  type ItemValidators as CoreItemValidators,
+  type QueryFeatures as CoreQueryFeatures,
+  type QueryPlan,
+  type VirtualFieldDeclaration as CoreVirtualFieldDeclaration,
+  type VirtualFieldOptions as CoreVirtualFieldOptions,
+} from '@simtlix/simfinity-core';
 import { GraphQLID, GraphQLObjectType, GraphQLString } from 'graphql';
 type Configuration = { schema: string; token: string };
 type Client = { active: boolean };
@@ -1046,12 +1173,29 @@ type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B
 const itemRules: ItemValidators = [validators.maxLength('Tag', 20), null];
 const tagRules = validators.arrayLength('Tags', 10, itemRules);
 const sameItemValidators: Equals<ItemValidators, CoreItemValidators> = true;
-void [capability, scalar, description, badOperation, badPlugin, scopes, itemRules, tagRules, sameItemValidators];`;
+const sameVirtualTypes: {
+  declaration: Equals<VirtualFieldDeclaration, CoreVirtualFieldDeclaration>;
+  options: Equals<VirtualFieldOptions, CoreVirtualFieldOptions>;
+} = { declaration: true, options: true };
+void [capability, scalar, description, badOperation, badPlugin, scopes, itemRules, tagRules, sameItemValidators, sameVirtualTypes];
+// queryFeatures is optional: the 3.5.9-shaped plugin above compiles without it, and null or undefined mean the same.
+const textPlugin: SQLPlugin<Configuration, Client, Description> = { ...plugin, queryFeatures: { operators: ['EQ', 'LIKE', 'ILIKE', 'IEQ'] } };
+const legacyPlugins: SQLPlugin<Configuration, Client, Description>[] = [{ ...plugin, queryFeatures: null }, { ...plugin, queryFeatures: undefined }];
+// @ts-expect-error operators lists operator names.
+const numericOperators: SQLPlugin<Configuration, Client, Description> = { ...plugin, queryFeatures: { operators: [1] } };
+// A declaration may name the compileQuery it describes, as a compileChildrenQuery does.
+const tiedPlugin: SQLPlugin<Configuration, Client, Description> = { ...plugin, queryFeatures: { operators: ['EQ', 'ILIKE'], compileQuery: plugin.compileQuery } };
+// @ts-expect-error queryFeatures.compileQuery is a compiler.
+const badTie: SQLPlugin<Configuration, Client, Description> = { ...plugin, queryFeatures: { operators: ['EQ'], compileQuery: 'compileQuery' } };
+const sqlFeatures: Equals<SQLPlugin['queryFeatures'], SQLQueryFeatures | null | undefined> = true;
+const sqlCoreFeatures: SQLQueryFeatures extends CoreQueryFeatures ? true : false = true;
+void [textPlugin, legacyPlugins, numericOperators, tiedPlugin, badTie, sqlFeatures, sqlCoreFeatures, createSQL({ plugin: textPlugin })];`;
 
 const postgresTypes = `import { Pool, type PoolClient } from 'pg';
-import { createSQL, type SQLChildrenQueryCompiler, type SQLStatement } from '@simtlix/simfinity-sql';
+import { createSQL, type SQLChildrenQueryCompiler, type SQLQueryFeatures, type SQLStatement } from '@simtlix/simfinity-sql';
 import {
   auth,
+  caseFoldExpression,
   configure,
   connect,
   createPostgres,
@@ -1074,8 +1218,15 @@ import {
   type PostgresSession,
   type DatabaseQueryable,
   type ItemValidators,
+  type VirtualFieldDeclaration,
+  type VirtualFieldOptions,
 } from '@simtlix/simfinity-postgres';
-import type { ItemValidators as CoreItemValidators } from '@simtlix/simfinity-core';
+import type {
+  ItemValidators as CoreItemValidators,
+  QueryFeatures as CoreQueryFeatures,
+  VirtualFieldDeclaration as CoreVirtualFieldDeclaration,
+  VirtualFieldOptions as CoreVirtualFieldOptions,
+} from '@simtlix/simfinity-core';
 import { GraphQLObjectType, GraphQLString } from 'graphql';
 declare const pool: Pool;
 const type = new GraphQLObjectType({ name: 'TypedPostgresBook', fields: { title: { type: GraphQLString } } });
@@ -1114,6 +1265,11 @@ type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B
 const itemRules: ItemValidators = [validators.maxLength('Tag', 20), null];
 const tagRules = validators.arrayLength('Tags', 10, itemRules);
 const sameItemValidators: Equals<ItemValidators, CoreItemValidators> = true;
+const sameVirtualTypes: {
+  declaration: Equals<VirtualFieldDeclaration, CoreVirtualFieldDeclaration>;
+  options: Equals<VirtualFieldOptions, CoreVirtualFieldOptions>;
+} = { declaration: true, options: true };
+void sameVirtualTypes;
 const pgOptions: PostgresConfiguration = { pool, schema: 'app', multiRowInserts: false, explicitNullsOrder: true };
 createPostgres(pgOptions);
 createPostgres().configure({ pool, explicitNullsOrder: false, multiRowInserts: true });
@@ -1154,9 +1310,20 @@ const badRefresh: PostgresConfiguration = { pool, refreshTriggers: 'perTransacti
 const badOwnerIndexes: PostgresConfiguration = { pool, ownerIndexes: 'none' };
 // @ts-expect-error describeDatabase options take the same values.
 describeDatabase([], { refreshTriggers: 'yes' });
+const foldedName: string = caseFoldExpression('"name"');
+// @ts-expect-error caseFoldExpression takes an SQL expression string.
+caseFoldExpression(5);
+void foldedName;
 void [schema, model, ready, lowLevel, defaultSchema, defaultReady, rule, email, scalarName, countPlugin, scopes];
 void [itemRules, tagRules, sameItemValidators];
-void [batchLimit, batchCompiler, triggerEvents, triggerWhen, badNulls, badInserts, badRefresh, badOwnerIndexes];`;
+void [batchLimit, batchCompiler, triggerEvents, triggerWhen, badNulls, badInserts, badRefresh, badOwnerIndexes];
+// The plugin declares its operators for its own compileQuery; a copy without the declaration, or with another
+// compileQuery, compiles the operators of 3.7.0.
+const pgFeatures: Equals<ReturnType<typeof postgresPlugin>['queryFeatures'], SQLQueryFeatures<PostgresConfiguration, DatabaseDescription> | null | undefined> = true;
+const pgCoreFeatures: CoreQueryFeatures | null | undefined = postgresPlugin().queryFeatures;
+const pgOperators: readonly string[] | undefined = postgresPlugin().queryFeatures?.operators;
+const legacyPg = createSQL({ plugin: { ...postgresPlugin({ pool }), queryFeatures: undefined } });
+void [pgFeatures, pgCoreFeatures, pgOperators, legacyPg];`;
 
 const mongoTypes = `import {
   InternalServerError,
@@ -1180,12 +1347,17 @@ const mongoTypes = `import {
   type MutationLimitsOptions,
   type TypeScopes,
   type ItemValidators,
+  type VirtualFieldDeclaration,
+  type VirtualFieldOptions,
 } from '@simtlix/simfinity-js';
 import type {
   AuthSchemaPlugin as CoreAuthSchemaPlugin,
   DatabaseAdapter as CoreDatabaseAdapter,
   EnvelopSchemaPlugin as CoreEnvelopSchemaPlugin,
   ItemValidators as CoreItemValidators,
+  QueryFeatures as CoreQueryFeatures,
+  VirtualFieldDeclaration as CoreVirtualFieldDeclaration,
+  VirtualFieldOptions as CoreVirtualFieldOptions,
 } from '@simtlix/simfinity-core';
 import { GraphQLObjectType, GraphQLString } from 'graphql';
 const runtime = createRuntime(createMongoAdapter());
@@ -1220,6 +1392,11 @@ const sameSchemaPlugins: {
   auth: Equals<AuthSchemaPlugin, CoreAuthSchemaPlugin>;
   createAuthPlugin: Equals<ReturnType<typeof auth.createAuthPlugin>, CoreAuthSchemaPlugin>;
 } = { envelop: true, auth: true, createAuthPlugin: true };
+const sameVirtualTypes: {
+  declaration: Equals<VirtualFieldDeclaration, CoreVirtualFieldDeclaration>;
+  options: Equals<VirtualFieldOptions, CoreVirtualFieldOptions>;
+} = { declaration: true, options: true };
+void sameVirtualTypes;
 // Batched collection reads are an adapter option; the adapter declares the optional members only.
 const plain: MongoAdapter = createMongoAdapter();
 const integrity: MongoAdapter = createMongoAdapter({ referentialIntegrity: 'transactional' });
@@ -1243,7 +1420,14 @@ const mongoBatchMembers: {
 } = { read: true, predicate: true, lists: true };
 void [registrations, inputType, formatted, internal, rule, email, scalarName, countPlugin, generated, protection, ready, scopes];
 void [itemRules, tagRules, sameItemValidators, sameSchemaPlugins];
-void [integrity, both, lists, eligible, double, wrongFlag, wrongSize, createRuntime(batching), mongoBatchMembers];`;
+void [integrity, both, lists, eligible, double, wrongFlag, wrongSize, createRuntime(batching), mongoBatchMembers];
+// The adapter declares the operators it compiles; a copy without the declaration gets the operators of 3.7.0.
+const mongoFeatures: Equals<MongoAdapter['queryFeatures'], CoreQueryFeatures> = true;
+const mongoOperators: readonly string[] = plain.queryFeatures.operators;
+// @ts-expect-error queryFeatures is readonly.
+plain.queryFeatures = { operators: [] };
+const legacyMongo: CoreDatabaseAdapter = { ...plain, queryFeatures: undefined };
+void [mongoFeatures, mongoOperators, createRuntime(legacyMongo)];`;
 
 // MongoDB's legacy deep imports of public API and their aliases: each value and type export has
 // exactly the type of the core subpath or root member it re-exports, so a missing sibling
@@ -1478,12 +1662,13 @@ const coreExactOptionalTypes = `import type { DatabaseAdapter } from '@simtlix/s
 declare const adapter: DatabaseAdapter;
 adapter.findChildrenBatch = undefined;
 adapter.batchesChildren = undefined;
-const copy: DatabaseAdapter = { ...adapter, findChildrenBatch: undefined, batchesChildren: undefined };
+adapter.queryFeatures = undefined;
+const copy: DatabaseAdapter = { ...adapter, findChildrenBatch: undefined, batchesChildren: undefined, queryFeatures: undefined };
 void copy;`;
 
 const sqlExactOptionalTypes = `import type { SQLConfiguration, SQLPlugin } from '@simtlix/simfinity-sql';
 declare const plugin: SQLPlugin;
-const copy: SQLPlugin = { ...plugin, compileChildrenQuery: undefined, compileRecordBatch: undefined, maxRecordBatchValues: undefined };
+const copy: SQLPlugin = { ...plugin, compileChildrenQuery: undefined, compileRecordBatch: undefined, maxRecordBatchValues: undefined, queryFeatures: undefined };
 const configuration: SQLConfiguration = { batchedCollections: undefined };
 void [copy, configuration];`;
 
@@ -1491,16 +1676,17 @@ const postgresExactOptionalTypes = `import { Pool } from 'pg';
 import { createPostgres, postgresPlugin } from '@simtlix/simfinity-postgres';
 const pool = new Pool();
 const plugin: ReturnType<typeof postgresPlugin> = {
-  ...postgresPlugin({ pool }), compileChildrenQuery: undefined, compileRecordBatch: undefined, maxRecordBatchValues: undefined,
+  ...postgresPlugin({ pool }), compileChildrenQuery: undefined, compileRecordBatch: undefined, maxRecordBatchValues: undefined, queryFeatures: undefined,
 };
 const runtime = createPostgres({ pool, batchedCollections: undefined });
 void [plugin, runtime];`;
 
-const mongoExactOptionalTypes = `import { createMongoAdapter } from '@simtlix/simfinity-js';
+const mongoExactOptionalTypes = `import { createMongoAdapter, createRuntime } from '@simtlix/simfinity-js';
 const adapter = createMongoAdapter({ batchedCollections: true, collectionBatchSize: undefined });
 adapter.findChildrenBatch = undefined;
 adapter.batchesChildren = undefined;
-void createMongoAdapter({ batchedCollections: undefined });`;
+void createMongoAdapter({ batchedCollections: undefined });
+void createRuntime({ ...adapter, queryFeatures: undefined });`;
 
 const customQueryTypes = (name, runtimeType, sessionType, singleton = false) => `import type { RegisterQueryOptions } from '${name}';
 import type { RegisterQueryOptions as CoreOptions } from '@simtlix/simfinity-core';

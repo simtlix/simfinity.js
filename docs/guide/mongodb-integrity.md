@@ -5,7 +5,7 @@ description: Opt into transactional reference checks and restrict-delete behavio
 
 # MongoDB reference integrity
 
-Available from **Simfinity 3.4.0**. Install `@simtlix/simfinity-js@3.7.0` and keep any directly installed Simfinity packages at the same version.
+Available from **Simfinity 3.4.0**. Install `@simtlix/simfinity-js@3.9.0` and keep any directly installed Simfinity packages at the same version.
 
 MongoDB applications can opt into transactional reference integrity when creating their adapter. The setting is fixed for that runtime. Queries, mutation inputs, scopes, authorization and MCP schemas keep their existing shape.
 
@@ -49,13 +49,13 @@ Calling `preventCreatingCollection(true)` before `createSchema()` suppresses the
 
 The protected graph comes from `extensions.relation`, using the same metadata description as the SQL planner:
 
-- Single references, including renamed and dotted Mongo storage keys.
+- Single references, including renamed storage keys. Up to 3.7.0, this list also included dotted storage keys, such as `nested.targetId`; `createSchema()` now rejects them, and the [upgrade notes](../resources/compatibility#moving-links-of-a-dotted-connectionfield) show how to move their links.
 - References inside embedded objects and arbitrarily deep supported embedded lists, including nullable items.
 - One-to-many child keys, including inferred scalar `GraphQLID` fields and private connection fields. A private connection field is also generated when the child type has a collection with the same `connectionField`, as in chained or self-referencing collections.
 - Explicit many-to-many link entities and self-references.
 - Referenced supporting types registered without root endpoints.
 
-Plain scalar IDs without a declared or inferred relationship remain ordinary values. Optional absent/null references do not require a target. An embedded document itself belongs to its owner and disappears when its owner is deleted; references within it still protect their separate targets.
+Plain scalar IDs without a declared or inferred relationship remain ordinary values. [Virtual fields](./queries#virtual-fields) store nothing, so they are never part of the graph, whatever their result type, and need no `relation` in this mode either. Optional absent/null references do not require a target. An embedded document itself belongs to its owner and disappears when its owner is deleted; references within it still protect their separate targets.
 
 A missing target returns `REFERENCE_CONSTRAINT_VIOLATION` with status metadata `409`, matching PostgreSQL's FK error. The entire generated mutation rolls back, including its parent and earlier nested children. Deleting a target still referenced by another stored document returns the same error. Deleting a self-referencing document is allowed when no other document references it.
 

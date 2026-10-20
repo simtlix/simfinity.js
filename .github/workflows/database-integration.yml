@@ -22,7 +22,10 @@ concurrency:
 
 jobs:
   integration:
-    runs-on: ubuntu-24.04
+    # MongoDB 8 refuses the newer kernels on ubuntu-24.04 (SERVER-121912).
+    # Keep the database matrix on the 22.04 runner's compatible kernel until
+    # the MongoDB images support the newer runner; retain every database version.
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     strategy:
       fail-fast: false

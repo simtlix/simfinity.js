@@ -82,8 +82,9 @@ try {
   assert.equal(overlap.errors[0].extensions.code, 'BOOKING_SLOT_UNAVAILABLE');
   const past = await mutation('addbooking', { ...bookingInput, scheduledDate: '2020-01-01' }, 'id', otherClient.accessToken, true);
   assert.equal(past.errors[0].extensions.code, 'BOOKING_OUTSIDE_ADVANCE_WINDOW');
-  const availability = await mutation('bookingAvailability', { barbershopId: shop.id, date: bookingInput.scheduledDate }, 'startTime endTime professionalId', otherClient.accessToken);
-  assert.deepEqual(availability, [{ startTime: '10:00', endTime: '11:00', professionalId: professional.id }]);
+  const availability = await request('query($id: ID, $date: String!) { barbershop(id: $id) { busyRanges(date: $date) { startTime endTime professionalId } } }', { id: shop.id, date: bookingInput.scheduledDate }, otherClient.accessToken);
+  assert.equal(availability.errors, undefined, JSON.stringify(availability.errors));
+  assert.deepEqual(availability.data.barbershop.busyRanges, [{ startTime: '10:00', endTime: '11:00', professionalId: professional.id }]); checks++;
   // Concurrent creates for one professional and slot serialize on the professional row.
   const raceInput = { ...bookingInput, startTime: '14:00' };
   const raced = await Promise.all([client, otherClient].map((user) => request('mutation($input: bookingInput!) { addbooking(input: $input) { id } }', { input: raceInput }, user.accessToken)));

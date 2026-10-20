@@ -19,5 +19,10 @@ try {
       }
     }
   }
-  console.log('Both dashboard selections validate against the application GraphQL schema.');
+  // The booking page sends its taken-times query as a whole GraphQL document.
+  const bookPage = await readFile(new URL('../../frontend/src/app/(client)/book/page.tsx', import.meta.url), 'utf8');
+  const busyRanges = bookPage.match(/const BUSY_RANGES_QUERY = `([^`]+)`/)?.[1];
+  assert.ok(busyRanges, '(client)/book/page.tsx: taken-times query found');
+  assert.deepEqual(validate(schema, parse(busyRanges)).map((error) => error.message), [], '(client)/book/page.tsx');
+  console.log("Both dashboard selections and the booking page's taken-times query validate against the application GraphQL schema.");
 } finally { await closeDatabase(); }

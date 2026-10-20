@@ -5,6 +5,7 @@ import { describeRelationalSchema } from './schema/describe.js';
 import { initializeDatabase } from './schema/initialize.js';
 import { compileDatabaseSchema } from './schema/ddl.js';
 import { compileChildrenQuery, compileQuery } from './query/compiler.js';
+import { markCaseFoldFailure } from './query/case-fold.js';
 import { compileRecord, compileRecordBatch, MAX_RECORD_BATCH_VALUES } from './record-statements.js';
 import { castId, encodeScalar, decodeScalar, encodeParameter, isRetryableDatabaseError, normalizeDatabaseError } from './codecs.js';
 
@@ -17,10 +18,18 @@ export const postgresPlugin = (options) => ({
   // singleStatementReads: one statement reads one snapshot at any isolation level, so a read without owned
   // tables needs no repeatable-read transaction.
   capabilities: ['transactions', 'foreignKeys', 'deferredForeignKeys', 'embeddedValues', 'ownedRecords', 'scalarLists', 'uniqueValues', 'nullableUnique', 'singleStatementReads'],
+  // Every filter operator compileQuery and compileChildrenQuery compile, listed one by one so that a later
+  // QLOperator value is rejected until the compiler supports it. The declaration names the compileQuery it describes,
+  // so a copy of this plugin with another compileQuery compiles the operators of 3.7.0 until it declares its own.
+  queryFeatures: {
+    operators: ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE', 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ'],
+    compileQuery,
+  },
   naming: { validateIdentifier: identifier, generatedName },
   // The runtime passes its bound configuration: createPostgres(options) or configure(value).
   describeSchema: (plan, configuration) => describeRelationalSchema(plan, { refreshTriggers: configuration?.refreshTriggers, ownerIndexes: configuration?.ownerIndexes }),
-  initialize: (configuration, description, initialization) => initializeDatabase(configuration.pool, description, initialization),
+  // `context.virtualFields` locates virtual fields, so that SCHEMA_MISMATCH can name one whose earlier storage is left.
+  initialize: (configuration, description, initialization, context) => initializeDatabase(configuration.pool, description, initialization, context),
   compileSchema: compileDatabaseSchema,
   compileQuery,
   // Optional member: the find statements of many parents in one statement, for findChildrenBatch, which the SQL
@@ -36,7 +45,15 @@ export const postgresPlugin = (options) => ({
     assertConfiguration(configuration) {
       if (!configuration?.pool?.connect || !configuration.pool.query) throw new SimfinityError('Configure a pg.Pool before creating the schema', 'DATABASE_NOT_CONFIGURED', 500);
     },
-    query: (configuration, statement, client) => (client || configuration.pool).query(statement.text, statement.values?.map(encodeParameter)),
+    // The error of a statement that folds case is marked, unchanged, so that normalizeError reports a database that
+    // cannot evaluate the fold as UNSUPPORTED_QUERY.
+    query: async (configuration, statement, client) => {
+      try {
+        return await (client || configuration.pool).query(statement.text, statement.values?.map(encodeParameter));
+      } catch (error) {
+        throw markCaseFoldFailure(statement, error);
+      }
+    },
     acquire: (configuration) => configuration.pool.connect(),
     begin: (client) => client.query('BEGIN ISOLATION LEVEL REPEATABLE READ'),
     // PostgreSQL answers COMMIT with ROLLBACK, and no error, when a statement in the transaction failed
