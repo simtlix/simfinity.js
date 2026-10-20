@@ -1,6 +1,6 @@
 ---
 title: Queries
-description: Retrieve records with scalar filters, related-field conditions, AND/OR groups, pagination, sorting, aggregation, and virtual fields for reads that filters cannot express.
+description: Retrieve records with scalar filters, related-field conditions, AND/OR groups, pagination, sorting, aggregation, virtual fields for reads that filters cannot express, and custom queries for results that are not stored records.
 ---
 
 # Queries
@@ -614,9 +614,16 @@ A field that is `readOnly` and has arguments and its own resolver, but is not vi
 
 ## Custom queries
 
-Register an application-specific read on `RootQueryType` before calling `createSchema()`. It uses the existing GraphQL endpoint and can also become an [MCP tool](./mcp#custom-query-tools). The input and output describe this operation independently of any connected entity.
+Generated queries, [query scopes](./query-scope), [aggregates](#aggregate-records) and [virtual fields](#virtual-fields) read stored records, and they stay the first choice for those reads. Some reads return a result that is not a stored record:
 
-This storage-free example estimates a duration using an application-owned catalog. `simfinity` is the runtime already initialized by your application; the same registration works with either backend.
+- a computation without storage, such as a price preview, an estimate or the free slots that a set of rules allows;
+- data from another source, such as a search index, another service or a catalog defined in code;
+- a permission evaluation, such as what the caller may do on a resource;
+- a result assembled from several sources, such as a federated search, a dashboard or an export.
+
+Register such a read as a **custom query**: a field of `RootQueryType` whose callback is application code. Clients send it in a `query` document, together with other query fields; Simfinity's [middleware](./middleware) and the [authorization plugin](./authorization) see it; `createSchema()` can include or exclude it; and [MCP](./mcp#custom-query-tools) publishes it as a read-only tool. A read of stored records does not belong here: a custom query bypasses the scopes, filters and permission rules of the generated reads, so it would have to repeat them.
+
+This example estimates a duration from a catalog defined in code. `simfinity` is the runtime your application already set up; register the query before the `createSchema()` call that should expose it.
 
 ```javascript
 import {
@@ -652,12 +659,12 @@ const DurationEstimate = new GraphQLObjectType({
   fields: { minutes: { type: new GraphQLNonNull(GraphQLInt) } },
 });
 
-simfinity.registerQuery(
+simfinity.registerCustomQuery(
   'estimateServiceDuration',
   'Estimate the total duration of selected services',
   DurationInput,
   DurationEstimate,
-  (input) => durationService.estimate(input.serviceCodes),
+  (input, context) => durationService.estimate(input.serviceCodes),
 );
 
 const schema = simfinity.createSchema();
@@ -671,24 +678,63 @@ query {
 }
 ```
 
-The result is `{ "data": { "estimateServiceDuration": { "minutes": 45 } } }`. An input object type creates one required `input` argument. Pass `null` or `undefined` instead of that type for an operation without arguments; its callback receives `undefined` as the input. Outputs can also be scalars, enums, lists, interfaces or unions, with GraphQL nullability wrappers. They do not need an entity model just to describe a result.
+The result is `{ "data": { "estimateServiceDuration": { "minutes": 45 } } }`. An input object type creates one required `input` argument. Pass `null` or `undefined` instead of that type for a query without arguments; its callback receives `undefined` as the input. Outputs can also be scalars, enums, lists, interfaces or unions, with GraphQL nullability wrappers, and need no registration or storage model.
 
-The callback receives `(input, session, context)`. GraphQL validates and coerces its arguments first, then [global middleware](./middleware) runs with `operation: 'custom_query'`. The callback gets a copy of the input after middleware and the original request context. Use `includedCustomQueries` in [`createSchema()`](/reference/api#createschema) to select custom queries by name. See [`registerQuery()`](/reference/api#registerquery) for its parameters and registration errors.
+The callback receives `(input, context)`. GraphQL validates and coerces the arguments first, then [global middleware](./middleware) runs with `operation: 'custom_query'` and `entry: 'estimateServiceDuration'`, and the callback gets a copy of the input after middleware and the request context. It returns the result or a promise of it. An error it throws keeps its code and status, as in a custom mutation. Unlike a custom mutation's `(input, session, context)`, the callback receives no session, so a callback ported from `registerMutation()` drops that parameter. The callback is engine-specific application code: Simfinity makes no promise that one callback works on both backends. See [`registerCustomQuery()`](/reference/api#registercustomquery) for its parameters and registration errors.
+
+### Select custom queries
+
+`createSchema()` includes every registered custom query. Its fourth argument, an options object, selects them by name:
+
+```javascript
+// Every generated query and mutation, every custom mutation, and one custom query.
+const schema = simfinity.createSchema(null, null, null, {
+  includedCustomQueries: ['estimateServiceDuration'],
+});
+```
+
+An omitted `includedCustomQueries` or `null` includes every custom query, `[]` includes none, and a name that is not registered is ignored. A fourth argument that is not a plain object, such as an array of names, and an option other than `includedCustomQueries` fail with `INVALID_SCHEMA_OPTIONS` (500) before any model is prepared.
+
+An included custom query named like an included generated query (`<entity>`, `<list>` or `<list>_aggregate`) fails with `QUERY_NAME_CONFLICT` (500), also before any model is prepared; exclude one of them. GraphQL accepts a custom query and a custom mutation with the same name, but [MCP](./mcp#custom-query-tools) then publishes only the query's tool, so give them distinct names. A schema without mutation fields, such as one that has only custom queries, has no `Mutation` root.
 
 ### Transactions
 
-By default, the callback receives `session = null` and runs without an enclosing transaction. Set `options.transactional` to `true` when several reads need to participate in one adapter transaction.
+Simfinity opens no transaction around a custom query, and the callback receives no session. Its native reads run outside any transaction, like the generated queries, and see committed data. A callback whose reads must see one snapshot opens its own transaction with the engine's API and passes the session to each read. This price preview reads every product of a cart from one snapshot; `ProductType` is a registered type with a `price` field:
 
-Pass the supplied session to each participating database call: `model.findById(id).session(session)` on MongoDB, or `model.findById(id, { session })` on PostgreSQL. Both runtimes must have their database connection and initialization ready as usual. MongoDB selects the session's connection as it does for [custom mutations](./mutations#which-connection-the-session-uses-on-mongodb).
+```javascript
+// PostgreSQL: simfinity is the @simtlix/simfinity-postgres instance.
+simfinity.registerCustomQuery('pricePreview', 'Price a cart without storing it', CartInput, PricePreview,
+  (input) => simfinity.withTransaction(null, async (session) => {
+    const products = simfinity.getModel(ProductType);
+    let total = 0;
+    for (const { productId, quantity } of input.lines) {
+      const product = await products.findById(productId, { session });
+      total += product.price * quantity;
+    }
+    return { total };
+  }));
+```
 
-Native calls keep their hooks and transaction behavior in both modes. The adapter may retry a transactional callback, so keep it safe to repeat. Each attempt receives a fresh typed input copy; see the [input-copy contract](/reference/api#registerquery).
+```javascript
+// MongoDB: the Mongoose connection of the models that the callback reads.
+simfinity.registerCustomQuery('pricePreview', 'Price a cart without storing it', CartInput, PricePreview,
+  (input) => mongoose.connection.transaction(async (session) => {
+    const products = simfinity.getModel(ProductType);
+    let total = 0;
+    for (const { productId, quantity } of input.lines) {
+      const product = await products.findById(productId).session(session);
+      total += product.price * quantity;
+    }
+    return { total };
+  }));
+```
 
-The transaction ends when the callback completes. Output field resolvers run afterwards, and sibling query fields do not share its session. Materialize the required data inside the callback when several reads must use the same transaction. Consistency follows the adapter's existing isolation policy. Registering a query does not enforce database read-only access.
+PostgreSQL's [`withTransaction()`](./postgresql#native-model-and-session-apis) uses repeatable-read isolation and retries serialization failures and deadlocks; Mongoose's `transaction()` retries transient transaction errors. Both may run the function more than once, so keep it free of other side effects. On MongoDB, a session belongs to one client: open the transaction on the connection of the models the callback reads, such as `ProductModel.db.transaction()` for models of another connection. The transaction ends when the function's promise settles. Output field resolvers run afterwards, outside it, and sibling query fields run their own callbacks and transactions. Registering a custom query does not make database access read-only.
 
 ### Authorization
 
-Use the [authorization plugin](./authorization) with the root field under `RootQueryType`, such as `RootQueryType: { estimateServiceDuration: requireAuth() }`. Output fields retain their normal resolvers and permissions.
+With the [authorization plugin](./authorization), the rule for `RootQueryType.<name>` authorizes the field before middleware and the callback run, such as `RootQueryType: { estimateServiceDuration: requireAuth() }`. Without a rule, the default policy applies, so under `defaultPolicy: 'DENY'` the field is denied. The fields of its output type are authorized by their own rules. The fields inside its `input` are not checked as field paths.
 
-The callback must enforce access restrictions on its native reads using trusted request context. Registering it does not automatically apply generated CRUD scopes, controllers, filters or pagination. Generated relationship fields selected on the result still run their usual middleware and scopes, after the callback has completed.
+The callback authorizes its own reads with the trusted request context: query scopes, controllers, generated filters and pagination do not run for it. Generated relationship fields selected on its result still run their middleware and scopes, after the callback has returned.
 
-For generated entity reads, use [query scope](./query-scope) to constrain which records a caller may query.
+To constrain which records a caller may query, continue with [query scope](./query-scope).

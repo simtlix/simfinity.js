@@ -29,7 +29,7 @@ For MongoDB, `simfinity` is the namespace imported from `@simtlix/simfinity-js`.
 
 ## Execution order
 
-For root reads and generated non-embedded relationship reads, the sequence is middleware, query scope, query construction, and database execution. Root mutation middleware runs before the transactional mutation handler. Nested collection mutations run the target child's middleware inside that transaction before checking its persisted parent and performing the child operation.
+For root reads and generated non-embedded relationship reads, the sequence is middleware, query scope, query construction, and database execution. Root mutation middleware runs before the transactional mutation handler. Custom query middleware runs before the callback, which no transaction wraps. Nested collection mutations run the target child's middleware inside that transaction before checking its persisted parent and performing the child operation.
 
 ::: warning What next() means
 `next()` advances to the next registered middleware. The database resolver executes after the entire middleware chain returns. Code after `await next()` still runs before database execution, and omitting `next()` only skips the remaining middleware. Throw an error to cancel the operation.
@@ -60,7 +60,7 @@ simfinity.use(async (params, next) => {
 | `operation` | One of the operation values below. |
 | `context` | The GraphQL request context. For nested collection children of a programmatic `saveObject()` call, the `context` passed to `saveObject()`, which is `undefined` when omitted; guard with `context?.`. |
 | `type` | Registered type metadata for generated entity operations; absent for custom queries and mutations. |
-| `entry` | Registered operation name for `custom_query` and `custom_mutation`. |
+| `entry` | Registered name of the custom query or custom mutation, for `custom_query` and `custom_mutation`. |
 | `actionName`, `actionField` | State-machine action name and configuration for `state_changed`. |
 
 | Operation | Trigger |
@@ -72,8 +72,8 @@ simfinity.use(async (params, next) => {
 | `update` | Generated update mutation or nested `updated` child (including children of a `saveObject()` call). |
 | `delete` | Generated delete mutation or nested `deleted` child (including children of a `saveObject()` call). |
 | `state_changed` | Generated state-machine action. |
-| `custom_mutation` | Registered custom mutation. |
-| `custom_query` | Registered custom query. |
+| `custom_mutation` | Custom mutation registered with `registerMutation()`. |
+| `custom_query` | [Custom query](./queries#custom-queries) registered with `registerCustomQuery()`. Its callback receives a copy of `args.input` as middleware leaves it. |
 
 ## Prepare arguments
 

@@ -243,7 +243,7 @@ const schema = simfinity.createSchema(
   includedQueryTypes,     // Optional: Array of types to include in queries
   includedMutationTypes,  // Optional: Array of types to include in mutations
   includedCustomMutations, // Optional: Array of custom mutation names to include
-  includedCustomQueries   // Optional: Array of custom query names to include
+  { includedCustomQueries } // Optional: Options object; custom query names to include
 );
 ```
 
@@ -2660,48 +2660,56 @@ A virtual field (`extensions: { virtual: true }`) is computed by its own resolve
 
 ### Custom Queries
 
-Register custom queries with their own input and result types. Their result types do not need a storage model.
+Register a custom query for a read whose result is not a stored record: a computation without storage, such as a price preview or an estimate; data from another source, such as a search index or another service; a permission evaluation; or a result assembled from several sources, such as a federated search or an export. Reads of stored records belong in generated queries, query scopes, aggregates and virtual fields.
 
-This MongoDB example assumes `BookType` has already been connected:
+This price preview prices a cart without storing anything. `pricing` stands for your application's pricing service, which reads a price list and tax rules:
 
 ```javascript
 import {
-  GraphQLID, GraphQLInputObjectType, GraphQLNonNull,
-  GraphQLObjectType, GraphQLString,
+  GraphQLFloat, GraphQLInputObjectType, GraphQLInt, GraphQLList,
+  GraphQLNonNull, GraphQLObjectType, GraphQLString,
 } from 'graphql';
 
-const BookPreviewInput = new GraphQLInputObjectType({
-  name: 'BookPreviewInput',
-  fields: { bookId: { type: new GraphQLNonNull(GraphQLID) } },
+const CartLineInput = new GraphQLInputObjectType({
+  name: 'CartLineInput',
+  fields: {
+    sku: { type: new GraphQLNonNull(GraphQLString) },
+    quantity: { type: new GraphQLNonNull(GraphQLInt) },
+  },
 });
-const BookPreview = new GraphQLObjectType({
-  name: 'BookPreview',
-  fields: { title: { type: GraphQLString } },
+const PricePreviewInput = new GraphQLInputObjectType({
+  name: 'PricePreviewInput',
+  fields: { lines: { type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(CartLineInput))) } },
+});
+const PricePreview = new GraphQLObjectType({
+  name: 'PricePreview',
+  fields: {
+    subtotal: { type: new GraphQLNonNull(GraphQLFloat) },
+    tax: { type: new GraphQLNonNull(GraphQLFloat) },
+    total: { type: new GraphQLNonNull(GraphQLFloat) },
+  },
 });
 
-simfinity.registerQuery(
-  'bookPreview',
-  'Read a book preview',
-  BookPreviewInput,
-  BookPreview,
-  async (input) => {
-    const book = await simfinity.getModel(BookType).findById(input.bookId);
-    return book ? { title: book.title } : null;
-  },
+simfinity.registerCustomQuery(
+  'pricePreview',
+  'Price a cart without storing it',
+  PricePreviewInput,
+  PricePreview,
+  (input, context) => pricing.preview(input.lines, context.user),
 );
 
 const schema = simfinity.createSchema();
 ```
 
 ```graphql
-query BookPreview($input: BookPreviewInput!) {
-  bookPreview(input: $input) { title }
+query PricePreview($input: PricePreviewInput!) {
+  pricePreview(input: $input) { subtotal tax total }
 }
 ```
 
-The callback receives `(input, session, context)`. By default, `session` is `null` and no transaction wraps the callback. Set `options.transactional` to `true` to use the adapter's transaction and retry policy; database calls must use the supplied session to participate. Native calls retain their existing hooks and behavior. Authorize the root under `RootQueryType` and enforce access restrictions on the callback's native reads.
+The field belongs to `RootQueryType`, so clients send it in a `query` document with other query fields. The callback receives `(input, context)`. Simfinity opens no transaction and passes no session; a callback that needs one opens it with `simfinity.withTransaction(null, callback)` on PostgreSQL or the Mongoose connection's `transaction()` on MongoDB. Middleware runs first with `operation: 'custom_query'`, the authorization plugin authorizes the field under `RootQueryType`, and MCP publishes it as a read-only tool. Select custom queries with the options object of `createSchema()`, such as `createSchema(null, null, null, { includedCustomQueries: ['pricePreview'] })`. A schema without mutation fields has no `Mutation` root.
 
-See the [custom query guide](docs/guide/queries.md#custom-queries) for both backends, transactions and authorization, and the [API reference](docs/reference/api.md#registerquery) for the full contract.
+See the [custom query guide](docs/guide/queries.md#custom-queries) for selection, transactions and authorization, and the [API reference](docs/reference/api.md#registercustomquery) for the full contract.
 
 ### Custom Mutations
 
@@ -4500,7 +4508,7 @@ const newBook = await simfinity.saveObject('Book', {
 
 **Note**: When `context` is not provided, it is `undefined` in controller hooks and in the middleware that nested collection children run. This is acceptable for programmatic usage where context may not be available.
 
-### `createSchema(includedQueryTypes?, includedMutationTypes?, includedCustomMutations?, includedCustomQueries?)`
+### `createSchema(includedQueryTypes?, includedMutationTypes?, includedCustomMutations?, options?)`
 
 Creates the final GraphQL schema with all connected types.
 
@@ -4508,7 +4516,7 @@ Creates the final GraphQL schema with all connected types.
 - `includedQueryTypes` (array, optional): Limit query types to include
 - `includedMutationTypes` (array, optional): Limit mutation types to include  
 - `includedCustomMutations` (array, optional): Limit custom mutations to include
-- `includedCustomQueries` (array, optional): Limit custom queries by their registered names
+- `options` (object, optional): `{ includedCustomQueries }`, the registered custom query names to include. Omitted or `null` includes all, `[]` includes none, and unregistered names are ignored. A value that is not a plain object, such as an array, and any other key throw `INVALID_SCHEMA_OPTIONS` (500)
 
 **Returns:**
 - `GraphQLSchema`: The complete GraphQL schema
