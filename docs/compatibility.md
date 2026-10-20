@@ -252,9 +252,9 @@ Version 3.8.0 adds virtual fields (`extensions.virtual`), which no backend store
 
 The virtual-field regressions were checked against 3.7.0. Version 3.8.0 also rejects dotted and non-string `connectionField` declarations; see the [migration notes](resources/compatibility.md#moving-links-of-a-dotted-connectionfield). `tests/connection-field-paths.test.js` verifies pre-model rejection in both MongoDB modes and PostgreSQL, including unregistered embedded types.
 
-## Next release: literal text operators
+## 3.9.0: literal text operators
 
-The next release adds six literal text operators to `QLOperator`: `ILIKE`, `STARTS_WITH`, `ISTARTS_WITH`, `ENDS_WITH`, `IENDS_WITH` and `IEQ`. The rows below record the contract; see the [upgrade notes](resources/compatibility.md#upgrade-notes-for-the-next-release) for the changes applications can observe. The evidence is in the repository's `tests/` and `scripts/test-packages.js`, and the shared fixture and cases are in `tests/helpers/query-text-operators.js`.
+Version 3.9.0 adds six literal text operators to `QLOperator`: `ILIKE`, `STARTS_WITH`, `ISTARTS_WITH`, `ENDS_WITH`, `IENDS_WITH` and `IEQ`. The rows below record the contract; see the [upgrade notes](resources/compatibility.md#upgrade-to-3-9-0) for the changes applications can observe. The evidence is in the repository's `tests/` and `scripts/test-packages.js`, and the shared fixture and cases are in `tests/helpers/query-text-operators.js`.
 
 | Behavior | Decision | Executable evidence |
 | --- | --- | --- |

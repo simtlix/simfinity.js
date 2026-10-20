@@ -35,9 +35,9 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22 or newer |
 
-## Upgrade notes for the next release
+## Upgrade to 3.9.0
 
-These notes describe changes that the next release will include. Filters that are valid in 3.8.0 keep their results, and the bundled adapters compile them to the same MongoDB pipelines and PostgreSQL statements. Custom adapters and SQL plugins need a declaration before they receive the new operators. Keep all directly installed Simfinity packages at the same version.
+Version 3.9.0 adds literal text filters to both backends. Filters that are valid in 3.8.0 keep their results, and the bundled adapters compile them to the same MongoDB pipelines and PostgreSQL statements. Custom adapters and SQL plugins need a declaration before they receive the new operators. Keep all directly installed Simfinity packages at the same version.
 
 ### Text operators
 
@@ -973,7 +973,7 @@ Keep all directly installed Simfinity packages at 3.5.0 and review these behavio
 - MongoDB uses the application's GraphQL and Mongoose peers. Install the optional MCP SDK explicitly for transports; `graphql-middleware` is no longer installed by Simfinity. See [installation](../guide/databases#install-from-npm).
 - Embedded updates enforce required fields when constructing replacement objects or list items; existing embedded objects still accept valid partial patches. SQL sessions reject statements after their callback settles, and a failed rollback discards the connection. See [mutations](../guide/mutations) and the [SQL plugin contract](../guide/sql-plugins#plugin-contract-version-1).
 
-The current [downloadable starters](../guide/databases#download-the-starters) use 3.8.0. The [Barber examples](./barber) state their own exact package pin, and historical archives retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
+The current [downloadable starters](../guide/databases#download-the-starters) use 3.9.0. The [Barber examples](./barber) state their own exact package pin, and historical archives retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
 
 ## Upgrade from 3.2.0
 
