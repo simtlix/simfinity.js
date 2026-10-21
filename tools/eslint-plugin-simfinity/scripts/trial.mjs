@@ -43,12 +43,14 @@ for (const engine of ['mongodb', 'postgres']) {
     ['{ Book: { title: simfinity.auth.anyRule(false) } }', 'valid-auth-composition'],
     ["{ Book: { title: simfinity.auth.requireRole(['admin', '']) } }", 'valid-required-claims'],
     ['{ Book: { title: simfinity.auth.requireAuth(async context => context.user) } }', 'no-async-auth-extractor'],
+    ["{ Book: { title: { eq: [{ ref: 'context.user.id' }, 1] } } }", 'valid-policy-expression'],
+    ['{ Book: { title: simfinity.auth.createRuleFromExpression({ anyOf: [true, { unknown: true }] }) } }', 'valid-policy-expression'],
   ]) {
     const code = application.replace('createAuthPlugin(permissions,', `createAuthPlugin(${permissions},`);
     assert.deepEqual(linter.verify(code, [plugin.configs['recommended-3.8']]).map(message => message.ruleId), [`simfinity/${rule}`]);
   }
   const middleware = linter.verify(application + '\nsimfinity.use(authPlugin);', [plugin.configs['recommended-3.8']]);
   assert.deepEqual(middleware.map(message => message.ruleId), ['simfinity/no-auth-plugin-as-middleware']);
-  console.log(`${engine}: eight injected policy, relation and authorization-contract violations detected in existing application files.`);
+  console.log(`${engine}: ten injected policy, relation and authorization-contract violations detected in existing application files.`);
 }
 console.log('Bounded trial only: cross-file permission maps, dynamic configuration, lifecycle, scopes and transaction ownership are not certified. No application code was executed.');

@@ -51,7 +51,6 @@ describe('permission maps and configured rules (AUTH-02/04)', () => {
     'function f(protect) { protect(null); }',
     'function f(undefined) { protect({ Book: { title: undefined } }); }',
     'const map = load(); protect(map);',
-    'protect({ Book: { title: { customOperator: true } } });', // AUTH-11 is a separate batch.
   ];
   for (const code of valid) it(`preserves valid or unknown configuration: ${code}`, () => assert.deepEqual(lint(auth + code), []));
   it('bounds nested rule traversal without crashing', () => {
