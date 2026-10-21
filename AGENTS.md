@@ -99,6 +99,14 @@ Use `npm run test:watch` while iterating; `npm run test:coverage` when coverage 
 
 ## When editing
 
+The optional ESLint plugin under `tools/eslint-plugin-simfinity` has its own stable
+release flow, `release-eslint-plugin.yml`, triggered by `eslint-plugin-vX.Y.Z` tags
+on reviewed master merge commits. Manual dispatch previews only. Keep its package,
+lock and `meta.version` aligned; test the packed archive, use the dedicated
+`npm-eslint-release` OIDC environment, and verify npm, GitHub release assets and the
+subsequent documentation deployment. It never joins the five runtime workspaces
+or changes their version. See the contributor guide for the one-time trust setup.
+
 - Keep changes scoped to the task; avoid drive-by refactors.
 - Extend existing patterns rather than introducing parallel abstractions.
 - For GraphQL types in examples/tests: use `extensions.relation` on relationship fields; use `extensions.readOnly` where appropriate; use `extensions.virtual` (not `readOnly` plus a resolver) for a field that its resolver computes and nothing stores. Code that walks `gqltype.getFields()` for storage, inputs or query arguments must skip virtual fields with `isVirtualField`, a public root export of `@simtlix/simfinity-core` (bundled packages import it from `@simtlix/simfinity-core/internal/relation-storage`); `describeModels()` already leaves them out.

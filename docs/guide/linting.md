@@ -1,24 +1,21 @@
 # Optional application linting
 
-`@simtlix/eslint-plugin-simfinity` provides eight optional ESLint rules for the
+`@simtlix/eslint-plugin-simfinity` provides ten optional ESLint rules for the
 **Simfinity 3.8.0** contract, shared by MongoDB and PostgreSQL. It complements the
 [application skills](./ai-project-bootstrap) and [usage guidance](./anti-patterns)
 with specific editor/CI diagnostics. It does not evaluate business authorization,
 scopes, state machines or transaction correctness.
 
-The plugin is an independently versioned development tool (`0.1.0`), outside the
+The plugin is an independently versioned development tool (`0.2.0`), outside the
 five runtime packages. Install it from npm in your application:
 
 ```sh
-npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.1.0'
+npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.2.0'
 ```
 
-The repository source additionally includes two **unreleased** authorization
-rules: `no-async-auth-extractor` and `no-auth-plugin-as-middleware` (ten rules in
-total). They are not included in the `0.1.0` npm install above. To try this source,
-run `npm pack --pack-destination /tmp` in `tools/eslint-plugin-simfinity` and
-install that archive in the application. Their contracts were revalidated against
-both Simfinity 3.8.0 and 3.10.0; this does not certify every rule for newer runtimes.
+Version 0.2.0 adds `no-async-auth-extractor` and `no-auth-plugin-as-middleware`
+to the eight rules in 0.1.0. Their contracts were revalidated against both
+Simfinity 3.8.0 and 3.10.0; this does not certify every rule for newer runtimes.
 
 Use Node.js 24 for development. The plugin supports ESLint 9.30.1–9.x, ESM flat
 config and Node.js `^18.18.0 || ^20.9.0 || >=21.1.0`. Selecting this preset explicitly
@@ -175,9 +172,9 @@ requirePermission(['read', 'write']); // both permissions
 Whitespace is accepted without trimming, matching 3.8.0. The rule diagnoses
 known invalid names and inline lists; dynamic names, aliased lists and spreads
 remain unknown. It does not inspect the user's claims, recommend role names or
-validate the extractor options (covered in part by the unreleased rule below).
+validate the extractor options (covered in part by the separate rule below).
 
-## no-async-auth-extractor (unreleased)
+## no-async-auth-extractor
 
 Built-in authorization helpers read paths synchronously. Passing an `async`
 function or an async generator as an extractor throws when creating the rule:
@@ -208,7 +205,7 @@ promises are not inferred; the runtime rejects those results when evaluated.
 Synchronous generators are outside this check because the runtime does not reject
 them at creation. Async custom permission rules are valid and remain untouched.
 
-## no-auth-plugin-as-middleware (unreleased)
+## no-auth-plugin-as-middleware
 
 Simfinity `use()` requires a middleware function. `createAuthPlugin()` returns an
 Envelop plugin object, so passing it to `use()` throws `INVALID_MIDDLEWARE`:
@@ -299,7 +296,7 @@ outside this first release. Alias analysis is bounded to 40 and type traversal
 to 200 nodes per file. No application imports, factories or database connections
 run during analysis.
 
-The current source's bounded consumer trial lints both Barber backends and checks eight injected
+The bounded consumer trial lints both Barber backends and checks eight injected
 policy, relation and authorization-contract violations per backend in memory.
 It does not certify their business policies
 or measure accuracy against the entire candidate catalogue. Native operations
@@ -310,7 +307,6 @@ The [source and verification commands](https://github.com/simtlix/simfinity.js/t
 include an isolated packed JS/TS consumer. The broader candidates in
 [issue #112](https://github.com/simtlix/simfinity.js/issues/112) are follow-up work.
 Authorization delivery and remaining candidates are tracked in
-[issue #117](https://github.com/simtlix/simfinity.js/issues/117). The published
-authorization rules cover AUTH-02/04/06/07; the two unreleased additions cover
-bounded AUTH-08/14 variants. This area remains open for its other candidates and
+[issue #117](https://github.com/simtlix/simfinity.js/issues/117). The authorization
+rules cover AUTH-02/04/06/07 and bounded AUTH-08/14 variants. This area remains open for its other candidates and
 the limitations above.

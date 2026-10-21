@@ -1,0 +1,133 @@
+name: Release ESLint plugin
+
+on:
+  push:
+    tags: ['eslint-plugin-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eslint-plugin-publication
+  queue: max
+
+jobs:
+  pack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      manifest_sha256: ${{ steps.pack.outputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.21.0
+      - name: Pack committed plugin source
+        id: pack
+        env:
+          ESLINT_RELEASE_TAG: ${{ github.ref_name }}
+          ESLINT_RELEASE_PREVIEW: ${{ github.event_name == 'workflow_dispatch' }}
+        run: node scripts/release-eslint-plugin.js pack "$RUNNER_TEMP/eslint-release" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: eslint-release
+          path: ${{ runner.temp }}/eslint-release/
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  verify:
+    needs: pack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      ESLINT_RELEASE_MANIFEST_SHA256: ${{ needs.pack.outputs.manifest_sha256 }}
+      ESLINT_RELEASE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.21.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: eslint-release
+          path: ${{ runner.temp }}/eslint-release/
+      - name: Verify packed bytes before dependencies run
+        run: node scripts/release-eslint-plugin.js verify "$RUNNER_TEMP/eslint-release/manifest.json"
+      - run: npm ci
+        working-directory: tools/eslint-plugin-simfinity
+      - run: npm run test:security && npm test && npm run test:trial
+        working-directory: tools/eslint-plugin-simfinity
+      - name: Test the actual release archive in an isolated JS/TS consumer
+        run: node tests/consumer.mjs "$RUNNER_TEMP"/eslint-release/*.tgz
+        working-directory: tools/eslint-plugin-simfinity
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/eslint-plugin-v')
+    needs: [pack, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: npm-eslint-release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ESLINT_RELEASE_MANIFEST_SHA256: ${{ needs.pack.outputs.manifest_sha256 }}
+      ESLINT_RELEASE_COMMIT: ${{ github.sha }}
+      ESLINT_RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.21.0
+          registry-url: https://registry.npmjs.org
+      - run: npm install --global npm@11.21.0 --ignore-scripts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: eslint-release
+          path: ${{ runner.temp }}/eslint-release/
+      - name: Publish with OIDC and verify registry integrity
+        run: node scripts/release-eslint-plugin.js publish "$RUNNER_TEMP/eslint-release/manifest.json"
+
+  release:
+    needs: [pack, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      ESLINT_RELEASE_MANIFEST_SHA256: ${{ needs.pack.outputs.manifest_sha256 }}
+      ESLINT_RELEASE_COMMIT: ${{ github.sha }}
+      ESLINT_RELEASE_TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.21.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: eslint-release
+          path: ${{ runner.temp }}/eslint-release/
+      - name: Attach verified artifacts without replacing the latest runtime release
+        run: node scripts/release-eslint-plugin.js github-release "$RUNNER_TEMP/eslint-release/manifest.json"
+
+  docs:
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Request the documentation-only deployment from master
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run docs.yml --repo "$GITHUB_REPOSITORY" --ref master -f deploy=true

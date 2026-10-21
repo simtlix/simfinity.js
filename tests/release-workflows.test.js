@@ -183,7 +183,8 @@ describe('workflows run pinned actions, Node and npm (#121)', () => {
     expect(versions[0]).toMatch(/^\d+\.\d+\.\d+$/);
     expect(versions).toEqual([versions[0], versions[0], versions[0]]);
     const installs = workflowFiles.flatMap((file) => [...source(`workflows/${file}`).matchAll(/npm install --global npm@(\S+)/g)].map((match) => match[1]));
-    expect(installs).toHaveLength(1);
+    expect(installs).toHaveLength(2);
+    expect(new Set(installs).size).toBe(1);
     expect(scripts(publish.jobs['publish-npm'])).toContain(`npm install --global npm@${installs[0]} --ignore-scripts`);
     expect(installs[0]).toMatch(/^11\.\d+\.\d+$/);
     const [, minor, patch] = installs[0].split('.').map(Number);
@@ -334,7 +335,7 @@ describe('documentation deploys only move GitHub Pages forward (#123)', () => {
 
   it('runs the gate before every Pages deployment and deploys Pages from one job only', () => {
     const jobs = Object.entries(workflows).flatMap(([file, workflow]) => Object.entries(workflow.jobs).map(([name, job]) => [`${file}/${name}`, job]));
-    expect(jobs.filter(([, job]) => scripts(job).includes('verify-docs')).map(([name]) => name)).toEqual(['docs.yml/gate', 'docs.yml/deploy']);
+    expect(jobs.filter(([, job]) => scripts(job).includes('release-state.js verify-docs')).map(([name]) => name)).toEqual(['docs.yml/gate', 'docs.yml/deploy']);
     expect(Object.values(workflows).map((workflow) => Object.values(workflow.jobs).map(scripts).join('\n')).join('\n')).not.toContain('verify-current "$RELEASE_VERSION"');
     expect(jobs.filter(([, job]) => (job.steps || []).some((step) => action(step) === 'actions/deploy-pages')).map(([name]) => name)).toEqual(['docs.yml/deploy']);
     expect(jobs.filter(([, job]) => job.environment?.name === 'github-pages' || job.environment === 'github-pages').map(([name]) => name)).toEqual(['docs.yml/deploy']);

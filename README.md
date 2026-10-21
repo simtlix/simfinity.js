@@ -2789,9 +2789,9 @@ const BookInput = simfinity.getInputType(BookType);
 
 For jobs, workers, webhooks and other server code, read [server-side operations](docs/guide/server-side-operations.md): it shows when to use a mutation with nested writes, a controller hook, in-process execution of the generated schema, a custom mutation with `saveObject()` or the native model with the session, and what each of them runs. [Usage anti-patterns](docs/guide/anti-patterns.md) lists the approaches to avoid.
 
-The optional [application ESLint plugin](docs/guide/linting.md) provides eight rules for specific Simfinity 3.8.0 contracts, including permission-map shapes, rule composition and required role/permission names. Install the separate development tool with `npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.1.0'`. It has no automatic permission or storage fixes. It complements the application skills; it does not certify authorization, scopes or transaction safety.
+The optional [application ESLint plugin](docs/guide/linting.md) provides ten rules for specific Simfinity 3.8.0 contracts, including permission-map shapes, rule composition and required role/permission names. Install the separate development tool with `npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.2.0'`. It has no automatic permission or storage fixes. It complements the application skills; it does not certify authorization, scopes or transaction safety.
 
-The source also contains two unreleased rules for async authorization extractors and Envelop plugins passed to runtime middleware, revalidated against the shared 3.8.0 and 3.10.0 contracts. See the linting guide for source-trial instructions and limits; the published `0.1.0` package does not yet contain these additions.
+Plugin 0.2.0 adds rules for async authorization extractors and Envelop plugins passed to runtime middleware, revalidated against the shared 3.8.0 and 3.10.0 contracts. See the linting guide for examples and analysis limits.
 
 ## 🤖 MCP Generation
 
