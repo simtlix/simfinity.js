@@ -768,6 +768,10 @@ describe.skipIf(!uri)('PostgreSQL reference emptiness rows', () => {
     // name and its Index Cond, either a string or a pattern.
     const matches = (expected, actual) => (typeof expected === 'string' ? actual === expected : expected.test(actual));
     const probes = (used, ...alternatives) => alternatives.some(([index, condition]) => used.some(([name, cond]) => matches(index, name) && matches(condition, cond)));
+    // A correlated EXISTS under OR may also run as a hashed SubPlan, built once from a whole read of the same index
+    // (PostgreSQL 18 picks it for these small tables). That plan reads the expected index without an Index Cond.
+    const hashedRead = (plan, ...alternatives) => /hashed SubPlan/i.test(JSON.stringify(plan))
+      && alternatives.some(([index]) => nodes(plan).some((node) => node['Index Name'] && matches(index, node['Index Name'])));
     // EXPLAIN may name a column of a scoped join by its LATERAL's alias or by the alias of the table inside it.
     // In a batched statement it adds the branch's suffix, as in t2_1.
     const through = (key, column, suffix = '') => new RegExp(`^\\(${key} = t[12]${suffix}\\.${column}\\)$`);
@@ -795,9 +799,11 @@ describe.skipIf(!uri)('PostgreSQL reference emptiness rows', () => {
       for (const [rootKey, path, operator, shape, expected] of PLANS) {
         const plan = await explain(find(rootKey, path, operator, shape));
         const used = scans(plan);
-        for (const alternatives of expected) expect(probes(used, ...alternatives), `${path} ${operator} ${shape} ${alternatives.join(' | ')}: ${JSON.stringify(used)}`).toBe(true);
+        for (const alternatives of expected) {
+          expect(probes(used, ...alternatives) || hashedRead(plan, ...alternatives), `${path} ${operator} ${shape} ${alternatives.join(' | ')}: ${JSON.stringify(used)} ${JSON.stringify(plan)}`).toBe(true);
+        }
         // Only the root may be read whole: with no index ordering to use, it stays a sequential scan.
-        expect(nodes(plan).filter((node) => node['Node Type'] === 'Seq Scan' && node.Alias !== 't0'), `${path} ${operator} ${shape}`).toEqual([]);
+        expect(nodes(plan).filter((node) => node['Node Type'] === 'Seq Scan' && node.Alias !== 't0'), `${path} ${operator} ${shape} ${JSON.stringify(plan)}`).toEqual([]);
       }
     });
 
