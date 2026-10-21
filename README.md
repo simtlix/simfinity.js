@@ -8,7 +8,7 @@ Read the [documentation website](https://simtlix.github.io/simfinity.js/): start
 
 For a complete application, run the [Barber examples](examples/barber/README.md): independent MongoDB and PostgreSQL backends with one shared Next.js frontend, synthetic demo data, Docker setup, and a dedicated CI workflow. Both backends consume released Simfinity 3.8.0 packages from npm. Their shared HTTP matrix verifies filters, aggregates, scopes and nested mutations; see the [API test commands and reference-integrity boundary](examples/barber/README.md#validate-changes).
 
-Run the documentation website locally with Node.js 22+:
+Run the documentation website locally with Node.js 22.12.0+:
 
 ```sh
 npm run docs:install
