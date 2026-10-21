@@ -37,7 +37,7 @@ Create a Markdown page with `title` and `description` frontmatter, a single H1, 
 
 The release label reads the private root `package.json`; the docs build does not install the MongoDB package. It identifies the documented library version. Deploy release documentation only after all matching npm packages are published and verified. Last-updated dates come from Git history after a page has been committed.
 
-VitePress 1.6.4 is pinned to the stable release. Its Vite dependency is overridden to `^6.4.3` to use the patched development server instead of the vulnerable Vite 5 dependency. Keep the override until upgrading to a VitePress release that uses a patched version itself; validate development, production builds, and local search when updating it.
+VitePress 1.6.4 is pinned to the stable release. Its Vite dependency is overridden to `^7.3.7` to use a patched development server; the Vite 6 line has no fix for the launch-editor advisories. Keep the override until upgrading to a VitePress release that uses a patched version itself; validate development, production builds, and local search when updating it.
 
 ## Build and publication
 
