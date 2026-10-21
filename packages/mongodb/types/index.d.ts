@@ -13,6 +13,7 @@ import type {
   GraphQLOutputType,
 } from 'graphql';
 import type {
+  CreateSchemaOptions,
   DatabaseAdapter,
   MutationLimitsOptions,
   QueryFeatures,
@@ -35,6 +36,7 @@ export type {
   AuthRule,
   AuthRuleFunction,
   AuthSchemaPlugin,
+  CreateSchemaOptions,
   EnvelopSchemaPlugin,
   FieldValidations,
   FieldValidator,
@@ -164,7 +166,7 @@ export function addNoEndpointType(gqltype: GraphQLObjectType): void;
 /**
  * Build the executable GraphQLSchema from every connected type. The first two
  * allowlists are matched against the GraphQLObjectType INSTANCES passed to
- * connect(); only custom mutations are matched by name. Scopes are validated
+ * connect(); custom queries and mutations are matched by name. Scopes are validated
  * (INVALID_SCOPE), and reachable types bound or reserved by another runtime, or
  * holding a field copied with toConfig() after another runtime generated its
  * relation resolver, keeping the generated resolver or its extensions, are rejected (TYPE_BOUND_TO_OTHER_RUNTIME), before models
@@ -191,14 +193,19 @@ export function addNoEndpointType(gqltype: GraphQLObjectType): void;
  * SimfinityRelationType) with a warning when it is in the process's first Simfinity schema. That
  * schema fixes the names: in a later createSchema(), an application type with one of the current
  * names (the original ones, or the fallback names after a rename) throws RESERVED_TYPE_NAME (500),
- * before models are created when it is an included endpoint type, a registered mutation's input or
+ * before models are created when it is an included endpoint type, a registered custom operation's input or
  * output type, an output type they reach or a field argument's type, and when the schema is
  * constructed otherwise.
+ * options.includedCustomQueries selects custom queries by name (see CreateSchemaOptions); an
+ * invalid options argument throws INVALID_SCHEMA_OPTIONS (500), and an included custom query named
+ * like an included generated query throws QUERY_NAME_CONFLICT (500), before models are created. A
+ * schema without mutation fields has no Mutation root.
  */
 export function createSchema(
   includedQueryTypes?: GraphQLObjectType[] | null,
   includedMutationTypes?: GraphQLObjectType[] | null,
   includedCustomMutations?: string[] | null,
+  options?: CreateSchemaOptions,
 ): GraphQLSchema;
 
 /** Register a custom mutation executed inside a transaction. */
@@ -208,6 +215,15 @@ export function registerMutation(
   inputModel: GraphQLInputObjectType | null | undefined,
   outputModel: GraphQLOutputType,
   callback: (input: any, session: any, context: any) => any,
+): void;
+
+/** Register a custom query for a result that is not a stored record. No transaction or session wraps it. */
+export function registerCustomQuery(
+  name: string,
+  description: string,
+  inputModel: GraphQLInputObjectType | null | undefined,
+  outputModel: GraphQLOutputType,
+  callback: (input: any, context: any) => any,
 ): void;
 
 /** Operation context for root operations, generated non-embedded relation reads, and nested collection writes. */

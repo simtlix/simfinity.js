@@ -17,6 +17,7 @@ export type {
   AuthRule,
   AuthRuleFunction,
   AuthSchemaPlugin,
+  CreateSchemaOptions,
   EntityController,
   EnvelopSchemaPlugin,
   FieldValidations,

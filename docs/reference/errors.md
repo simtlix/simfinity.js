@@ -177,6 +177,9 @@ Here `readApplicationEvents()` is your application's event source. When the serv
 | `INVALID_SORT` | A sort has no terms or an unsupported direction. |
 | `INVALID_PAGINATION` | Page, size, computed skip, or maximum page-size validation fails. |
 | `INVALID_QUERY_LIMITS` | The configured maximum page size is not a positive safe integer. |
+| `INVALID_QUERY_REGISTRATION` | Status 500. Invalid name, description, GraphQL types or callback passed to [registerCustomQuery](/reference/api#registercustomquery). The entry is not registered. |
+| `QUERY_NAME_CONFLICT` | Status 500. [registerCustomQuery](/reference/api#registercustomquery) received a name already registered, or `createSchema()` includes a custom query named like an included generated query (`<entity>`, `<list>` or `<list>_aggregate`), before any model is prepared. |
+| `INVALID_SCHEMA_OPTIONS` | Status 500. The fourth [createSchema](/reference/api#createschema) argument is not a plain object (an array, `null` or a primitive), has an option other than `includedCustomQueries`, or has an `includedCustomQueries` that is not an array of strings, `null` or `undefined`. Raised before any model is prepared. |
 | `INVALID_MUTATION_LIMITS` | Status 400. `configureMutationLimits()` received options that are not a plain object, an option other than `maxNestedOperations` (such as the misspelled `maxNestedOperation`), or a `maxNestedOperations` that is not `null` or a non-negative safe integer. The current limit is kept. |
 | `NESTED_OPERATIONS_EXCEEDED` | Status 400. A generated add, update or state-action mutation has more nested `added`, `updated` and `deleted` entries than `maxNestedOperations`. See [limit nested collection operations](/guide/mutations#limit-nested-collection-operations). |
 | `FILTER_DEPTH_EXCEEDED` | A recursive filter group exceeds the supported nesting limit. |
