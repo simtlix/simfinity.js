@@ -74,7 +74,7 @@ Use disposable databases for seeds, datasets, and integration tests. Keep app se
 
 ## Improve the documentation
 
-Use Node.js 22 or newer for the website tooling:
+Use Node.js 22.12.0 or newer for the website tooling:
 
 ```sh
 npm run docs:install

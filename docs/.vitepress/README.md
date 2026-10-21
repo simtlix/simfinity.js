@@ -1,6 +1,6 @@
 # Working on the documentation
 
-The website is a separate, private npm project in `docs/`. Its dependencies and build output are excluded from the published library. Use Node.js 22 or newer to work on the site; the library's runtime requirement remains unchanged.
+The website is a separate, private npm project in `docs/`. Its dependencies and build output are excluded from the published library. Use Node.js 22.12.0 or newer to work on the site; the library's runtime requirement remains unchanged.
 
 From the repository root:
 
@@ -71,7 +71,7 @@ gh workflow run docs.yml --repo simtlix/simfinity.js --ref master -f deploy=true
 
 The gate job requires `contents: read` and `deployments: read`; the deployment job requires `pages: write`, `id-token: write` and `deployments: read`. Pull requests only build the site. Publication replaces the static Pages site and does not publish an npm release. To roll back content or deployment configuration, revert the relevant commit on `master` and dispatch publication again; the revert descends from the live commit, while deploying an older tag or commit is skipped or refused. If the gate refuses because the live commit is missing from the repository history, mark that `github-pages` deployment inactive or delete it so that the gate uses the previous successful one. Confirm the Actions deployment succeeds and that the home page, a guide, and their assets load at the public subdirectory.
 
-For another static host, use install command `npm ci --prefix docs`, build command `npm run docs:build`, output directory `docs/.vitepress/dist`, and Node.js 22+. See the [VitePress deployment documentation](https://vuejs.github.io/vitepress/v1/guide/deploy).
+For another static host, use install command `npm ci --prefix docs`, build command `npm run docs:build`, output directory `docs/.vitepress/dist`, and Node.js 22.12.0+. See the [VitePress deployment documentation](https://vuejs.github.io/vitepress/v1/guide/deploy).
 
 Before submitting changes, build the site, verify search, navigation, code copying, light/dark themes, and mobile layouts. Run the repository's `npm run lint` and `npm test`. Do not include generated output in Git or npm.
 
