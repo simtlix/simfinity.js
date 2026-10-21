@@ -1,21 +1,21 @@
 # @simtlix/eslint-plugin-simfinity
 
 Optional editor/CI checks for **Simfinity 3.8.0**, shared by MongoDB and PostgreSQL.
-Published version 0.2.0 provides ten precise rules. This source adds an
-**unreleased eleventh rule**, `valid-policy-expression`. It does not execute application
+Version 0.3.0 provides eleven precise rules, including `valid-policy-expression`.
+It does not execute application
 code or load Simfinity, GraphQL, database drivers or the MCP SDK.
 
-The plugin has its own version (`0.2.0`) and is outside Simfinity's five runtime
+The plugin has its own version (`0.3.0`) and is outside Simfinity's five runtime
 workspaces and their release workflow. Install it from npm in your application:
 
 ```sh
-npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.2.0'
+npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.3.0'
 ```
 
-Version 0.2.0 adds `no-async-auth-extractor` and `no-auth-plugin-as-middleware`.
-Version 0.1.0 contains the preceding eight rules. The new policy-expression rule
-requires an archive built from this source; npm 0.2.0 does not include it yet.
-Runtime versions are independent.
+Version 0.3.0 adds `valid-policy-expression` to `recommended-3.8`, so upgrading
+can report malformed policies that earlier plugin versions did not diagnose.
+Version 0.2.0 added `no-async-auth-extractor` and `no-auth-plugin-as-middleware`;
+0.1.0 contains the preceding eight rules. Runtime versions are independent.
 
 ESLint **9.30.1 or later within 9.x**, ESM flat config and Node.js
 `^18.18.0 || ^20.9.0 || >=21.1.0` are supported. ESLint 10 and CommonJS
@@ -30,9 +30,9 @@ export default [simfinity.configs['recommended-3.8']];
 
 Selecting `recommended-3.8` explicitly selects the **3.8.0 runtime contract**.
 The plugin does not discover your installed runtime version, infer a database,
-or claim compatibility with older/newer contracts. The two new authorization
-checks and the unreleased expression check were also revalidated against Simfinity
-3.10.0; their runtime contracts are unchanged. All eleven source rules are errors
+or claim compatibility with older/newer contracts. The authorization checks added
+in 0.2.0 and 0.3.0 were also revalidated against Simfinity
+3.10.0; their runtime contracts are unchanged. All eleven rules are errors
 in this preset and can be individually disabled using normal ESLint config.
 
 For TypeScript, install `@typescript-eslint/parser` in the application and add:
@@ -57,7 +57,7 @@ export default [
 | `valid-required-claims` | Missing/empty/non-string claims or an inline empty/sparse list with invalid entries | Supply nonempty strings; roles use OR, permissions use AND |
 | `no-async-auth-extractor` | An async function or async generator in a built-in auth extractor position | Resolve data in the GraphQL context or use an async custom rule |
 | `no-auth-plugin-as-middleware` | A proven `createAuthPlugin()` result passed to Simfinity `use()` | Install the plugin in the GraphQL server's Envelop plugins |
-| `valid-policy-expression` (unreleased) | Malformed inline policy syntax in `createRuleFromExpression` or configured permission rules | Use valid operators, operands, logical arrays and `parent`/`args`/`ctx` references |
+| `valid-policy-expression` | Malformed inline policy syntax in `createRuleFromExpression` or configured permission rules | Use valid operators, operands, logical arrays and `parent`/`args`/`ctx` references |
 | `valid-query-limits` | Explicit `maxPageSize` is not a positive safe integer or `undefined` | Set a valid cap; omission/undefined restores 1000 |
 | `valid-connection-field` | A locally registered relation has a dotted or non-string link field under 3.8.0 | Use a field name; declare embedded references on their owning type |
 

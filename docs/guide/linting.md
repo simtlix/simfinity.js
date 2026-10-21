@@ -1,27 +1,23 @@
 # Optional application linting
 
-`@simtlix/eslint-plugin-simfinity` provides ten optional ESLint rules for the
+`@simtlix/eslint-plugin-simfinity` provides eleven optional ESLint rules for the
 **Simfinity 3.8.0** contract, shared by MongoDB and PostgreSQL. It complements the
 [application skills](./ai-project-bootstrap) and [usage guidance](./anti-patterns)
 with specific editor/CI diagnostics. It does not evaluate business authorization,
 scopes, state machines or transaction correctness.
 
-The plugin is an independently versioned development tool (`0.2.0`), outside the
+The plugin is an independently versioned development tool (`0.3.0`), outside the
 five runtime packages. Install it from npm in your application:
 
 ```sh
-npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.2.0'
+npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.3.0'
 ```
 
-Version 0.2.0 adds `no-async-auth-extractor` and `no-auth-plugin-as-middleware`
-to the eight rules in 0.1.0. Their contracts were revalidated against both
-Simfinity 3.8.0 and 3.10.0; this does not certify every rule for newer runtimes.
-
-The repository source additionally includes **unreleased** `valid-policy-expression`
-(AUTH-11), an eleventh rule in `recommended-3.8`, checked against the same two runtime
-versions. npm 0.2.0 does not include it yet. To try it before publication, pack the
-plugin source and install that archive as described in its
-[README](https://github.com/simtlix/simfinity.js/tree/master/tools/eslint-plugin-simfinity#contributing-and-verification).
+Version 0.3.0 adds `valid-policy-expression` (AUTH-11) to `recommended-3.8`.
+Upgrading can report malformed policies that earlier plugin versions did not diagnose.
+Version 0.2.0 added `no-async-auth-extractor` and `no-auth-plugin-as-middleware`
+to the eight rules in 0.1.0. These three authorization contracts were revalidated
+against both Simfinity 3.8.0 and 3.10.0; this does not certify every rule for newer runtimes.
 
 Use Node.js 24 for development. The plugin supports ESLint 9.30.1–9.x, ESM flat
 config and Node.js `^18.18.0 || ^20.9.0 || >=21.1.0`. Selecting this preset explicitly
@@ -138,7 +134,7 @@ inspection is bounded to 200 nodes per plugin call.
 
 ## valid-policy-expression
 
-**Unreleased; available in the repository source.** This check validates syntax in
+**Added in plugin 0.3.0.** This check validates syntax in
 the first argument to `createRuleFromExpression` and in nonempty inline expressions
 inside `createAuthPlugin` permission maps, including nested rule arrays. It reports
 proven contract errors without deciding the application's permissions.
