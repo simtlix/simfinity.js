@@ -763,15 +763,28 @@ describe.skipIf(!uri)('PostgreSQL reference emptiness rows', () => {
     };
     const scans = (plan) => nodes(plan).filter((node) => node['Index Cond']).map((node) => [node['Index Name'], node['Index Cond']]);
     // An owned single object has a unique index and a foreign-key index on its __owner_id, and either serves the probe.
-    const ownerIndex = (table) => new RegExp(`^${table}____owner_id__(uq|idx)$`);
+    const ownerIndex = (table) => Object.assign(new RegExp(`^${table}____owner_id__(uq|idx)$`), { table });
     // Whether the plan has an index scan whose index and condition match one of `alternatives`, each a pair of an index
     // name and its Index Cond, either a string or a pattern.
     const matches = (expected, actual) => (typeof expected === 'string' ? actual === expected : expected.test(actual));
     const probes = (used, ...alternatives) => alternatives.some(([index, condition]) => used.some(([name, cond]) => matches(index, name) && matches(condition, cond)));
-    // A correlated EXISTS under OR may also run as a hashed SubPlan, built once from a whole read of the same index
-    // (PostgreSQL 18 picks it for these small tables). That plan reads the expected index without an Index Cond.
-    const hashedRead = (plan, ...alternatives) => /hashed SubPlan/i.test(JSON.stringify(plan))
-      && alternatives.some(([index]) => nodes(plan).some((node) => node['Index Name'] && matches(index, node['Index Name'])));
+    // A correlated EXISTS under OR may instead run as a hashed SubPlan, built once from a whole read of its table.
+    // PostgreSQL 18 picks it for these small tables by cost, even through scans that enable_seqscan disables, so no
+    // setting forces the probe there. The nodes under a hashed SubPlan may read their table whole.
+    const hashedNodes = (plan) => {
+      const names = new Set([...JSON.stringify(plan).matchAll(/hashed SubPlan (\d+)/g)].map(([, number]) => `SubPlan ${number}`));
+      const found = [];
+      const walk = (node, inside) => {
+        const here = inside || names.has(node['Subplan Name']);
+        if (here) found.push(node);
+        for (const child of node.Plans || []) walk(child, here);
+      };
+      walk(plan, false);
+      return found;
+    };
+    // The table an index belongs to: an entity's indexes start with its name, and an owned table's are ownerIndex().
+    const tableOf = (index) => (typeof index === 'string' ? index.split('__')[0] : index.table);
+    const hashedRead = (plan, ...alternatives) => alternatives.some(([index]) => hashedNodes(plan).some((node) => node['Relation Name'] === tableOf(index)));
     // EXPLAIN may name a column of a scoped join by its LATERAL's alias or by the alias of the table inside it.
     // In a batched statement it adds the branch's suffix, as in t2_1.
     const through = (key, column, suffix = '') => new RegExp(`^\\(${key} = t[12]${suffix}\\.${column}\\)$`);
@@ -802,8 +815,9 @@ describe.skipIf(!uri)('PostgreSQL reference emptiness rows', () => {
         for (const alternatives of expected) {
           expect(probes(used, ...alternatives) || hashedRead(plan, ...alternatives), `${path} ${operator} ${shape} ${alternatives.join(' | ')}: ${JSON.stringify(used)} ${JSON.stringify(plan)}`).toBe(true);
         }
-        // Only the root may be read whole: with no index ordering to use, it stays a sequential scan.
-        expect(nodes(plan).filter((node) => node['Node Type'] === 'Seq Scan' && node.Alias !== 't0'), `${path} ${operator} ${shape} ${JSON.stringify(plan)}`).toEqual([]);
+        // Only the root, and the tables a hashed SubPlan reads once, may be read whole.
+        const hashed = hashedNodes(plan);
+        expect(nodes(plan).filter((node) => node['Node Type'] === 'Seq Scan' && node.Alias !== 't0' && !hashed.includes(node)), `${path} ${operator} ${shape} ${JSON.stringify(plan)}`).toEqual([]);
       }
     });
 
