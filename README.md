@@ -2791,6 +2791,8 @@ For jobs, workers, webhooks and other server code, read [server-side operations]
 
 The optional [application ESLint plugin](docs/guide/linting.md) provides eight rules for specific Simfinity 3.8.0 contracts, including permission-map shapes, rule composition and required role/permission names. Install the separate development tool with `npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.1.0'`. It has no automatic permission or storage fixes. It complements the application skills; it does not certify authorization, scopes or transaction safety.
 
+The source also contains two unreleased rules for async authorization extractors and Envelop plugins passed to runtime middleware, revalidated against the shared 3.8.0 and 3.10.0 contracts. See the linting guide for source-trial instructions and limits; the published `0.1.0` package does not yet contain these additions.
+
 ## 🤖 MCP Generation
 
 Simfinity can automatically expose every generated GraphQL operation as a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) tool. For each connected type you get one MCP tool per generated query and mutation — exactly mirroring the GraphQL surface:

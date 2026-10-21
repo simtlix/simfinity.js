@@ -13,6 +13,13 @@ five runtime packages. Install it from npm in your application:
 npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.1.0'
 ```
 
+The repository source additionally includes two **unreleased** authorization
+rules: `no-async-auth-extractor` and `no-auth-plugin-as-middleware` (ten rules in
+total). They are not included in the `0.1.0` npm install above. To try this source,
+run `npm pack --pack-destination /tmp` in `tools/eslint-plugin-simfinity` and
+install that archive in the application. Their contracts were revalidated against
+both Simfinity 3.8.0 and 3.10.0; this does not certify every rule for newer runtimes.
+
 Use Node.js 24 for development. The plugin supports ESLint 9.30.1–9.x, ESM flat
 config and Node.js `^18.18.0 || ^20.9.0 || >=21.1.0`. Selecting this preset explicitly
 selects the 3.8.0 runtime contract; it does not detect your installed runtime or
@@ -37,7 +44,7 @@ export default [
 ];
 ```
 
-All eight rules are errors in the preset. To opt out of a rule, add a later flat
+All included rules are errors in the preset. To opt out of a rule, add a later flat
 config entry, for example `{ rules: { 'simfinity/valid-query-limits': 'off' } }`.
 Each diagnostic reports the rule ID, source location, violated contract and
 suggested action. None supplies automatic source fixes.
@@ -168,7 +175,62 @@ requirePermission(['read', 'write']); // both permissions
 Whitespace is accepted without trimming, matching 3.8.0. The rule diagnoses
 known invalid names and inline lists; dynamic names, aliased lists and spreads
 remain unknown. It does not inspect the user's claims, recommend role names or
-validate the extractor options (a separate candidate in issue #117).
+validate the extractor options (covered in part by the unreleased rule below).
+
+## no-async-auth-extractor (unreleased)
+
+Built-in authorization helpers read paths synchronously. Passing an `async`
+function or an async generator as an extractor throws when creating the rule:
+
+```javascript
+import { requireAuth, requireRole, createRule } from '@simtlix/simfinity-core/auth';
+
+requireAuth(async context => context.user); // diagnostic
+requireRole('admin', { rolePath: async user => user.role }); // diagnostic
+
+requireAuth(context => context.user); // data already resolved by the context
+createRule(async (_parent, _args, context) => Boolean(await loadUser(context)));
+```
+
+The async custom rule illustrates an application-supplied `loadUser` function;
+the linter does not infer that application's access policy or rewrite it.
+Prefer resolving shared identity data once when building the GraphQL context.
+
+Checked positions are `requireAuth(userPath)`, `requireRole` options
+`userPath`/`rolePath`, `requirePermission` options `userPath`/`permissionsPath`,
+and `isOwner(ownerField, userIdField, { userPath })`. Inline async functions,
+async generators and stable local `const` aliases are supported. Options must
+be inline plain objects; duplicate properties use the last value.
+
+Unknown imports/calls, function declarations, option aliases, getters, method
+shorthand, computed keys and spreads are skipped. Ordinary functions returning
+promises are not inferred; the runtime rejects those results when evaluated.
+Synchronous generators are outside this check because the runtime does not reject
+them at creation. Async custom permission rules are valid and remain untouched.
+
+## no-auth-plugin-as-middleware (unreleased)
+
+Simfinity `use()` requires a middleware function. `createAuthPlugin()` returns an
+Envelop plugin object, so passing it to `use()` throws `INVALID_MIDDLEWARE`:
+
+```javascript
+import * as simfinity from '@simtlix/simfinity-postgres';
+import { createAuthPlugin } from '@simtlix/simfinity-core/auth';
+import { createYoga } from 'graphql-yoga';
+
+const schema = simfinity.createSchema();
+const authPlugin = createAuthPlugin({}); // supply the application's permissions
+simfinity.use(authPlugin); // diagnostic
+
+// Correct integration for Yoga:
+const yoga = createYoga({ schema, plugins: [authPlugin] });
+```
+
+This rule also supports the MongoDB facade and `createRuntime`, `createSQL` and
+`createPostgres` instances. It follows proven imports and stable `const` aliases,
+checks only the first `use` argument and leaves middleware functions, Envelop
+hosts and MCP `schemaPlugins` alone. Bare factories passed to `use`, spread calls,
+unknown wrappers and dynamic/mutable aliases remain outside this batch.
 
 ## valid-query-limits
 
@@ -237,7 +299,7 @@ outside this first release. Alias analysis is bounded to 40 and type traversal
 to 200 nodes per file. No application imports, factories or database connections
 run during analysis.
 
-The bounded consumer trial lints both Barber backends and checks six injected
+The current source's bounded consumer trial lints both Barber backends and checks eight injected
 policy, relation and authorization-contract violations per backend in memory.
 It does not certify their business policies
 or measure accuracy against the entire candidate catalogue. Native operations
@@ -248,6 +310,7 @@ The [source and verification commands](https://github.com/simtlix/simfinity.js/t
 include an isolated packed JS/TS consumer. The broader candidates in
 [issue #112](https://github.com/simtlix/simfinity.js/issues/112) are follow-up work.
 Authorization delivery and remaining candidates are tracked in
-[issue #117](https://github.com/simtlix/simfinity.js/issues/117). These three added
-rules cover AUTH-02/04/06/07 within the limits above; the issue is not completed
-by this batch.
+[issue #117](https://github.com/simtlix/simfinity.js/issues/117). The published
+authorization rules cover AUTH-02/04/06/07; the two unreleased additions cover
+bounded AUTH-08/14 variants. This area remains open for its other candidates and
+the limitations above.

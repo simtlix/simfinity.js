@@ -99,7 +99,6 @@ describe('required role/permission contracts (AUTH-07)', () => {
     "const roles = []; const box = { roles }; box.roles.push('admin'); requireRole(roles);",
     "const roles = []; roles.push('admin'); requireRole(roles);",
     'function f(requireRole) { requireRole([]); }',
-    "requireRole('admin', { userPath: async () => load() });", // AUTH-08 is separate.
   ];
   for (const code of valid) it(`preserves valid or unknown claims: ${code}`, () => assert.deepEqual(lint(auth + code), []));
 });
