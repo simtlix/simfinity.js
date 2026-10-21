@@ -35,9 +35,15 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22.12.0 or newer |
 
-## Upgrade notes for the next release
+## Upgrade to 3.10.0
 
-These notes describe changes that the next release will include. Filters that are valid in 3.9.0 keep their results, and the bundled adapters compile them to the same MongoDB pipelines and PostgreSQL statements. One error code changes on PostgreSQL. Custom adapters and SQL plugins need a declaration before they receive the new operators. Keep all directly installed Simfinity packages at the same version.
+Version 3.10.0 adds custom root queries and emptiness filters on both backends. Filters that are valid in 3.9.0 keep their results, and the bundled adapters compile them to the same MongoDB pipelines and PostgreSQL statements. One error code changes on PostgreSQL. Custom adapters and SQL plugins need a declaration before they receive the new operators. Keep all directly installed Simfinity packages at the same version.
+
+### Custom root queries
+
+`registerCustomQuery(name, description, inputModel, outputModel, callback)` registers a typed root read whose result is not a stored record. Generated queries, scopes, aggregates and virtual fields remain the first choice for stored-record reads. The callback receives `(input, context)` after global middleware with `operation: 'custom_query'`; root and output-field authorization rules apply, but generated entity scopes and controllers do not run inside the callback. It receives no session and opens any required native transaction itself. See [custom queries](../guide/queries#custom-queries).
+
+The optional fourth `createSchema()` argument is an options object with `includedCustomQueries`. An omitted or null `includedCustomQueries` includes all custom queries, and `[]` includes none. Invalid options fail before model preparation, and names cannot collide with included generated queries. A schema with no mutation fields now omits the Mutation root. MCP exposes custom queries as read-only tools; use distinct query and mutation names because a custom query takes precedence on a tool-name collision. Existing custom mutations retain their transaction and retry behavior.
 
 ### Emptiness operators
 
@@ -996,7 +1002,7 @@ Keep all directly installed Simfinity packages at 3.5.0 and review these behavio
 - MongoDB uses the application's GraphQL and Mongoose peers. Install the optional MCP SDK explicitly for transports; `graphql-middleware` is no longer installed by Simfinity. See [installation](../guide/databases#install-from-npm).
 - Embedded updates enforce required fields when constructing replacement objects or list items; existing embedded objects still accept valid partial patches. SQL sessions reject statements after their callback settles, and a failed rollback discards the connection. See [mutations](../guide/mutations) and the [SQL plugin contract](../guide/sql-plugins#plugin-contract-version-1).
 
-The current [downloadable starters](../guide/databases#download-the-starters) use 3.9.0. The [Barber examples](./barber) state their own exact package pin, and historical archives retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
+The current [downloadable starters](../guide/databases#download-the-starters) use 3.10.0. The [Barber examples](./barber) state their own exact package pin, and historical archives retain their documented package pins; upgrade all their Simfinity dependencies together before relying on newer library behavior.
 
 ## Upgrade from 3.2.0
 

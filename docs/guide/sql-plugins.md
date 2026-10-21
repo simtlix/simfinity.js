@@ -14,8 +14,8 @@ Choose a plugin when constructing a runtime. Its configuration is bound once, an
 Install the SQL core and the PostgreSQL plugin as direct dependencies when importing both:
 
 ```sh
-npm install @simtlix/simfinity-sql@3.9.0 \
-  @simtlix/simfinity-postgres@3.9.0 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-sql@3.10.0 \
+  @simtlix/simfinity-postgres@3.10.0 graphql@^16.11.0 pg@^8.16.3
 ```
 
 ```javascript
