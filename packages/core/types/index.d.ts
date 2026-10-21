@@ -21,10 +21,22 @@ export const QLValue: GraphQLScalarType<unknown, unknown>;
  * and `IENDS_WITH` as a suffix, respecting or ignoring case, and `IEQ` as the whole value ignoring
  * case. An empty value matches every non-null string, except for `IEQ`, where it matches only the
  * empty string. On a list, some element must match.
+ *
+ * `IS_EMPTY` and `IS_NOT_EMPTY` take no value (omitted or null; any other value fails with
+ * `INVALID_FILTER_VALUE`), and every record matches exactly one of them. `IS_EMPTY` holds for a
+ * missing, null or `""` String (`" "` is not empty), a missing or null value of any other scalar or
+ * enum, a missing, null or `[]` list (`[null]` and `[""]` are not empty), and a missing or null
+ * embedded object or one whose stored members are all empty by these rules; the record identity is
+ * never empty. They apply to the queried record's own fields: a path that continues inside an
+ * embedded list or a collection fails with `INVALID_FILTER_PATH`, and a path that crosses or ends
+ * at a reference, a path that ends at a collection, and an embedded object with a reference or
+ * collection member fail with `UNSUPPORTED_QUERY` until reference emptiness arrives. A term or
+ * group condition without a path tests the field itself.
  */
 export type QueryOperator =
   | 'EQ' | 'NE' | 'LT' | 'LTE' | 'GT' | 'GTE' | 'BTW' | 'IN' | 'NIN' | 'LIKE'
-  | 'ILIKE' | 'STARTS_WITH' | 'ISTARTS_WITH' | 'ENDS_WITH' | 'IENDS_WITH' | 'IEQ';
+  | 'ILIKE' | 'STARTS_WITH' | 'ISTARTS_WITH' | 'ENDS_WITH' | 'IENDS_WITH' | 'IEQ'
+  | 'IS_EMPTY' | 'IS_NOT_EMPTY';
 
 /**
  * The query language features a {@link DatabaseAdapter} compiles. Declare it so that the runtime
@@ -366,7 +378,9 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * does not support fails with `UNSUPPORTED_QUERY` (400), before middleware runs for the client's
    * arguments and before `find`, `count`, `aggregate`, `findChildren` or `findChildrenBatch` for
    * conditions that middleware, scopes and joined scopes added. Operators outside `QLOperator` still
-   * reach the adapter, which reports them as before.
+   * reach the adapter, which reports them as before. Declaring `IS_EMPTY` and `IS_NOT_EMPTY` means
+   * compiling their semantics on the record's own fields; it does not lift the `UNSUPPORTED_QUERY`
+   * that emptiness through references and collections gets in this release.
    */
   queryFeatures?: QueryFeatures | null | undefined;
   bind?(runtime: Pick<Runtime<Model, Session>, 'getModel' | 'getType' | 'getRegistrations'>): void;
@@ -486,7 +500,12 @@ export interface DatabaseAdapter<Model = any, Session = any> {
 }
 export function createRuntime<Model = any, Session = any>(adapter: DatabaseAdapter<Model, Session>): Runtime<Model, Session>;
 
-/** `operator` is a {@link QueryOperator}; the value of a text operator is a validated string. */
+/**
+ * `operator` is a {@link QueryOperator}; the value of a text operator is a validated string. For
+ * `IS_EMPTY` and `IS_NOT_EMPTY` the value is null, and `path` may end at an embedded object, an
+ * embedded list or a scalar list as well as at a scalar; `IS_NOT_EMPTY` is the exact complement,
+ * which the compiler builds.
+ */
 export type QueryPredicate = { kind: 'predicate'; path: string[]; operator: string; value: any } | { kind: 'and' | 'or'; terms: QueryPredicate[] };
 export interface QueryPlan {
   entity: string;
@@ -502,6 +521,18 @@ export interface QueryPlan {
  * a string or contains U+0000. With `operators`, the names the caller compiles, any other
  * `QLOperator` value fails with `UNSUPPORTED_QUERY` (400); unknown operators fail with
  * `INVALID_FILTER_OPERATOR` (400) either way.
+ *
+ * An emptiness condition is checked in this order: its form, path and group depth
+ * (`MISSING_FILTER_PATH` for `IS_EMPTY` or `IS_NOT_EMPTY` on an object filter without terms or beside
+ * terms, `AMBIGUOUS_FILTER_FIELD`, `INVALID_FILTER_PATH`, `INVALID_FILTER_FIELD`,
+ * `FILTER_DEPTH_EXCEEDED`), then `operators` (`UNSUPPORTED_QUERY`), then `INVALID_FILTER_PATH` for a
+ * value inside an embedded list or a collection, `INVALID_FILTER_OPERATOR` for an embedded type that
+ * reaches itself through single embedded members, `INVALID_FILTER_VALUE` for a value that is not
+ * omitted or null, and `UNSUPPORTED_QUERY` for a reference or collection on the path or among the
+ * members. A term without a path (omitted, null or `""`) and a group condition without a path test
+ * the field itself. For other operators, a filter path of more than one segment that ends at an
+ * object fails with `INVALID_FILTER_PATH`, as on MongoDB; a bare object field keeps
+ * `MISSING_FILTER_PATH`.
  */
 export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode']; operators?: Iterable<string> }): QueryPlan;
 export function resolveModelPath(models: ModelDescription, entityName: string, path: string | string[]): FieldDescription[];

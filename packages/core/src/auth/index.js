@@ -45,7 +45,7 @@ import {
 import SimfinityError from '../errors/simfinity.error.js';
 import { UnauthenticatedError, ForbiddenError, createAuthError } from './errors.js';
 import { isPolicyExpression, createRuleFromExpression, evaluateExpression } from './expressions.js';
-import { collectQueryPaths, walkQueryPath } from '../query-plan.js';
+import { collectQueryPathEntries, walkQueryPath } from '../query-plan.js';
 import { relationFieldOwners } from '../relation-owners.js';
 import { isThenable } from './thenable.js';
 import {
@@ -246,13 +246,15 @@ const executeRule = async (rule, parent, args, ctx, info) => {
  * field's filter, sort and aggregation arguments. Each segment needs its own `Type.field` rule
  * (exact, wildcard, then default policy). Rules run without a parent, with empty args and the
  * path field's identity in info, so parent-dependent rules such as isOwner deny query paths. A rule that
- * throws anything other than a Simfinity or GraphQL error denies the path.
+ * throws anything other than a Simfinity or GraphQL error denies the path. An IS_EMPTY or IS_NOT_EMPTY
+ * condition on an embedded object reads its stored members, so each member path is authorized as a
+ * named path is, after it, with the same answer for a field that is both.
  */
 const authorizeQueryPaths = async (permissions, defaultPolicy, schema, query, args, ctx, info) => {
   const queriedType = query && schema?.getType?.(query.typeName);
   if (!queriedType) return;
   const checked = new Set();
-  for (const segments of collectQueryPaths(args, query.operation)) {
+  for (const { segments } of collectQueryPathEntries(args, query.operation, { gqltype: queriedType, expandMembers: true })) {
     const steps = [];
     walkQueryPath(queriedType, segments, (step) => steps.push(step));
     for (const { type, fieldName, field } of steps) {

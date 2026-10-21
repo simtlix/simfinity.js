@@ -1,6 +1,7 @@
 // The literal text operators (#108, part 1) in generated MCP tools: input schemas and descriptions name every
 // QLOperator value, and list, count and aggregate calls pass text conditions to an adapter that declares them in
-// queryFeatures. An adapter without the declaration rejects them before it runs, as GraphQL requests do.
+// queryFeatures. An adapter without the declaration rejects them before it runs, as GraphQL requests do. The
+// descriptions also state the value and path rules of the emptiness operators (#108, part 2a).
 import { describe, expect, it } from 'vitest';
 import {
   GraphQLID, GraphQLList, GraphQLObjectType, GraphQLString,
@@ -84,10 +85,12 @@ describe('MCP tool schemas and descriptions with the text operators', () => {
     expect(description).toContain('LIKE, STARTS_WITH and ENDS_WITH respect case');
   });
 
-  it('names every operator in the list and aggregate tool descriptions', () => {
+  // Only the operator list counts: the emptiness rules that follow it name IS_EMPTY and IS_NOT_EMPTY as well.
+  it('names every operator in the operator list of the list and aggregate tool descriptions', () => {
     for (const name of [LIST, AGGREGATE]) {
-      const { description } = tool(tools, name);
-      for (const operator of DESCRIBED) expect(names(description, operator), `${name} ${operator}`).toBe(true);
+      const list = tool(tools, name).description.match(/operators: ([^;)]*)/)?.[1];
+      expect(list, name).toBeTypeOf('string');
+      for (const operator of DESCRIBED) expect(names(list, operator), `${name} ${operator}`).toBe(true);
     }
   });
 
@@ -100,6 +103,28 @@ describe('MCP tool schemas and descriptions with the text operators', () => {
     }
     expect(validate({ name: { operator: 'CONTAINS', value: 'pal' } }).valid).toBe(false);
     expect(validate({ name: { operator: 'ilike', value: 'pal' } }).valid).toBe(false);
+  });
+
+  it('says that IS_EMPTY and IS_NOT_EMPTY take no value and test an embedded field itself without a path', () => {
+    const NO_VALUE = 'IS_EMPTY and IS_NOT_EMPTY take no value';
+    const { $defs, properties } = tool(tools, LIST).inputSchema;
+    expect($defs.QLOperator.description).toContain(`${NO_VALUE} (omit it or pass null), and every record matches exactly one of them`);
+    expect($defs.QLOperator.description).toContain('a list when missing, null or [] ([null] is not)');
+    expect($defs.QLOperator.description).toContain('so EQ null also matches [null] and never []');
+    // A path that goes on past a collection gets the permanent INVALID_FILTER_PATH, which comes before UNSUPPORTED_QUERY.
+    expect($defs.QLOperator.description).toContain('apply to the record\'s own fields: a path that continues inside an embedded list or a collection '
+      + 'fails with INVALID_FILTER_PATH, and a path that crosses or ends at a reference, a path that ends at a collection, and an embedded '
+      + 'object with a reference or collection member fail with UNSUPPORTED_QUERY for now.');
+    expect($defs.QLFilter.properties.value.description).toBe('Filter value. Accepts a scalar, or an array for the IN, NIN and BTW operators. Omit it, or pass null, for IS_EMPTY and IS_NOT_EMPTY.');
+    expect($defs.QLTypeFilter.description).toContain('With IS_EMPTY or IS_NOT_EMPTY, omit the path to test the embedded object or embedded list itself.');
+    expect($defs.QLTypeFilterExpression.description).toContain('A term with IS_EMPTY or IS_NOT_EMPTY and no path tests an embedded object or embedded list itself.');
+    expect($defs.QLFilterCondition.description).toContain('test an embedded object or embedded list field itself when the path is omitted');
+    expect(properties.name.description).toBe(`Filter on \`name\` using { operator, value }; ${NO_VALUE}.`);
+    expect(properties.owner.description).toBe('Filter on the related entity or embedded value `owner` using { terms: [{ path, operator, value }] }; '
+      + 'on an embedded field, a term { operator: IS_EMPTY } or { operator: IS_NOT_EMPTY } without path tests the field itself.');
+    for (const name of [LIST, AGGREGATE]) {
+      expect(tool(tools, name).description, name).toContain(`; ${NO_VALUE}, and a term or group condition without path applies them to an embedded object or list itself),`);
+    }
   });
 });
 

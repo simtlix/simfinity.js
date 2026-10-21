@@ -62,10 +62,12 @@ const check = (archives, name) => {
   return archive;
 };
 
-// Every QLOperator value, in declaration order: the ten of 3.7.0, then the literal text operators (#108, part 1).
-// The bundled adapters list the same names in an order of their own, so their checks sort both lists.
+// Every QLOperator value, in declaration order: the ten of 3.7.0, then the literal text operators (#108, part 1),
+// then the emptiness operators (#108, part 2a). The bundled adapters list the same names in an order of their own,
+// so their checks sort both lists.
 const LEGACY_OPERATORS = ['EQ', 'LT', 'GT', 'LTE', 'GTE', 'BTW', 'NE', 'IN', 'NIN', 'LIKE'];
-const QUERY_OPERATORS = [...LEGACY_OPERATORS, 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ'];
+const EMPTINESS_OPERATORS = ['IS_EMPTY', 'IS_NOT_EMPTY'];
+const QUERY_OPERATORS = [...LEGACY_OPERATORS, 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ', ...EMPTINESS_OPERATORS];
 const SORTED_OPERATORS = [...QUERY_OPERATORS].sort();
 
 const adapterSource = `const adapter = {
@@ -289,8 +291,28 @@ const coreSource = `import assert from 'node:assert/strict';
   assert.throws(() => createRuntime({ ...adapter, queryFeatures: { operators: 'ILIKE' } }), (error) => error.getCode() === 'INVALID_QUERY_FEATURES');
   const textRuntime = createRuntime({ ...adapter, queryFeatures: { operators: QLOperator.getValues().map((value) => value.name) } });
   textRuntime.connect(null, new GraphQLObjectType({ name: 'CoreTextBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } }), 'coreTextBook', 'coreTextBooks');
-  const textResult = await graphql({ schema: textRuntime.createSchema(), source: '{ coreTextBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
-  assert.equal(textResult.errors, undefined);`;
+  const textSchema = textRuntime.createSchema();
+  const textResult = await graphql({ schema: textSchema, source: '{ coreTextBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
+  assert.equal(textResult.errors, undefined);
+  // The emptiness operators: the archive ships their shared rules, an adapter without queryFeatures rejects them
+  // before it runs, as one that declares other operators does, and one that declares them gets them without a value.
+  assert.deepEqual(queryOperators.EMPTINESS_QUERY_OPERATORS, ${JSON.stringify(EMPTINESS_OPERATORS)});
+  assert.equal(queryOperators.isEmptinessOperator('IS_NOT_EMPTY'), true);
+  assert.equal(queryOperators.isEmptinessOperator('EQ'), false);
+  assert.throws(() => queryOperators.validateEmptinessValue('IS_EMPTY', '', 'title'), (error) => error.getCode() === 'INVALID_FILTER_VALUE');
+  for (const operator of ${JSON.stringify(EMPTINESS_OPERATORS)}) {
+    const rejected = await graphql({ schema, source: \`{ coreBooks(title: { operator: \${operator} }) { id } }\` });
+    assert.equal(rejected.errors[0].extensions.code, 'UNSUPPORTED_QUERY', operator);
+    assert.equal(rejected.errors[0].message, \`The database adapter does not support the \${operator} filter operator, used on CoreBook.title\`);
+    const accepted = await graphql({ schema: textSchema, source: \`{ coreTextBooks(title: { operator: \${operator} }) { id } }\` });
+    assert.equal(accepted.errors, undefined, operator);
+    const valued = await graphql({ schema: textSchema, source: \`{ coreTextBooks(title: { operator: \${operator}, value: "" }) { id } }\` });
+    assert.equal(valued.errors[0].extensions.code, 'INVALID_FILTER_VALUE', operator);
+  }
+  const ilikeOnly = createRuntime({ ...adapter, queryFeatures: { operators: ['EQ', 'ILIKE'] } });
+  ilikeOnly.connect(null, new GraphQLObjectType({ name: 'CoreIlikeBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } }), 'coreIlikeBook', 'coreIlikeBooks');
+  const ilikeResult = await graphql({ schema: ilikeOnly.createSchema(), source: '{ coreIlikeBooks(title: { operator: IS_EMPTY }) { id } }' });
+  assert.equal(ilikeResult.errors[0].extensions.code, 'UNSUPPORTED_QUERY');`;
 
 const sqlSource = `import assert from 'node:assert/strict';
   import { createRequire } from 'node:module';
@@ -333,6 +355,11 @@ const sqlSource = `import assert from 'node:assert/strict';
   const unsupported = await graphql({ schema, source: '{ sqlBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
   assert.equal(unsupported.errors[0].extensions.code, 'UNSUPPORTED_QUERY');
   await assert.rejects(() => api.getModel(book).find({ title: { operator: 'IEQ', value: 'a' } }), (error) => error.getCode() === 'UNSUPPORTED_QUERY');
+  for (const operator of ${JSON.stringify(EMPTINESS_OPERATORS)}) {
+    const rejected = await graphql({ schema, source: \`{ sqlBooks(title: { operator: \${operator} }) { id } }\` });
+    assert.equal(rejected.errors[0].extensions.code, 'UNSUPPORTED_QUERY', operator);
+    await assert.rejects(() => api.getModel(book).find({ title: { operator } }), (error) => error.getCode() === 'UNSUPPORTED_QUERY');
+  }
   assert.deepEqual(calls, ['find']);
   assert.throws(() => createSQL({ plugin: { ...plugin, queryFeatures: { operators: [1] } } }), (error) => error.getCode() === 'INVALID_SQL_PLUGIN');
   const textApi = createSQL({ plugin: { ...plugin, queryFeatures: { operators: ${JSON.stringify(QUERY_OPERATORS)} } } });
@@ -341,7 +368,9 @@ const sqlSource = `import assert from 'node:assert/strict';
   const textSchema = textApi.createSchema();
   await textApi.initializeDatabase();
   assert.equal((await graphql({ schema: textSchema, source: '{ sqlTextBooks(title: { operator: ILIKE, value: "a" }) { id } }' })).errors, undefined);
-  assert.deepEqual(calls, ['find', 'find']);`;
+  assert.deepEqual(calls, ['find', 'find']);
+  assert.equal((await graphql({ schema: textSchema, source: '{ sqlTextBooks(title: { operator: IS_EMPTY }) { id } }' })).errors, undefined);
+  assert.deepEqual(calls, ['find', 'find', 'find']);`;
 
 const postgresSource = `import assert from 'node:assert/strict';
   import {
@@ -742,7 +771,7 @@ const textOperators: readonly QueryOperator[] = ['LIKE', 'ILIKE', 'STARTS_WITH',
 const textAdapter: DatabaseAdapter<Model, Session> = { ...adapter, queryFeatures: { operators: ['EQ', ...textOperators] } };
 const legacyAdapters: DatabaseAdapter<Model, Session>[] = [{ ...adapter, queryFeatures: null }, { ...adapter, queryFeatures: undefined }];
 // Names that this version does not know, such as those of later releases, still compile.
-const laterFeatures: QueryFeatures = { operators: Object.freeze(['EQ', 'IS_EMPTY']) };
+const laterFeatures: QueryFeatures = { operators: Object.freeze(['EQ', 'CONTAINS_ALL']) };
 // @ts-expect-error operators is a list of operator names.
 const oneOperator: QueryFeatures = { operators: 'ILIKE' };
 // @ts-expect-error a declaration is an object with operators, not the list itself.
@@ -751,7 +780,7 @@ const bareList: DatabaseAdapter<Model, Session> = { ...adapter, queryFeatures: [
 const unknownOperator: QueryOperator = 'CONTAINS';
 const featureMembers: {
   adapter: Equals<DatabaseAdapter['queryFeatures'], QueryFeatures | null | undefined>;
-  operator: Equals<QueryOperator, 'EQ' | 'NE' | 'LT' | 'LTE' | 'GT' | 'GTE' | 'BTW' | 'IN' | 'NIN' | 'LIKE' | 'ILIKE' | 'STARTS_WITH' | 'ISTARTS_WITH' | 'ENDS_WITH' | 'IENDS_WITH' | 'IEQ'>;
+  operator: Equals<QueryOperator, 'EQ' | 'NE' | 'LT' | 'LTE' | 'GT' | 'GTE' | 'BTW' | 'IN' | 'NIN' | 'LIKE' | 'ILIKE' | 'STARTS_WITH' | 'ISTARTS_WITH' | 'ENDS_WITH' | 'IENDS_WITH' | 'IEQ' | 'IS_EMPTY' | 'IS_NOT_EMPTY'>;
 } = { adapter: true, operator: true };
 const textPlan = createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', { title: { operator: 'ISTARTS_WITH', value: 'a' } }, { mode: 'count', operators: new Set<QueryOperator>(['EQ', 'ISTARTS_WITH']) });
 const planOperators = createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', {}, { operators: textOperators });

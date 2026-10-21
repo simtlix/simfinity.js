@@ -19,6 +19,8 @@ const QLOperator = new GraphQLEnumType({
     ENDS_WITH: { value: 'ENDS_WITH' },
     IENDS_WITH: { value: 'IENDS_WITH' },
     IEQ: { value: 'IEQ' },
+    IS_EMPTY: { value: 'IS_EMPTY' },
+    IS_NOT_EMPTY: { value: 'IS_NOT_EMPTY' },
   },
 });
 

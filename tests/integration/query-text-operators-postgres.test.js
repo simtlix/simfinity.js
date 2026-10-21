@@ -23,6 +23,7 @@ import {
 const uri = process.env.SIMFINITY_POSTGRES_URI;
 const LEGACY = ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE'];
 const TEXT = ['ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ'];
+const EMPTINESS = ['IS_EMPTY', 'IS_NOT_EMPTY'];
 const ICU = '"pg_catalog"."und-x-icu"';
 // The case fold of #108 section 3.1, spelled out apart from the compiler: the 22 characters that ICU lower() keeps
 // and simple case folding maps to another lowercase letter, then their foldings, U+00B5 to μ, U+017F to s, U+0345 to
@@ -218,7 +219,7 @@ describe('SQL plugin queryFeatures', () => {
   const invalidPlugin = expect.objectContaining({ extensions: expect.objectContaining({ code: 'INVALID_SQL_PLUGIN' }) });
 
   it('declares every QLOperator value in the PostgreSQL plugin and binds a frozen copy', () => {
-    expect([...ALL].sort()).toEqual([...LEGACY, ...TEXT].sort());
+    expect([...ALL].sort()).toEqual([...LEGACY, ...TEXT, ...EMPTINESS].sort());
     const plugin = postgresPlugin();
     expect([...plugin.queryFeatures.operators].sort()).toEqual([...ALL].sort());
     const bound = bindPlugin(plugin);

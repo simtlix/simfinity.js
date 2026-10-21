@@ -92,8 +92,11 @@ export interface MongoAdapter extends DatabaseAdapter {
   /**
    * Frozen; lists every `QLOperator` value. The literal text operators compile to escaped regular
    * expressions: `ILIKE` unanchored, `STARTS_WITH` and `ISTARTS_WITH` anchored with `^`, `ENDS_WITH` and
-   * `IENDS_WITH` with `\z`, and `IEQ` with both, with the `i` option for the case-insensitive ones. A
-   * copy of the adapter without this member supports only the operators of 3.7.0.
+   * `IENDS_WITH` with `\z`, and `IEQ` with both, with the `i` option for the case-insensitive ones.
+   * `IS_EMPTY` and `IS_NOT_EMPTY` compile to plain query operators on the record's own fields (see
+   * {@link buildQuery}); declaring them does not lift the `UNSUPPORTED_QUERY` that emptiness through
+   * references and collections gets in this release. A copy of the adapter without this member
+   * supports only the operators of 3.7.0.
    */
   readonly queryFeatures: QueryFeatures;
   /**
@@ -302,7 +305,9 @@ export interface FilterGroupInput {
   conditions?: Array<{
     field: string;
     operator?: string;
+    /** Omitted or null for `IS_EMPTY` and `IS_NOT_EMPTY`. */
     value?: any;
+    /** Required on an object field, except for `IS_EMPTY` and `IS_NOT_EMPTY`, where it may be omitted, null or `""` to test the field itself. */
     path?: string;
   }>;
   [key: string]: any;
@@ -314,6 +319,25 @@ export interface FilterGroupInput {
  * built here. An embedded `.id` path uses the declared `id` member, except for entity types embedded
  * as lists and supplied subdocument schemas without an `id` path, which use the subdocument `_id`.
  * A filter, condition or sort path through a virtual field rejects with `INVALID_FILTER_FIELD` (400).
+ *
+ * `IS_EMPTY` and `IS_NOT_EMPTY` take no value and test the queried document's own fields, inside the
+ * same `$match`: `{ p: { $in: [null, ""] } }` and `{ p: { $nin: [null, ""] } }` on a `String` field (a
+ * validated scalar by its base scalar), `{ p: null }` and `{ p: { $ne: null } }` on any other scalar
+ * or enum and on the record identity `_id`, `{ $and: [{ p: null }, { p: { $not: { $type: "array" } } }] }`
+ * and its `$nor` on an application scalar without a supported base, which MongoDB stores as written,
+ * so that an array, also `[null]`, is a value, `{ "p.0": { $exists: false } }` and
+ * `$exists: true` on a scalar list or an embedded list, and, on an embedded object,
+ * `{ $or: [{ p: null }, { $and: [<each stored member's IS_EMPTY form>] }] }` and its `$nor`. A type
+ * without stored members is always empty (`{}` stands for the members). Embedded `id` members follow
+ * the `.id` rule above, so an object of a supplied subdocument schema with an automatic `_id` is never
+ * empty. A term without a path (omitted, null or `""`) and a group condition without a path test the
+ * field itself. The checks, and their codes, are those of `createQueryPlan` in the same order:
+ * `MISSING_FILTER_PATH` for an emptiness operator on an object filter without terms or beside terms,
+ * `INVALID_FILTER_PATH` for a value inside an embedded list or a collection and for an interface or
+ * union field or member, `INVALID_FILTER_OPERATOR` for an embedded type that reaches itself through
+ * single embedded members, `INVALID_FILTER_VALUE` for a value that is not omitted or null, and
+ * `UNSUPPORTED_QUERY` for a reference or collection on the path or among the members. Other operators
+ * keep their pipelines.
  */
 export function buildQuery(
   input: Record<string, any>,
@@ -323,7 +347,8 @@ export function buildQuery(
 
 /**
  * Translate a QLFilterGroup into a MongoDB `$match` expression, collecting required lookups. A
- * condition path through a virtual field rejects with `INVALID_FILTER_FIELD` (400).
+ * condition path through a virtual field rejects with `INVALID_FILTER_FIELD` (400). `IS_EMPTY` and
+ * `IS_NOT_EMPTY` conditions compile and reject as in {@link buildQuery}, and add no lookup.
  */
 export function buildFilterGroupMatch(
   filterGroup: FilterGroupInput,

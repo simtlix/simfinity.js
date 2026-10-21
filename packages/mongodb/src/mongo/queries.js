@@ -2,14 +2,16 @@ import {
   GraphQLEnumType,
   GraphQLID,
   GraphQLObjectType,
-  GraphQLScalarType,
   getNamedType,
+  isAbstractType,
+  isScalarType,
 } from 'graphql';
 import mongoose from 'mongoose';
 
 import { SimfinityError, QLOperator, paginationStages } from '@simtlix/simfinity-core';
 import {
-  TEXT_QUERY_OPERATORS, textQueryOperator, validateTextFilterValue,
+  TEXT_QUERY_OPERATORS, describeEmptiness, effectiveScalarName, isEmptinessOperator, textQueryOperator,
+  validateTextFilterValue,
 } from '@simtlix/simfinity-core/internal/query-operators';
 import {
   getFieldStorageName, getListShape, hasStoredIdentity, isVirtualField, normalizeConnectionField,
@@ -17,10 +19,6 @@ import {
 
 import { castObjectId } from './ids.js';
 import { resolveStorageScalar } from './models.js';
-
-const getEffectiveTypeName = (type) => (
-  type instanceof GraphQLScalarType ? resolveStorageScalar(type).name : type.name
-);
 
 const isGraphQLisoDate = (typeName) => (
   typeName === 'DateTime' || typeName === 'Date' || typeName === 'Time'
@@ -36,6 +34,7 @@ const LOOKUP_ALIAS_PREFIX = '__sf_l';
 export const MONGO_QUERY_OPERATORS = Object.freeze([
   'EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE',
   'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ',
+  'IS_EMPTY', 'IS_NOT_EMPTY',
 ]);
 
 export const createMongoQueries = ({ getModel, getRegistrations }) => {
@@ -231,6 +230,74 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
   throw filterError(`Invalid query path: ${path}`, 'INVALID_FILTER_PATH');
 };
 
+// The emptiness operators IS_EMPTY and IS_NOT_EMPTY (#108, part 2a). Core's describeEmptiness applies
+// their checks in the order every caller uses and describes what "empty" means for the path. It
+// rejects references, collections, interface and union fields and anything inside a list, so the
+// path and every member it reads are stored in the queried document, through single embedded objects.
+// The forms are plain query operators that need no lookup, valid wherever the $match runs.
+const isPathless = (path) => path == null || path === '';
+
+// The stored key of the member `name` of `type`, an object stored at `schemaPath` ('' at the root):
+// a non-object `id` member follows identifierLeaf, as resolveQueryPath does; others keep their name.
+const emptinessKey = (model, type, schemaPath, name) => {
+  const field = type.getFields()[name];
+  const leaf = name === 'id' && !(getNamedType(field.type) instanceof GraphQLObjectType)
+    ? identifierLeaf(model, schemaPath, type)
+    : name;
+  return schemaPath ? `${schemaPath}.${leaf}` : leaf;
+};
+
+// MongoDB stores the built-in scalars, dates and enums as single values, but keeps an application scalar
+// without a supported base as written, arrays included, and `{ p: null }` also matches an array that
+// holds a null. The null rule of such a scalar leaves arrays out, so `[null]` is a value, as GraphQL
+// reads it. The record identity `_id` is never an array, so it keeps the plain form.
+const SINGLE_VALUE_SCALARS = new Set(['String', 'ID', 'Int', 'Float', 'Boolean', 'DateTime', 'Date', 'Time']);
+const holdsArrays = (key, type) => (
+  key !== '_id' && isScalarType(type) && !SINGLE_VALUE_SCALARS.has(effectiveScalarName(type))
+);
+const nullForm = (key, type) => (holdsArrays(key, type)
+  ? { $and: [{ [key]: null }, { [key]: { $not: { $type: 'array' } } }] }
+  : { [key]: null });
+
+// The IS_EMPTY form of `shape` for the value stored at `key`; `type` is the named type of its field.
+// An object is missing, null, or has every stored member empty. Without stored members it is always
+// empty: MongoDB rejects an empty $and, so the empty query, which matches every document, stands in.
+const emptyForm = (model, shape, key, type) => {
+  if (shape.rule === 'string') return { [key]: { $in: [null, ''] } };
+  if (shape.rule === 'null') return nullForm(key, type);
+  if (shape.rule === 'list') return { [`${key}.0`]: { $exists: false } };
+  const fields = type.getFields();
+  const members = shape.members.map((member) => emptyForm(
+    model, member.shape, emptinessKey(model, type, key, member.name), getNamedType(fields[member.name].type),
+  ));
+  return { $or: [{ [key]: null }, members.length ? { $and: members } : {}] };
+};
+
+// IS_NOT_EMPTY is the exact complement: the positive form of a leaf, which an index can serve, or
+// the $nor of the IS_EMPTY form of an object or of a scalar that may hold arrays.
+const notEmptyForm = (model, shape, key, type) => {
+  if (shape.rule === 'string') return { [key]: { $nin: [null, ''] } };
+  if (shape.rule === 'null') return holdsArrays(key, type) ? { $nor: [nullForm(key, type)] } : { [key]: { $ne: null } };
+  if (shape.rule === 'list') return { [`${key}.0`]: { $exists: true } };
+  return { $nor: [emptyForm(model, shape, key, type)] };
+};
+
+// The match clause of one emptiness condition on `path`, the field itself or a dotted path from it.
+const buildEmptinessClause = (gqltype, path, operator, value) => {
+  const segments = path.split('.');
+  const shape = describeEmptiness(gqltype, segments, { operator, value, path });
+  const model = getModel(gqltype);
+  let type = gqltype;
+  let schemaPath = '';
+  for (const name of segments.slice(0, -1)) {
+    schemaPath = schemaPath ? `${schemaPath}.${name}` : name;
+    type = getNamedType(type.getFields()[name].type);
+  }
+  const name = segments.at(-1);
+  const form = operator === 'IS_EMPTY' ? emptyForm : notEmptyForm;
+  return form(model, shape, emptinessKey(model, type, schemaPath, name), getNamedType(type.getFields()[name].type));
+};
+
 const castFilterValue = (value, resolved) => {
   if (value === null) return null;
   if (value === undefined || Array.isArray(value)
@@ -245,7 +312,7 @@ const castFilterValue = (value, resolved) => {
     // ID representation is a persistence concern, including String/Number/custom _id schemas.
     if (schemaType && (scalar === GraphQLID || resolved.mongoPath.endsWith('._id') || resolved.mongoPath === '_id'
       || schemaType.instance === 'ObjectId')) return schemaType.cast(value);
-    const typeName = getEffectiveTypeName(scalar);
+    const typeName = effectiveScalarName(scalar);
     if (isGraphQLisoDate(typeName)) {
       const date = value instanceof Date ? value : new Date(value);
       if (Number.isNaN(date.getTime())) throw new Error('Invalid date');
@@ -275,14 +342,14 @@ const buildMatchesClause = (resolved, operator, value, path) => {
   // Text operators take the value as is, once core's shared rule accepts it: a String field (a
   // validated scalar by its base scalar) and a string without U+0000.
   if (textQueryOperator(op)) {
-    const text = validateTextFilterValue(op, value, getEffectiveTypeName(resolved.fieldType), path);
+    const text = validateTextFilterValue(op, value, effectiveScalarName(resolved.fieldType), path);
     return { [resolved.mongoPath]: OP_TO_MONGO[op](text, path) };
   }
   const collectionOperator = op === 'IN' || op === 'NIN' || op === 'BTW';
   if (collectionOperator && (!Array.isArray(value) || (op === 'BTW' && value.length !== 2))) {
     throw filterError(`${op} requires ${op === 'BTW' ? 'exactly two values' : 'an array value'}`);
   }
-  if (op === 'LIKE' && (typeof value !== 'string' || getEffectiveTypeName(resolved.fieldType) !== 'String')) {
+  if (op === 'LIKE' && (typeof value !== 'string' || effectiveScalarName(resolved.fieldType) !== 'String')) {
     throw filterError('LIKE requires a string field and string value');
   }
   if (value === null && op !== 'EQ' && op !== 'NE') throw filterError(`${op} does not accept null`);
@@ -302,13 +369,44 @@ const buildQueryTerms = async (filterField, qlField, fieldName, gqltype, aggrega
   if (!qlField) throw filterError(`Unknown filter field: ${fieldName}`, 'INVALID_FILTER_FIELD');
   if (filterField == null) return { aggregateClauses, matchesClauses };
   if (typeof filterField !== 'object' || Array.isArray(filterField)) throw filterError(`Invalid filter for ${fieldName}`);
-  const isObject = getNamedType(qlField.type) instanceof GraphQLObjectType;
+  const namedType = getNamedType(qlField.type);
+  const isObject = namedType instanceof GraphQLObjectType;
+  // Only trusted code writes an operator on an object filter, since QLTypeFilterExpression has none:
+  // an emptiness operator there fails instead of being dropped; other operators stay left out. Rule 1
+  // comes first, so a virtual field fails as it does in every other form.
+  if (isObject && isEmptinessOperator(filterField.operator)) {
+    const { operator } = filterField;
+    if (isVirtualField(qlField)) {
+      throw filterError(`Query path ${fieldName} uses the virtual field ${gqltype.name}.${fieldName}, which is not stored`, 'INVALID_FILTER_FIELD');
+    }
+    throw filterError(`Filter on ${fieldName} takes ${operator} only in a term; to test the field itself, use a term without a path: `
+      + `${fieldName}: { terms: [{ operator: ${operator} }] }`, 'MISSING_FILTER_PATH');
+  }
   if (isObject && (!Array.isArray(filterField.terms) || filterField.terms.length === 0)) {
     throw filterError(`Filter on ${fieldName} requires non-empty terms`, 'MISSING_FILTER_PATH');
+  }
+  // QLTypeFilterExpression gives interface and union lists terms too. An emptiness operator beside
+  // them or in one of them tests the field itself, which rule 3 rejects, or a path through it, which
+  // rule 1 rejects: describeEmptiness throws both, in the order the gate reads them. Other operators
+  // keep reading the filter as a value.
+  if (isAbstractType(namedType) && Array.isArray(filterField.terms)) {
+    for (const term of [filterField, ...filterField.terms]) {
+      if (!isEmptinessOperator(term?.operator)) continue;
+      const pathed = term !== filterField && !isPathless(term.path);
+      if (pathed) assertValidFilterPath(term.path);
+      describeEmptiness(gqltype, pathed ? `${fieldName}.${term.path}` : fieldName, { operator: term.operator, value: term.value });
+    }
   }
   const terms = isObject ? filterField.terms : [filterField];
   for (const term of terms) {
     if (!term || typeof term !== 'object' || Array.isArray(term)) throw filterError(`Invalid term for ${fieldName}`);
+    // An emptiness term whose path is omitted, null or "" tests the field itself.
+    if (isEmptinessOperator(term.operator)) {
+      const pathed = isObject && !isPathless(term.path);
+      if (pathed) assertValidFilterPath(term.path);
+      matchesClauses.push(buildEmptinessClause(gqltype, pathed ? `${fieldName}.${term.path}` : fieldName, term.operator, term.value));
+      continue;
+    }
     if (isObject) assertValidFilterPath(term.path);
     const path = isObject ? `${fieldName}.${term.path}` : fieldName;
     const resolved = resolveQueryPath(gqltype, path, aggregationsIncluded);
@@ -340,6 +438,13 @@ const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, agg
     for (const rawCondition of filterGroup.conditions) {
       if (!rawCondition || typeof rawCondition.field !== 'string') throw filterError('Filter conditions require a field');
       const condition = normalizeFilterCondition(rawCondition);
+      // An emptiness condition without a path tests its field, also an object field; a dotted field
+      // is resolved as a whole, as the query plan resolves it.
+      if (isEmptinessOperator(condition.operator)) {
+        const path = rawCondition.path ? `${rawCondition.field}.${rawCondition.path}` : rawCondition.field;
+        parts.push(buildEmptinessClause(gqltype, path, condition.operator, condition.value));
+        continue;
+      }
       const qlField = fields[condition.field];
       if (!qlField) {
         throw new SimfinityError(`Unknown filter field: ${condition.field}`, 'INVALID_FILTER_FIELD', 400);

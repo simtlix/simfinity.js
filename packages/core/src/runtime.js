@@ -4,7 +4,7 @@ import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
   GraphQLInt, GraphQLEnumType, GraphQLBoolean, GraphQLError, GraphQLInterfaceType, GraphQLUnionType,
-  Kind, getNamedType,
+  Kind, getNamedType, isObjectType,
 } from 'graphql';
 
 import SimfinityError from './errors/simfinity.error.js';
@@ -17,6 +17,7 @@ import {
   collectQueryOperators, collectQueryPathEntries, collectQueryPaths, walkQueryPath,
 } from './query-plan.js';
 import { QUERY_OPERATORS, isQueryOperator, resolveQueryFeatures } from './query-operators.js';
+import { assertEmptinessPath, describeEmptiness, isEmptinessOperator } from './query-emptiness.js';
 import { relationFieldOwners } from './relation-owners.js';
 import { isThenable } from './auth/thenable.js';
 import {
@@ -178,7 +179,10 @@ const prefixScopeArgs = (scopeArgs, prefix, typeName) => {
         throw new SimfinityError(`Scope filter ${typeName}.${name} requires non-empty terms`, 'MISSING_FILTER_PATH', 400);
       }
       for (const term of value.terms) {
-        conditions.push({ field: `${prefix}.${name}.${term?.path}`, operator: term?.operator, value: term?.value });
+        // An emptiness term without a path (omitted, null or "") tests the field itself; other
+        // operators keep the path as written.
+        const itself = isEmptinessOperator(term?.operator) && (term.path == null || term.path === '');
+        conditions.push({ field: itself ? `${prefix}.${name}` : `${prefix}.${name}.${term?.path}`, operator: term?.operator, value: term?.value });
       }
     } else conditions.push({ field: `${prefix}.${name}`, operator: value.operator, value: value.value });
   }
@@ -1741,12 +1745,15 @@ const copyFilterGroups = (groups) => (Array.isArray(groups) ? groups.map((group)
 // client AND/OR groups whose conditions use each path, or `topLevel` for every other form.
 // graphql-js passes the same variable values to every resolver call of a request, so the client's
 // AND/OR groups are first copied onto this call's args, and joined scopes are only placed in those copies.
+// An emptiness condition on an embedded object reads its stored members, so their paths are checked
+// as client paths too (#108 part 2a); a member path only gets the 403 checks, and enters no joined
+// scope.
 const inspectClientPaths = (gqltype, args, operation) => {
   for (const key of ['AND', 'OR']) {
     if (Object.hasOwn(args, key)) args[key] = copyFilterGroups(args[key]);
   }
   const joinedScopes = new Map();
-  for (const { segments, group } of collectQueryPathEntries(args, operation)) {
+  for (const { segments, group, member } of collectQueryPathEntries(args, operation, { gqltype, expandMembers: true })) {
     walkQueryPath(gqltype, segments, ({ type, fieldName, field, index }) => {
       const path = segments.slice(0, index + 1).join('.');
       if (isVirtualField(field)) {
@@ -1756,6 +1763,7 @@ const inspectClientPaths = (gqltype, args, operation) => {
       if (queryable === false || (queryable !== true && hasApplicationResolver(type, fieldName))) {
         throw forbiddenPath(`Query path ${path} uses the non-queryable field ${type.name}.${fieldName}`);
       }
+      if (member) return;
       const relation = field.extensions?.relation;
       if (!relation || relation.embedded) return;
       const target = typesDict.types[unwrapListAndNonNull(field.type).name];
@@ -1794,19 +1802,103 @@ const assertStoredQueryPaths = (gqltype, args, operation) => {
   }
 };
 
-// Rejects a QLOperator value that the adapter does not declare in queryFeatures, with
-// UNSUPPORTED_QUERY (400), so an adapter never drops or misreads a condition it does not compile.
-// Runs on the client's arguments before middleware and on the final arguments before the adapter
-// call, which covers what middleware, scopes and joined scopes added. Operators that QLOperator does
-// not list are left to the adapter, which reports them as before.
-const assertSupportedOperators = (gqltype, args, operation) => {
-  if (supportsEveryOperator) return;
-  for (const { operator, path } of collectQueryOperators(args, operation)) {
-    if (isQueryOperator(operator) && !supportedOperators.has(operator)) {
-      throw new SimfinityError(`The database adapter does not support the ${operator} filter operator, used on `
-        + `${gqltype.name}.${path}`, 'UNSUPPORTED_QUERY', 400);
+const assertDeclaredOperator = (gqltype, operator, path) => {
+  if (!supportedOperators.has(operator)) {
+    throw new SimfinityError(`The database adapter does not support the ${operator} filter operator, used on `
+      + `${gqltype.name}.${path}`, 'UNSUPPORTED_QUERY', 400);
+  }
+};
+
+// The checks of an emptiness condition (#108 part 2a) that come before rules 3 to 6 of
+// describeEmptiness, with the codes and messages of createQueryPlan: the group depth, a dotted field
+// next to a path, an emptiness operator on an object filter without terms or beside terms, the
+// fields of the path (rule 1), then the adapter's operators (rule 2). Returns false when the backends
+// never read the condition as one, so that rules 3 to 6 do not apply: a term of a field that is not
+// an object (they read that filter's own operator) and a condition without a string field (they
+// reject it their own way; when the adapter does not declare the operator, no compiler sees it, so
+// the gate gives createQueryPlan's rule-1 code).
+const assertEmptinessForm = (gqltype, {
+  operator, path, segments, form, field, depth, ambiguous,
+}) => {
+  if (form === 'condition') {
+    if (depth > MAX_FILTER_GROUP_DEPTH) throw new SimfinityError('Filter nesting too deep', 'FILTER_DEPTH_EXCEEDED', 400);
+    if (typeof field !== 'string') {
+      if (!supportedOperators.has(operator)) throw new SimfinityError('Invalid filter path', 'INVALID_FILTER_PATH', 400);
+      return false;
+    }
+    if (ambiguous) {
+      throw new SimfinityError('Filter condition cannot use both dotted field syntax and a separate path', 'AMBIGUOUS_FILTER_FIELD', 400);
+    }
+  } else {
+    assertEmptinessPath(gqltype, [field]);
+    const type = getNamedType(gqltype.getFields()[field].type);
+    if (isObjectType(type) && form !== 'term') {
+      throw new SimfinityError(`Filter on ${field} takes ${operator} only in a term; to test the field itself, use a term `
+        + `without a path: ${field}: { terms: [{ operator: ${operator} }] }`, 'MISSING_FILTER_PATH', 400);
+    }
+    if (form === 'term' && !isObjectType(type) && !(type instanceof GraphQLInterfaceType) && !(type instanceof GraphQLUnionType)) {
+      assertDeclaredOperator(gqltype, operator, path);
+      return false;
     }
   }
+  assertEmptinessPath(gqltype, segments, { path });
+  assertDeclaredOperator(gqltype, operator, path);
+  return true;
+};
+
+// Rejects a QLOperator value that the adapter does not declare in queryFeatures, with
+// UNSUPPORTED_QUERY (400), so an adapter never drops or misreads a condition it does not compile,
+// and applies to every IS_EMPTY or IS_NOT_EMPTY condition the order of checks of #108 part 2a,
+// whatever the adapter declares. Runs on the client's arguments before middleware and on the final
+// arguments before the adapter call, which covers what middleware, scopes and joined scopes added,
+// so that an emptiness condition gets the code that a direct createQueryPlan call gives, whoever
+// wrote it and whatever the caller may read. Operators that QLOperator does not list are left to the
+// adapter, which reports them as before.
+const assertQueryConditions = (gqltype, args, operation) => {
+  for (const entry of collectQueryOperators(args, operation)) {
+    const { operator, path } = entry;
+    if (isEmptinessOperator(operator)) {
+      if (assertEmptinessForm(gqltype, entry)) describeEmptiness(gqltype, entry.segments, { operator, value: entry.value, path });
+    } else if (!supportsEveryOperator && isQueryOperator(operator)) assertDeclaredOperator(gqltype, operator, path);
+  }
+};
+
+// Decision 3 of #108 part 2a: a target find scope with an emptiness condition is not applied below a
+// client's relation path, because the prefix makes the condition cross a reference, which 2a
+// rejects. Runs after the scoped-collection and assertJoinedScopePaths 403s. The raw scope arguments,
+// operators beside terms included, first get the checks they get on the target's own endpoint (the
+// stored paths, then each emptiness condition's), so that a rejection the scope has there keeps its
+// code; otherwise the request fails with UNSUPPORTED_QUERY naming the scope and the prefixed condition.
+// A prefix that continues inside an embedded list or a collection (`olines.shop`, `reviews.item`)
+// adds more than a reference crossing. After its form and operator, each prefixed condition is checked
+// on `rootType`, the queried type, where rule 3, which comes before rules 4 to 6, rejects it with the
+// permanent INVALID_FILTER_PATH that the final gate and createQueryPlan give it wherever it is written.
+const assertJoinedScopeConditions = (rootType, scopeArgs, groups, prefix, target) => {
+  const { gqltype } = target;
+  const entries = collectQueryOperators(scopeArgs, 'find').filter(({ operator }) => isEmptinessOperator(operator));
+  if (!entries.length) return;
+  assertStoredQueryPaths(gqltype, scopeArgs, 'find');
+  let throughList = false;
+  walkQueryPath(rootType, prefix.split('.'), ({ field }) => { throughList ||= !!getListShape(field.type); });
+  // Rule 6, here or on the target's own endpoint, is the rejection thrown below.
+  const exceptRule6 = (check) => {
+    try {
+      check();
+    } catch (error) {
+      if (!(error instanceof SimfinityError) || error.getCode() !== 'UNSUPPORTED_QUERY') throw error;
+    }
+  };
+  for (const entry of entries) {
+    if (!assertEmptinessForm(gqltype, entry)) continue;
+    const { operator, value } = entry;
+    if (throughList) exceptRule6(() => describeEmptiness(rootType, `${prefix}.${entry.path}`, { operator, value }));
+    exceptRule6(() => describeEmptiness(gqltype, entry.segments, { operator, value, path: entry.path }));
+  }
+  const prefixed = collectQueryOperators({ AND: groups }).find(({ operator }) => isEmptinessOperator(operator))
+    ?? { operator: entries[0].operator, path: `${prefix}.${entries[0].path}` };
+  throw new SimfinityError(`Query path ${prefix} enters ${gqltype.name}, whose find scope tests ${prefixed.path} with `
+    + `${prefixed.operator}: emptiness through references and collections arrives with reference emptiness (#108); `
+    + `until then, use EQ null in the ${gqltype.name} find scope`, 'UNSUPPORTED_QUERY', 400);
 };
 
 // A joined scope must not repeat the rows it restricts: its paths may not cross a collection, nor
@@ -1867,6 +1959,7 @@ const applyJoinedScopes = async (joinedScopes, params) => {
     if (!groups.length) continue;
     if (collection) throw forbiddenPath(`Query path ${prefix} enters the scoped collection ${collection}`);
     assertJoinedScopePaths(groups, prefix, target);
+    assertJoinedScopeConditions(params.type.gqltype, scopeArgs, groups, prefix, target);
     queryGroups ??= collectFilterGroups(params.args);
     const addedDepth = 1 + Math.max(...groups.map(groupDepth));
     if (topLevel || [...owners].some((owner) => !queryGroups.has(owner)
@@ -1963,7 +2056,7 @@ const resolveById = async (type, args, context, requiredId) => {
   const queryArgs = { id: { operator: 'EQ', value: args.id } };
   await executeScope({ type, args: queryArgs, operation: 'get_by_id', context });
   assertStoredQueryPaths(type.gqltype, queryArgs, 'find');
-  assertSupportedOperators(type.gqltype, queryArgs, 'find');
+  assertQueryConditions(type.gqltype, queryArgs, 'find');
   const results = await adapter.find(type.model, type.gqltype, queryArgs, null, { requiredId, context });
   return results[0] || null;
 };
@@ -2471,7 +2564,7 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
           extensions: { simfinityQuery: { typeName: type.gqltype.name, operation: 'find', countSink: true } },
           async resolve(parent, args, context, info) {
             const joinedScopes = inspectClientPaths(type.gqltype, args, 'find');
-            assertSupportedOperators(type.gqltype, args, 'find');
+            assertQueryConditions(type.gqltype, args, 'find');
             const params = {
               type,
               args,
@@ -2482,7 +2575,7 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
             await executeScope(params);
             await applyJoinedScopes(joinedScopes, params);
             assertStoredQueryPaths(type.gqltype, params.args, 'find');
-            assertSupportedOperators(type.gqltype, params.args, 'find');
+            assertQueryConditions(type.gqltype, params.args, 'find');
             const queryArgs = params.args;
             const wantsCount = !!(queryArgs.pagination && queryArgs.pagination.count)
               && canReportCount(parent, info, context);
@@ -2519,7 +2612,7 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
           extensions: { simfinityQuery: { typeName: type.gqltype.name, operation: 'aggregate' } },
           async resolve(parent, args, context) {
             const joinedScopes = inspectClientPaths(type.gqltype, args, 'aggregate');
-            assertSupportedOperators(type.gqltype, args, 'aggregate');
+            assertQueryConditions(type.gqltype, args, 'aggregate');
             const params = {
               type,
               args,
@@ -2530,7 +2623,7 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
             await executeScope(params);
             await applyJoinedScopes(joinedScopes, params);
             assertStoredQueryPaths(type.gqltype, params.args, 'aggregate');
-            assertSupportedOperators(type.gqltype, params.args, 'aggregate');
+            assertQueryConditions(type.gqltype, params.args, 'aggregate');
             return adapter.aggregate(type.model, type.gqltype, params.args, null);
           },
         };
@@ -2980,13 +3073,13 @@ const autoGenerateResolvers = (gqltype) => {
           throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
         }
         const joinedScopes = inspectClientPaths(relatedType, args, 'find');
-        assertSupportedOperators(relatedType, args, 'find');
+        assertQueryConditions(relatedType, args, 'find');
         const params = { type: relatedTypeInfo, args, operation: 'find', context };
         await executeMiddleware(params);
         await executeScope(params);
         await applyJoinedScopes(joinedScopes, params);
         assertStoredQueryPaths(relatedType, params.args, 'find');
-        assertSupportedOperators(relatedType, params.args, 'find');
+        assertQueryConditions(relatedType, params.args, 'find');
         return loadChildren(relatedTypeInfo, connection, parent._id ?? parent.id, params.args, context);
       }, { simfinityQuery: { typeName: relatedType.name, operation: 'find' } });
       runtimeBoundTypes.set(gqltype, runtimeIdentity);

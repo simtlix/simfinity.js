@@ -56,10 +56,25 @@ The result is an array directly under `data.series`, rather than an `edges` / `n
 | `STARTS_WITH`, `ISTARTS_WITH` | Literal prefix, respecting or ignoring case | `"The "`, `"the "` |
 | `ENDS_WITH`, `IENDS_WITH` | Literal suffix, respecting or ignoring case | `" fiction"` |
 | `IEQ` | Equal, ignoring case | `"science fiction"` |
+| `IS_EMPTY`, `IS_NOT_EMPTY` | The field holds no value, or holds one; see [empty values](#empty-values) | None: omit `value` or pass `null` |
 
-Use the value's actual JSON type: a number for a numeric comparison, a Boolean for a Boolean field, a string for the [text operators](#text-operators), and an array for `IN`, `NIN`, or `BTW`.
+Use the value's actual JSON type: a number for a numeric comparison, a Boolean for a Boolean field, a string for the [text operators](#text-operators), and an array for `IN`, `NIN`, or `BTW`. `IS_EMPTY` and `IS_NOT_EMPTY` take no value; any value other than `null`, including `""`, `[]`, `false` and `0`, fails with `INVALID_FILTER_VALUE` (400) on both backends.
 
-`IN` and `NIN` require flat scalar lists; `BTW` requires exactly two non-null bounds. Null list elements, literal objects, nested lists, unsupported operators and invalid scalar values are rejected. Explicit `null` is supported by `EQ` and `NE`. Inline GraphQL values and variables follow the same rules. List items may be operation variables, as in `value: [$from, $to]`. Declare them as `QLValue` (or `QLValue!`): GraphQL rejects other declared types, such as `Int` or `String`, in that position. A list item whose variable the request leaves unset reads as `null`, as GraphQL reads list arguments, so it is rejected like an explicit null element. Enum literals such as `value: ACTIVE` or `value: [ACTIVE, INACTIVE]` are read as the enum names, like `"ACTIVE"`. Enum names or declared internal values are converted to the stored representation, including the state names used by state machines. Date values are converted without changing the input arguments. Validated scalars use their base scalar type for filters, allowing string fragments in the text operators and range bounds outside create/update constraints.
+`IN` and `NIN` require flat scalar lists; `BTW` requires exactly two non-null bounds. Null list elements, literal objects, nested lists, unsupported operators and invalid scalar values are rejected. Explicit `null` is supported by `EQ` and `NE`, and is the only value that `IS_EMPTY` and `IS_NOT_EMPTY` accept. Inline GraphQL values and variables follow the same rules. List items may be operation variables, as in `value: [$from, $to]`. Declare them as `QLValue` (or `QLValue!`): GraphQL rejects other declared types, such as `Int` or `String`, in that position. A list item whose variable the request leaves unset reads as `null`, as GraphQL reads list arguments, so it is rejected like an explicit null element. Enum literals such as `value: ACTIVE` or `value: [ACTIVE, INACTIVE]` are read as the enum names, like `"ACTIVE"`. Enum names or declared internal values are converted to the stored representation, including the state names used by state machines. Date values are converted without changing the input arguments. Validated scalars use their base scalar type for filters, allowing string fragments in the text operators and range bounds outside create/update constraints.
+
+### Filters on lists
+
+On a scalar list, such as a `tags: [String]` field, a condition compares the list's elements, on both backends. The value is a single element, never a whole list: `tags: { operator: EQ, value: ["a", "b"] }` fails with `INVALID_FILTER_VALUE` (400).
+
+| Condition | A record matches when |
+| --- | --- |
+| `EQ "a"`, `IN ["a", "b"]` | Some element equals the value, or one of the values |
+| `NE "a"`, `NIN ["a", "b"]` | No element equals the value, or any of the values, so a missing, `null` or empty list matches too |
+| `EQ null` | The list is missing or `null`, or some element is `null`: `[null]` matches, `[]` does not |
+| `NE null` | The list is present and holds no `null` element: `[]` matches, a missing list and `[null]` do not |
+| `LT`, `LTE`, `GT`, `GTE` and the [text operators](#text-operators) | Some element matches |
+
+A leaf reached through an embedded list, such as `lines.qty`, compares the values of the list's items: `EQ`, `IN`, the comparisons and the text operators match when some item's value matches, and `NE` and `NIN` when none does. No condition on the elements matches exactly the lists that hold nothing, since `EQ null` also matches `[null]` and never `[]`; [`IS_EMPTY`](#empty-values) does: it holds for a missing, `null` or empty list, and not for `[null]` or `[""]`.
 
 ### Text operators
 
@@ -146,6 +161,109 @@ CREATE INDEX series_label_ci ON "app"."Serie" (translate(lower(("details" ->> 'l
 A btree index on `fold("column")` with the default operator class serves `IEQ` but not `ISTARTS_WITH`. A trigram index narrows an `ILIKE` search only for values of three or more characters. For the `LIKE` patterns, PostgreSQL derives the index condition from the bound value when it plans the statement, which it does for the unnamed statements that Simfinity sends. Conditions on a `String` list read every element of the list, so these indexes do not serve them. If a later release changes the fold, its upgrade notes say so: an index on the earlier expression then stops serving the operators, without ever returning other rows, until you build it again with `caseFoldExpression`.
 
 On MongoDB, `STARTS_WITH` reads a prefix range of an index on the field. The other text operators, like `LIKE`, test every key of such an index, or every document without one. `$regex` ignores collations, so a case-insensitive collation index does not serve them; for frequent case-insensitive equality or prefix searches, store a normalized copy of the field, such as its lowercase form, and filter it with `EQ` or `STARTS_WITH`. MongoDB accepts regular expressions of at most 32,764 bytes of UTF-8, so on MongoDB a value whose pattern is longer fails with `INVALID_FILTER_VALUE` (400) before the query runs, with `LIKE` and with the text operators. Every escaped character counts one byte more, and the operators add up to four bytes of their own: `^` for the prefixes, `\z` for the suffixes, both for `IEQ` and `.*` twice for `LIKE`. So an `ILIKE` value of 32,764 ASCII letters runs, while 16,383 dots or 16,383 two-byte letters such as `é` fail. PostgreSQL has no such limit.
+
+## Empty values
+
+`IS_EMPTY` matches the records in which a field holds no value, and `IS_NOT_EMPTY` the records in which it holds one, so every record matches exactly one of the two. They take no value: omit `value`, or pass `null`. They test the queried record's own fields, scalars, enums, lists, embedded objects and embedded lists, wherever filters apply: field filters, relation `terms`, `AND`/`OR` conditions, `pagination.count`, aggregate filters, collection fields, batched or not, `find`, `get_by_id` and `aggregate` [scopes](./query-scope), middleware and [MCP tools](./mcp).
+
+```graphql
+query {
+  series(
+    category: { operator: IS_EMPTY }
+    director: { terms: [{ operator: IS_NOT_EMPTY }] }
+  ) {
+    id
+    name
+  }
+}
+```
+
+This returns the series that have a director and no category. What counts as empty depends on the field, and is the same on both backends:
+
+| Field | `IS_EMPTY` holds when the value is |
+| --- | --- |
+| `String`, and a scalar whose base scalar is `String`, such as a validated email | Missing, `null` or `""`; `" "` is not empty |
+| Any other scalar or enum: numbers, Booleans, `ID`, dates, a state machine's `state`, an application scalar such as `JSON`, and the ID of an inferred inverse reference | Missing or `null` |
+| The record identity, the queried type's own `id`, whatever its declared scalar | Missing or `null`, which a stored record never is: `IS_EMPTY` matches no record and `IS_NOT_EMPTY` every record |
+| A scalar list | Missing, `null` or `[]`; `[null]` and `[""]` are not empty |
+| An embedded list | Missing, `null` or `[]`; `[null]` and `[{}]` are not empty |
+| An embedded object | Missing or `null`, or an object whose stored members are all empty by their own rules |
+| A leaf inside embedded objects, such as `director.country` | Empty by the leaf's rule; a missing or `null` object on the way makes the leaf empty |
+
+An embedded object's members are the fields its type stores; [virtual fields](#virtual-fields) store nothing and are left out. A nested embedded object follows the object rule, and a list member the list rule, which never looks at the items, so `{ tags: [null] }` is not empty. An `id` member follows the rule of its declared scalar, unlike the record identity, so a `String` `id` member is empty when it is `""`. An embedded type that stores no member is always empty: `IS_EMPTY` matches every record and `IS_NOT_EMPTY` none. On MongoDB, an embedded object whose `id` member resolves to an automatic subdocument `_id`, as in the supplied subdocument schemas that [IDs in paths](#ids-in-paths) describes, always holds that `_id`, so it is never empty; generated models give embedded objects no `_id`.
+
+An application scalar such as `JSON` is empty only when it is missing or `null`. On MongoDB it can hold an array, and an array is a value even when it holds `null`, so `[null]` and `[1, null]` are not empty.
+
+### Conditions without a path
+
+`IS_EMPTY` and `IS_NOT_EMPTY` are the only operators that test an embedded object or an embedded list itself, so their relation terms and group conditions may leave out `path`: a `path` that is omitted, `null` or `""` names the field itself. Such a term can sit next to terms that have paths. These series have a director whose country is empty:
+
+```graphql
+query {
+  series(director: { terms: [{ operator: IS_NOT_EMPTY }, { path: "country", operator: IS_EMPTY }] }) {
+    id
+    name
+  }
+}
+```
+
+In a group, name the field alone. These series have no director, or one from Argentina:
+
+```graphql
+query {
+  series(
+    OR: [
+      { conditions: [{ field: "director", operator: IS_EMPTY }] }
+      { conditions: [{ field: "director.country", operator: EQ, value: "Argentina" }] }
+    ]
+  ) {
+    id
+    name
+  }
+}
+```
+
+A scalar list takes a field filter, as a scalar does: `tags: { operator: IS_EMPTY }`. A group condition may also use the dotted form, `{ field: "director.country", operator: IS_EMPTY }`, but not together with a `path`, which fails with `AMBIGUOUS_FILTER_FIELD` (400). Other operators still need a path into an object field, and keep their codes when it is missing.
+
+### What generated mutations store
+
+Generated mutations seldom store `null` for an embedded object, which is why the object rule reads every stored member instead of testing for `null` alone:
+
+- A create that omits an embedded object, or sends `null`, `{}` or only `null` members, stores nothing when the embedded type has no list member. When it has one, such as `tags`, the omitted list defaults to `[]`, so the object is stored as `{ tags: [] }` and reads back with `null` members. Both are empty, and so is a stored `{ label: "" }`, while `{ label: " " }` is not.
+- An update that sets the embedded object to `null` removes it, and one that sets each of its members to `null` stores an object with `null` members, such as `{ a: null, b: null }`. Both are empty.
+- On PostgreSQL, an embedded object that is stored in a table of its own, because it has a `unique` member, gets a row on create even when every member is empty. That row is empty by the same rule.
+
+`EQ null` is a different test: it does not apply to an embedded object, it treats `""` as a value, and on a list it matches `[null]` and never `[]`; see [filters on lists](#filters-on-lists).
+
+### Rejected emptiness conditions
+
+| Condition | Code |
+| --- | --- |
+| A value other than `null`, such as `""`, `[]`, `{}`, `false` or `0` | `INVALID_FILTER_VALUE` (400) |
+| A path that continues inside an embedded list or a collection, such as `lines.qty` or `seasons.year`: emptiness of a value inside a list is not defined | `INVALID_FILTER_PATH` (400) |
+| An interface or union field, on the path or among the members of an embedded object, which only MongoDB's default mode allows | `INVALID_FILTER_PATH` (400) |
+| An embedded object whose type reaches itself again through single embedded members, which custom adapters and supplied MongoDB models allow when a field of the cycle is `readOnly`; a type that reaches itself only through a list member is accepted | `INVALID_FILTER_OPERATOR` (400) |
+| A path that crosses or ends at a reference, such as `serie.name` or `serie` on a season, a path that ends at a collection, such as `seasons` on a serie, and an embedded object with a reference or collection member | `UNSUPPORTED_QUERY` (400) in this release; see [limits](#limits-of-emptiness) |
+| `IS_EMPTY` or `IS_NOT_EMPTY` written on the filter of an embedded, reference or collection field itself, as in `director: { operator: IS_EMPTY }`, with or without `terms`; only server code, such as middleware and scopes, can write this form, since the GraphQL input has no `operator` there | `MISSING_FILTER_PATH` (400); write a term without a path instead |
+| An unknown field, a path through a scalar, a dotted field with a `path`, or a group nested more than five levels deep | `INVALID_FILTER_FIELD`, `INVALID_FILTER_PATH`, `AMBIGUOUS_FILTER_FIELD` or `FILTER_DEPTH_EXCEEDED` (400), as with other operators |
+| A custom adapter or SQL plugin that does not declare the operators in `queryFeatures` | `UNSUPPORTED_QUERY` (400); see [emptiness in custom adapters and SQL plugins](../resources/compatibility#emptiness-in-custom-adapters-and-sql-plugins) |
+
+A condition that breaks several rules fails with the first of them, in this order, so its code does not depend on the caller or the backend: on client paths and the members they read, the authorization plugin's read rules, with `FORBIDDEN`, and then the `queryable: false`, application-resolver and virtual-field checks of [path restrictions](#path-restrictions), with `FORBIDDEN_FILTER_PATH` (403); the form, the fields and the group depth; an adapter that does not declare the operator; `INVALID_FILTER_PATH`; `INVALID_FILTER_OPERATOR`; `INVALID_FILTER_VALUE`; and last the `UNSUPPORTED_QUERY` of references and collections. The order holds within one condition; a request with several rejected conditions reports one of them. The `find`-scope checks of path restrictions, which give 403 to a path into a scoped collection or into a type whose scope filters through a collection, never apply to an emptiness condition: one that enters a reference or a collection already fails with a 400 above, for every caller, before any scope runs. So `seasons: { terms: [{ path: "year", operator: IS_EMPTY }] }` fails with `INVALID_FILTER_PATH` even for a caller whom the `Season` scope restricts, where an `EQ` term on `year` fails with `FORBIDDEN_FILTER_PATH`. The runtime checks the client's arguments before middleware and scopes run, so a rejected condition gets the same code for every caller and never runs a scope, and checks the final arguments, with what middleware and scopes added, before it calls the adapter. `createQueryPlan()`, the PostgreSQL compiler and MongoDB's `buildQuery()` and `buildFilterGroupMatch()` apply the same rules, apart from the path restrictions; for a path through a virtual field they raise `INVALID_FILTER_FIELD`.
+
+### Limits of emptiness
+
+This release tests only the queried record's own fields. Emptiness through references and collections is not available yet: "seasons without a serie", `serie: { terms: [{ operator: IS_EMPTY }] }`, "series without seasons", `seasons: { terms: [{ operator: IS_EMPTY }] }`, a leaf through a reference, such as `serie.name`, and an embedded object with a reference or collection member, which its member rule would read, all fail with `UNSUPPORTED_QUERY` (400), with a message that says that emptiness through references and collections arrives with reference emptiness (#108). A later release answers these conditions without changing any other result or code. A leaf through a collection, such as `seasons.year`, is not among them: it fails with the permanent `INVALID_FILTER_PATH`, as a leaf inside an embedded list does. The rejection applies whoever writes the condition: a client, middleware, a scope function or a [joined scope](./query-scope#emptiness-in-joined-scopes). An embedded list is tested as a list, so `lines: { terms: [{ operator: IS_EMPTY }] }` works even when its items hold references.
+
+### Compiled forms and indexes
+
+| Field | MongoDB `IS_EMPTY` | PostgreSQL `IS_EMPTY` |
+| --- | --- | --- |
+| `String` | `{ f: { $in: [null, ""] } }` | `("f" IS NULL OR "f" = '')` |
+| Other scalars and enums, and the record identity | `{ f: null }`, `{ _id: null }` | `"f" IS NULL`, `"id" IS NULL` |
+| Scalar list, embedded list | `{ "f.0": { $exists: false } }` | `COALESCE(cardinality("f"), 0) = 0` on an array column; a guarded `jsonb_array_length` on jsonb; in a table of its own, state not `present` or no row |
+| Embedded object | `{ $or: [{ f: null }, { $and: [<member forms>] }] }` | `(J IS NULL OR J = 'null'::jsonb OR (<member forms>))` on jsonb; in a table of its own, state not `present` or no row with a non-empty member |
+
+`IS_NOT_EMPTY` compiles to the complement: `$nin`, `$ne: null`, `$exists: true` and a `$nor` of the object form on MongoDB; on PostgreSQL, the positive forms of the leaf and list tests, such as `("f" IS NOT NULL AND "f" <> '')` and `COALESCE(cardinality("f"), 0) > 0`, and `NOT (…)` of the forms of embedded objects and of tables of their own. The forms bind no parameters and read jsonb members with `->>`, without casts. An index on the field serves the `String` and `null` forms on both backends, on MongoDB with index bounds for `null` and `""` and on PostgreSQL with a btree index on the column, through a BitmapOr for the `String` form. No index serves the list forms.
 
 ## Combine conditions with AND and OR
 
@@ -241,7 +359,7 @@ query {
 
 Logical groups can describe the same path with `{ field: "serie", path: "name", ... }` or the dotted field form `{ field: "serie.name", ... }`. Do not combine the dotted form and a separate `path` in one condition.
 
-All `terms` are ANDed, including multiple conditions on the same path. For example, `[{ path: "year", operator: GTE, value: 2020 }, { path: "year", operator: LTE, value: 2025 }]` preserves both bounds. These conditions remain ANDed with logical groups and scope filters. Paths must terminate at a declared scalar or enum field. MongoDB ID comparisons use the actual Mongoose schema path, including supplied models with string or numeric `_id` fields; PostgreSQL entity and reference IDs are UUIDs.
+All `terms` are ANDed, including multiple conditions on the same path. For example, `[{ path: "year", operator: GTE, value: 2020 }, { path: "year", operator: LTE, value: 2025 }]` preserves both bounds. These conditions remain ANDed with logical groups and scope filters. Paths must terminate at a declared scalar or enum field, except with `IS_EMPTY` and `IS_NOT_EMPTY`, whose path may also end at an embedded list or an embedded object, or be left out to test the field itself; see [empty values](#empty-values). MongoDB ID comparisons use the actual Mongoose schema path, including supplied models with string or numeric `_id` fields; PostgreSQL entity and reference IDs are UUIDs.
 
 ::: info Referenced collection joins
 Root filters that traverse a one-to-many relation preserve one result row per matching child. A parent can appear more than once when multiple child records match, on both supported backends. Account for this when designing result lists and counts.
@@ -262,6 +380,7 @@ Filter, sort, `groupId` and fact paths supplied by the client are collected befo
 - No path segment may name a field with `extensions.queryable: false`, or a field with an application-defined `resolve`. This includes masking resolvers, relationship fields with a manual resolver, and a custom `id` resolver; only the resolvers Simfinity generates keep a field queryable. Set `extensions.queryable: true` to let clients query a stored field that has its own resolver. Such paths fail with `FORBIDDEN_FILTER_PATH` (403); unknown fields still fail with `INVALID_FILTER_FIELD` (400).
 - A path through a non-embedded single reference to a type with a `find` scope only matches rows whose referenced record that scope admits, including when it is used for sorting or grouping; a path used only in `AND`/`OR` group conditions restricts just the groups that use it. A path into a collection relation whose type's `find` scope restricts the caller, such as `seasons.year` when `Season` is scoped, fails with `FORBIDDEN_FILTER_PATH`. So does a path into a type whose `find` scope, while it restricts the caller, filters through a collection relation or a reference inside an embedded list. See [query scope](./query-scope#relationship-paths-in-filters-sorts-and-aggregations).
 - No path segment may name a [virtual field](#virtual-fields), which holds no stored value. Such paths fail with `FORBIDDEN_FILTER_PATH` (403) too, whatever `queryable` says.
+- An `IS_EMPTY` or `IS_NOT_EMPTY` condition on a whole embedded object, with or without a path, reads every member that the object stores, at any depth through single embedded objects, so each member path counts as a client path too. A member with `extensions.queryable: false` or an application-defined `resolve` fails with `FORBIDDEN_FILTER_PATH` (403), naming the member path, such as `director.salary`, and the authorization plugin checks each member's read rule. Virtual members are not read and not checked. These 403s come before the 400s of [rejected emptiness conditions](#rejected-emptiness-conditions), also for a reference or collection member, which the condition would otherwise reject with `UNSUPPORTED_QUERY`. Neither members nor named emptiness paths get the `find`-scope checks of the second bullet: an emptiness condition that enters a reference or a collection fails with a 400 before any scope runs.
 - With the [authorization plugin](./authorization#filter-sort-and-aggregation-paths), every field a path names also needs a read rule.
 
 Paths that middleware or scope functions add are trusted and are not checked, with one exception: a path through a virtual field fails with `INVALID_MODEL` (500) before the database is queried, because it cannot compile against storage that does not exist.
