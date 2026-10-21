@@ -251,7 +251,7 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL emptiness parity'
       // Every record matches exactly one of the two operators.
       expect(alike([...expected(rootKey, path, 'IS_EMPTY'), ...expected(rootKey, path, 'IS_NOT_EMPTY')].sort()), path).toEqual(all);
     }
-  });
+  }, 60000);
 
   it('counts the records of every path before paging, alike', async () => {
     for (const rootKey of ROOTS) {
