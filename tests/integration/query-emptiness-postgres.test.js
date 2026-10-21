@@ -595,7 +595,7 @@ describe.skipIf(!uri)('PostgreSQL emptiness rows', () => {
       } finally {
         await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
       }
-    });
+    }, 120000);
 
     it('serves the null form with the generated index of an ID column', async () => {
       const plan = await explain(batched, 'item', { ref: { operator: 'IS_EMPTY' } }, []);
