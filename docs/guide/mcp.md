@@ -64,6 +64,28 @@ Generated inputs distinguish omission from explicit null: defaulted arguments us
 
 `limits` bound reads, not writes. Generated add and update tools accept nested collection inputs, and each nested `added`, `updated` or `deleted` entry runs inside the parent's transaction. On servers exposed to MCP clients, cap them with [`configureMutationLimits({ maxNestedOperations })`](/guide/mutations#limit-nested-collection-operations) at startup.
 
+## Custom query tools
+
+[Custom queries](./queries#custom-queries), registered with `registerCustomQuery()`, are published as read-only query tools (`readOnlyHint: true`), titled by their field name and described by their description. For example, the duration estimate from the query guide is called with:
+
+```javascript
+const { callTool } = mcp.generateMCPTools(schema, {
+  include: ['estimateServiceDuration'],
+});
+
+const result = await callTool('estimateServiceDuration', {
+  input: { serviceCodes: ['haircut', 'beard'] },
+});
+```
+
+Selectors treat a custom query like any other query tool:
+
+- `include` and `exclude` match its field name, its published name with `toolNamePrefix`, or the category `'query'`. `exclude: 'mutation'` keeps it, so a read-only server publishes it, and `exclude: 'query'` hides it.
+- `includeTypes` and `excludeTypes` match its named output object type. A custom query whose output is not an object type, such as a scalar, is hidden whenever `includeTypes` is set.
+- `toolOverrides` apply by published name or by field name.
+
+Custom inputs do not acquire generated pagination or filtering behavior. Apply domain limits inside the callback and configure [authorization](#preserve-authorization) for its root and output fields. If a custom query and a custom mutation share a name, MCP publishes only the query's tool and skips the mutation with a warning; use distinct names to expose both. A custom query named like a [virtual field tool](/reference/mcp#virtual-field-tools), `<byIdQuery>_<field>`, takes that tool name, and the virtual field's tool is skipped with a warning.
+
 ## Start a stdio server
 
 Install the SDK for protocol transports:

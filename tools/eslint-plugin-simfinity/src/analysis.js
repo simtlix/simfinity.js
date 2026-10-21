@@ -15,7 +15,7 @@ export const factories = new Set([
 const runtimeMembers = new Set(['createSchema', 'connect', 'addNoEndpointType', 'configureQueryLimits']);
 const otherRuntimeMembers = new Set([
   'configureMutationLimits', 'getModel', 'getType', 'getInputType', 'getRegistrations',
-  'use', 'registerMutation', 'saveObject', 'preventCreatingCollection',
+  'use', 'registerMutation', 'registerCustomQuery', 'saveObject', 'preventCreatingCollection',
 ]);
 const sqlMembers = new Set(['configure', 'initializeDatabase', 'describeDatabase', 'compileDatabaseSchema', 'withTransaction']);
 const wrappers = new Set(['TSAsExpression', 'TSTypeAssertion', 'TSNonNullExpression', 'TSSatisfiesExpression', 'ChainExpression']);

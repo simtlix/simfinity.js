@@ -215,7 +215,7 @@ simfinity.registerMutation('sendinvoiceemail', 'Email an invoice.', SendInvoiceI
 
 ## Reading stored records through a custom mutation
 
-**What it looks like.** A read of stored records gets a root field of its own, beside the generated queries of the type it reads. Simfinity registers custom mutations only, so the read becomes one, and its callback loads the records natively:
+**What it looks like.** A read of stored records gets a root field of its own, beside the generated queries of the type it reads. The read becomes a custom mutation, whose callback loads the records natively:
 
 ```javascript
 simfinity.registerMutation(
@@ -230,7 +230,7 @@ simfinity.registerMutation(
 );
 ```
 
-**Why it hurts.** The callback receives only its input, a session and the context, so it loads the shop itself and repeats the shop's scope and permission checks in code, where the copy drifts from the scope. Clients cannot select the read with the shop: a query field and a mutation field cannot share one operation, so a page that shows both sends two operations, and the read cannot appear under the shops of a list or a relationship. As a mutation, it runs in a transaction that Simfinity opens and retries for a read, GraphQL runs mutation root fields one at a time, and MCP publishes it with `readOnlyHint: false`, so `exclude: 'mutation'` also hides it from agents that may only read. Adding a query field to the built schema instead fails: graphql-js's `extendSchema()` throws `Schema must contain uniquely named types but contains multiple types named "FieldExtensionsType".`, and rebuilding the schema is not supported; see [work with the built schema](./schema#work-with-the-built-schema).
+**Why it hurts.** The callback receives only its input, a session and the context, so it loads the shop itself and repeats the shop's scope and permission checks in code, where the copy drifts from the scope. Clients cannot select the read with the shop: a query field and a mutation field cannot share one operation, so a page that shows both sends two operations, and the read cannot appear under the shops of a list or a relationship. As a mutation, it runs in a transaction that Simfinity opens and retries for a read, GraphQL runs mutation root fields one at a time, and MCP publishes it with `readOnlyHint: false`, so `exclude: 'mutation'` also hides it from agents that may only read. Registering the read as a [custom query](./queries#custom-queries) instead removes the transaction and the write classification, but not the rest: its callback still repeats the scope and permission checks, and clients still cannot select the read with the shop. Custom queries are for results that are not stored records.
 
 **Do this instead.** Read stored records through generated queries: filters for what the client asks for, [query scopes](./query-scope) for what the caller may see, and [aggregate queries](./queries#aggregate-records) for totals. When a read needs logic that filters cannot express, add a [virtual field](./queries#virtual-fields) to the type it belongs to. The type's generated queries, its scope and the permission rules then decide which records reach the field, clients select it with the record, and generated MCP tools read it through a read-only per-field tool when it has required arguments:
 
@@ -243,7 +243,7 @@ query ShopDay($id: ID!, $date: String!) {
 }
 ```
 
-Its resolver still runs once per returned record, so batch its reads when lists select it, as that section shows. Keep custom mutations for writes, and run work that touches no data in your own service code.
+Its resolver still runs once per returned record, so batch its reads when lists select it, as that section shows. Keep custom mutations for writes. For a read whose result is not a stored record, such as a price preview, data from another service or a permission evaluation, register a [custom query](./queries#custom-queries): clients send it in a `query` document, and MCP publishes it as a read-only tool.
 
 ## Raising the query limit for internal reads
 

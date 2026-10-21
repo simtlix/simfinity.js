@@ -17,6 +17,7 @@ export type {
   AuthRule,
   AuthRuleFunction,
   AuthSchemaPlugin,
+  CreateSchemaOptions,
   EntityController,
   EnvelopSchemaPlugin,
   FieldValidations,
@@ -269,6 +270,7 @@ export const getInputType: PostgresRuntime['getInputType'];
 export const getRegistrations: PostgresRuntime['getRegistrations'];
 export const use: PostgresRuntime['use'];
 export const registerMutation: PostgresRuntime['registerMutation'];
+export const registerCustomQuery: PostgresRuntime['registerCustomQuery'];
 export const saveObject: PostgresRuntime['saveObject'];
 export const preventCreatingCollection: PostgresRuntime['preventCreatingCollection'];
 export const withTransaction: PostgresRuntime['withTransaction'];
