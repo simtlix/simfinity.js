@@ -1,20 +1,18 @@
 # @simtlix/eslint-plugin-simfinity
 
 Optional editor/CI checks for **Simfinity 3.8.0**, shared by MongoDB and PostgreSQL.
-The source provides ten precise rules (eight published in `0.1.0`, two unreleased).
-It does not execute application
+The plugin provides ten precise rules. It does not execute application
 code or load Simfinity, GraphQL, database drivers or the MCP SDK.
 
-The plugin has its own version (`0.1.0`) and is outside Simfinity's five runtime
+The plugin has its own version (`0.2.0`) and is outside Simfinity's five runtime
 workspaces and their release workflow. Install it from npm in your application:
 
 ```sh
-npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.1.0'
+npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.2.0'
 ```
 
-`no-async-auth-extractor` and `no-auth-plugin-as-middleware` are **unreleased**;
-the npm command above does not include them. To try them, pack this source as
-described below. This change does not bump or publish the plugin or runtime.
+Version 0.2.0 adds `no-async-auth-extractor` and `no-auth-plugin-as-middleware`.
+Version 0.1.0 contains the preceding eight rules. Runtime versions are independent.
 
 ESLint **9.30.1 or later within 9.x**, ESM flat config and Node.js
 `^18.18.0 || ^20.9.0 || >=21.1.0` are supported. ESLint 10 and CommonJS
@@ -31,7 +29,7 @@ Selecting `recommended-3.8` explicitly selects the **3.8.0 runtime contract**.
 The plugin does not discover your installed runtime version, infer a database,
 or claim compatibility with older/newer contracts. The two new authorization
 checks were also revalidated against Simfinity 3.10.0; their runtime contracts
-are unchanged. All ten source rules are errors
+are unchanged. All ten rules are errors
 in this preset and can be individually disabled using normal ESLint config.
 
 For TypeScript, install `@typescript-eslint/parser` in the application and add:
@@ -54,8 +52,8 @@ export default [
 | `valid-permissions` | A proven invalid top-level/type permission map or a configured rule that is a nonboolean primitive, empty object, empty/sparse rule array | Supply maps and valid rules; omission means using the default policy |
 | `valid-auth-composition` | Missing or provably nonfunction arguments to `composeRules`, `anyRule` or the `createRule` predicate | Supply functions; wrap expressions before composition |
 | `valid-required-claims` | Missing/empty/non-string claims or an inline empty/sparse list with invalid entries | Supply nonempty strings; roles use OR, permissions use AND |
-| `no-async-auth-extractor` (unreleased) | An async function or async generator in a built-in auth extractor position | Resolve data in the GraphQL context or use an async custom rule |
-| `no-auth-plugin-as-middleware` (unreleased) | A proven `createAuthPlugin()` result passed to Simfinity `use()` | Install the plugin in the GraphQL server's Envelop plugins |
+| `no-async-auth-extractor` | An async function or async generator in a built-in auth extractor position | Resolve data in the GraphQL context or use an async custom rule |
+| `no-auth-plugin-as-middleware` | A proven `createAuthPlugin()` result passed to Simfinity `use()` | Install the plugin in the GraphQL server's Envelop plugins |
 | `valid-query-limits` | Explicit `maxPageSize` is not a positive safe integer or `undefined` | Set a valid cap; omission/undefined restores 1000 |
 | `valid-connection-field` | A locally registered relation has a dotted or non-string link field under 3.8.0 | Use a field name; declare embedded references on their owning type |
 
@@ -135,10 +133,12 @@ that `--fix` changes no source. No runtime dependency is installed or executed.
 The bounded trial lints both Barber backends and injects eight in-memory sentinel
 violations per backend to check coverage; it does not run the applications or
 certify their business policies. `.github/workflows/eslint-plugin.yml` owns this
-package's checks. Runtime releases do not install, test, version or publish it.
+package's checks. `release-eslint-plugin.yml` publishes stable plugin tags via OIDC
+and tests the exact packed archive before publication. Runtime releases do not
+install, test, version or publish this plugin.
 
-The published authorization batch addresses AUTH-02/04/06/07; the unreleased
-addition covers bounded AUTH-08/14 variants within the documented limits.
+The authorization rules address AUTH-02/04/06/07 and bounded AUTH-08/14 variants
+within the documented limits.
 The remaining authorization candidates are tracked in
 [issue #117](https://github.com/simtlix/simfinity.js/issues/117), under the
 [issue #112 catalogue](https://github.com/simtlix/simfinity.js/issues/112).

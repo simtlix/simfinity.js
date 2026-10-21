@@ -10,7 +10,7 @@ import noAsyncAuthExtractor from './rules/no-async-auth-extractor.js';
 import noAuthPluginAsMiddleware from './rules/no-auth-plugin-as-middleware.js';
 
 const plugin = {
-  meta: { name: '@simtlix/eslint-plugin-simfinity', version: '0.1.0', namespace: 'simfinity' },
+  meta: { name: '@simtlix/eslint-plugin-simfinity', version: '0.2.0', namespace: 'simfinity' },
   rules: {
     'no-schema-cloning': noSchemaCloning,
     'no-uncalled-auth-factory': noUncalledAuthFactory,

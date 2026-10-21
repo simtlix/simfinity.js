@@ -70,6 +70,7 @@ jobs:
         run: |
           git merge-base --is-ancestor HEAD refs/remotes/origin/master
           node .release-tools/scripts/verify-published.js --workspace
+          node .release-tools/scripts/release-eslint-plugin.js verify-docs
       - name: Record documented version and commit
         id: version
         run: |

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -11,13 +11,18 @@ const directory = await mkdtemp(join(tmpdir(), 'simfinity-eslint-consumer-'));
 const execute = (command, args, cwd = directory) => execFileSync(command, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
 try {
-  const [archive] = JSON.parse(execute('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', directory], root));
-  const names = archive.files.map(file => file.path);
+  const [provided, ...extra] = process.argv.slice(2);
+  assert.equal(extra.length, 0, 'Supply at most one release archive');
+  const archive = provided ? resolve(provided) : join(directory, JSON.parse(execute('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', directory], root))[0].filename);
+  const names = execute('tar', ['-tzf', archive]).trim().split('\n').map(name => name.replace(/^package\//, ''));
+  const packed = JSON.parse(execute('tar', ['-xOf', archive, 'package/package.json']));
+  assert.equal(packed.name, manifest.name);
+  assert.equal(packed.version, manifest.version);
   for (const name of ['README.md', 'LICENSE', 'src/index.js', 'src/index.d.ts']) assert.ok(names.includes(name), `Missing packed ${name}`);
   assert.ok(names.every(name => name.startsWith('src/') || ['package.json', 'README.md', 'LICENSE'].includes(name)));
-  assert.equal(manifest.dependencies, undefined);
+  assert.equal(packed.dependencies, undefined);
   await writeFile(join(directory, 'package.json'), JSON.stringify({ name: 'isolated-eslint-consumer', private: true, type: 'module' }));
-  execute('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', join(directory, archive.filename),
+  execute('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', archive,
     `eslint@${manifest.devDependencies.eslint}`,
     `@typescript-eslint/parser@${manifest.devDependencies['@typescript-eslint/parser']}`,
     `typescript@${manifest.devDependencies.typescript}`]);
@@ -109,6 +114,8 @@ const extractor: Rule.RuleModule = plugin.rules['no-async-auth-extractor'];
 const middleware: Rule.RuleModule = plugin.rules['no-auth-plugin-as-middleware'];
 export default config;
 `);
+  const installedVersion = execute(process.execPath, ['--input-type=module', '-e', "import plugin from '@simtlix/eslint-plugin-simfinity'; console.log(plugin.meta.version);"]).trim();
+  assert.equal(installedVersion, manifest.version, 'Packed plugin metadata must match the package version');
   execute(process.execPath, ['node_modules/typescript/bin/tsc', '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext', 'config.ts']);
   console.log('Packed consumer passed: eleven JS and six TS diagnostics, config/rule types, valid fixtures, no runtime dependencies or source fixes.');
 } finally {

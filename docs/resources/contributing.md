@@ -174,9 +174,37 @@ public access. Verify npm's version, `latest` tag and archive integrity, then
 attach the archive and its checksum to an `eslint-plugin-v0.1.0` GitHub release
 on the same merge commit. Keep this tool release from becoming the repository's
 latest runtime release. Deploy the installation guide through the documentation-only
-flow after npm availability is verified. The plugin's existing workflow only
-tests it; subsequent versions require a separate OIDC publication workflow and
-Trusted Publisher before release, rather than repeating the local-login exception.
+flow after npm availability is verified. Subsequent versions use **Release ESLint
+plugin** (`release-eslint-plugin.yml`), independently of the five runtime packages:
+
+1. Update the plugin's package/lock versions, `meta.version`, and installation
+   documentation in a reviewed PR. Run its tests, audit, packed consumer and both
+   Barber trials; merge only after checks pass. The runtime version stays unchanged.
+2. Run the workflow manually on `master` to preview packing and validation. Manual
+   dispatch cannot publish. For publication, create an annotated
+   `eslint-plugin-vX.Y.Z` tag on the validated merge commit in master's first-parent
+   history and push it. This flow currently accepts stable plugin versions only.
+3. The workflow packs committed source before installing dependencies, with Node.js
+   24.21.0 and its bundled npm and with lifecycle scripts disabled. It checks that
+   every packed file is tracked, records SHA-256/SHA-512 in a manifest, and tests
+   that exact archive in an isolated JS/TS consumer. Each later job checks the
+   manifest digest and source commit supplied by the packing job.
+4. The publication job uses npm 11.21.0 and OIDC. It refuses missing package metadata,
+   newer published versions and conflicting archive integrity. Retries skip only
+   an identical existing version and verify `latest` before continuing. Keep the
+   original tag immutable and rerun a failed run for recoverable external failures.
+5. The workflow creates the matching GitHub release with the archive, manifest and
+   npm verification report, without replacing the latest runtime release. It then
+   dispatches **Documentation** on `master`. Wait for that separate deployment and
+   verify the live installation guide before reporting publication complete.
+
+Configure this plugin's npm Trusted Publisher once with organization `simtlix`,
+repository `simfinity.js`, workflow filename `release-eslint-plugin.yml`, environment
+`npm-eslint-release`, and **Allow npm publish**. The dedicated GitHub environment
+allows only tags matching `eslint-plugin-v*`; do not broaden `npm-release`. npm may
+require the maintainer's security key to establish this trust. This setup is not a
+second local-publication exception. The documentation deployment also verifies the
+documented plugin version on npm, so it cannot advertise an unavailable version.
 
 The workflows call each other explicitly. A release created by this workflow uses `GITHUB_TOKEN` and does not recursively trigger publication. If another automation creates the initial tag or release, its `GITHUB_TOKEN` event will not start this workflow; use a suitably scoped GitHub App or maintainer credential for that initiating action. Keep publication permissions restricted to the owning jobs and preserve the `npm-release` environment restriction. The documentation gate and deployment jobs read deployments, so the release's documentation job grants `contents: read`, `pages: write`, `id-token: write` and `deployments: read`: a called workflow never gets a scope its caller lacks, and `tests/release-workflows.test.js` checks every call.
 
