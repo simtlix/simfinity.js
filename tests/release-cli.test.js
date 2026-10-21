@@ -26,6 +26,7 @@ const clis = [
   ['publish-packages.js', [], /^Usage: node scripts\/publish-packages\.js /],
   ['verify-published.js', [], /^Usage: node scripts\/verify-published\.js /],
   ['github-release.js', [], /^Usage: node scripts\/github-release\.js find <tag>$/],
+  ['release-eslint-plugin.js', [], /^Usage: release-eslint-plugin\.js /],
 ];
 const invocations = {
   'its real path': () => (file) => join(scripts, file),
