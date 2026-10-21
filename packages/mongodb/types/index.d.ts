@@ -92,13 +92,14 @@ export interface MongoAdapterOptions {
 export interface MongoAdapter extends DatabaseAdapter {
   readonly referentialIntegrity: 'off' | 'transactional';
   /**
-   * Frozen; lists every `QLOperator` value. The literal text operators compile to escaped regular
-   * expressions: `ILIKE` unanchored, `STARTS_WITH` and `ISTARTS_WITH` anchored with `^`, `ENDS_WITH` and
-   * `IENDS_WITH` with `\z`, and `IEQ` with both, with the `i` option for the case-insensitive ones.
-   * `IS_EMPTY` and `IS_NOT_EMPTY` compile to plain query operators on the record's own fields (see
-   * {@link buildQuery}); declaring them does not lift the `UNSUPPORTED_QUERY` that emptiness through
-   * references and collections gets in this release. A copy of the adapter without this member
-   * supports only the operators of 3.7.0.
+   * Frozen; lists every `QLOperator` value and declares `referenceEmptiness: true`. The literal text
+   * operators compile to escaped regular expressions: `ILIKE` unanchored, `STARTS_WITH` and
+   * `ISTARTS_WITH` anchored with `^`, `ENDS_WITH` and `IENDS_WITH` with `\z`, and `IEQ` with both, with
+   * the `i` option for the case-insensitive ones. `IS_EMPTY` and `IS_NOT_EMPTY` compile to plain query
+   * operators on the record's own fields, and through single references and at references and
+   * collections to joins and frames (see {@link buildQuery}). A copy of the adapter without this member
+   * supports only the operators of 3.7.0, and one whose declaration leaves out `referenceEmptiness`
+   * gets `UNSUPPORTED_QUERY` for emptiness through references and collections.
    */
   readonly queryFeatures: QueryFeatures;
   /**
@@ -259,9 +260,18 @@ export function preventCreatingCollection(prevent: boolean): void;
 export interface QueryLimitsOptions {
   /** Positive safe integer; defaults to 1000. Unpaged lists use min(100, maxPageSize). */
   maxPageSize?: number;
+  /**
+   * Positive safe integer; defaults to 10. The most distinct scoped joins and frames that the
+   * client's reference and collection emptiness may need in one list, aggregate or collection-field
+   * call; more fail with `FILTER_DEPTH_EXCEEDED` (400).
+   */
+  maxReferenceFrames?: number;
 }
 
-/** Configure at startup. Invalid configuration throws INVALID_QUERY_LIMITS (400). */
+/**
+ * Configure at startup. Invalid configuration throws INVALID_QUERY_LIMITS (400) and keeps both
+ * limits; an omitted option takes its default again.
+ */
 export function configureQueryLimits(options?: QueryLimitsOptions): void;
 
 /**
@@ -347,13 +357,34 @@ export interface FilterGroupInput {
  * without stored members is always empty (`{}` stands for the members). Embedded `id` members follow
  * the `.id` rule above, so an object of a supplied subdocument schema with an automatic `_id` is never
  * empty. A term without a path (omitted, null or `""`) and a group condition without a path test the
- * field itself. The checks, and their codes, are those of `createQueryPlan` in the same order:
- * `MISSING_FILTER_PATH` for an emptiness operator on an object filter without terms or beside terms,
- * `INVALID_FILTER_PATH` for a value inside an embedded list or a collection and for an interface or
- * union field or member, `INVALID_FILTER_OPERATOR` for an embedded type that reaches itself through
- * single embedded members, `INVALID_FILTER_VALUE` for a value that is not omitted or null, and
- * `UNSUPPORTED_QUERY` for a reference or collection on the path or among the members. Other operators
- * keep their pipelines.
+ * field itself.
+ *
+ * Their path may also cross single references and end at a reference or a collection, and an
+ * embedded object may have reference and collection members. A crossing reads its target through a
+ * `$lookup` and `$unwind` before the `$match`, and the target's `id` right after it is the joined
+ * `_id`, which takes the null rule. A reference or collection end or member is a frame, one `$lookup`
+ * with `pipeline: [{ $limit: 1 }, { $project: { _id: 1 } }]` under an alias `__sf_qN`, matched with
+ * `{ "__sf_qN.0": { $exists: false } }` (for a collection, `$or` a null local key, since `$lookup`
+ * matches a missing local key with every child whose connection field is null) and its `$nor`. A
+ * collection frame reads the child's connection field, and its local key is `<path>._id`. Arguments
+ * from this function, middleware and scopes read stored data: a reference is empty when no record it
+ * points to exists, so a dangling reference is empty, and leaves share the lookup aliases of the other
+ * operators. A term or group condition that the runtime marked for a client, `__scope: { id, scopes }`,
+ * reads through the target find scopes in `scopes`, compiled with this function into the `$lookup`
+ * pipelines: crossings become scoped joins (`__sf_jN`), frames take their target's scope, and a record
+ * that a scope hides reads as missing. A crossing or frame after a scoped crossing stays in that chain,
+ * also when its own scope is null. The aliases are unset at the end of find pipelines. A target type
+ * without a model fails with `INVALID_FILTER_PATH` (400), and a marker that is not filled for every
+ * path the construct reads, or that sits on a construct that reads none or on another operator, with
+ * `DETACHED_CLIENT_FILTER` (500), after the 400 checks. Supplied models on another database or
+ * connection and discriminator targets are not supported here, as for the other relation paths.
+ *
+ * The checks, and their codes, are those of `createQueryPlan` in the same order: `MISSING_FILTER_PATH`
+ * for an emptiness operator on an object filter without terms or beside terms, `INVALID_FILTER_PATH`
+ * for a value inside an embedded list or a collection and for an interface or union field or member,
+ * `INVALID_FILTER_OPERATOR` for an embedded type that reaches itself through single embedded members,
+ * and `INVALID_FILTER_VALUE` for a value that is not omitted or null. Other operators keep their
+ * pipelines.
  */
 export function buildQuery(
   input: Record<string, any>,
@@ -364,7 +395,9 @@ export function buildQuery(
 /**
  * Translate a QLFilterGroup into a MongoDB `$match` expression, collecting required lookups. A
  * condition path through a virtual field rejects with `INVALID_FILTER_FIELD` (400). `IS_EMPTY` and
- * `IS_NOT_EMPTY` conditions compile and reject as in {@link buildQuery}, and add no lookup.
+ * `IS_NOT_EMPTY` conditions compile and reject as in {@link buildQuery}: on the record's own fields
+ * they add no lookup, and through references and collections they append their joins and frames to
+ * `aggregateClauses` and record their aliases in `aggregationsIncluded`.
  */
 export function buildFilterGroupMatch(
   filterGroup: FilterGroupInput,

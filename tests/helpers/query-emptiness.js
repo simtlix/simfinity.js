@@ -1,7 +1,8 @@
 // The fixture, cases and seeding of the emptiness operators IS_EMPTY and IS_NOT_EMPTY (#108, part 2a), shared by the
 // core, MongoDB, PostgreSQL, parity and MCP tests. Every case is a record written through the generated create
 // mutation, or created from a base record and then changed through the generated update mutation, so each backend
-// stores what its own mutations store.
+// stores what its own mutations store. The fixture of reference and collection emptiness (#108, part 2b) is a separate
+// one, described before its code at the end of this file.
 //
 // Fixture (type names start with the prefix):
 // - Item: `note` String, `code` a validated String scalar, `count` Int, `kind` enum, `state` the state machine's enum
@@ -567,4 +568,500 @@ export const expectedEmptinessKeys = (rootKey, path, operator, cases = EMPTINESS
     .filter((item) => Object.hasOwn(item.expectEmpty, path) && item.expectEmpty[path] === empty)
     .map((item) => item.name)
     .sort();
+};
+
+// Reference and collection emptiness (#108, part 2b): the second fixture of the issue (6.5), extended with Pro, `odim`
+// and a collection whose connectionField names a child reference stored under another name. Its records are written
+// through generated create mutations, apart from MongoDB's dangling reference, which is written natively.
+//
+// Fixture (type names start with the prefix):
+// - Shop { id: String, key, name, state: String, minStock, products: [Product] } (a collection whose connectionField
+//   is Product.shop). Its identity is declared String, so `shop.id`, `pro.shop.id` and `odim.shop.id` test the record
+//   identity after a reference, which PostgreSQL stores as a uuid.
+// - Pro { key, name, shop: Shop }.
+// - Product { key, name, stock, shop: Shop, pro: Pro, odim { w, shop: Shop }, olines [{ qty, shop: Shop }], reviews:
+//   [Review] }. `odim` and `olines` are owned tables on PostgreSQL, by their reference member. `reviews` declares the
+//   connectionField `product`, the GraphQL name of Review.product, which stores itself as `productId`, so the
+//   collection's storage column is `productId`.
+// - Review { key, rating, author, product: Product (connectionField `productId`) }.
+// Every entity has a NonNull `key`, unique among all records, which the rows name; `name` repeats it where it exists.
+//
+// Data (REFERENCE_DATA), by type key, references by key:
+// - Shops S1 (OPEN, minStock 4), S2 (CLOSED, 50) and S3 (no state, 1).
+// - Pros P1 -> S1, P2 -> S1, P3 -> S2, and P4 without a shop.
+// - Products Ka (stock 5, shop S1, pro P1, odim { w: 1 }, olines (1, S1) and (9, no shop)), c (5, S2, P2, odim { shop:
+//   S1 }, (1, S2)), C (5, no shop, P3, odim { shop: S2 }, (1, no shop)), D (0, S3, P4, odim { shop: S3 }, no olines)
+//   and E (3, S1, no pro, no odim, (2, S3)).
+// - Reviews Ka:5:x, c:1:hidden, D:1:x, D:5:hidden, E:5:x and E:1:hidden (`<product>:<rating>:<author>`).
+// - On MongoDB only, the dangling product Dg (REFERENCE_DANGLING_KEY): stock 1, and `shop`, `pro`, `odim.shop` and
+//   `olines[0].shop` pointing to an ObjectId no record has. PostgreSQL's foreign keys keep references from dangling.
+//
+// Scopes, driven by the request context's `shape` (REFERENCE_SHAPES; omitted reads as 'admin'). Each one appends one
+// AND group with one condition to the arguments of the type's find and aggregate scopes; get_by_id scopes add nothing,
+// so reference fields still read records that the find scopes hide.
+// - 'admin': none.
+// - 'NE' (null-accepting): Shop `name NE "S2"`, Review `author NE "hidden"`, Pro `name NE "P2"`.
+// - 'EQ' (null-rejecting): Shop `state EQ "OPEN"`, Review `author EQ "x"`, Pro `name EQ "P1"`.
+// - 'proOnly': Pro `name NE "P2"`, with Shop and Review unscoped.
+// - 'shopNE' and 'shopEQ': the Shop condition of 'NE' or 'EQ' alone, with Pro, Product and Review unscoped. They give
+//   the probe's two-hop rows (map-probe.md section 1), which read Review.product.shop with the Review root unscoped, and
+//   chains whose unscoped first hop is followed by a scoped one (Review.product.shop, Product.pro.shop).
+//
+// Exports:
+// - REFERENCE_SHAPES, REFERENCE_SCOPES ({ [shape]: { [type key]: condition } }), REFERENCE_DATA and
+//   REFERENCE_DANGLING_KEY, as above.
+// - createReferenceEmptinessTypes(prefix = 'Qr', { backend = 'postgres', scopes = {} } = {}) -> types. Fresh GraphQL
+//   types for one runtime. Every entity has an `extensions.scope` with find, aggregate and get_by_id functions that
+//   apply the shape and then call `scopes[typeKey][operation](params)`, when given, with the runtime's scope
+//   parameters `{ type, args, operation, context }`; type keys are 'shop', 'pro', 'product' and 'review'. `types`
+//   holds `backend`, `prefix`, `Shop`, `Pro`, `Product`, `Review`, `embedded` ([ODim, OLine]) and `roots`, which 2a's
+//   readMongoEmptinessDocuments, writeMongoEmptinessDocuments, emptinessArgs and emptinessQuery also read:
+//   `{ [type key]: { key, type, single, plural, paths } }`, with `paths` the case paths of that root.
+// - registerReferenceEmptinessTypes(api, types): registers the embedded types and connects every entity; each
+//   endpoint is named after its type with a lower-case first letter (`qrProduct`, `qrProducts`).
+// - seedReferenceEmptiness(runtime, types) -> Promise<{ [key]: id }>: creates every record of REFERENCE_DATA through
+//   generated create mutations (shops, pros, products, reviews) and returns each record's id by key. `runtime` is what
+//   seedEmptiness takes.
+// - writeMongoDanglingReference(api, types, { id } = {}) -> Promise<document>: inserts the dangling product natively
+//   with writeMongoEmptinessDocuments; `id` is the ObjectId it points to, a new one by default.
+// - REFERENCE_CASES: `[{ name, root, path?, operator?, args?, scopeArgs?, rows, trusted?, dangling }]`, the expected
+//   rows of each case for each shape, as sorted keys of the root's records.
+//   - A case with `path` and `operator` is one client construct (a term or a group condition; referenceCaseArgs
+//     writes either), and `trusted` gives its rows when the same construct comes from trusted code (stored semantics:
+//     middleware, the root's own scope), which the root's own find scope still restricts.
+//   - A case with `args` holds client arguments as a whole, with each identifier written as `<id:KEY>`, and
+//     `scopeArgs`, when present, are trusted arguments that the root's own find scope appends to the query.
+//   - `dangling` lists the shapes in which MongoDB's dangling product also matches.
+//   Cases are frozen: referenceCaseArgs returns fresh arguments, and `scopeArgs` should be copied (structuredClone)
+//   before a scope appends them.
+//   Paths: on Product shop, shop.id, shop.name, shop.state, shop.products, reviews, pro, pro.name, pro.shop,
+//   pro.shop.id, pro.shop.state, odim, odim.w, odim.shop, odim.shop.id and odim.shop.state; on Review product (a
+//   reference stored as productId), product.shop and product.shop.state; on Shop products; each with IS_EMPTY and
+//   IS_NOT_EMPTY. The compound cases are gap 5, a legacy
+//   branch beside a marked construct in an OR and in the same group, a sort beside a marked construct, and Pro chains
+//   beside a trusted condition on the same path and beside a legacy condition in an earlier OR branch.
+// - referenceCaseArgs(item, ids = {}, form = 'field') -> client arguments: for a construct case, a term
+//   (`form: 'field'`) or an AND group condition (`'condition'`); for an `args` case, its arguments with the
+//   identifiers of `ids` (seedReferenceEmptiness's result) in place.
+// - expectedReferenceRows(item, shape, { trusted = false, dangling = false } = {}) -> sorted keys; `dangling` adds the
+//   dangling product where it matches (MongoDB).
+// - referenceQuery(types, rootKey, args, selection = 'key') -> { source, variables }: a list query on the root that
+//   passes each argument as a variable, `sort` and `pagination` included, sorted by key unless `args.sort` is given.
+const deepFreeze = (value) => {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const item of Object.values(value)) deepFreeze(item);
+    Object.freeze(value);
+  }
+  return value;
+};
+
+export const REFERENCE_SHAPES = Object.freeze(['admin', 'NE', 'EQ', 'proOnly', 'shopNE', 'shopEQ']);
+export const REFERENCE_SCOPES = deepFreeze({
+  admin: {},
+  NE: {
+    shop: { field: 'name', operator: 'NE', value: 'S2' },
+    review: { field: 'author', operator: 'NE', value: 'hidden' },
+    pro: { field: 'name', operator: 'NE', value: 'P2' },
+  },
+  EQ: {
+    shop: { field: 'state', operator: 'EQ', value: 'OPEN' },
+    review: { field: 'author', operator: 'EQ', value: 'x' },
+    pro: { field: 'name', operator: 'EQ', value: 'P1' },
+  },
+  proOnly: { pro: { field: 'name', operator: 'NE', value: 'P2' } },
+  shopNE: { shop: { field: 'name', operator: 'NE', value: 'S2' } },
+  shopEQ: { shop: { field: 'state', operator: 'EQ', value: 'OPEN' } },
+});
+
+export const REFERENCE_DATA = deepFreeze({
+  shop: [
+    { key: 'S1', name: 'S1', state: 'OPEN', minStock: 4 },
+    { key: 'S2', name: 'S2', state: 'CLOSED', minStock: 50 },
+    { key: 'S3', name: 'S3', minStock: 1 },
+  ],
+  pro: [
+    { key: 'P1', name: 'P1', shop: 'S1' }, { key: 'P2', name: 'P2', shop: 'S1' }, { key: 'P3', name: 'P3', shop: 'S2' },
+    { key: 'P4', name: 'P4' },
+  ],
+  product: [
+    { key: 'Ka', name: 'Ka', stock: 5, shop: 'S1', pro: 'P1', odim: { w: 1 }, olines: [{ qty: 1, shop: 'S1' }, { qty: 9 }] },
+    { key: 'c', name: 'c', stock: 5, shop: 'S2', pro: 'P2', odim: { shop: 'S1' }, olines: [{ qty: 1, shop: 'S2' }] },
+    { key: 'C', name: 'C', stock: 5, pro: 'P3', odim: { shop: 'S2' }, olines: [{ qty: 1 }] },
+    { key: 'D', name: 'D', stock: 0, shop: 'S3', pro: 'P4', odim: { shop: 'S3' } },
+    { key: 'E', name: 'E', stock: 3, shop: 'S1', olines: [{ qty: 2, shop: 'S3' }] },
+  ],
+  review: [
+    { key: 'Ka:5:x', rating: 5, author: 'x', product: 'Ka' }, { key: 'c:1:hidden', rating: 1, author: 'hidden', product: 'c' },
+    { key: 'D:1:x', rating: 1, author: 'x', product: 'D' }, { key: 'D:5:hidden', rating: 5, author: 'hidden', product: 'D' },
+    { key: 'E:5:x', rating: 5, author: 'x', product: 'E' }, { key: 'E:1:hidden', rating: 1, author: 'hidden', product: 'E' },
+  ],
+});
+export const REFERENCE_DANGLING_KEY = 'Dg';
+
+const REFERENCE_TYPE_KEYS = ['shop', 'pro', 'product', 'review'];
+const SCOPE_OPERATIONS = ['find', 'aggregate', 'get_by_id'];
+
+// Appends the shape's condition for the type, as one AND group, to the scope's arguments.
+const restrictToShape = (typeKey, args, shape = 'admin') => {
+  const restrictions = REFERENCE_SCOPES[shape];
+  if (!restrictions) throw new Error(`Unknown reference emptiness shape ${shape}`);
+  const condition = restrictions[typeKey];
+  if (condition) args.AND = [...(Array.isArray(args.AND) ? args.AND : []), { conditions: [{ ...condition }] }];
+};
+const referenceScope = (typeKey, extra = {}) => Object.fromEntries(SCOPE_OPERATIONS.map((operation) => [operation, (params) => {
+  if (operation !== 'get_by_id') restrictToShape(typeKey, params.args, params.context?.shape ?? 'admin');
+  extra[operation]?.(params);
+}]));
+
+// Every (root, path) pair of the construct cases below, so that `roots[...].paths` lists them.
+const CASE_PATHS = {
+  product: [
+    'shop', 'shop.id', 'shop.name', 'shop.state', 'shop.products', 'reviews', 'pro', 'pro.name', 'pro.shop', 'pro.shop.id',
+    'pro.shop.state', 'odim', 'odim.w', 'odim.shop', 'odim.shop.id', 'odim.shop.state',
+  ],
+  review: ['product', 'product.shop', 'product.shop.state'],
+  shop: ['products'],
+  pro: [],
+};
+
+export const createReferenceEmptinessTypes = (prefix = 'Qr', { backend = 'postgres', scopes = {} } = {}) => {
+  const unknown = Object.keys(scopes).filter((key) => !REFERENCE_TYPE_KEYS.includes(key));
+  if (unknown.length) throw new Error(`Unknown reference emptiness type keys: ${unknown.join(', ')}`);
+  const scoped = (typeKey) => ({ extensions: { scope: referenceScope(typeKey, scopes[typeKey]) } });
+  const Shop = new GraphQLObjectType({
+    name: `${prefix}Shop`,
+    ...scoped('shop'),
+    fields: () => ({
+      id: { type: GraphQLString },
+      key: { type: new GraphQLNonNull(GraphQLString) },
+      name: { type: GraphQLString },
+      state: { type: GraphQLString },
+      minStock: { type: GraphQLInt },
+      products: { type: new GraphQLList(Product), extensions: reference('shop') },
+    }),
+  });
+  const Pro = new GraphQLObjectType({
+    name: `${prefix}Pro`,
+    ...scoped('pro'),
+    fields: () => ({
+      id: { type: GraphQLID }, key: { type: new GraphQLNonNull(GraphQLString) }, name: { type: GraphQLString },
+      shop: { type: Shop, extensions: reference('shop') },
+    }),
+  });
+  // A reference member makes these owned tables on PostgreSQL.
+  const ODim = new GraphQLObjectType({
+    name: `${prefix}ODim`,
+    fields: () => ({ w: { type: GraphQLInt }, shop: { type: Shop, extensions: reference() } }),
+  });
+  const OLine = new GraphQLObjectType({
+    name: `${prefix}OLine`,
+    fields: () => ({ qty: { type: GraphQLInt }, shop: { type: Shop, extensions: reference() } }),
+  });
+  const Review = new GraphQLObjectType({
+    name: `${prefix}Review`,
+    ...scoped('review'),
+    fields: () => ({
+      id: { type: GraphQLID }, key: { type: new GraphQLNonNull(GraphQLString) }, rating: { type: GraphQLInt },
+      author: { type: GraphQLString },
+      // Stored as productId: Product.reviews names this field, and reads the storage column.
+      product: { type: Product, extensions: reference('productId') },
+    }),
+  });
+  const Product = new GraphQLObjectType({
+    name: `${prefix}Product`,
+    ...scoped('product'),
+    fields: () => ({
+      id: { type: GraphQLID },
+      key: { type: new GraphQLNonNull(GraphQLString) },
+      name: { type: GraphQLString },
+      stock: { type: GraphQLInt },
+      shop: { type: Shop, extensions: reference('shop') },
+      pro: { type: Pro, extensions: reference() },
+      odim: { type: ODim, extensions: embedded },
+      olines: { type: new GraphQLList(OLine), extensions: embedded },
+      reviews: { type: new GraphQLList(Review), extensions: reference('product') },
+    }),
+  });
+  const describe = (key, type) => ({
+    key, type, single: lowerFirst(type.name), plural: `${lowerFirst(type.name)}s`, paths: Object.freeze([...CASE_PATHS[key]]),
+  });
+  return {
+    backend,
+    prefix,
+    Shop,
+    Pro,
+    Product,
+    Review,
+    embedded: [ODim, OLine],
+    roots: {
+      shop: describe('shop', Shop), pro: describe('pro', Pro), product: describe('product', Product), review: describe('review', Review),
+    },
+  };
+};
+
+export const registerReferenceEmptinessTypes = (api, types) => {
+  for (const type of types.embedded) api.addNoEndpointType(type);
+  for (const type of [types.Shop, types.Pro, types.Product, types.Review]) {
+    const name = lowerFirst(type.name);
+    api.connect(null, type, name, `${name}s`);
+  }
+};
+
+export const seedReferenceEmptiness = async (runtime, types) => {
+  const execute = executorOf(runtime);
+  const ids = {};
+  const link = (key) => (key ? { id: ids[key] } : undefined);
+  const defined = (value) => Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
+  const inputs = {
+    shop: (record) => record,
+    pro: ({ shop, ...record }) => defined({ ...record, shop: link(shop) }),
+    product: ({
+      shop, pro, odim, olines, ...record
+    }) => defined({
+      ...record,
+      shop: link(shop),
+      pro: link(pro),
+      odim: odim && defined({ w: odim.w, shop: link(odim.shop) }),
+      olines: olines?.map((line) => defined({ qty: line.qty, shop: link(line.shop) })),
+    }),
+    review: ({ product, ...record }) => defined({ ...record, product: link(product) }),
+  };
+  for (const typeKey of REFERENCE_TYPE_KEYS) {
+    const root = types.roots[typeKey];
+    for (const record of REFERENCE_DATA[typeKey]) {
+      const source = `mutation($input:${root.type.name}Input!){add${root.single}(input:$input){id}}`;
+      const input = inputs[typeKey](record);
+      const result = await execute(source, { input });
+      if (result.errors) throw new Error(`${source} ${JSON.stringify(input)}: ${JSON.stringify(result.errors)}`);
+      ids[record.key] = Object.values(result.data)[0].id;
+    }
+  }
+  return ids;
+};
+
+export const writeMongoDanglingReference = async (api, types, { id } = {}) => {
+  const missing = id ?? new (await import('mongoose')).default.Types.ObjectId();
+  const document = {
+    key: REFERENCE_DANGLING_KEY, name: REFERENCE_DANGLING_KEY, stock: 1, shop: missing, pro: missing, odim: { shop: missing },
+    olines: [{ qty: 1, shop: missing }],
+  };
+  await writeMongoEmptinessDocuments(api, types, { product: [document] });
+  return document;
+};
+
+// The expected rows. Rows are sorted keys; the builders derive what the definitions fix: IS_NOT_EMPTY is the
+// complement of IS_EMPTY among the root records the shape reads, and a trusted construct reads stored data, which is
+// what an admin's client construct reads, restricted by the root's own scope.
+const ALL_ROOT_KEYS = Object.fromEntries(['product', 'review', 'shop'].map((root) => [root, REFERENCE_DATA[root].map((record) => record.key).sort()]));
+// The root records each shape reads: only the NE and EQ shapes scope Review, and every shape but admin and proOnly
+// scopes Shop; no shape scopes Product.
+const VISIBLE = {
+  product: {
+    admin: ALL_ROOT_KEYS.product, NE: ALL_ROOT_KEYS.product, EQ: ALL_ROOT_KEYS.product, proOnly: ALL_ROOT_KEYS.product,
+    shopNE: ALL_ROOT_KEYS.product, shopEQ: ALL_ROOT_KEYS.product,
+  },
+  review: {
+    admin: ALL_ROOT_KEYS.review, NE: ['D:1:x', 'E:5:x', 'Ka:5:x'], EQ: ['D:1:x', 'E:5:x', 'Ka:5:x'], proOnly: ALL_ROOT_KEYS.review,
+    shopNE: ALL_ROOT_KEYS.review, shopEQ: ALL_ROOT_KEYS.review,
+  },
+  shop: {
+    admin: ALL_ROOT_KEYS.shop, NE: ['S1', 'S3'], EQ: ['S1'], proOnly: ALL_ROOT_KEYS.shop, shopNE: ['S1', 'S3'], shopEQ: ['S1'],
+  },
+};
+const byShape = (root, rows) => deepFreeze(Object.fromEntries(REFERENCE_SHAPES.map((shape) => {
+  if (!Object.hasOwn(rows, shape)) throw new Error(`Rows on ${root} give nothing for the ${shape} shape`);
+  const keys = (rows[shape] ? rows[shape].split(' ') : []).sort();
+  const outside = keys.filter((key) => !VISIBLE[root][shape].includes(key));
+  if (outside.length) throw new Error(`Rows ${outside.join(', ')} are not read by the ${shape} shape on ${root}`);
+  return [shape, keys];
+})));
+const mapShapes = (body) => deepFreeze(Object.fromEntries(REFERENCE_SHAPES.map((shape) => [shape, body(shape)])));
+const constructCases = (root, path, emptyRows) => {
+  const empty = byShape(root, emptyRows);
+  const rest = (rows) => mapShapes((shape) => VISIBLE[root][shape].filter((key) => !rows[shape].includes(key)));
+  const trustedEmpty = mapShapes((shape) => empty.admin.filter((key) => VISIBLE[root][shape].includes(key)));
+  const name = (operator) => `${root === 'product' ? '' : `${root}: `}${path} ${operator}`;
+  // The dangling product reads as empty on every path of these cases.
+  const dangling = root === 'product' ? REFERENCE_SHAPES : [];
+  return [
+    {
+      name: name('IS_EMPTY'), root, path, operator: 'IS_EMPTY', rows: empty, trusted: trustedEmpty, dangling,
+    },
+    {
+      name: name('IS_NOT_EMPTY'), root, path, operator: 'IS_NOT_EMPTY', rows: rest(empty), trusted: rest(trustedEmpty), dangling: [],
+    },
+  ];
+};
+const argsCase = (name, args, rows, dangling, scopeArgs) => ({
+  name, root: 'product', args, ...(scopeArgs ? { scopeArgs } : {}), rows: byShape('product', rows), dangling,
+});
+const condition = (field, path, operator, value) => ({
+  field, ...(path ? { path } : {}), operator, ...(value === undefined ? {} : { value }),
+});
+
+export const REFERENCE_CASES = deepFreeze([
+  // A hidden record reads as missing: S2 is hidden under NE, EQ, shopNE and shopEQ, S3 under EQ and shopEQ.
+  ...constructCases('product', 'shop', {
+    admin: 'C', NE: 'C c', EQ: 'C D c', proOnly: 'C', shopNE: 'C c', shopEQ: 'C D c',
+  }),
+  // The record identity after a reference takes the null rule, so it reads like the reference.
+  ...constructCases('product', 'shop.id', {
+    admin: 'C', NE: 'C c', EQ: 'C D c', proOnly: 'C', shopNE: 'C c', shopEQ: 'C D c',
+  }),
+  ...constructCases('product', 'shop.name', {
+    admin: 'C', NE: 'C c', EQ: 'C D c', proOnly: 'C', shopNE: 'C c', shopEQ: 'C D c',
+  }),
+  // A leaf through a scoped join: S3 has no state.
+  ...constructCases('product', 'shop.state', {
+    admin: 'C D', NE: 'C D c', EQ: 'C D c', proOnly: 'C D', shopNE: 'C D c', shopEQ: 'C D c',
+  }),
+  // A collection end through a scoped join: every shop has products, so a hidden or absent shop is what empties it.
+  ...constructCases('product', 'shop.products', {
+    admin: 'C', NE: 'C c', EQ: 'C D c', proOnly: 'C', shopNE: 'C c', shopEQ: 'C D c',
+  }),
+  // A collection whose storage column is productId: the reviews by "hidden" are hidden under NE and EQ.
+  ...constructCases('product', 'reviews', {
+    admin: 'C', NE: 'C c', EQ: 'C c', proOnly: 'C', shopNE: 'C', shopEQ: 'C',
+  }),
+  ...constructCases('product', 'pro', {
+    admin: 'E', NE: 'E c', EQ: 'C D E c', proOnly: 'E c', shopNE: 'E', shopEQ: 'E',
+  }),
+  ...constructCases('product', 'pro.name', {
+    admin: 'E', NE: 'E c', EQ: 'C D E c', proOnly: 'E c', shopNE: 'E', shopEQ: 'E',
+  }),
+  // A hidden Pro (P2 under NE and proOnly; all but P1 under EQ) empties the second hop, also when Shop is unscoped;
+  // trusted constructs keep P2's stored shop. Under shopNE and shopEQ the unscoped first hop is followed by a scoped
+  // one: C's P3 points to the hidden S2.
+  ...constructCases('product', 'pro.shop', {
+    admin: 'D E', NE: 'C D E c', EQ: 'C D E c', proOnly: 'D E c', shopNE: 'C D E', shopEQ: 'C D E',
+  }),
+  ...constructCases('product', 'pro.shop.id', {
+    admin: 'D E', NE: 'C D E c', EQ: 'C D E c', proOnly: 'D E c', shopNE: 'C D E', shopEQ: 'C D E',
+  }),
+  ...constructCases('product', 'pro.shop.state', {
+    admin: 'D E', NE: 'C D E c', EQ: 'C D E c', proOnly: 'D E c', shopNE: 'C D E', shopEQ: 'C D E',
+  }),
+  // The member rule with a reference member: Ka has `w`, and c's S1 is never hidden.
+  ...constructCases('product', 'odim', {
+    admin: 'E', NE: 'C E', EQ: 'C D E', proOnly: 'E', shopNE: 'C E', shopEQ: 'C D E',
+  }),
+  ...constructCases('product', 'odim.w', {
+    admin: 'C D E c', NE: 'C D E c', EQ: 'C D E c', proOnly: 'C D E c', shopNE: 'C D E c', shopEQ: 'C D E c',
+  }),
+  ...constructCases('product', 'odim.shop', {
+    admin: 'E Ka', NE: 'C E Ka', EQ: 'C D E Ka', proOnly: 'E Ka', shopNE: 'C E Ka', shopEQ: 'C D E Ka',
+  }),
+  ...constructCases('product', 'odim.shop.id', {
+    admin: 'E Ka', NE: 'C E Ka', EQ: 'C D E Ka', proOnly: 'E Ka', shopNE: 'C E Ka', shopEQ: 'C D E Ka',
+  }),
+  ...constructCases('product', 'odim.shop.state', {
+    admin: 'D E Ka', NE: 'C D E Ka', EQ: 'C D E Ka', proOnly: 'D E Ka', shopNE: 'C D E Ka', shopEQ: 'C D E Ka',
+  }),
+  // A reference frame on a reference stored under another name: Review.product is stored as productId. Every review
+  // has a product and no shape scopes Product, so none is empty; IS_NOT_EMPTY gives every review the root reads.
+  ...constructCases('review', 'product', {
+    admin: '', NE: '', EQ: '', proOnly: '', shopNE: '', shopEQ: '',
+  }),
+  // Two hops from Review. Its own scope hides the reviews by "hidden" under NE and EQ; shopNE and shopEQ leave the
+  // root and Product unscoped and give the probe's rows (map-probe.md section 1), where the scoped Shop hop follows
+  // the unscoped Product one.
+  ...constructCases('review', 'product.shop', {
+    admin: '', NE: '', EQ: 'D:1:x', proOnly: '', shopNE: 'c:1:hidden', shopEQ: 'D:1:x D:5:hidden c:1:hidden',
+  }),
+  ...constructCases('review', 'product.shop.state', {
+    admin: 'D:1:x D:5:hidden',
+    NE: 'D:1:x',
+    EQ: 'D:1:x',
+    proOnly: 'D:1:x D:5:hidden',
+    shopNE: 'D:1:x D:5:hidden c:1:hidden',
+    shopEQ: 'D:1:x D:5:hidden c:1:hidden',
+  }),
+  // A collection frame on a scoped root: every shop has products.
+  ...constructCases('shop', 'products', {
+    admin: '', NE: '', EQ: '', proOnly: '', shopNE: '', shopEQ: '',
+  }),
+  // Gap 5: the legacy branch keeps its joined scope, and the marked branch reads hidden as missing.
+  argsCase('gap 5: OR [legacy shop.id EQ S1, shop IS_EMPTY]', {
+    OR: [{ conditions: [condition('shop', 'id', 'EQ', '<id:S1>')] }, { conditions: [condition('shop', null, 'IS_EMPTY')] }],
+  }, {
+    admin: 'C E Ka', NE: 'C E Ka c', EQ: 'C D E Ka c', proOnly: 'C E Ka', shopNE: 'C E Ka c', shopEQ: 'C D E Ka c',
+  }, REFERENCE_SHAPES),
+  // A legacy branch in an OR beside a marked construct: c never appears for a restricted caller.
+  argsCase('OR [legacy shop.name EQ "S2", shop IS_NOT_EMPTY]', {
+    OR: [{ conditions: [condition('shop', 'name', 'EQ', 'S2')] }, { conditions: [condition('shop', null, 'IS_NOT_EMPTY')] }],
+  }, {
+    admin: 'D E Ka c', NE: 'D E Ka', EQ: 'E Ka', proOnly: 'D E Ka c', shopNE: 'D E Ka', shopEQ: 'E Ka',
+  }, []),
+  // The same group: the legacy condition's joined scope restricts the marked construct too.
+  argsCase('one group [legacy shop.name EQ "S2", shop IS_NOT_EMPTY]', {
+    AND: [{ conditions: [condition('shop', 'name', 'EQ', 'S2'), condition('shop', null, 'IS_NOT_EMPTY')] }],
+  }, {
+    admin: 'c', NE: '', EQ: '', proOnly: 'c', shopNE: '', shopEQ: '',
+  }, []),
+  argsCase('one group [legacy shop.name EQ "S2", shop IS_EMPTY]', {
+    AND: [{ conditions: [condition('shop', 'name', 'EQ', 'S2'), condition('shop', null, 'IS_EMPTY')] }],
+  }, {
+    admin: '', NE: '', EQ: '', proOnly: '', shopNE: '', shopEQ: '',
+  }, []),
+  // A sort keeps a joined scope on the whole query: under EQ it removes the products without a shop and those with a
+  // hidden one, under NE only those with a hidden one.
+  argsCase('sort shop.name beside shop IS_EMPTY', {
+    shop: { terms: [{ operator: 'IS_EMPTY' }] }, sort: { terms: [{ field: 'shop.name', order: 'ASC' }] },
+  }, {
+    admin: 'C', NE: 'C', EQ: '', proOnly: 'C', shopNE: 'C', shopEQ: '',
+  }, ['admin', 'NE', 'proOnly', 'shopNE']),
+  // A client chain beside a trusted condition on the same path, which the root's own scope adds: P2's stored shop
+  // keeps c in the trusted condition while the client's hidden P2 empties the chain.
+  argsCase('pro.shop IS_EMPTY beside a trusted pro.shop IS_NOT_EMPTY', {
+    pro: { terms: [{ path: 'shop', operator: 'IS_EMPTY' }] },
+  }, {
+    admin: '', NE: 'C c', EQ: 'C c', proOnly: 'c', shopNE: 'C', shopEQ: 'C',
+  }, [], { AND: [{ conditions: [condition('pro', 'shop', 'IS_NOT_EMPTY')] }] }),
+  // A client chain after a legacy branch on the same path, whose joins and joined scopes it must not share.
+  argsCase('OR [legacy pro.shop.name EQ "S2", pro.shop.state IS_EMPTY]', {
+    OR: [{ conditions: [condition('pro', 'shop.name', 'EQ', 'S2')] }, { conditions: [condition('pro', 'shop.state', 'IS_EMPTY')] }],
+  }, {
+    admin: 'C D E', NE: 'C D E c', EQ: 'C D E c', proOnly: 'C D E c', shopNE: 'C D E', shopEQ: 'C D E',
+  }, REFERENCE_SHAPES),
+]);
+
+const ID_PLACEHOLDER = /^<id:([^>]+)>$/;
+const withReferenceIds = (value, ids) => {
+  if (typeof value === 'string') {
+    const match = ID_PLACEHOLDER.exec(value);
+    if (!match) return value;
+    if (!Object.hasOwn(ids, match[1])) throw new Error(`No id for ${match[1]}`);
+    return ids[match[1]];
+  }
+  if (Array.isArray(value)) return value.map((item) => withReferenceIds(item, ids));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, withReferenceIds(item, ids)]));
+  return value;
+};
+
+export const referenceCaseArgs = (item, ids = {}, form = 'field') => {
+  if (item.args) return withReferenceIds(item.args, ids);
+  const [head, ...rest] = item.path.split('.');
+  const tail = rest.join('.');
+  if (form === 'condition') return { AND: [{ conditions: [condition(head, tail, item.operator)] }] };
+  // Every construct case starts at an object field, so the field form is a term.
+  return { [head]: { terms: [{ ...(tail ? { path: tail } : {}), operator: item.operator }] } };
+};
+
+export const expectedReferenceRows = (item, shape, { trusted = false, dangling = false } = {}) => {
+  const rows = trusted ? item.trusted?.[shape] : item.rows[shape];
+  if (!rows) throw new Error(`The case ${item.name} has no ${trusted ? 'trusted ' : ''}rows for ${shape}`);
+  return [...rows, ...(dangling && item.dangling.includes(shape) ? [REFERENCE_DANGLING_KEY] : [])].sort();
+};
+
+const REFERENCE_ARGUMENT_TYPES = {
+  AND: '[QLFilterGroup]', OR: '[QLFilterGroup]', sort: 'QLSortExpression', pagination: 'QLPagination',
+};
+export const referenceQuery = (types, rootKey, args, selection = 'key') => {
+  const root = types.roots[rootKey];
+  if (!root) throw new Error(`No root ${rootKey}`);
+  const typeOf = (name) => REFERENCE_ARGUMENT_TYPES[name] ?? emptinessArgumentType(types, rootKey, name);
+  const names = Object.keys(args);
+  const declared = names.map((name) => `$${name}:${typeOf(name)}`).join(',');
+  const passed = [...names.map((name) => `${name}:$${name}`), ...(Object.hasOwn(args, 'sort') ? [] : ['sort:{terms:[{field:"key",order:ASC}]}'])];
+  return { source: `query${declared ? `(${declared})` : ''}{${root.plural}(${passed.join(',')}){${selection}}}`, variables: args };
 };

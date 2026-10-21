@@ -242,8 +242,21 @@ export interface PostgresRuntime extends Runtime<PostgresModel, PostgresSession>
  * for a native array; jsonb members as text without a cast, and jsonb lists through a `jsonb_typeof` guard; an
  * embedded object as missing, JSON `null`, or every stored member empty; and owned objects and lists through their
  * state column and a `NOT EXISTS` subquery on the owned table, null list items counting as items. `IS_NOT_EMPTY` is
- * the positive form of a leaf, which a btree can serve, and the `NOT` of an object or owned form. Declaring the two
- * operators does not lift the UNSUPPORTED_QUERY (400) that emptiness through references and collections gets.
+ * the positive form of a leaf, which a btree can serve, and the `NOT` of an object or owned form.
+ *
+ * The plugin also declares `queryFeatures.referenceEmptiness`. A client's condition reads as missing every record that
+ * the target's `find` scope hides. The references it crosses share the plain `LEFT JOIN` of other conditions while
+ * the scopes crossed so far add nothing; from the first scope that adds conditions on, each crossing is a
+ * `LEFT JOIN LATERAL (... LIMIT 1)` that admits the target only where its own scope admits it, and later hops
+ * correlate to that join even when their own scope adds nothing. A reference end or member whose scope adds
+ * conditions is a `NOT EXISTS` subquery with that scope (`EXISTS` for `IS_NOT_EMPTY`); one whose scope adds nothing
+ * compiles to `"ref" IS NULL` (`IS NOT NULL`), as a trusted one does. A collection end or member is always a
+ * `NOT EXISTS` subquery (`EXISTS`) on the child's connection column, with the scope only when it adds conditions.
+ * Scope values are parameters, and the target's `id` after a reference is its uuid key, under the null rule.
+ * Conditions from middleware and scopes read stored data: a reference is empty when its column is `NULL`, which its
+ * foreign key, validated and not deferred, keeps exact, a collection through `NOT EXISTS` on the child's column, and
+ * a leaf through a plain `LEFT JOIN`. A session that defers the foreign keys (`SET CONSTRAINTS ... DEFERRED`) can see
+ * a dangling reference as not empty in the `"ref" IS NULL` form, trusted or client, until it commits.
  */
 export function postgresPlugin(options?: PostgresConfiguration): SQLPlugin<
   PostgresConfiguration,

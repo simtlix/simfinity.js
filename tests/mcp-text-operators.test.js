@@ -1,7 +1,8 @@
 // The literal text operators (#108, part 1) in generated MCP tools: input schemas and descriptions name every
 // QLOperator value, and list, count and aggregate calls pass text conditions to an adapter that declares them in
 // queryFeatures. An adapter without the declaration rejects them before it runs, as GraphQL requests do. The
-// descriptions also state the value and path rules of the emptiness operators (#108, part 2a).
+// descriptions also state the value and path rules of the emptiness operators (#108, part 2a), and that their tests of
+// references and collections depend on the database adapter (part 2b).
 import { describe, expect, it } from 'vitest';
 import {
   GraphQLID, GraphQLList, GraphQLObjectType, GraphQLString,
@@ -105,25 +106,35 @@ describe('MCP tool schemas and descriptions with the text operators', () => {
     expect(validate({ name: { operator: 'ilike', value: 'pal' } }).valid).toBe(false);
   });
 
-  it('says that IS_EMPTY and IS_NOT_EMPTY take no value and test an embedded field itself without a path', () => {
+  // The texts are the same whatever the adapter declares: generateMCPTools reads only the schema, so they say that
+  // references and collections depend on the database adapter (#108, part 2b).
+  it('says that IS_EMPTY and IS_NOT_EMPTY take no value, test the field itself without a path, and test references and collections where the adapter supports it', () => {
     const NO_VALUE = 'IS_EMPTY and IS_NOT_EMPTY take no value';
+    const ADAPTER = 'where the database adapter supports it';
     const { $defs, properties } = tool(tools, LIST).inputSchema;
     expect($defs.QLOperator.description).toContain(`${NO_VALUE} (omit it or pass null), and every record matches exactly one of them`);
     expect($defs.QLOperator.description).toContain('a list when missing, null or [] ([null] is not)');
     expect($defs.QLOperator.description).toContain('so EQ null also matches [null] and never []');
-    // A path that goes on past a collection gets the permanent INVALID_FILTER_PATH, which comes before UNSUPPORTED_QUERY.
-    expect($defs.QLOperator.description).toContain('apply to the record\'s own fields: a path that continues inside an embedded list or a collection '
-      + 'fails with INVALID_FILTER_PATH, and a path that crosses or ends at a reference, a path that ends at a collection, and an embedded '
-      + 'object with a reference or collection member fail with UNSUPPORTED_QUERY for now.');
+    // A path that goes on past a collection keeps the permanent INVALID_FILTER_PATH on every adapter.
+    expect($defs.QLOperator.description).toContain('For IS_EMPTY and IS_NOT_EMPTY, a path that continues inside an embedded list or a collection '
+      + 'fails with INVALID_FILTER_PATH. Where the database adapter supports it, they also test references and collections, and read a record '
+      + 'the caller may not see as a missing one: a reference is empty when it points to no record the caller may see, a collection when it '
+      + 'has no child the caller may see, and a field reached through references when it is empty by its own rule or a reference on the way '
+      + 'is empty; other adapters reject these conditions with UNSUPPORTED_QUERY.');
+    expect($defs.QLOperator.description).not.toContain('for now');
     expect($defs.QLFilter.properties.value.description).toBe('Filter value. Accepts a scalar, or an array for the IN, NIN and BTW operators. Omit it, or pass null, for IS_EMPTY and IS_NOT_EMPTY.');
-    expect($defs.QLTypeFilter.description).toContain('With IS_EMPTY or IS_NOT_EMPTY, omit the path to test the embedded object or embedded list itself.');
-    expect($defs.QLTypeFilterExpression.description).toContain('A term with IS_EMPTY or IS_NOT_EMPTY and no path tests an embedded object or embedded list itself.');
-    expect($defs.QLFilterCondition.description).toContain('test an embedded object or embedded list field itself when the path is omitted');
+    expect($defs.QLTypeFilter.description).toContain('With IS_EMPTY or IS_NOT_EMPTY, omit the path to test the embedded object or embedded list itself. '
+      + 'Where the database adapter supports it, a reference or collection can be tested itself the same way.');
+    expect($defs.QLTypeFilterExpression.description).toContain('A term with IS_EMPTY or IS_NOT_EMPTY and no path tests an embedded object or embedded list itself. '
+      + 'Where the database adapter supports it, such a term also tests a reference or collection itself.');
+    expect($defs.QLFilterCondition.description).toContain('test an embedded object or embedded list field itself when the path is omitted, '
+      + `and a reference or collection field itself ${ADAPTER}.`);
     expect(properties.name.description).toBe(`Filter on \`name\` using { operator, value }; ${NO_VALUE}.`);
     expect(properties.owner.description).toBe('Filter on the related entity or embedded value `owner` using { terms: [{ path, operator, value }] }; '
-      + 'on an embedded field, a term { operator: IS_EMPTY } or { operator: IS_NOT_EMPTY } without path tests the field itself.');
+      + `a term { operator: IS_EMPTY } or { operator: IS_NOT_EMPTY } without path tests the field itself, on a reference or collection only ${ADAPTER}.`);
     for (const name of [LIST, AGGREGATE]) {
-      expect(tool(tools, name).description, name).toContain(`; ${NO_VALUE}, and a term or group condition without path applies them to an embedded object or list itself),`);
+      expect(tool(tools, name).description, name).toContain(`; ${NO_VALUE}, and a term or group condition without path applies them to the field `
+        + `itself: an embedded object or list, or a reference or collection ${ADAPTER}),`);
     }
   });
 });

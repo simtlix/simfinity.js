@@ -71,7 +71,7 @@ const ownedObject = (state, table, alias, key, forms) => object(`(${state} IS DI
 const E = ([empty]) => empty;
 
 describe('PostgreSQL emptiness statements', () => {
-  const { types, models, database, owned, plan, find, where } = compiled();
+  const { types, models, database, operators, owned, plan, find, where } = compiled();
   const dims = 't0."dims"';
   const dimsMembers = [E(nullable(`(${dims} ->> 'w')`)), E(string(`(${dims} ->> 'label')`)), E(jsonList(`(${dims} -> 'tags')`))];
   const inner = '(t0."outer" -> \'inner\')';
@@ -243,8 +243,6 @@ describe('PostgreSQL emptiness statements', () => {
     const hand = (path, operator = 'IS_EMPTY', value = null) => ({ entity: 'QpItem', mode: 'find', where: { kind: 'predicate', path, operator, value }, sort: [], pagination: null });
     const condition = (path, operator) => ({ AND: [{ conditions: [{ field: path.join('.'), operator }] }] });
     const REJECTED = [
-      // An object whose members hold a reference, and paths that cross or end at a reference or a collection.
-      [['odim'], 'UNSUPPORTED_QUERY'], [['shop'], 'UNSUPPORTED_QUERY'], [['shop', 'name'], 'UNSUPPORTED_QUERY'], [['reviews'], 'UNSUPPORTED_QUERY'],
       // Leaves through lists.
       [['lines', 'qty'], 'INVALID_FILTER_PATH'], [['olines', 'qty'], 'INVALID_FILTER_PATH'], [['reviews', 'text'], 'INVALID_FILTER_PATH'],
       // Field resolution.
@@ -270,6 +268,37 @@ describe('PostgreSQL emptiness statements', () => {
     for (const [entity, path] of [[owned, ['nest']], [owned, ['nest', 'meta', 'code']], ['QpItem', ['dims']], ['QpItem', ['id']], ['QpSid', ['id']]]) {
       const built = { ...hand(path, 'IS_NOT_EMPTY'), entity };
       expect(compileQuery(bare, database, built), `${entity} ${path.join('.')}`).toEqual(compileQuery(models, database, built));
+    }
+  });
+
+  // #108 part 2b lifts rule 6 for a compiler that declares referenceEmptiness, which this one does: a plan built by hand
+  // that crosses or ends at a reference or a collection, or reads a reference member, compiles with stored semantics,
+  // as createQueryPlan plans it by default. Plans for a compiler that does not declare it keep UNSUPPORTED_QUERY.
+  it('compiles emptiness through references and collections with stored semantics, and plans without referenceEmptiness keep UNSUPPORTED_QUERY', () => {
+    const bare = { entities: models.entities.map((entity) => Object.fromEntries(Object.entries(entity).filter(([key]) => key !== 'gqltype'))) };
+    const hand = (path, operator) => ({ entity: 'QpItem', mode: 'count', where: { kind: 'predicate', path, operator, value: null }, sort: [], pagination: null });
+    const condition = (path, operator) => ({ AND: [{ conditions: [{ field: path.join('.'), operator }] }] });
+    const shopJoin = 'LEFT JOIN "app"."QpShop" t1 ON t1."id" = t0."shop"';
+    const STORED = [
+      // A reference member reads its column in the owned row; the reference its own column; a leaf through it a plain
+      // LEFT JOIN; a collection NOT EXISTS on its storage column.
+      [['odim'], '', ownedObject('t0."__odim_state"', 'QpItem__odim', 't1', 't0."id"', ['t1."w" IS NULL', 'COALESCE(cardinality(t1."tags"), 0) = 0', 't1."shop" IS NULL']), 'reads the reference member odim.shop'],
+      [['shop'], '', nullable('t0."shop"'), 'ends at the reference shop'],
+      [['shop', 'name'], shopJoin, string('t1."name"'), 'crosses the reference shop'],
+      [['reviews'], '', ['NOT ', ''].map((not) => `${not}EXISTS (SELECT 1 FROM "app"."QpReview" t1 WHERE t1."item" = t0."id")`), 'ends at the collection reviews'],
+    ];
+    for (const [path, joins, forms, kind] of STORED) {
+      OPERATORS.forEach((operator, index) => {
+        const label = `${path.join('.')} ${operator}`;
+        const direct = compileQuery(models, database, hand(path, operator));
+        expect(direct, label).toEqual({ text: `SELECT count(*) AS size FROM "app"."QpItem" t0 ${joins} WHERE (${forms[index]})`, values: [] });
+        expect(compileQuery(bare, database, hand(path, operator)), label).toEqual(direct);
+        expect(compileQuery(models, database, createQueryPlan(models, 'QpItem', condition(path, operator), { mode: 'count' })), label).toEqual(direct);
+        expect(compileQuery(models, database, createQueryPlan(models, 'QpItem', condition(path, operator), { mode: 'count', operators, referenceEmptiness: true })), label).toEqual(direct);
+        // The plans of a compiler that does not declare it.
+        expect(failure(caught(() => createQueryPlan(models, 'QpItem', condition(path, operator), { operators }))), label)
+          .toEqual({ code: 'UNSUPPORTED_QUERY', message: `${operator} on ${path.join('.')} ${kind}: the database adapter does not support emptiness through references and collections` });
+      });
     }
   });
 });
@@ -528,12 +557,12 @@ describe.skipIf(!uri)('PostgreSQL emptiness rows', () => {
     }
   });
 
-  it('rejects, through the SQL runtime and in reads outside it, what 2a cannot answer and object-ending filter paths', async () => {
+  it('rejects, through the SQL runtime and in reads outside it, what emptiness cannot answer and object-ending filter paths', async () => {
     const find = (args) => batched.api.getModel(batched.types.Item).find(args).then(() => undefined, (error) => code(error));
     const REJECTED = [
-      [{ odim: { terms: [{ operator: 'IS_EMPTY' }] } }, 'UNSUPPORTED_QUERY'],
-      [{ shop: { terms: [{ operator: 'IS_NOT_EMPTY' }] } }, 'UNSUPPORTED_QUERY'],
       [{ lines: { terms: [{ path: 'qty', operator: 'IS_EMPTY' }] } }, 'INVALID_FILTER_PATH'],
+      [{ olines: { terms: [{ path: 'shop', operator: 'IS_EMPTY' }] } }, 'INVALID_FILTER_PATH'],
+      [{ reviews: { terms: [{ path: 'text', operator: 'IS_NOT_EMPTY' }] } }, 'INVALID_FILTER_PATH'],
       [{ dims: { terms: [{ operator: 'IS_EMPTY', value: '' }] } }, 'INVALID_FILTER_VALUE'],
       // Filter paths of other operators that end at an object (#108 2.6).
       [{ AND: [{ conditions: [{ field: 'outer', path: 'inner', operator: 'EQ', value: 'x' }] }] }, 'INVALID_FILTER_PATH'],
@@ -546,6 +575,57 @@ describe.skipIf(!uri)('PostgreSQL emptiness rows', () => {
       expect(await failureOf(batched, args), JSON.stringify(args)).toBe(expectedCode);
       expect(await find(args), JSON.stringify(args)).toBe(expectedCode);
     }
+  });
+
+  // #108 part 2b: the plugin declares referenceEmptiness, so these paths, which 2a rejected, return rows. Neither Item
+  // nor Shop nor Review has a scope here, so the client's constructs read what trusted ones read: each gives the rows
+  // of the legacy or 2a conditions that mean the same on stored data.
+  it('answers emptiness through references and collections, through the SQL runtime and in reads outside it', async () => {
+    const [reviewed] = await batched.api.getModel(batched.types.Item).find({ key: { operator: 'EQ', value: 'native values' } });
+    const added = await execute(batched, 'mutation($input:QpReviewInput!){addqpReview(input:$input){id}}', { input: { key: 'r1', item: { id: reviewed.id } } });
+    expect(added.errors).toBeUndefined();
+    const named = await execute(batched, 'mutation($input:QpShopInputForUpdate!){updateqpShop(input:$input){id}}', { input: { id: shops.S1, name: 'S1' } });
+    expect(named.errors).toBeUndefined();
+    const condition = (field, path, operator, value) => ({ field, ...(path ? { path } : {}), operator, ...(value === undefined ? {} : { value }) });
+    const EQUIVALENT = [
+      [{ shop: { terms: [{ operator: 'IS_EMPTY' }] } }, { shop: { terms: [{ path: 'id', operator: 'EQ', value: null }] } }],
+      [{ AND: [{ conditions: [condition('shop', 'name', 'IS_EMPTY')] }] }, { OR: [{ conditions: [condition('shop', 'name', 'EQ', null)] }, { conditions: [condition('shop', 'name', 'EQ', '')] }] }],
+      [{ reviews: { terms: [{ operator: 'IS_EMPTY' }] } }, { reviews: { terms: [{ path: 'id', operator: 'EQ', value: null }] } }],
+      [{ odim: { terms: [{ operator: 'IS_EMPTY' }] } }, { AND: [{ conditions: [condition('odim', 'w', 'IS_EMPTY'), condition('odim', 'tags', 'IS_EMPTY'), condition('odim', 'shop.id', 'EQ', null)] }] }],
+    ];
+    const all = await keys(batched, 'item', {});
+    const flip = (args) => JSON.parse(JSON.stringify(args).replace('"IS_EMPTY"', '"IS_NOT_EMPTY"'));
+    for (const [args, same] of EQUIVALENT) {
+      const label = JSON.stringify(args);
+      const empty = [...new Set(await keys(batched, 'item', same))];
+      expect(empty.length, label).toBeGreaterThan(0);
+      expect(empty.length, label).toBeLessThan(all.length);
+      expect(await keys(batched, 'item', args), label).toEqual(empty);
+      expect(await keys(batched, 'item', flip(args)), label).toEqual(all.filter((key) => !empty.includes(key)));
+      const records = await batched.api.getModel(batched.types.Item).find({ ...args, sort: { terms: [{ field: 'key', order: 'ASC' }] } });
+      expect(records.map((record) => record.key), label).toEqual(empty);
+    }
+  });
+
+  it('rejects emptiness through references and collections for a plugin that declares the operators and not referenceEmptiness, also in reads outside the runtime', async () => {
+    const api = createSQL({ plugin: { ...postgresPlugin({ pool, schema: namespace }), queryFeatures: { operators: postgresPlugin().queryFeatures.operators } } });
+    const types = createEmptinessTypes('Qp');
+    registerEmptinessTypes(api, types);
+    const schema = api.createSchema();
+    await api.initializeDatabase({ mode: 'validate' });
+    const runtime = { api, types, all: types, schema };
+    for (const [args, message] of [
+      [{ shop: { terms: [{ operator: 'IS_EMPTY' }] } }, 'IS_EMPTY on shop ends at the reference shop'],
+      [{ odim: { terms: [{ operator: 'IS_NOT_EMPTY' }] } }, 'IS_NOT_EMPTY on odim reads the reference member odim.shop'],
+      [{ AND: [{ conditions: [{ field: 'shop', path: 'name', operator: 'IS_EMPTY' }] }] }, 'IS_EMPTY on shop.name crosses the reference shop'],
+      [{ reviews: { terms: [{ operator: 'IS_EMPTY' }] } }, 'IS_EMPTY on reviews ends at the collection reviews'],
+    ]) {
+      const label = JSON.stringify(args);
+      expect(await failureOf(runtime, args), label).toBe('UNSUPPORTED_QUERY');
+      await expect(api.getModel(types.Item).find(args), label).rejects.toMatchObject({ message: `${message}: the database adapter does not support emptiness through references and collections`, extensions: { code: 'UNSUPPORTED_QUERY' } });
+    }
+    // The record's own fields keep their rows.
+    expect(await keys(runtime, 'item', { note: { operator: 'IS_EMPTY' } })).toEqual(await keys(batched, 'item', { note: { operator: 'IS_EMPTY' } }));
   });
 
   it('rejects the emptiness operators for a plugin without queryFeatures, also in reads outside the runtime', async () => {

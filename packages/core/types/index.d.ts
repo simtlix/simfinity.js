@@ -27,11 +27,14 @@ export const QLValue: GraphQLScalarType<unknown, unknown>;
  * missing, null or `""` String (`" "` is not empty), a missing or null value of any other scalar or
  * enum, a missing, null or `[]` list (`[null]` and `[""]` are not empty), and a missing or null
  * embedded object or one whose stored members are all empty by these rules; the record identity is
- * never empty. They apply to the queried record's own fields: a path that continues inside an
- * embedded list or a collection fails with `INVALID_FILTER_PATH`, and a path that crosses or ends
- * at a reference, a path that ends at a collection, and an embedded object with a reference or
- * collection member fail with `UNSUPPORTED_QUERY` until reference emptiness arrives. A term or
- * group condition without a path tests the field itself.
+ * never empty, also the target's `id` right after a reference. A path that continues inside an
+ * embedded list or a collection fails with `INVALID_FILTER_PATH`. With an adapter that declares
+ * `queryFeatures.referenceEmptiness: true`, a path may also cross single references and end at a
+ * reference or a collection, and an embedded object may have reference and collection members: a
+ * reference is empty when no record it points to exists that the target's `find` scope admits for
+ * the caller, a collection when no such child exists, and a hidden record on the way reads as
+ * missing; constructs that middleware and scopes add read stored data. With any other adapter they
+ * fail with `UNSUPPORTED_QUERY`. A term or group condition without a path tests the field itself.
  */
 export type QueryOperator =
   | 'EQ' | 'NE' | 'LT' | 'LTE' | 'GT' | 'GTE' | 'BTW' | 'IN' | 'NIN' | 'LIKE'
@@ -48,6 +51,15 @@ export interface QueryFeatures {
    * version of Simfinity does not know are ignored.
    */
   operators: readonly (QueryOperator | (string & {}))[];
+  /**
+   * Whether the adapter compiles `IS_EMPTY` and `IS_NOT_EMPTY` through single references and at
+   * references and collections, including reference and collection members of embedded objects.
+   * Undefined or null means false; any other value that is not a boolean fails `createRuntime` with
+   * `INVALID_QUERY_FEATURES` (500). An adapter that declares it receives client constructs that carry
+   * a filled client scope marker, `__scope: { id, scopes }`, on their term or group condition, and
+   * must apply each target scope in `scopes`; constructs without a marker read stored data.
+   */
+  referenceEmptiness?: boolean | null | undefined;
 }
 
 export interface ModelRegistration {
@@ -303,8 +315,20 @@ export interface CreateSchemaOptions {
   includedCustomQueries?: string[] | null;
 }
 
+export interface QueryLimitsOptions {
+  /** Positive safe integer; defaults to 1000. Unpaged lists use min(100, maxPageSize). */
+  maxPageSize?: number;
+  /**
+   * Positive safe integer; defaults to 10. The most distinct scoped joins and frames that the
+   * client's reference and collection emptiness may need in one list, aggregate or collection-field
+   * call; more fail with `FILTER_DEPTH_EXCEEDED` (400).
+   */
+  maxReferenceFrames?: number;
+}
+
 export interface Runtime<Model = any, Session = any> {
-  configureQueryLimits(options?: { maxPageSize?: number }): void;
+  /** The same process-wide setting as the root `configureQueryLimits`. */
+  configureQueryLimits(options?: QueryLimitsOptions): void;
   /**
    * Process-wide; calling it without options restores the unlimited default. Invalid options,
    * including unknown or misspelled option keys, throw `INVALID_MUTATION_LIMITS` (400) and keep
@@ -395,15 +419,16 @@ export interface DatabaseAdapter<Model = any, Session = any> {
   /**
    * Optional. The filter operators this adapter compiles. `createRuntime` reads it once and throws
    * `INVALID_QUERY_FEATURES` (500) unless it is undefined, null or an object whose `operators` is an
-   * array of strings. Without it the adapter supports the operators of 3.7.0 (`EQ`, `NE`, `LT`,
-   * `LTE`, `GT`, `GTE`, `BTW`, `IN`, `NIN` and `LIKE`). A list, aggregate or collection read, or a
+   * array of strings and whose `referenceEmptiness`, if present, is a boolean or null. Without it the
+   * adapter supports the operators of 3.7.0 (`EQ`, `NE`, `LT`, `LTE`, `GT`, `GTE`, `BTW`, `IN`, `NIN`
+   * and `LIKE`) and no reference emptiness. A list, aggregate or collection read, or a
    * by-ID read through a `get_by_id` scope, whose arguments use a `QLOperator` value the adapter
    * does not support fails with `UNSUPPORTED_QUERY` (400), before middleware runs for the client's
    * arguments and before `find`, `count`, `aggregate`, `findChildren` or `findChildrenBatch` for
    * conditions that middleware, scopes and joined scopes added. Operators outside `QLOperator` still
    * reach the adapter, which reports them as before. Declaring `IS_EMPTY` and `IS_NOT_EMPTY` means
-   * compiling their semantics on the record's own fields; it does not lift the `UNSUPPORTED_QUERY`
-   * that emptiness through references and collections gets in this release.
+   * compiling their semantics on the record's own fields; emptiness through references and
+   * collections also needs `referenceEmptiness: true`, and fails with `UNSUPPORTED_QUERY` without it.
    */
   queryFeatures?: QueryFeatures | null | undefined;
   bind?(runtime: Pick<Runtime<Model, Session>, 'getModel' | 'getType' | 'getRegistrations'>): void;
@@ -527,9 +552,21 @@ export function createRuntime<Model = any, Session = any>(adapter: DatabaseAdapt
  * `operator` is a {@link QueryOperator}; the value of a text operator is a validated string. For
  * `IS_EMPTY` and `IS_NOT_EMPTY` the value is null, and `path` may end at an embedded object, an
  * embedded list or a scalar list as well as at a scalar; `IS_NOT_EMPTY` is the exact complement,
- * which the compiler builds.
+ * which the compiler builds. With `referenceEmptiness: true`, their `path` may also cross single
+ * references and end at a reference or a collection.
+ *
+ * `scopes` exists only on such an emptiness predicate from a client, and only for a compiler that
+ * declares `referenceEmptiness: true`. It has one key per dotted path from the queried record: each
+ * single reference the path crosses (a scoped join, which admits the target only where the scope
+ * admits it), the end when it is a reference or a collection, and each reference and collection
+ * member of an embedded object (frames, which keep only the records the scope admits). Each value is
+ * the target's `find` scope as a predicate in the target's own frame, or null when the scope added
+ * nothing; after a scoped crossing, a null hop still correlates through that scoped join. Without
+ * `scopes` the predicate reads stored data, through plain joins.
  */
-export type QueryPredicate = { kind: 'predicate'; path: string[]; operator: string; value: any } | { kind: 'and' | 'or'; terms: QueryPredicate[] };
+export type QueryPredicate =
+  | { kind: 'predicate'; path: string[]; operator: string; value: any; scopes?: Record<string, QueryPredicate | null> }
+  | { kind: 'and' | 'or'; terms: QueryPredicate[] };
 export interface QueryPlan {
   entity: string;
   where: QueryPredicate | null;
@@ -556,11 +593,26 @@ export interface QueryPlan {
  * the field itself. For other operators, a filter path of more than one segment that ends at an
  * object fails with `INVALID_FILTER_PATH`, as on MongoDB; a bare object field keeps
  * `MISSING_FILTER_PATH`.
+ *
+ * `referenceEmptiness` defaults to true when `operators` is omitted and to false when it is given.
+ * When it is false, an emptiness condition that crosses or ends at a reference or a collection, or
+ * reads a reference or collection member, fails with `UNSUPPORTED_QUERY` where the order above has
+ * `UNSUPPORTED_QUERY` for references; when it is true, such a condition plans with stored semantics,
+ * unless its term or group condition carries a client scope marker that the runtime filled, which
+ * becomes the predicate's `scopes`. A marker that is not filled for every path of the condition fails
+ * with `DETACHED_CLIENT_FILTER` (500).
  */
-export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode']; operators?: Iterable<string> }): QueryPlan;
+export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode']; operators?: Iterable<string>; referenceEmptiness?: boolean }): QueryPlan;
 export function resolveModelPath(models: ModelDescription, entityName: string, path: string | string[]): FieldDescription[];
 
-export function configureQueryLimits(options?: { maxPageSize?: number }): void;
+/**
+ * Process-wide. `maxPageSize` (default 1000) caps page sizes. `maxReferenceFrames` (default 10) caps,
+ * per list, aggregate or collection-field call, the distinct scoped joins and frames that a client's
+ * reference and collection emptiness needs; more fail with `FILTER_DEPTH_EXCEEDED` (400). Each must be
+ * a positive safe integer, or the call throws `INVALID_QUERY_LIMITS` (400) and keeps both limits; an
+ * omitted option takes its default again.
+ */
+export function configureQueryLimits(options?: QueryLimitsOptions): void;
 /**
  * Same process-wide setting as `Runtime.configureMutationLimits`. Unknown or misspelled options
  * throw `INVALID_MUTATION_LIMITS` (400) and keep the current limit.

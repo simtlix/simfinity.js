@@ -324,7 +324,7 @@ Empty strings, `false`, `0`, and empty arrays are persisted after validators acc
 
 ### Filtering and Querying
 
-Every relationship or embedded `terms` entry is combined with AND, including repeated paths such as `age GTE 18` and `age LTE 30`. These conditions remain ANDed with top-level logical groups and scope filters. Filter and list-sort paths must resolve to declared scalar or enum fields, except that a filter path of `IS_EMPTY` or `IS_NOT_EMPTY` may also end at an embedded object or an embedded list, or be left out to test the field itself; see [empty values](docs/guide/queries.md#empty-values). Client filter, sort and aggregation paths cannot name a field with `extensions.queryable: false` or an application-defined `resolve` unless it sets `extensions.queryable: true`; such paths fail with `FORBIDDEN_FILTER_PATH` (403). This covers masking resolvers, relationship fields with a manual resolver, and a custom `id` resolver. When upgrading, remove manual relationship resolvers that only load the related record, because Simfinity generates them, or set `queryable: true` on fields whose resolver returns the stored value. Paths through scoped relationships apply the target's scope, as described under [Query Scope](#-query-scope), and the authorization plugin checks field rules for every path segment. Root and relationship `id` paths refer to the stored `_id`. Inside an embedded object, `id` is the declared `id` member, except for entity types embedded as lists and supplied subdocument schemas without an `id` path, which use the subdocument `_id`; see [IDs in paths](docs/guide/queries.md#ids-in-paths). Comparisons use the connected Mongoose model's schema, so supplied string or numeric ID models retain their identifier representation.
+Every relationship or embedded `terms` entry is combined with AND, including repeated paths such as `age GTE 18` and `age LTE 30`. These conditions remain ANDed with top-level logical groups and scope filters. Filter and list-sort paths must resolve to declared scalar or enum fields, except that a filter path of `IS_EMPTY` or `IS_NOT_EMPTY` may also end at an embedded object or an embedded list, and, on an adapter that supports it, at a reference or a collection, or be left out to test the field itself; see [empty values](docs/guide/queries.md#empty-values). Client filter, sort and aggregation paths cannot name a field with `extensions.queryable: false` or an application-defined `resolve` unless it sets `extensions.queryable: true`; such paths fail with `FORBIDDEN_FILTER_PATH` (403). This covers masking resolvers, relationship fields with a manual resolver, and a custom `id` resolver. When upgrading, remove manual relationship resolvers that only load the related record, because Simfinity generates them, or set `queryable: true` on fields whose resolver returns the stored value. Paths through scoped relationships apply the target's scope, as described under [Query Scope](#-query-scope), and the authorization plugin checks field rules for every path segment. Root and relationship `id` paths refer to the stored `_id`. Inside an embedded object, `id` is the declared `id` member, except for entity types embedded as lists and supplied subdocument schemas without an `id` path, which use the subdocument `_id`; see [IDs in paths](docs/guide/queries.md#ids-in-paths). Comparisons use the connected Mongoose model's schema, so supplied string or numeric ID models retain their identifier representation.
 
 Filter values must use the field's JSON scalar type. `IN` and `NIN` require flat lists, `BTW` requires exactly two non-null bounds, and `LIKE` and the other text operators require a string value on a `String` field or list. Literal objects, nested lists, null list elements, invalid operators, unknown paths, and malformed groups are rejected with a structured 400 error instead of being ignored. Explicit `null` remains supported by `EQ` and `NE`. List items may be operation variables, as in `value: [$from, $to]`. Declare them as `QLValue` (or `QLValue!`): GraphQL rejects other declared types, such as `Int` or `String`, in that position. A list item whose variable the request leaves unset reads as `null`, as GraphQL reads list arguments, so it is rejected like an explicit null element. Enum literals such as `value: ACTIVE` or `value: [ACTIVE, INACTIVE]` are read as the enum names, like `"ACTIVE"`. Enum names or declared internal enum values are converted to the stored representation; state-machine `state` filters preserve stored state names. Date filters convert valid date values without mutating the query input. Validated string scalars support partial text searches, and range filters use their base scalar type rather than the field's create/update validation constraints.
 
@@ -365,7 +365,7 @@ query {
 
 The text operators match their value literally, so `%`, `_` and regular-expression characters match themselves, and `""` matches every non-null string except with `IEQ`. On a `String` list, some element must match. Both backends fold case with the Unicode simple case foldings, except for `İ` and letters newer than one side's Unicode tables, and on PostgreSQL the case-insensitive operators need a `UTF8` database on a server built with ICU; see [text operators](docs/guide/queries.md#text-operators) for the rules, the differences and the PostgreSQL indexes that serve them, which `caseFoldExpression()` writes. A custom database adapter or SQL plugin receives them only after it declares them in `queryFeatures`.
 
-`IS_EMPTY` holds for a `String` that is missing, `null` or `""`, any other scalar or enum that is missing or `null`, a list that is missing, `null` or `[]` (`[null]` is not empty), and an embedded object that is missing, `null` or whose stored members are all empty; `IS_NOT_EMPTY` is its exact complement. Omit `value` or pass `null`. On an embedded object or list, write them as a term or group condition without `path`, such as `address: { terms: [{ operator: IS_EMPTY }] }` or `{ field: "address", operator: IS_EMPTY }`. On a list, `EQ`, `NE`, `IN` and `NIN` compare the elements, so `EQ null` also matches `[null]` and never `[]`. Emptiness of a reference or a collection, or through a reference, fails with `UNSUPPORTED_QUERY` until a later release, and a path that continues inside an embedded list or a collection fails with `INVALID_FILTER_PATH`; see [empty values](docs/guide/queries.md#empty-values) for the rules, the rejected forms and their codes, and the generated writes that the member rule reads as empty. A custom database adapter or SQL plugin receives them only after it declares them in `queryFeatures` too.
+`IS_EMPTY` holds for a `String` that is missing, `null` or `""`, any other scalar or enum that is missing or `null`, a list that is missing, `null` or `[]` (`[null]` is not empty), and an embedded object that is missing, `null` or whose stored members are all empty; `IS_NOT_EMPTY` is its exact complement. Omit `value` or pass `null`. On an embedded object or list, write them as a term or group condition without `path`, such as `address: { terms: [{ operator: IS_EMPTY }] }` or `{ field: "address", operator: IS_EMPTY }`. On a list, `EQ`, `NE`, `IN` and `NIN` compare the elements, so `EQ null` also matches `[null]` and never `[]`. They also test a reference or a collection, such as `season: { terms: [{ operator: IS_EMPTY }] }`, and fields reached through references, such as `season.name`: for the client's conditions, a record that the target type's `find` scope hides reads as a missing one, while conditions that middleware and scopes add read stored data. A custom database adapter or SQL plugin answers these only when it declares `referenceEmptiness` in `queryFeatures`, and otherwise rejects them with `UNSUPPORTED_QUERY`; see [references and collections](docs/guide/queries.md#references-and-collections). A path that continues inside an embedded list or a collection fails with `INVALID_FILTER_PATH`; see [empty values](docs/guide/queries.md#empty-values) for the rules, the rejected forms and their codes, and the generated writes that the member rule reads as empty. A custom database adapter or SQL plugin receives them only after it declares them in `queryFeatures` too.
 
 ### Logical Filters (AND / OR)
 
@@ -1683,27 +1683,17 @@ const EpisodeType = new GraphQLObjectType({
     scope: {
       find: async ({ type, args, operation, context }) => {
         // Modify args in place to add filter conditions
-        args.owner = {
-          terms: [
-            {
-              path: 'id',
-              operator: 'EQ',
-              value: context.user.id
-            }
-          ]
-        };
+        args.AND = [
+          ...(args.AND || []),
+          { conditions: [{ field: 'owner', path: 'id', operator: 'EQ', value: context.user.id }] },
+        ];
       },
       aggregate: async ({ type, args, operation, context }) => {
         // Apply same scope to aggregate queries
-        args.owner = {
-          terms: [
-            {
-              path: 'id',
-              operator: 'EQ',
-              value: context.user.id
-            }
-          ]
-        };
+        args.AND = [
+          ...(args.AND || []),
+          { conditions: [{ field: 'owner', path: 'id', operator: 'EQ', value: context.user.id }] },
+        ];
       },
       get_by_id: async ({ type, args, operation, context }) => {
         // For get_by_id, scope is automatically merged with id filter
@@ -1746,15 +1736,10 @@ const DocumentType = new GraphQLObjectType({
     scope: {
       find: async ({ type, args, operation, context }) => {
         // Only show documents owned by the current user
-        args.owner = {
-          terms: [
-            {
-              path: 'id',
-              operator: 'EQ',
-              value: context.user.id
-            }
-          ]
-        };
+        args.AND = [
+          ...(args.AND || []),
+          { conditions: [{ field: 'owner', path: 'id', operator: 'EQ', value: context.user.id }] },
+        ];
       }
     }
   },
@@ -1787,15 +1772,10 @@ const OrderType = new GraphQLObjectType({
     scope: {
       aggregate: async ({ type, args, operation, context }) => {
         // Only aggregate orders for the current user's organization
-        args.organization = {
-          terms: [
-            {
-              path: 'id',
-              operator: 'EQ',
-              value: context.user.organizationId
-            }
-          ]
-        };
+        args.AND = [
+          ...(args.AND || []),
+          { conditions: [{ field: 'organization', path: 'id', operator: 'EQ', value: context.user.organizationId }] },
+        ];
       }
     }
   },
@@ -1881,6 +1861,8 @@ args.relationField = {
 };
 ```
 
+Assigning a field's filter replaces any filter the caller sent on that field. In `find` and `aggregate` scopes, append the restriction to `args.AND` instead, as the examples above do; with an adapter that supports [emptiness through references and collections](docs/guide/queries.md#references-and-collections), replacing a client's `IS_EMPTY` or `IS_NOT_EMPTY` condition on a reference or a collection fails the request with `DETACHED_CLIENT_FILTER` (500).
+
 ### Complete Example
 
 Here's a complete example showing scope for all query operations:
@@ -1896,27 +1878,17 @@ const EpisodeType = new GraphQLObjectType({
     scope: {
       find: async ({ type, args, operation, context }) => {
         // Only show episodes from seasons the user has access to
-        args.season = {
-          terms: [
-            {
-              path: 'owner.id',
-              operator: 'EQ',
-              value: context.user.id
-            }
-          ]
-        };
+        args.AND = [
+          ...(args.AND || []),
+          { conditions: [{ field: 'season', path: 'owner.id', operator: 'EQ', value: context.user.id }] },
+        ];
       },
       aggregate: async ({ type, args, operation, context }) => {
         // Apply same scope to aggregations
-        args.season = {
-          terms: [
-            {
-              path: 'owner.id',
-              operator: 'EQ',
-              value: context.user.id
-            }
-          ]
-        };
+        args.AND = [
+          ...(args.AND || []),
+          { conditions: [{ field: 'season', path: 'owner.id', operator: 'EQ', value: context.user.id }] },
+        ];
       },
       get_by_id: async ({ type, args, operation, context }) => {
         // Ensure user can only access their own episodes
@@ -1961,11 +1933,11 @@ const EpisodeType = new GraphQLObjectType({
 ### Important Notes
 
 - **Execution Order**: Scope functions are executed **after** middleware, so middleware can set up context (e.g., user info) that scope functions can use
-- **Modify Args In Place**: Scope functions should modify the `args` object directly
+- **Modify Args In Place**: Scope functions should modify the `args` object directly, appending restrictions, for example to `args.AND`, instead of assigning over the caller's filters. Replacing or rebuilding a client's `IS_EMPTY` or `IS_NOT_EMPTY` condition on a reference or a collection fails the request with `DETACHED_CLIENT_FILTER` (500); see [keep the client's filter objects](docs/guide/middleware.md#keep-client-filter-objects)
 - **Filter Structure**: Use the correct filter structure (`QLFilter` for scalars, `QLTypeFilterExpression` for relations)
 - **All Query Operations**: Scope applies to `find`, `aggregate`, and `get_by_id` operations
 - **Generated Relationships**: Non-embedded single relations run the target type's `get_by_id` middleware and scope; collection relations run its `find` middleware and scope with the same request context. A separate database predicate preserves the referenced ID or parent connection even when filters are changed, including by scope functions. A scoped-out single relation returns `null`; a collection omits scoped-out children.
-- **Relationship Paths**: When a client filter, sort, `groupId` or fact path crosses a non-embedded single reference to a type with a `find` scope, that scope runs with empty `args` and its conditions are ANDed below the relation path (`tenant` becomes `author.tenant`), into the query or, for a path used only in `AND`/`OR` group conditions, into each group that uses it. Rows whose referenced record is scoped out are omitted, also when sorting or grouping through the reference. While the target's `find` scope restricts the caller, a client path into that scoped collection relation fails with `FORBIDDEN_FILTER_PATH` (403), and so does a path into a type whose `find` scope filters through a non-embedded collection, such as membership-based tenancy, or through a reference inside an embedded list: such a join would repeat rows. Paths added by middleware and scopes are trusted.
+- **Relationship Paths**: When a client filter, sort, `groupId` or fact path crosses a non-embedded single reference to a type with a `find` scope, that scope runs with empty `args` and its conditions are ANDed below the relation path (`tenant` becomes `author.tenant`), into the query or, for a path used only in `AND`/`OR` group conditions, into each group that uses it. Rows whose referenced record is scoped out are omitted, also when sorting or grouping through the reference. A client's `IS_EMPTY` and `IS_NOT_EMPTY` conditions apply the target's `find` scope inside the condition instead, so a scoped-out record reads as a missing one; see [emptiness through references and collections](docs/guide/query-scope.md#emptiness-through-references-and-collections). While the target's `find` scope restricts the caller, a client path into that scoped collection relation fails with `FORBIDDEN_FILTER_PATH` (403), and so does a path into a type whose `find` scope filters through a non-embedded collection, such as membership-based tenancy, or through a reference inside an embedded list: such a join would repeat rows. Paths added by middleware and scopes are trusted.
 - **Custom Resolvers and Writes**: Existing relationship resolvers remain unchanged. Query scope does not authorize mutations; use global middleware or controller checks for write permissions, including permissions on nested children.
 - **Automatic Merging**: For `get_by_id`, the id filter is automatically combined with scope filters
 - **Context Access**: Use `context.user`, `context.ip`, or other context properties to determine scope
@@ -2811,7 +2783,7 @@ Simfinity can automatically expose every generated GraphQL operation as a [Model
 
 Each generated tool follows MCP best practices so an agent can use it without extra context:
 
-- **`description`**: reuses the GraphQL type/field descriptions and adds an actionable summary. List and aggregate tools spell out the available filter operators (`EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE, ILIKE, STARTS_WITH, ISTARTS_WITH, ENDS_WITH, IENDS_WITH, IEQ, IS_EMPTY, IS_NOT_EMPTY`) and that `IS_EMPTY` and `IS_NOT_EMPTY` take no value and apply to an embedded object or list itself without a path, `AND`/`OR` groups, pagination and sorting; aggregate tools additionally document the `SUM/COUNT/AVG/MIN/MAX` operations and the `aggregation` argument.
+- **`description`**: reuses the GraphQL type/field descriptions and adds an actionable summary. List and aggregate tools spell out the available filter operators (`EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE, ILIKE, STARTS_WITH, ISTARTS_WITH, ENDS_WITH, IENDS_WITH, IEQ, IS_EMPTY, IS_NOT_EMPTY`) and that `IS_EMPTY` and `IS_NOT_EMPTY` take no value and apply to the field itself without a path, an embedded object or list, or a reference or collection where the database adapter supports it, `AND`/`OR` groups, pagination and sorting; aggregate tools additionally document the `SUM/COUNT/AVG/MIN/MAX` operations and the `aggregation` argument.
 - **`title`**: a human-readable label (e.g. `List Book`, `Create Book`, `Aggregate Book`). State-machine actions, custom mutations and custom queries are titled by their field name.
 - **`inputSchema`**: JSON Schema derived from the GraphQL arguments (scalars, enums, input objects, lists, non-null wrappers, and recursive filter types such as `QLFilterGroup` via `$defs`/`$ref`). Nullable arguments, input fields and list items accept explicit `null`; non-null positions reject it. Nullable references use `anyOf` with a null alternative. GraphQL type and field descriptions are propagated, with curated descriptions for synthetic types. `Date`/`DateTime`/`Time` scalars use the matching JSON Schema `format` as a hint for the value to send (input only; see `outputSchema`). Defaulted arguments are optional; representable defaults appear in the schema and generated GraphQL variables, with enum member names rather than internal values. Omitted opaque scalar defaults that have no GraphQL literal representation use the field's original default. Validated scalars, including chains built on other validated scalars, use the JSON type of their root scalar; a custom scalar's description is published unless the field or argument has its own. The arguments object is closed (`additionalProperties: false`): hosts that validate tool input reject undeclared keys, and `callTool` rejects an undeclared key the caller sent with `MCP_UNKNOWN_ARGUMENT` (see [Tool results and errors](#tool-results-and-errors)). Nested input objects are not closed in the schema; GraphQL already rejects their unknown fields.
 - **`outputSchema`**: JSON Schema describing the returned data (mirroring the auto-generated selection set), with type/field descriptions. Every nullable GraphQL position also accepts `null` (e.g. `type: ['string', 'null']`; enums get `null` appended), so validating MCP clients accept the `null`s GraphQL legitimately returns in `structuredContent` (get-by-id misses, unset optional fields). A scalar gets a JSON `type` only when it is a GraphQL spec scalar (`Int`, `Float`, `String`, `Boolean`, `ID`) or a `createValidatedScalar` chain ending at one. Any other scalar serializes with its own `serialize`, so it is published without a `type` or `format`: `Date`, `DateTime` and `Time` (an identity scalar sends an ISO instant, others epoch milliseconds or `YYYY-MM-DD`), custom scalars with a hand-set `baseScalarType` storage hint (such as a `Decimal` hinted as `Float` that sends `'12.30'`) and opaque scalars. Date/time scalars without a description get one saying their JSON form is defined by the server's scalar. Input schemas keep the `format` hints, so an input `Time` argument still advertises `format: 'time'` while outputs carry whatever `serialize` returns; hosts that validate input formats can reject a value copied from an output. Next to the root field, the schema declares the optional keys MCP adds: `totalCount` on list tools with a `pagination` argument, and `truncated` on mutation tools when `limits.maxResultBytes` is set (`__totalCount`/`__truncated` when the root field has that name).
@@ -3773,7 +3745,7 @@ import * as simfinity from '@simtlix/simfinity-js';
 simfinity.configureQueryLimits({ maxPageSize: 500 });
 ```
 
-The default maximum is **1000**. Explicit `page` and `size` must be positive safe integers, `size` must not exceed the maximum, and the computed skip must remain a safe integer. Invalid pagination throws `INVALID_PAGINATION` (400); invalid configuration throws `INVALID_QUERY_LIMITS` (400). With no pagination, a list returns at most `Math.min(100, maxPageSize)` records. Any positive safe-integer maximum is allowed, including values below 100. Call `configureQueryLimits()` to restore the default maximum. This deliberately tightens previously unbounded explicit page sizes; applications needing larger pages can configure an appropriate maximum. Unpaginated aggregate queries retain their existing behavior.
+The default maximum is **1000**. Explicit `page` and `size` must be positive safe integers, `size` must not exceed the maximum, and the computed skip must remain a safe integer. Invalid pagination throws `INVALID_PAGINATION` (400); invalid configuration throws `INVALID_QUERY_LIMITS` (400). With no pagination, a list returns at most `Math.min(100, maxPageSize)` records. Any positive safe-integer maximum is allowed, including values below 100. Call `configureQueryLimits()` to restore the default maximum. Its `maxReferenceFrames` option, 10 by default, caps the distinct scoped joins and frames that the client's `IS_EMPTY` and `IS_NOT_EMPTY` conditions of one list, aggregate or collection-field call read through references and collections; more fail with `FILTER_DEPTH_EXCEEDED` (400), and an option that a call omits takes its default again. This deliberately tightens previously unbounded explicit page sizes; applications needing larger pages can configure an appropriate maximum. Unpaginated aggregate queries retain their existing behavior.
 
 ```graphql
 query {

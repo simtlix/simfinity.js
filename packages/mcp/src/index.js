@@ -21,8 +21,9 @@ import { virtualFieldOptions } from '@simtlix/simfinity-core/internal/relation-s
 
 // Every QLOperator value; tests/mcp-text-operators.test.js fails when the enum gains one this text does not name.
 const FILTER_OPERATORS_TEXT = 'EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE, ILIKE, STARTS_WITH, ISTARTS_WITH, ENDS_WITH, IENDS_WITH, IEQ, IS_EMPTY, IS_NOT_EMPTY';
-// The value and path rules of the emptiness operators, for the list and aggregate tool descriptions.
-const EMPTINESS_OPERATORS_TEXT = 'IS_EMPTY and IS_NOT_EMPTY take no value, and a term or group condition without path applies them to an embedded object or list itself';
+// The value and path rules of the emptiness operators, for the list and aggregate tool descriptions. The tools read
+// only the schema, so the texts say that references and collections depend on the database adapter.
+const EMPTINESS_OPERATORS_TEXT = 'IS_EMPTY and IS_NOT_EMPTY take no value, and a term or group condition without path applies them to the field itself: an embedded object or list, or a reference or collection where the database adapter supports it';
 
 /** Allowed shape for published MCP tool names (SEP-986). */
 const TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -35,12 +36,12 @@ const TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/;
  * either a type name (`QLFilter`) or a `TypeName.fieldName` pair.
  */
 const SIMFINITY_FILTER_DOCS = Object.assign(Object.create(null), {
-  QLOperator: 'Comparison operator: EQ (equals), NE (not equals), LT, LTE, GT, GTE, IN (value in list), NIN (value not in list), BTW (between, value is [min, max]), LIKE (substring), ILIKE (substring, ignoring case), STARTS_WITH (prefix), ISTARTS_WITH (prefix, ignoring case), ENDS_WITH (suffix), IENDS_WITH (suffix, ignoring case), IEQ (equals, ignoring case), IS_EMPTY (holds no value) and IS_NOT_EMPTY (holds a value). The text operators, LIKE to IEQ, take a string value and apply to String fields and String lists. They match the value literally, so % and _ are ordinary characters, and LIKE, STARTS_WITH and ENDS_WITH respect case. IS_EMPTY and IS_NOT_EMPTY take no value (omit it or pass null), and every record matches exactly one of them: a String is empty when missing, null or "" (" " is not), any other scalar or enum when missing or null, a list when missing, null or [] ([null] is not), and an embedded object when missing, null or when every member it stores is empty. On a list, EQ, NE, IN and NIN compare its elements, so EQ null also matches [null] and never []. IS_EMPTY and IS_NOT_EMPTY apply to the record\'s own fields: a path that continues inside an embedded list or a collection fails with INVALID_FILTER_PATH, and a path that crosses or ends at a reference, a path that ends at a collection, and an embedded object with a reference or collection member fail with UNSUPPORTED_QUERY for now.',
+  QLOperator: 'Comparison operator: EQ (equals), NE (not equals), LT, LTE, GT, GTE, IN (value in list), NIN (value not in list), BTW (between, value is [min, max]), LIKE (substring), ILIKE (substring, ignoring case), STARTS_WITH (prefix), ISTARTS_WITH (prefix, ignoring case), ENDS_WITH (suffix), IENDS_WITH (suffix, ignoring case), IEQ (equals, ignoring case), IS_EMPTY (holds no value) and IS_NOT_EMPTY (holds a value). The text operators, LIKE to IEQ, take a string value and apply to String fields and String lists. They match the value literally, so % and _ are ordinary characters, and LIKE, STARTS_WITH and ENDS_WITH respect case. IS_EMPTY and IS_NOT_EMPTY take no value (omit it or pass null), and every record matches exactly one of them: a String is empty when missing, null or "" (" " is not), any other scalar or enum when missing or null, a list when missing, null or [] ([null] is not), and an embedded object when missing, null or when every member it stores is empty. On a list, EQ, NE, IN and NIN compare its elements, so EQ null also matches [null] and never []. For IS_EMPTY and IS_NOT_EMPTY, a path that continues inside an embedded list or a collection fails with INVALID_FILTER_PATH. Where the database adapter supports it, they also test references and collections, and read a record the caller may not see as a missing one: a reference is empty when it points to no record the caller may see, a collection when it has no child the caller may see, and a field reached through references when it is empty by its own rule or a reference on the way is empty; other adapters reject these conditions with UNSUPPORTED_QUERY.',
   QLValue: 'Filter value. Accepts a scalar, or an array for the IN, NIN and BTW operators. Omit it, or pass null, for IS_EMPTY and IS_NOT_EMPTY.',
   QLFilter: 'Single-field filter: a comparison operator plus the value to compare against, which IS_EMPTY and IS_NOT_EMPTY do not take.',
-  QLTypeFilter: 'Filter applied to a related-entity or embedded field, addressed by a dot-separated path. With IS_EMPTY or IS_NOT_EMPTY, omit the path to test the embedded object or embedded list itself.',
-  QLTypeFilterExpression: 'Filter on a related entity or an embedded value: a list of path-based terms. A term with IS_EMPTY or IS_NOT_EMPTY and no path tests an embedded object or embedded list itself.',
-  QLFilterCondition: 'A single filter condition: field, operator, value and an optional nested path. IS_EMPTY and IS_NOT_EMPTY take no value, and test an embedded object or embedded list field itself when the path is omitted.',
+  QLTypeFilter: 'Filter applied to a related-entity or embedded field, addressed by a dot-separated path. With IS_EMPTY or IS_NOT_EMPTY, omit the path to test the embedded object or embedded list itself. Where the database adapter supports it, a reference or collection can be tested itself the same way.',
+  QLTypeFilterExpression: 'Filter on a related entity or an embedded value: a list of path-based terms. A term with IS_EMPTY or IS_NOT_EMPTY and no path tests an embedded object or embedded list itself. Where the database adapter supports it, such a term also tests a reference or collection itself.',
+  QLFilterCondition: 'A single filter condition: field, operator, value and an optional nested path. IS_EMPTY and IS_NOT_EMPTY take no value, and test an embedded object or embedded list field itself when the path is omitted, and a reference or collection field itself where the database adapter supports it.',
   QLFilterGroup: 'Recursive logical group of filter conditions combined with AND/OR.',
   QLPagination: 'Pagination control: page (1-based), size (page size) and an optional count flag to include the total.',
   'QLPagination.page': '1-based page number.',
@@ -347,7 +348,7 @@ const resolveArgDescription = (arg) => {
   }
   if (named.name === 'QLTypeFilterExpression') {
     return `Filter on the related entity or embedded value \`${arg.name}\` using { terms: [{ path, operator, value }] }; `
-      + 'on an embedded field, a term { operator: IS_EMPTY } or { operator: IS_NOT_EMPTY } without path tests the field itself.';
+      + 'a term { operator: IS_EMPTY } or { operator: IS_NOT_EMPTY } without path tests the field itself, on a reference or collection only where the database adapter supports it.';
   }
   return SIMFINITY_ARG_DOCS[arg.name];
 };

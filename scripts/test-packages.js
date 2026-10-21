@@ -195,6 +195,8 @@ const coreSource = `import assert from 'node:assert/strict';
     buildErrorFormatter,
     auth,
     configureMutationLimits,
+    configureQueryLimits,
+    createQueryPlan,
     createRuntime,
     createValidatedScalar,
     describeModels,
@@ -320,7 +322,71 @@ const coreSource = `import assert from 'node:assert/strict';
   const ilikeOnly = createRuntime({ ...adapter, queryFeatures: { operators: ['EQ', 'ILIKE'] } });
   ilikeOnly.connect(null, new GraphQLObjectType({ name: 'CoreIlikeBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } }), 'coreIlikeBook', 'coreIlikeBooks');
   const ilikeResult = await graphql({ schema: ilikeOnly.createSchema(), source: '{ coreIlikeBooks(title: { operator: IS_EMPTY }) { id } }' });
-  assert.equal(ilikeResult.errors[0].extensions.code, 'UNSUPPORTED_QUERY');`;
+  assert.equal(ilikeResult.errors[0].extensions.code, 'UNSUPPORTED_QUERY');
+  // Reference and collection emptiness: the archive ships the shapes and scope paths the backends import; an adapter
+  // declares it with queryFeatures.referenceEmptiness, a boolean, and then receives the client's construct with its
+  // filled scope marker; one that declares the operators without it keeps UNSUPPORTED_QUERY; and maxReferenceFrames
+  // limits the scoped joins and frames of one query field.
+  const allOperators = QLOperator.getValues().map((value) => value.name);
+  const referenceTypes = (prefix) => {
+    const shop = new GraphQLObjectType({ name: \`\${prefix}Shop\`, fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+    const book = new GraphQLObjectType({
+      name: \`\${prefix}Book\`,
+      fields: { id: { type: GraphQLID }, title: { type: GraphQLString }, shop: { type: shop, extensions: { relation: { embedded: false } } } },
+    });
+    return { shop, book };
+  };
+  const shapeTypes = referenceTypes('CoreShape');
+  const throughShop = queryOperators.describeEmptiness(shapeTypes.book, ['shop', 'name'], { operator: 'IS_EMPTY' });
+  assert.deepEqual(throughShop, { rule: 'string', crossings: [{ path: 'shop', target: 'CoreShapeShop' }] });
+  assert.deepEqual(queryOperators.emptinessScopePaths(throughShop, 'shop.name'), { joins: ['shop'], frames: [] });
+  assert.deepEqual(queryOperators.emptinessScopeTargets(throughShop, 'shop.name'), { shop: 'CoreShapeShop' });
+  const atShop = queryOperators.describeEmptiness(shapeTypes.book, ['shop'], { operator: 'IS_EMPTY' });
+  assert.deepEqual(atShop, { rule: 'reference', target: 'CoreShapeShop' });
+  assert.deepEqual(queryOperators.emptinessScopePaths(atShop, 'shop'), { joins: [], frames: ['shop'] });
+  assert.throws(() => queryOperators.describeEmptiness(shapeTypes.book, ['shop'], { operator: 'IS_EMPTY', referenceEmptiness: false }), (error) => error.getCode() === 'UNSUPPORTED_QUERY');
+  assert.equal(queryOperators.resolveQueryFeatures(undefined).referenceEmptiness, false);
+  assert.equal(queryOperators.resolveQueryFeatures({ operators: [], referenceEmptiness: true }).referenceEmptiness, true);
+  // Null and undefined mean false, as the declaration's type allows.
+  for (const referenceEmptiness of [null, undefined]) {
+    assert.equal(queryOperators.resolveQueryFeatures({ operators: [], referenceEmptiness }).referenceEmptiness, false);
+    createRuntime({ ...adapter, queryFeatures: { operators: allOperators, referenceEmptiness } });
+  }
+  assert.throws(() => createRuntime({ ...adapter, queryFeatures: { operators: allOperators, referenceEmptiness: 'yes' } }), (error) => error.getCode() === 'INVALID_QUERY_FEATURES');
+  const reads = [];
+  const declared = createRuntime({ ...adapter, queryFeatures: { operators: allOperators, referenceEmptiness: true }, async find(model, type, args) { reads.push(args); return []; } });
+  const declaredTypes = referenceTypes('CoreDeclared');
+  declared.connect(null, declaredTypes.shop, 'coreDeclaredShop', 'coreDeclaredShops');
+  declared.connect(null, declaredTypes.book, 'coreDeclaredBook', 'coreDeclaredBooks');
+  const declaredSchema = declared.createSchema();
+  const declaredResult = await graphql({ schema: declaredSchema, source: '{ coreDeclaredBooks(shop: { terms: [{ operator: IS_EMPTY }] }) { id } }' });
+  assert.equal(declaredResult.errors, undefined);
+  // The Shop type has no find scope, so the marker's scope for shop is null. The copy of the arguments keeps the null
+  // prototype of an inline literal.
+  assert.deepEqual(JSON.parse(JSON.stringify(reads.at(-1).shop)), { terms: [{ operator: 'IS_EMPTY', __scope: { id: 0, scopes: { shop: null } } }] });
+  assert.equal(Object.getPrototypeOf(reads.at(-1).shop.terms[0]), null);
+  const undeclared = createRuntime({ ...adapter, queryFeatures: { operators: allOperators } });
+  const undeclaredTypes = referenceTypes('CoreUndeclared');
+  undeclared.connect(null, undeclaredTypes.shop, 'coreUndeclaredShop', 'coreUndeclaredShops');
+  undeclared.connect(null, undeclaredTypes.book, 'coreUndeclaredBook', 'coreUndeclaredBooks');
+  const undeclaredResult = await graphql({ schema: undeclared.createSchema(), source: '{ coreUndeclaredBooks(shop: { terms: [{ operator: IS_EMPTY }] }) { id } }' });
+  assert.equal(undeclaredResult.errors[0].extensions.code, 'UNSUPPORTED_QUERY');
+  assert.equal(undeclaredResult.errors[0].message, 'IS_EMPTY on shop ends at the reference shop: the database adapter does not support emptiness through references and collections');
+  // A frame on shop and a scoped join through it are two pairs.
+  const twoPairs = '{ coreDeclaredBooks(shop: { terms: [{ operator: IS_EMPTY }, { path: "name", operator: IS_EMPTY }] }) { id } }';
+  configureQueryLimits({ maxReferenceFrames: 1 });
+  assert.equal((await graphql({ schema: declaredSchema, source: twoPairs })).errors[0].extensions.code, 'FILTER_DEPTH_EXCEEDED');
+  assert.throws(() => configureQueryLimits({ maxReferenceFrames: 0 }), (error) => error.getCode() === 'INVALID_QUERY_LIMITS');
+  configureQueryLimits();
+  assert.equal((await graphql({ schema: declaredSchema, source: twoPairs })).errors, undefined);
+  // createQueryPlan reads emptiness through references with stored semantics by default, lifts a filled marker into
+  // the predicate's scopes, and rejects them with UNSUPPORTED_QUERY when given operators without referenceEmptiness.
+  const referenceModels = describeModels([{ gqltype: shapeTypes.shop }, { gqltype: shapeTypes.book }]);
+  assert.deepEqual(createQueryPlan(referenceModels, 'CoreShapeBook', { shop: { terms: [{ operator: 'IS_EMPTY' }] } }).where, { kind: 'predicate', path: ['shop'], operator: 'IS_EMPTY', value: null });
+  assert.deepEqual(createQueryPlan(referenceModels, 'CoreShapeBook', { shop: { terms: [{ operator: 'IS_EMPTY', __scope: { id: 0, scopes: { shop: { name: { operator: 'EQ', value: 'a' } } } } }] } }).where, {
+    kind: 'predicate', path: ['shop'], operator: 'IS_EMPTY', value: null, scopes: { shop: { kind: 'predicate', path: ['name'], operator: 'EQ', value: 'a' } },
+  });
+  assert.throws(() => createQueryPlan(referenceModels, 'CoreShapeBook', { shop: { terms: [{ operator: 'IS_EMPTY' }] } }, { operators: allOperators }), (error) => error.getCode() === 'UNSUPPORTED_QUERY');`;
 
 const sqlSource = `import assert from 'node:assert/strict';
   import { createRequire } from 'node:module';
@@ -384,7 +450,45 @@ const sqlSource = `import assert from 'node:assert/strict';
   assert.equal((await graphql({ schema: textSchema, source: '{ sqlTextBooks(title: { operator: ILIKE, value: "a" }) { id } }' })).errors, undefined);
   assert.deepEqual(calls, ['find', 'find']);
   assert.equal((await graphql({ schema: textSchema, source: '{ sqlTextBooks(title: { operator: IS_EMPTY }) { id } }' })).errors, undefined);
-  assert.deepEqual(calls, ['find', 'find', 'find']);`;
+  assert.deepEqual(calls, ['find', 'find', 'find']);
+  // Reference and collection emptiness: a plugin that declares referenceEmptiness receives the client's scopes in its
+  // plans; one that declares only the operators keeps UNSUPPORTED_QUERY, also in reads outside the runtime; and the
+  // declaration must be a boolean.
+  assert.throws(() => createSQL({ plugin: { ...plugin, queryFeatures: { operators: ${JSON.stringify(QUERY_OPERATORS)}, referenceEmptiness: 'yes' } } }), (error) => error.getCode() === 'INVALID_SQL_PLUGIN');
+  // Null and undefined mean false, as core's.
+  for (const referenceEmptiness of [null, undefined]) createSQL({ plugin: { ...plugin, queryFeatures: { operators: ${JSON.stringify(QUERY_OPERATORS)}, referenceEmptiness } } });
+  const plans = [];
+  const referenceApi = (prefix, endpoint, referenceEmptiness) => {
+    const shop = new GraphQLObjectType({ name: \`\${prefix}Shop\`, fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+    const book = new GraphQLObjectType({
+      name: \`\${prefix}Book\`,
+      fields: { id: { type: GraphQLID }, title: { type: GraphQLString }, shop: { type: shop, extensions: { relation: { embedded: false } } } },
+    });
+    const instance = createSQL({
+      plugin: {
+        ...plugin,
+        // A reference needs foreign keys.
+        capabilities: [...plugin.capabilities, 'foreignKeys', 'deferredForeignKeys'],
+        compileQuery(models, description, query) { plans.push(query); return { text: query.mode, values: [] }; },
+        queryFeatures: { operators: ${JSON.stringify(QUERY_OPERATORS)}, ...(referenceEmptiness ? { referenceEmptiness } : {}) },
+      },
+    });
+    instance.connect(null, shop, \`\${endpoint}Shop\`, \`\${endpoint}Shops\`);
+    instance.connect(null, book, \`\${endpoint}Book\`, \`\${endpoint}Books\`);
+    return { instance, book, schema: instance.createSchema() };
+  };
+  const declared = referenceApi('SQLDeclared', 'sqlDeclared', true);
+  await declared.instance.initializeDatabase();
+  const declaredResult = await graphql({ schema: declared.schema, source: '{ sqlDeclaredBooks(shop: { terms: [{ operator: IS_EMPTY }] }) { id } }' });
+  assert.equal(declaredResult.errors, undefined);
+  assert.deepEqual(plans.at(-1).where, { kind: 'predicate', path: ['shop'], operator: 'IS_EMPTY', value: null, scopes: { shop: null } });
+  const undeclared = referenceApi('SQLUndeclared', 'sqlUndeclared', false);
+  await undeclared.instance.initializeDatabase();
+  const undeclaredResult = await graphql({ schema: undeclared.schema, source: '{ sqlUndeclaredBooks(shop: { terms: [{ operator: IS_EMPTY }] }) { id } }' });
+  assert.equal(undeclaredResult.errors[0].extensions.code, 'UNSUPPORTED_QUERY');
+  assert.equal(undeclaredResult.errors[0].message, 'IS_EMPTY on shop ends at the reference shop: the database adapter does not support emptiness through references and collections');
+  await assert.rejects(() => undeclared.instance.getModel(undeclared.book).find({ shop: { terms: [{ operator: 'IS_EMPTY' }] } }), (error) => error.getCode() === 'UNSUPPORTED_QUERY');
+  assert.equal(plans.length, 1);`;
 
 const postgresSource = `import assert from 'node:assert/strict';
   import {
@@ -453,6 +557,26 @@ const postgresSource = `import assert from 'node:assert/strict';
   const copySchema = copySql.createSchema();
   const copied = await graphql({ schema: copySchema, source: '{ copyBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
   assert.equal(copied.errors[0].extensions.code, 'UNSUPPORTED_QUERY');
+  // The plugin declares reference emptiness for its own compileQuery: its plans take emptiness through references, and
+  // only reach the uninitialized database; a copy that declares the operators alone, or replaces compileQuery, keeps
+  // UNSUPPORTED_QUERY for them before any statement runs.
+  assert.equal(postgresPlugin().queryFeatures.referenceEmptiness, true);
+  for (const [prefix, endpoint, plugin, code] of [
+    ['PgDeclared', 'pgDeclared', postgresPlugin({ pool, schema: 'app' }), 'DATABASE_NOT_INITIALIZED'],
+    ['PgOperators', 'pgOperators', { ...postgresPlugin({ pool, schema: 'app' }), queryFeatures: { operators: postgresPlugin().queryFeatures.operators } }, 'UNSUPPORTED_QUERY'],
+    ['PgCopy', 'pgCopy', { ...postgresPlugin({ pool, schema: 'app' }), compileQuery: (...args) => postgresPlugin().compileQuery(...args) }, 'UNSUPPORTED_QUERY'],
+  ]) {
+    const shop = new GraphQLObjectType({ name: \`\${prefix}Shop\`, fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+    const book = new GraphQLObjectType({
+      name: \`\${prefix}Book\`,
+      fields: { id: { type: GraphQLID }, title: { type: GraphQLString }, shop: { type: shop, extensions: { relation: { embedded: false } } } },
+    });
+    const sqlApi = createSQL({ plugin });
+    sqlApi.connect(null, shop, \`\${endpoint}Shop\`, \`\${endpoint}Shops\`);
+    sqlApi.connect(null, book, \`\${endpoint}Book\`, \`\${endpoint}Books\`);
+    const reference = await graphql({ schema: sqlApi.createSchema(), source: \`{ \${endpoint}Books(shop: { terms: [{ operator: IS_EMPTY }] }) { id } }\` });
+    assert.equal(reference.errors[0].extensions.code, code, prefix);
+  }
   // The case fold of ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ, for application indexes.
   const fold = (sql) => \`translate(lower((\${sql}) COLLATE "pg_catalog"."und-x-icu"), '\\u00B5\\u017F\\u0345\\u03C2\\u03D0\\u03D1\\u03D5\\u03D6\\u03F0\\u03F1\\u03F5\\u1C80\\u1C81\\u1C82\\u1C83\\u1C84\\u1C85\\u1C86\\u1C87\\u1C88\\u1E9B\\u1FBE', '\\u03BC\\u0073\\u03B9\\u03C3\\u03B2\\u03B8\\u03C6\\u03C0\\u03BA\\u03C1\\u03B5\\u0432\\u0434\\u043E\\u0441\\u0442\\u0442\\u044A\\u0463\\uA64B\\u1E61\\u03B9')\`;
   assert.equal(caseFoldExpression('"name"'), fold('"name"'));
@@ -548,6 +672,9 @@ const mongoSource = `import assert from 'node:assert/strict';
   const { queryFeatures } = simfinity.createMongoAdapter();
   assert.deepEqual([...queryFeatures.operators].sort(), ${JSON.stringify(SORTED_OPERATORS)});
   assert(Object.isFrozen(queryFeatures) && Object.isFrozen(queryFeatures.operators));
+  // The adapter declares reference emptiness, and a spread copy keeps the declaration.
+  assert.equal(queryFeatures.referenceEmptiness, true);
+  assert.equal({ ...simfinity.createMongoAdapter() }.queryFeatures.referenceEmptiness, true);
   assert.equal(simfinity.auth, auth);
   assert.equal(simfinity.plugins, plugins);
   assert.equal(simfinity.scalars, scalars);
@@ -649,6 +776,7 @@ const coreTypes = `import {
   auth,
   buildErrorFormatter,
   configureMutationLimits,
+  configureQueryLimits,
   createQueryPlan,
   createRuntime,
   describeModels,
@@ -662,7 +790,9 @@ const coreTypes = `import {
   type FieldValidations,
   type MutationLimitsOptions,
   type QueryFeatures,
+  type QueryLimitsOptions,
   type QueryOperator,
+  type QueryPredicate,
   type TypeScopes,
   type VirtualFieldDeclaration,
   type VirtualFieldOptions,
@@ -819,7 +949,42 @@ const textPlan = createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCore
 const planOperators = createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', {}, { operators: textOperators });
 // @ts-expect-error operators is an iterable of operator names.
 createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', {}, { operators: 5 });
-void [textAdapter, legacyAdapters, laterFeatures, oneOperator, bareList, unknownOperator, featureMembers, textPlan.mode, planOperators, createRuntime(textAdapter)];`;
+void [textAdapter, legacyAdapters, laterFeatures, oneOperator, bareList, unknownOperator, featureMembers, textPlan.mode, planOperators, createRuntime(textAdapter)];
+// Reference and collection emptiness: the declaration, the scopes of a client's emptiness predicate, the plan option and
+// the reference frame limit.
+const referenceAdapter: DatabaseAdapter<Model, Session> = { ...adapter, queryFeatures: { operators: ['EQ', 'IS_EMPTY', 'IS_NOT_EMPTY'], referenceEmptiness: true } };
+const plainFeatures: QueryFeatures = { operators: ['IS_EMPTY'], referenceEmptiness: false };
+// Null and undefined mean false.
+const nullReference: DatabaseAdapter<Model, Session> = { ...adapter, queryFeatures: { operators: ['IS_EMPTY'], referenceEmptiness: null } };
+const undefinedReference: QueryFeatures = { operators: ['IS_EMPTY'], referenceEmptiness: undefined };
+// @ts-expect-error referenceEmptiness is a boolean, null or undefined.
+const textReference: QueryFeatures = { operators: [], referenceEmptiness: 'yes' };
+const scopedPredicate: QueryPredicate = {
+  kind: 'predicate', path: ['shop', 'name'], operator: 'IS_EMPTY', value: null,
+  scopes: { shop: { kind: 'and', terms: [{ kind: 'predicate', path: ['state'], operator: 'EQ', value: 'OPEN' }] }, 'shop.owner': null },
+};
+// @ts-expect-error a scope is a predicate or null.
+const textScope: QueryPredicate = { kind: 'predicate', path: ['shop'], operator: 'IS_EMPTY', value: null, scopes: { shop: 'state' } };
+const scopeCount = (predicate: QueryPredicate | null): number => (predicate?.kind === 'predicate' ? Object.keys(predicate.scopes ?? {}).length : 0);
+const referencePlan = createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', {}, { operators: textOperators, referenceEmptiness: true });
+// @ts-expect-error referenceEmptiness is a boolean.
+createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', {}, { referenceEmptiness: 'yes' });
+const queryLimits: QueryLimitsOptions = { maxPageSize: 100, maxReferenceFrames: 4 };
+configureQueryLimits(queryLimits);
+runtime.configureQueryLimits({ maxReferenceFrames: 12 });
+configureQueryLimits();
+// @ts-expect-error maxReferenceFrames is a number.
+configureQueryLimits({ maxReferenceFrames: '10' });
+// @ts-expect-error The options are maxPageSize and maxReferenceFrames.
+runtime.configureQueryLimits({ maxReferenceFrame: 10 });
+const referenceMembers: {
+  feature: Equals<QueryFeatures['referenceEmptiness'], boolean | null | undefined>;
+  scopes: Equals<Extract<QueryPredicate, { kind: 'predicate' }>['scopes'], Record<string, QueryPredicate | null> | undefined>;
+  limits: Equals<QueryLimitsOptions, { maxPageSize?: number; maxReferenceFrames?: number }>;
+  rootLimits: Equals<Parameters<typeof configureQueryLimits>[0], QueryLimitsOptions | undefined>;
+  runtimeLimits: Equals<Parameters<typeof runtime.configureQueryLimits>[0], QueryLimitsOptions | undefined>;
+} = { feature: true, scopes: true, limits: true, rootLimits: true, runtimeLimits: true };
+void [referenceAdapter, plainFeatures, nullReference, undefinedReference, textReference, scopedPredicate, textScope, scopeCount(referencePlan.where), queryLimits, referenceMembers, createRuntime(referenceAdapter), createRuntime(nullReference)];`;
 
 // The expected type of a subpath's default export.
 const subpathDefaultType = ({ namespace, values, defaultExport, defaultExtras }) => {
@@ -1222,7 +1387,18 @@ const tiedPlugin: SQLPlugin<Configuration, Client, Description> = { ...plugin, q
 const badTie: SQLPlugin<Configuration, Client, Description> = { ...plugin, queryFeatures: { operators: ['EQ'], compileQuery: 'compileQuery' } };
 const sqlFeatures: Equals<SQLPlugin['queryFeatures'], SQLQueryFeatures | null | undefined> = true;
 const sqlCoreFeatures: SQLQueryFeatures extends CoreQueryFeatures ? true : false = true;
-void [textPlugin, legacyPlugins, numericOperators, tiedPlugin, badTie, sqlFeatures, sqlCoreFeatures, createSQL({ plugin: textPlugin })];`;
+void [textPlugin, legacyPlugins, numericOperators, tiedPlugin, badTie, sqlFeatures, sqlCoreFeatures, createSQL({ plugin: textPlugin })];
+// Reference and collection emptiness: a plugin declares it next to its operators, and its compileQuery reads the
+// scopes of a client's emptiness predicate.
+const referencePlugin: SQLPlugin<Configuration, Client, Description> = { ...plugin, queryFeatures: { operators: ['EQ', 'IS_EMPTY'], referenceEmptiness: true, compileQuery: plugin.compileQuery } };
+// Null and undefined mean false, as core's.
+const nullReferencePlugin: SQLPlugin<Configuration, Client, Description> = { ...plugin, queryFeatures: { operators: ['EQ'], referenceEmptiness: null } };
+const undefinedReferencePlugin: SQLPlugin<Configuration, Client, Description> = { ...plugin, queryFeatures: { operators: ['EQ'], referenceEmptiness: undefined } };
+// @ts-expect-error referenceEmptiness is a boolean, null or undefined.
+const textReferencePlugin: SQLPlugin<Configuration, Client, Description> = { ...plugin, queryFeatures: { operators: [], referenceEmptiness: 'yes' } };
+const sqlReference: Equals<SQLQueryFeatures['referenceEmptiness'], boolean | null | undefined> = true;
+const scopedPaths = (query: QueryPlan): string[] => (query.where?.kind === 'predicate' ? Object.keys(query.where.scopes ?? {}) : []);
+void [referencePlugin, nullReferencePlugin, undefinedReferencePlugin, textReferencePlugin, sqlReference, scopedPaths, createSQL({ plugin: referencePlugin }), createSQL({ plugin: nullReferencePlugin })];`;
 
 const postgresTypes = `import { Pool, type PoolClient } from 'pg';
 import { createSQL, type SQLChildrenQueryCompiler, type SQLQueryFeatures, type SQLStatement } from '@simtlix/simfinity-sql';
@@ -1240,6 +1416,7 @@ import {
   scalars,
   validators,
   configureMutationLimits,
+  configureQueryLimits,
   type AuthRuleFunction,
   type DatabaseDescription,
   type DatabaseTrigger,
@@ -1356,7 +1533,14 @@ const pgFeatures: Equals<ReturnType<typeof postgresPlugin>['queryFeatures'], SQL
 const pgCoreFeatures: CoreQueryFeatures | null | undefined = postgresPlugin().queryFeatures;
 const pgOperators: readonly string[] | undefined = postgresPlugin().queryFeatures?.operators;
 const legacyPg = createSQL({ plugin: { ...postgresPlugin({ pool }), queryFeatures: undefined } });
-void [pgFeatures, pgCoreFeatures, pgOperators, legacyPg];`;
+void [pgFeatures, pgCoreFeatures, pgOperators, legacyPg];
+// The plugin declares reference emptiness, and the facade's query limits take maxReferenceFrames.
+const pgReference: boolean | null | undefined = postgresPlugin().queryFeatures?.referenceEmptiness;
+configureQueryLimits({ maxPageSize: 100, maxReferenceFrames: 5 });
+api.configureQueryLimits({ maxReferenceFrames: 5 });
+// @ts-expect-error maxReferenceFrames is a number.
+configureQueryLimits({ maxReferenceFrames: 'five' });
+void pgReference;`;
 
 const mongoTypes = `import {
   InternalServerError,
@@ -1378,10 +1562,12 @@ const mongoTypes = `import {
   type MongoAdapter,
   type MongoAdapterOptions,
   type MutationLimitsOptions,
+  type QueryLimitsOptions,
   type TypeScopes,
   type ItemValidators,
   type VirtualFieldDeclaration,
   type VirtualFieldOptions,
+  configureQueryLimits,
 } from '@simtlix/simfinity-js';
 import type {
   AuthSchemaPlugin as CoreAuthSchemaPlugin,
@@ -1389,6 +1575,7 @@ import type {
   EnvelopSchemaPlugin as CoreEnvelopSchemaPlugin,
   ItemValidators as CoreItemValidators,
   QueryFeatures as CoreQueryFeatures,
+  QueryLimitsOptions as CoreQueryLimitsOptions,
   VirtualFieldDeclaration as CoreVirtualFieldDeclaration,
   VirtualFieldOptions as CoreVirtualFieldOptions,
 } from '@simtlix/simfinity-core';
@@ -1460,7 +1647,15 @@ const mongoOperators: readonly string[] = plain.queryFeatures.operators;
 // @ts-expect-error queryFeatures is readonly.
 plain.queryFeatures = { operators: [] };
 const legacyMongo: CoreDatabaseAdapter = { ...plain, queryFeatures: undefined };
-void [mongoFeatures, mongoOperators, createRuntime(legacyMongo)];`;
+void [mongoFeatures, mongoOperators, createRuntime(legacyMongo)];
+// The adapter declares reference emptiness, and the facade's query limits take maxReferenceFrames, as core's do.
+const mongoReference: boolean | null | undefined = plain.queryFeatures.referenceEmptiness;
+const mongoLimits: QueryLimitsOptions = { maxPageSize: 50, maxReferenceFrames: 3 };
+configureQueryLimits(mongoLimits);
+// @ts-expect-error maxReferenceFrames is a number.
+configureQueryLimits({ maxReferenceFrames: '3' });
+const sameMongoLimits: Equals<QueryLimitsOptions, CoreQueryLimitsOptions> = true;
+void [mongoReference, sameMongoLimits];`;
 
 // MongoDB's legacy deep imports of public API and their aliases: each value and type export has
 // exactly the type of the core subpath or root member it re-exports, so a missing sibling
@@ -1691,19 +1886,23 @@ export type { EnvelopSchemaPlugin } from '@simtlix/simfinity-core/plugins';`;
 
 // The documented \`undefined\` opt-outs must also compile under exactOptionalPropertyTypes, where an optional
 // member that does not include \`undefined\` in its type rejects an explicit \`undefined\` (TS2412, TS2375).
-const coreExactOptionalTypes = `import type { DatabaseAdapter } from '@simtlix/simfinity-core';
+const coreExactOptionalTypes = `import type { DatabaseAdapter, QueryFeatures } from '@simtlix/simfinity-core';
 declare const adapter: DatabaseAdapter;
 adapter.findChildrenBatch = undefined;
 adapter.batchesChildren = undefined;
 adapter.queryFeatures = undefined;
 const copy: DatabaseAdapter = { ...adapter, findChildrenBatch: undefined, batchesChildren: undefined, queryFeatures: undefined };
-void copy;`;
+const features: QueryFeatures[] = [{ operators: [], referenceEmptiness: undefined }, { operators: [], referenceEmptiness: null }];
+adapter.queryFeatures = { operators: ['IS_EMPTY'], referenceEmptiness: undefined };
+void [copy, features];`;
 
-const sqlExactOptionalTypes = `import type { SQLConfiguration, SQLPlugin } from '@simtlix/simfinity-sql';
+const sqlExactOptionalTypes = `import type { SQLConfiguration, SQLPlugin, SQLQueryFeatures } from '@simtlix/simfinity-sql';
 declare const plugin: SQLPlugin;
 const copy: SQLPlugin = { ...plugin, compileChildrenQuery: undefined, compileRecordBatch: undefined, maxRecordBatchValues: undefined, queryFeatures: undefined };
 const configuration: SQLConfiguration = { batchedCollections: undefined };
-void [copy, configuration];`;
+const features: SQLQueryFeatures[] = [{ operators: [], referenceEmptiness: undefined, compileQuery: undefined }, { operators: [], referenceEmptiness: null }];
+const declared: SQLPlugin = { ...plugin, queryFeatures: { operators: ['EQ'], referenceEmptiness: undefined } };
+void [copy, configuration, features, declared];`;
 
 const postgresExactOptionalTypes = `import { Pool } from 'pg';
 import { createPostgres, postgresPlugin } from '@simtlix/simfinity-postgres';

@@ -10,8 +10,8 @@ import mongoose from 'mongoose';
 
 import { SimfinityError, QLOperator, paginationStages } from '@simtlix/simfinity-core';
 import {
-  TEXT_QUERY_OPERATORS, describeEmptiness, effectiveScalarName, isEmptinessOperator, textQueryOperator,
-  validateTextFilterValue,
+  TEXT_QUERY_OPERATORS, describeEmptiness, effectiveScalarName, emptinessScopePaths, isEmptinessOperator,
+  textQueryOperator, validateTextFilterValue,
 } from '@simtlix/simfinity-core/internal/query-operators';
 import {
   getFieldStorageName, getListShape, hasStoredIdentity, isVirtualField, normalizeConnectionField,
@@ -26,6 +26,9 @@ const isGraphQLisoDate = (typeName) => (
 
 // GraphQL reserves `__` names, so these aliases never replace a stored field.
 const LOOKUP_ALIAS_PREFIX = '__sf_l';
+// The scoped joins and frames of reference and collection emptiness (#108 part 2b). Each kind has its own counter, so
+// the lookup aliases keep their numbers.
+const RELATION_ALIAS_PREFIXES = { join: '__sf_j', frame: '__sf_q' };
 
 /**
  * The filter operators this compiler supports, which the adapter declares as its queryFeatures. They
@@ -51,10 +54,32 @@ const allocateLookupAlias = (aggregationsIncluded, relationPath) => {
   return aliases.get(relationPath);
 };
 
+// The scoped joins and frames of one build, keyed by the build's `included` accumulator like the lookup aliases:
+// their aliases by kind and key, a counter per kind, and each target scope compiled once.
+const relationBuilds = new WeakMap();
+
+const relationBuild = (aggregationsIncluded) => {
+  let build = relationBuilds.get(aggregationsIncluded);
+  if (!build) {
+    build = {
+      aliases: new Map(), counts: { join: 0, frame: 0 }, scopes: new WeakMap(), scopeCount: 0,
+    };
+    relationBuilds.set(aggregationsIncluded, build);
+  }
+  return build;
+};
+
+const allocateRelationAlias = (build, kind, key) => {
+  const entry = `${kind} ${key}`;
+  if (!build.aliases.has(entry)) build.aliases.set(entry, `${RELATION_ALIAS_PREFIXES[kind]}${build.counts[kind]++}`);
+  return build.aliases.get(entry);
+};
+
+// Lookup entries are `{ stages }` by alias: a join's `$lookup` and `$unwind`, or a frame's single `$lookup`.
 const appendLookups = (aggregateClauses, aggregationsIncluded, lookups) => {
-  for (const [alias, { lookup, unwind }] of Object.entries(lookups)) {
+  for (const [alias, { stages }] of Object.entries(lookups)) {
     if (!Object.hasOwn(aggregationsIncluded, alias)) {
-      aggregateClauses.push(lookup, unwind);
+      aggregateClauses.push(...stages);
       aggregationsIncluded[alias] = true;
     }
   }
@@ -63,12 +88,14 @@ const appendLookups = (aggregateClauses, aggregationsIncluded, lookups) => {
 const buildRelationLookup = ({
   collectionName, localField, foreignField, alias,
 }) => ({
-  lookup: {
-    $lookup: {
-      from: collectionName, foreignField, localField, as: alias,
+  stages: [
+    {
+      $lookup: {
+        from: collectionName, foreignField, localField, as: alias,
+      },
     },
-  },
-  unwind: { $unwind: { path: `$${alias}`, preserveNullAndEmptyArrays: true } },
+    { $unwind: { path: `$${alias}`, preserveNullAndEmptyArrays: true } },
+  ],
 });
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -230,72 +257,238 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
   throw filterError(`Invalid query path: ${path}`, 'INVALID_FILTER_PATH');
 };
 
-// The emptiness operators IS_EMPTY and IS_NOT_EMPTY (#108, part 2a). Core's describeEmptiness applies
-// their checks in the order every caller uses and describes what "empty" means for the path. It
-// rejects references, collections, interface and union fields and anything inside a list, so the
-// path and every member it reads are stored in the queried document, through single embedded objects.
-// The forms are plain query operators that need no lookup, valid wherever the $match runs.
+// The emptiness operators IS_EMPTY and IS_NOT_EMPTY (#108, parts 2a and 2b). Core's describeEmptiness applies their
+// checks in the order every caller uses and describes what "empty" means for the path. It rejects interface and
+// union fields and anything inside a list. On the queried document's own fields, through single embedded objects,
+// the forms are plain query operators that need no lookup, valid wherever the $match runs. A path may also cross
+// single references and end at a reference or a collection, and an embedded object may have reference and
+// collection members (part 2b). A crossing reads the target through a join, and a reference or collection end or
+// member through a frame: one `$lookup` that keeps at most one record id, so it never repeats a document, and that
+// is empty when no record exists. A construct the client sent carries the client scope marker that the runtime
+// fills, `__scope: { id, scopes }`, on its term or group condition; `scopes` holds each target's find scope
+// arguments by path, or null when the scope added nothing. Its crossings are then scoped joins and its frames scoped
+// frames, so a record the scope hides reads as missing. A construct without a marker, from middleware, a scope or a
+// direct buildQuery() call, reads stored data, and its leaves share the plain lookup aliases with the other
+// operators. The joins and frames sit with the other lookups before the $match, so they also filter counts,
+// aggregates and batched collection reads.
 const isPathless = (path) => path == null || path === '';
+const joinPath = (base, name) => (base ? `${base}.${name}` : name);
 
-// The stored key of the member `name` of `type`, an object stored at `schemaPath` ('' at the root):
-// a non-object `id` member follows identifierLeaf, as resolveQueryPath does; others keep their name.
-const emptinessKey = (model, type, schemaPath, name) => {
+const hasScopeMarker = (construct) => construct != null && typeof construct === 'object' && Object.hasOwn(construct, '__scope');
+// Only the runtime writes and fills client scope markers, after middleware, so a marker that cannot be honored here
+// is an internal error, never a construct compiled with stored semantics.
+const detachedFilter = (message) => new SimfinityError(
+  `${message}; only the runtime writes and fills client scope markers (docs/guide/middleware.md)`, 'DETACHED_CLIENT_FILTER', 500,
+);
+
+// Where a value is: the Mongo key that reads it, its storage path relative to the documents of `model` (which
+// identifierLeaf and the identity rule read), and its dotted GraphQL path from the queried record, which names
+// its scope. `{ key: '', schemaPath: '', path: '' }` is the queried document; a joined document has its alias as
+// key, an empty storage path and its crossing as path.
+const memberPlace = (model, parent, type, name) => {
   const field = type.getFields()[name];
+  // A non-object `id` member follows identifierLeaf, as resolveQueryPath does; others keep their name.
   const leaf = name === 'id' && !(getNamedType(field.type) instanceof GraphQLObjectType)
-    ? identifierLeaf(model, schemaPath, type)
+    ? identifierLeaf(model, parent.schemaPath, type)
     : name;
-  return schemaPath ? `${schemaPath}.${leaf}` : leaf;
+  return { key: joinPath(parent.key, leaf), schemaPath: joinPath(parent.schemaPath, leaf), path: joinPath(parent.path, name) };
 };
 
 // MongoDB stores the built-in scalars, dates and enums as single values, but keeps an application scalar
 // without a supported base as written, arrays included, and `{ p: null }` also matches an array that
 // holds a null. The null rule of such a scalar leaves arrays out, so `[null]` is a value, as GraphQL
-// reads it. The record identity `_id` is never an array, so it keeps the plain form.
+// reads it. The record identity `_id`, of the queried or a joined document, is never an array, so it keeps the
+// plain form.
 const SINGLE_VALUE_SCALARS = new Set(['String', 'ID', 'Int', 'Float', 'Boolean', 'DateTime', 'Date', 'Time']);
-const holdsArrays = (key, type) => (
-  key !== '_id' && isScalarType(type) && !SINGLE_VALUE_SCALARS.has(effectiveScalarName(type))
+const holdsArrays = (place, type) => (
+  place.schemaPath !== '_id' && isScalarType(type) && !SINGLE_VALUE_SCALARS.has(effectiveScalarName(type))
 );
-const nullForm = (key, type) => (holdsArrays(key, type)
-  ? { $and: [{ [key]: null }, { [key]: { $not: { $type: 'array' } } }] }
-  : { [key]: null });
+const nullForm = (place, type) => (holdsArrays(place, type)
+  ? { $and: [{ [place.key]: null }, { [place.key]: { $not: { $type: 'array' } } }] }
+  : { [place.key]: null });
 
-// The IS_EMPTY form of `shape` for the value stored at `key`; `type` is the named type of its field.
-// An object is missing, null, or has every stored member empty. Without stored members it is always
-// empty: MongoDB rejects an empty $and, so the empty query, which matches every document, stands in.
-const emptyForm = (model, shape, key, type) => {
-  if (shape.rule === 'string') return { [key]: { $in: [null, ''] } };
-  if (shape.rule === 'null') return nullForm(key, type);
-  if (shape.rule === 'list') return { [`${key}.0`]: { $exists: false } };
-  const fields = type.getFields();
-  const members = shape.members.map((member) => emptyForm(
-    model, member.shape, emptinessKey(model, type, key, member.name), getNamedType(fields[member.name].type),
-  ));
-  return { $or: [{ [key]: null }, members.length ? { $and: members } : {}] };
+// A frame: NONE over the reference or collection `name` of the object at `parent`, whose type is `type`. Its
+// `$lookup` keeps at most one id of a target record that the reference points to (`foreignField: '_id'`) or of a
+// child whose connection field, `shape.connectionField`, holds the object's `_id`, among those the target scope
+// admits. A frame is keyed by its path and by the scopes of every crossing before it and its own, so a frame after
+// a scoped crossing never shares a trusted one, even when its own scope is null. A collection frame also tests its
+// local key for null: `$lookup` matches a missing local key with every child whose connection field is null.
+const frameForm = (ctx, shape, parent, type, name) => {
+  const field = type.getFields()[name];
+  const path = joinPath(parent.path, name);
+  const scope = ctx.scopes.get(path) ?? null;
+  const alias = allocateRelationAlias(ctx.build, 'frame', `${path} ${[...ctx.chain, scope ? scope.token : '-'].join(',')}`);
+  const collection = shape.rule === 'collection';
+  const localField = joinPath(parent.key, collection ? '_id' : getFieldStorageName(name, field));
+  ctx.lookups[alias] = {
+    stages: [{
+      $lookup: {
+        from: getModel(getNamedType(field.type)).collection.collectionName,
+        localField,
+        foreignField: collection ? shape.connectionField : '_id',
+        pipeline: [...(scope?.stages ?? []), { $limit: 1 }, { $project: { _id: 1 } }],
+        as: alias,
+      },
+    }],
+  };
+  const none = { [`${alias}.0`]: { $exists: false } };
+  return collection ? { $or: [{ [localField]: null }, none] } : none;
 };
 
-// IS_NOT_EMPTY is the exact complement: the positive form of a leaf, which an index can serve, or
-// the $nor of the IS_EMPTY form of an object or of a scalar that may hold arrays.
-const notEmptyForm = (model, shape, key, type) => {
-  if (shape.rule === 'string') return { [key]: { $nin: [null, ''] } };
-  if (shape.rule === 'null') return holdsArrays(key, type) ? { $nor: [nullForm(key, type)] } : { [key]: { $ne: null } };
-  if (shape.rule === 'list') return { [`${key}.0`]: { $exists: true } };
-  return { $nor: [emptyForm(model, shape, key, type)] };
+// The IS_EMPTY form of `shape` for the member `name` of the object at `parent`, whose type is `type`. An object is
+// missing, null, or has every stored member empty. Without stored members it is always empty: MongoDB rejects an
+// empty $and, so the empty query, which matches every document, stands in.
+const emptyForm = (ctx, shape, parent, type, name) => {
+  if (shape.rule === 'reference' || shape.rule === 'collection') return frameForm(ctx, shape, parent, type, name);
+  const place = memberPlace(ctx.model, parent, type, name);
+  const valueType = getNamedType(type.getFields()[name].type);
+  if (shape.rule === 'string') return { [place.key]: { $in: [null, ''] } };
+  if (shape.rule === 'null') return nullForm(place, valueType);
+  if (shape.rule === 'list') return { [`${place.key}.0`]: { $exists: false } };
+  const members = shape.members.map((member) => emptyForm(ctx, member.shape, place, valueType, member.name));
+  return { $or: [{ [place.key]: null }, members.length ? { $and: members } : {}] };
 };
 
-// The match clause of one emptiness condition on `path`, the field itself or a dotted path from it.
-const buildEmptinessClause = (gqltype, path, operator, value) => {
+// IS_NOT_EMPTY is the exact complement: the positive form of a leaf, which an index can serve, or the $nor of the
+// IS_EMPTY form of an object, a reference, a collection or a scalar that may hold arrays.
+const notEmptyForm = (ctx, shape, parent, type, name) => {
+  if (shape.rule === 'reference' || shape.rule === 'collection' || shape.rule === 'object') {
+    return { $nor: [emptyForm(ctx, shape, parent, type, name)] };
+  }
+  const place = memberPlace(ctx.model, parent, type, name);
+  const valueType = getNamedType(type.getFields()[name].type);
+  if (shape.rule === 'string') return { [place.key]: { $nin: [null, ''] } };
+  if (shape.rule === 'null') return holdsArrays(place, valueType) ? { $nor: [nullForm(place, valueType)] } : { [place.key]: { $ne: null } };
+  return { [`${place.key}.0`]: { $exists: true } };
+};
+
+// The GraphQL target type of each reference and collection path an emptiness construct reads (its crossings, its end
+// and its members), by dotted path from the queried type.
+const relationTargets = (gqltype, segments, shape) => {
+  const targets = new Map();
+  let type = gqltype;
+  for (const [index, name] of segments.entries()) {
+    type = getNamedType(type.getFields()[name].type);
+    targets.set(segments.slice(0, index + 1).join('.'), type);
+  }
+  const visit = (node, objectType, path) => {
+    if (node.rule !== 'object') return;
+    for (const member of node.members) {
+      const memberType = getNamedType(objectType.getFields()[member.name].type);
+      targets.set(`${path}.${member.name}`, memberType);
+      visit(member.shape, memberType, `${path}.${member.name}`);
+    }
+  };
+  visit(shape, type, segments.join('.'));
+  return targets;
+};
+
+// A target's find scope from a filled client scope marker, compiled once per build and target type with this
+// compiler, in a fresh alias space: its own lookups live on the joined documents, and ID casting and state names are
+// the target's. Scope arguments are trusted. Gives `{ token, stages }`, or null for a null scope or one that adds no
+// stage, which reads like no scope.
+const compileTargetScope = async (build, scope, targetType) => {
+  if (scope === null) return null;
+  const compiled = build.scopes.get(scope);
+  if (compiled?.has(targetType)) return compiled.get(targetType);
+  const stages = [];
+  const match = await collectFiltersAndLookups(scope, targetType, stages, {}, 'find');
+  if (match) stages.push(match);
+  const result = stages.length ? { token: `s${build.scopeCount++}`, stages } : null;
+  if (!build.scopes.has(scope)) build.scopes.set(scope, new Map());
+  build.scopes.get(scope).set(targetType, result);
+  return result;
+};
+
+// The scopes of a client construct's filled marker, or null for a construct without one. Fails closed: a marker
+// on a construct that reads no reference or collection, or whose `scopes` lack a path the construct reads, is an
+// internal error.
+const clientScopes = (construct, label, paths) => {
+  if (!hasScopeMarker(construct)) return null;
+  if (!paths.length) throw detachedFilter(`${label} carries a client scope marker, but reads no reference or collection`);
+  const scopes = construct.__scope?.scopes;
+  if (!scopes || typeof scopes !== 'object' || Array.isArray(scopes)) {
+    throw detachedFilter(`${label} carries a client scope marker whose scopes are not filled`);
+  }
+  for (const path of paths) {
+    if (!Object.hasOwn(scopes, path) || scopes[path] === undefined) {
+      throw detachedFilter(`${label} carries a client scope marker without the scope of ${path}`);
+    }
+  }
+  return scopes;
+};
+
+// The match clause of one emptiness condition on `path`, the field itself or a dotted path from it. `construct` is
+// the term or group condition that holds it, the only objects whose client scope marker is read, or null. Its joins
+// and frames are added to `lookups` as entries by alias, which the caller appends before the $match. A crossing, end
+// or member whose target has no model fails with INVALID_FILTER_PATH before any entry is added.
+const buildEmptinessClause = async (gqltype, path, operator, value, construct, lookups, aggregationsIncluded) => {
   const segments = path.split('.');
   const shape = describeEmptiness(gqltype, segments, { operator, value, path });
-  const model = getModel(gqltype);
-  let type = gqltype;
-  let schemaPath = '';
-  for (const name of segments.slice(0, -1)) {
-    schemaPath = schemaPath ? `${schemaPath}.${name}` : name;
-    type = getNamedType(type.getFields()[name].type);
+  const { joins, frames } = emptinessScopePaths(shape, segments);
+  const paths = [...joins, ...frames];
+  const targets = relationTargets(gqltype, segments, shape);
+  if (paths.some((relationPath) => !getModel(targets.get(relationPath)))) {
+    throw filterError(`Related model is not available for ${path}`, 'INVALID_FILTER_PATH');
   }
-  const name = segments.at(-1);
+  const scopes = clientScopes(construct, `${operator} on ${path}`, paths);
+  const build = relationBuild(aggregationsIncluded);
+  const compiled = new Map();
+  if (scopes) {
+    for (const relationPath of paths) compiled.set(relationPath, await compileTargetScope(build, scopes[relationPath], targets.get(relationPath)));
+  }
+  const ctx = {
+    build, lookups, scopes: compiled, chain: [], model: getModel(gqltype),
+  };
+  // Crossings: a plain lookup, shared with the other operators, while every crossing so far is trusted or has a null
+  // scope; from the first scoped crossing on, a scoped join keyed by the scopes of every crossing up to it, also when
+  // its own scope is null, correlated through the joins before it.
+  const crossings = new Set(joins);
+  let parent = { key: '', schemaPath: '', path: '' };
+  let type = gqltype;
+  let scoped = false;
+  for (const name of segments.slice(0, -1)) {
+    const field = type.getFields()[name];
+    const fieldType = getNamedType(field.type);
+    const crossing = joinPath(parent.path, name);
+    if (!crossings.has(crossing)) {
+      parent = { key: joinPath(parent.key, name), schemaPath: joinPath(parent.schemaPath, name), path: crossing };
+    } else {
+      const scope = compiled.get(crossing) ?? null;
+      ctx.chain.push(scope ? scope.token : '-');
+      scoped ||= !!scope;
+      const target = getModel(fieldType);
+      const localField = joinPath(parent.key, getFieldStorageName(name, field));
+      let alias;
+      if (!scoped) {
+        alias = allocateLookupAlias(aggregationsIncluded, crossing);
+        lookups[alias] = buildRelationLookup({
+          collectionName: target.collection.collectionName, localField, foreignField: '_id', alias,
+        });
+      } else {
+        alias = allocateRelationAlias(build, 'join', `${crossing} ${ctx.chain.join(',')}`);
+        lookups[alias] = {
+          stages: [
+            {
+              $lookup: {
+                from: target.collection.collectionName,
+                localField,
+                foreignField: '_id',
+                pipeline: [...(scope?.stages ?? []), { $limit: 1 }],
+                as: alias,
+              },
+            },
+            { $unwind: { path: `$${alias}`, preserveNullAndEmptyArrays: true } },
+          ],
+        };
+      }
+      parent = { key: alias, schemaPath: '', path: crossing };
+      ctx.model = target;
+    }
+    type = fieldType;
+  }
   const form = operator === 'IS_EMPTY' ? emptyForm : notEmptyForm;
-  return form(model, shape, emptinessKey(model, type, schemaPath, name), getNamedType(type.getFields()[name].type));
+  return form(ctx, shape, parent, type, segments.at(-1));
 };
 
 const castFilterValue = (value, resolved) => {
@@ -401,10 +594,14 @@ const buildQueryTerms = async (filterField, qlField, fieldName, gqltype, aggrega
   for (const term of terms) {
     if (!term || typeof term !== 'object' || Array.isArray(term)) throw filterError(`Invalid term for ${fieldName}`);
     // An emptiness term whose path is omitted, null or "" tests the field itself.
+    // Only the terms of an object filter are constructs; a scalar filter is its own term.
     if (isEmptinessOperator(term.operator)) {
       const pathed = isObject && !isPathless(term.path);
       if (pathed) assertValidFilterPath(term.path);
-      matchesClauses.push(buildEmptinessClause(gqltype, pathed ? `${fieldName}.${term.path}` : fieldName, term.operator, term.value));
+      matchesClauses.push(await buildEmptinessClause(
+        gqltype, pathed ? `${fieldName}.${term.path}` : fieldName, term.operator, term.value, isObject ? term : null,
+        aggregateClauses, aggregationsIncluded,
+      ));
       continue;
     }
     if (isObject) assertValidFilterPath(term.path);
@@ -412,6 +609,9 @@ const buildQueryTerms = async (filterField, qlField, fieldName, gqltype, aggrega
     const resolved = resolveQueryPath(gqltype, path, aggregationsIncluded);
     Object.assign(aggregateClauses, resolved.aggregateClauses);
     matchesClauses.push(buildMatchesClause(resolved, term.operator, term.value, path));
+    if (isObject && hasScopeMarker(term)) {
+      throw detachedFilter(`${term.operator ?? 'EQ'} on ${path} carries a client scope marker, but is not an emptiness condition`);
+    }
   }
   return { aggregateClauses, matchesClauses };
 };
@@ -440,9 +640,12 @@ const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, agg
       const condition = normalizeFilterCondition(rawCondition);
       // An emptiness condition without a path tests its field, also an object field; a dotted field
       // is resolved as a whole, as the query plan resolves it.
+      const path = rawCondition.path ? `${rawCondition.field}.${rawCondition.path}` : rawCondition.field;
       if (isEmptinessOperator(condition.operator)) {
-        const path = rawCondition.path ? `${rawCondition.field}.${rawCondition.path}` : rawCondition.field;
-        parts.push(buildEmptinessClause(gqltype, path, condition.operator, condition.value));
+        const lookups = {};
+        const match = await buildEmptinessClause(gqltype, path, condition.operator, condition.value, rawCondition, lookups, aggregationsIncluded);
+        appendLookups(aggregateClauses, aggregationsIncluded, lookups);
+        parts.push(match);
         continue;
       }
       const qlField = fields[condition.field];
@@ -466,6 +669,9 @@ const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, agg
       }
 
       const result = await buildQueryTerms(filterInput, qlField, condition.field, gqltype, aggregationsIncluded);
+      if (hasScopeMarker(rawCondition)) {
+        throw detachedFilter(`${condition.operator ?? 'EQ'} on ${path} carries a client scope marker, but is not an emptiness condition`);
+      }
       appendLookups(aggregateClauses, aggregationsIncluded, result.aggregateClauses);
       for (const matchClause of Object.values(result.matchesClauses)) {
         for (const [matchKey, match] of Object.entries(matchClause)) {

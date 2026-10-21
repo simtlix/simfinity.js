@@ -16,9 +16,11 @@ export const createSQLAdapter = (sourcePlugin) => {
   const { castId, createId } = plugin.values;
   const { driver } = plugin;
   const options = plugin.options;
-  // The operators the plugin's compileQuery compiles. Plans reject the others with UNSUPPORTED_QUERY, also for reads
-  // that do not go through the runtime, such as model.find().
-  const { operators } = plugin.queryFeatures;
+  // The operators the plugin's compileQuery compiles, and whether it compiles emptiness through references and
+  // collections. Plans reject the others with UNSUPPORTED_QUERY, also for reads that do not go through the runtime,
+  // such as model.find(). createQueryPlan reads `referenceEmptiness` as false whenever `operators` is given, so the
+  // flag is passed on its own.
+  const { operators, referenceEmptiness = false } = plugin.queryFeatures;
   let configured = options ? Object.freeze({ ...options }) : null;
   let prepared = false;
   let ready = false;
@@ -54,7 +56,7 @@ export const createSQLAdapter = (sourcePlugin) => {
   };
   const execute = async (model, gqltype, args, session, mode, extra) => {
     const name = nameOf(model);
-    const plan = createQueryPlan(models, name, args, { mode, operators });
+    const plan = createQueryPlan(models, name, args, { mode, operators, referenceEmptiness });
     const compiled = plugin.compileQuery(models, database, plan, extra, configured);
     const { rows } = await query(compiled, session);
     if (mode === 'count') return Number(rows[0]?.size || 0);
@@ -106,7 +108,7 @@ export const createSQLAdapter = (sourcePlugin) => {
     const keys = parentIds.map((id) => castId(id));
     const ids = [...new Set(keys)];
     if (!ids.length) return [];
-    const plan = createQueryPlan(models, name, args, { mode: 'find', operators });
+    const plan = createQueryPlan(models, name, args, { mode: 'find', operators, referenceEmptiness });
     const chunks = [];
     for (let start = 0; start < ids.length; start += CHILDREN_BATCH_SIZE) {
       const chunk = ids.slice(start, start + CHILDREN_BATCH_SIZE);
