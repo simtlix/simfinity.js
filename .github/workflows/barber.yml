@@ -43,7 +43,10 @@ jobs:
 
   database:
     name: Barber (${{ matrix.database }})
-    runs-on: ubuntu-latest
+    # The mongo:8.0 image refuses the newer kernels on ubuntu-24.04
+    # (SERVER-121912). Keep both stacks on the 22.04 runner's compatible kernel
+    # until the MongoDB image supports the newer runner.
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
