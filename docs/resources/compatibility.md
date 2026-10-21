@@ -33,7 +33,7 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | PostgreSQL facade | PostgreSQL 15, 16, or 18; `pg` `^8.16.3` |
 | Downloadable starters | Node.js 22.15.0 or newer, npm and the database selected in the corresponding quick start |
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
-| Documentation development | Node.js 22 or newer |
+| Documentation development | Node.js 22.12.0 or newer |
 
 ## Upgrade notes for the next release
 
