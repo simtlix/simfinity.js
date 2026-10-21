@@ -27,7 +27,8 @@ export const QLValue: GraphQLScalarType<unknown, unknown>;
  * missing, null or `""` String (`" "` is not empty), a missing or null value of any other scalar or
  * enum, a missing, null or `[]` list (`[null]` and `[""]` are not empty), and a missing or null
  * embedded object or one whose stored members are all empty by these rules; the record identity is
- * never empty, also the target's `id` right after a reference. A path that continues inside an
+ * never empty. The target's `id` right after a reference is empty exactly when the reference is,
+ * including when the target is missing or hidden by its `find` scope. A path that continues inside an
  * embedded list or a collection fails with `INVALID_FILTER_PATH`. With an adapter that declares
  * `queryFeatures.referenceEmptiness: true`, a path may also cross single references and end at a
  * reference or a collection, and an embedded object may have reference and collection members: a
