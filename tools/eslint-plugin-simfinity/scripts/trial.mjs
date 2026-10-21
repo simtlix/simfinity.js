@@ -42,10 +42,13 @@ for (const engine of ['mongodb', 'postgres']) {
     ['{ Book: { title: [] } }', 'valid-permissions'],
     ['{ Book: { title: simfinity.auth.anyRule(false) } }', 'valid-auth-composition'],
     ["{ Book: { title: simfinity.auth.requireRole(['admin', '']) } }", 'valid-required-claims'],
+    ['{ Book: { title: simfinity.auth.requireAuth(async context => context.user) } }', 'no-async-auth-extractor'],
   ]) {
     const code = application.replace('createAuthPlugin(permissions,', `createAuthPlugin(${permissions},`);
     assert.deepEqual(linter.verify(code, [plugin.configs['recommended-3.8']]).map(message => message.ruleId), [`simfinity/${rule}`]);
   }
-  console.log(`${engine}: six injected policy, relation and authorization-contract violations detected in existing application files.`);
+  const middleware = linter.verify(application + '\nsimfinity.use(authPlugin);', [plugin.configs['recommended-3.8']]);
+  assert.deepEqual(middleware.map(message => message.ruleId), ['simfinity/no-auth-plugin-as-middleware']);
+  console.log(`${engine}: eight injected policy, relation and authorization-contract violations detected in existing application files.`);
 }
 console.log('Bounded trial only: cross-file permission maps, dynamic configuration, lifecycle, scopes and transaction ownership are not certified. No application code was executed.');

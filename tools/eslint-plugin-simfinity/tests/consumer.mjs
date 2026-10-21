@@ -47,6 +47,8 @@ createAuthPlugin(null);
 createAuthPlugin({ Book: { title: [] } });
 anyRule(false);
 requireRole(['admin', '']);
+requireAuth(async context => context.user);
+sf.use(createAuthPlugin({}));
 throw new Error('Linting must not execute application code');
 `);
   await writeFile(join(directory, 'fixtures/valid.js'), prelude + `const schema = sf.createSchema();
@@ -56,10 +58,12 @@ sf.connect(null, new GraphQLObjectType({ name: 'Book', fields: { summary: { type
 createAuthPlugin({ Book: { title: [true, { allOf: [] }, async () => true] } });
 anyRule(requireAuth(), async () => true);
 requireRole(['admin', ' ']);
+requireAuth(context => context.user);
+createYoga({ schema, plugins: [createAuthPlugin({})] });
 throw new Error('Linting must not execute application code');
 `);
-  await writeFile(join(directory, 'fixtures/invalid.ts'), "import { configureQueryLimits, auth } from '@simtlix/simfinity-core';\nconst cap = 0 as const; configureQueryLimits({ maxPageSize: cap });\nauth.createAuthPlugin({ Book: { title: [] } } satisfies Permissions);\nauth.createRule(false as const);\nauth.requirePermission(['read', ''] as const);\n");
-  await writeFile(join(directory, 'fixtures/valid.ts'), "import { configureQueryLimits, auth } from '@simtlix/simfinity-core';\nconst cap = 100 as const; configureQueryLimits({ maxPageSize: cap });\nauth.createAuthPlugin({ Book: { title: true } } satisfies Permissions);\nauth.createRule(async () => true);\nauth.requirePermission(['read', 'write'] as const);\n");
+  await writeFile(join(directory, 'fixtures/invalid.ts'), "import { configureQueryLimits, auth, createRuntime } from '@simtlix/simfinity-core';\nconst cap = 0 as const; configureQueryLimits({ maxPageSize: cap });\nauth.createAuthPlugin({ Book: { title: [] } } satisfies Permissions);\nauth.createRule(false as const);\nauth.requirePermission(['read', ''] as const);\nauth.isOwner((async p => p.ownerId) as Extractor);\ncreateRuntime(adapter).use(auth.createAuthPlugin({}) as unknown as Middleware);\n");
+  await writeFile(join(directory, 'fixtures/valid.ts'), "import { configureQueryLimits, auth, createRuntime } from '@simtlix/simfinity-core';\nconst cap = 100 as const; configureQueryLimits({ maxPageSize: cap });\nauth.createAuthPlugin({ Book: { title: true } } satisfies Permissions);\nauth.createRule(async () => true);\nauth.requirePermission(['read', 'write'] as const);\nauth.isOwner((p => p.ownerId) as Extractor);\ncreateRuntime(adapter).use(middleware as Middleware);\n");
   let output;
   try {
     output = execute(process.execPath, ['node_modules/eslint/bin/eslint.js', 'fixtures', '--format', 'json', '--fix']);
@@ -80,6 +84,8 @@ throw new Error('Linting must not execute application code');
     ['simfinity/valid-permissions', 10],
     ['simfinity/valid-auth-composition', 11],
     ['simfinity/valid-required-claims', 12],
+    ['simfinity/no-async-auth-extractor', 13],
+    ['simfinity/no-auth-plugin-as-middleware', 14],
   ]);
   const ts = reports.find(report => report.filePath.endsWith('/invalid.ts'));
   assert.deepEqual(ts.messages.map(message => [message.ruleId, message.line]), [
@@ -87,6 +93,8 @@ throw new Error('Linting must not execute application code');
     ['simfinity/valid-permissions', 3],
     ['simfinity/valid-auth-composition', 4],
     ['simfinity/valid-required-claims', 5],
+    ['simfinity/no-async-auth-extractor', 6],
+    ['simfinity/no-auth-plugin-as-middleware', 7],
   ]);
   for (const report of reports) {
     assert.equal(report.fatalErrorCount, 0);
@@ -95,12 +103,14 @@ throw new Error('Linting must not execute application code');
     for (const message of report.messages) assert.equal(message.fix, undefined);
   }
   await writeFile(join(directory, 'config.ts'), `import plugin from '@simtlix/eslint-plugin-simfinity';
-import type { Linter } from 'eslint';
+import type { Linter, Rule } from 'eslint';
 const config: Linter.Config = plugin.configs['recommended-3.8'];
+const extractor: Rule.RuleModule = plugin.rules['no-async-auth-extractor'];
+const middleware: Rule.RuleModule = plugin.rules['no-auth-plugin-as-middleware'];
 export default config;
 `);
   execute(process.execPath, ['node_modules/typescript/bin/tsc', '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext', 'config.ts']);
-  console.log('Packed consumer passed: nine JS and four TS diagnostics, config types, valid fixtures, no runtime dependencies or source fixes.');
+  console.log('Packed consumer passed: eleven JS and six TS diagnostics, config/rule types, valid fixtures, no runtime dependencies or source fixes.');
 } finally {
   await rm(directory, { recursive: true, force: true });
 }
