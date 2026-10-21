@@ -180,8 +180,9 @@ plugin** (`release-eslint-plugin.yml`), independently of the five runtime packag
 1. Update the plugin's package/lock versions, `meta.version`, and installation
    documentation in a reviewed PR. Run its tests, audit, packed consumer and both
    Barber trials; merge only after checks pass. The runtime version stays unchanged.
-2. Run the workflow manually on `master` to preview packing and validation. Manual
-   dispatch cannot publish. For publication, create an annotated
+2. Relevant PRs preview the release archive in Actions without publishing. Run the
+   workflow manually on `master` to preview the merged source as well. PRs and
+   manual dispatch cannot publish. For publication, create an annotated
    `eslint-plugin-vX.Y.Z` tag on the validated merge commit in master's first-parent
    history and push it. This flow currently accepts stable plugin versions only.
 3. The workflow packs committed source before installing dependencies, with Node.js
