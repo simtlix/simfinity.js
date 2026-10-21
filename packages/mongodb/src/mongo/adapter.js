@@ -12,8 +12,9 @@ import {
 
 const withSession = (query, session) => (session ? query.session(session) : query);
 
-// Every filter operator the query compiler supports; the runtime rejects any other one.
-const QUERY_FEATURES = Object.freeze({ operators: MONGO_QUERY_OPERATORS });
+// Every filter operator the query compiler supports, and emptiness through references and collections (#108 part
+// 2b); the runtime rejects any other operator.
+const QUERY_FEATURES = Object.freeze({ operators: MONGO_QUERY_OPERATORS, referenceEmptiness: true });
 
 // A write that fails only on malformed ObjectId values reports NOT_VALID_ID, not a driver error.
 const mapIdCastErrors = async (write) => {

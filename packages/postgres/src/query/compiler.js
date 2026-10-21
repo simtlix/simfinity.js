@@ -1,12 +1,21 @@
 import { resolveModelPath, SimfinityError } from '@simtlix/simfinity-core';
 import {
-  describeEmptiness, describeModelEmptiness, isEmptinessOperator, textQueryOperator, validateTextFilterValue,
+  describeEmptiness, describeModelEmptiness, emptinessScopePaths, isEmptinessOperator, textQueryOperator, validateTextFilterValue,
 } from '@simtlix/simfinity-core/internal/query-operators';
 import { identifier as q, literal, qualified } from '../schema/sql.js';
 import { encodeScalar, storageTypes, invalidValue } from '../codecs.js';
 import { caseFoldExpression as fold } from './case-fold.js';
 
 const unsupported = (message) => { throw new SimfinityError(message, 'UNSUPPORTED_QUERY', 400); };
+// A predicate whose `scopes` do not hold what createQueryPlan writes for it, from a client scope marker the runtime
+// filled, is never compiled as trusted (#108 part 2b).
+const detached = (message) => {
+  throw new SimfinityError(`${message}; only createQueryPlan writes the scopes of a predicate, from the client scope markers the runtime fills (docs/guide/middleware.md)`, 'DETACHED_CLIENT_FILTER', 500);
+};
+// The compiler compiles emptiness through single references and at references and collections (#108 part 2b), which
+// the PostgreSQL plugin declares as queryFeatures.referenceEmptiness.
+const REFERENCE_EMPTINESS = true;
+const SCOPE_KINDS = ['predicate', 'and', 'or'];
 
 // The case-insensitive text operators compare the case fold of both sides (see case-fold.js), so an application
 // index serves them only on that expression, which caseFoldExpression writes.
@@ -72,30 +81,58 @@ export const compileChildrenQuery = (models, database, plan, extra, configuratio
 // each parent with its own compileQuery.
 Object.defineProperty(compileChildrenQuery, 'compileQuery', { value: compileQuery });
 
+/**
+ * A text that identifies a scope predicate by its value, so that the client constructs of one statement whose chains
+ * carry equal scopes share their scoped joins (#108 part 2b). Plain objects, arrays, strings, numbers, booleans,
+ * bigints and dates compare by value; anything else, such as a class instance, identifies only itself, through
+ * `identities`, and is never shared.
+ */
+const scopeIdentity = (value, identities) => {
+  if (value === null || value === undefined) return 'null';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (['number', 'boolean', 'bigint'].includes(typeof value)) return `${typeof value}:${String(value)}`;
+  if (value instanceof Date) return `date:${value.getTime()}`;
+  if (Array.isArray(value)) return `[${value.map((item) => scopeIdentity(item, identities)).join(',')}]`;
+  const prototype = typeof value === 'object' ? Object.getPrototypeOf(value) : undefined;
+  if (prototype === Object.prototype || prototype === null) {
+    const members = Object.keys(value).sort().filter((key) => value[key] !== undefined);
+    return `{${members.map((key) => `${JSON.stringify(key)}:${scopeIdentity(value[key], identities)}`).join(',')}}`;
+  }
+  if (!identities.has(value)) identities.set(value, identities.size);
+  return `#${identities.get(value)}`;
+};
+
 const compileSelect = (models, database, plan, extra, configuration, batched) => {
   const explicitNullsOrder = configuration?.explicitNullsOrder === true;
   const values = [];
-  const joins = new Map();
   let serial = 0;
   const alias = () => `t${++serial}`;
   const tableByName = (name) => database.tables.find((item) => item.name === name);
   const root = tableByName(plan.entity);
   if (!root) unsupported(`Unknown persistent entity ${plan.entity}`);
+  // Paths resolve, and their joins are kept, in a frame: the row of an entity and the joins its paths need. The
+  // statement's own frame is its root row, t0. Each subquery of reference and collection emptiness (#108 part 2b)
+  // reads a frame of its own, whose joins go into the subquery's FROM. Aliases and parameters stay numbered across
+  // the whole statement, so no alias shadows another one that an inner subquery reads.
+  const rootFrame = { entity: plan.entity, table: root, alias: 't0', joins: new Map() };
+  const identities = new Map();
   const bind = (value, type) => { values.push(value); return `$${values.length}::${type}`; };
   const col = (name, field) => `${name}.${q(field)}`;
-  const join = (key, table, condition) => {
+  const join = (frame, key, table, condition) => {
+    const { joins } = frame;
     if (!joins.has(key)) {
       const name = alias();
       joins.set(key, { alias: name, sql: `LEFT JOIN ${qualified(database.schema, table)} ${name} ON ${condition(name)}` });
     }
     return joins.get(key).alias;
   };
+  const joinsOf = (frame) => [...frame.joins.values()].map((item) => item.sql).join(' ');
   // The owned table that stores `field` of the row `context`, or undefined when the row stores it; values inside
   // jsonb never own tables.
   const ownedOf = (context, field) => context.table && database.tables.find((item) => item.ownership?.ownerTable === context.table.name && item.ownership.field === field.name);
   // The LEFT JOIN of an owned single object, one per path, which filters and the emptiness forms share. A missed
   // join, and an object in another state, read as NULL.
-  const joinOwned = (key, context, owned) => join(key, owned.name, (name) => `${col(name, '__owner_id')} = ${col(context.alias, context.table.primaryKey.columns[0])} AND ${col(context.alias, owned.ownership.stateColumn)} = 'present'`);
+  const joinOwned = (frame, key, context, owned) => join(frame, key, owned.name, (name) => `${col(name, '__owner_id')} = ${col(context.alias, context.table.primaryKey.columns[0])} AND ${col(context.alias, owned.ownership.stateColumn)} = 'present'`);
   const arrayFrom = (vector, expression) => `ARRAY(SELECT ${expression} FROM ${vector.from} WHERE ${vector.where})`;
   const jsonItems = (expression, missing = '[]') => `jsonb_array_elements(CASE WHEN jsonb_typeof(${expression}) = 'array' THEN ${expression} ELSE '${missing}'::jsonb END)`;
   const helper = (name, ...args) => `${qualified(database.schema, `__simfinity_${name}`)}(${args.join(', ')})`;
@@ -133,9 +170,9 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
     const child = project({ json: `${name}.value` }, rest);
     return `CASE WHEN jsonb_typeof(${value}) = 'array' THEN (SELECT COALESCE(jsonb_agg(${child} ORDER BY ${name}.ordinality) FILTER (WHERE ${child} IS NOT NULL), '[]'::jsonb) FROM ${jsonItems(value)} WITH ORDINALITY ${name}(value, ordinality)) END`;
   };
-  const path = (parts, usage = 'filter') => {
-    const steps = resolveModelPath(models, plan.entity, parts);
-    let context = { table: root, alias: 't0', json: null, vector: null };
+  const path = (parts, usage = 'filter', frame = rootFrame) => {
+    const steps = resolveModelPath(models, frame.entity, parts);
+    let context = { table: frame.table, alias: frame.alias, json: null, vector: null };
     for (let index = 0; index < steps.length; index++) {
       const field = steps[index];
       const key = parts.slice(0, index + 1).join('.');
@@ -154,7 +191,7 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
           const state = `${col(ownerAlias, owned.ownership.stateColumn)} = 'present'`;
           const presence = (name) => owned.ownership.nullableItems && usage !== 'sort' ? ` AND ${col(name, '__item_present')}` : '';
           if (!field.list && !context.vector) {
-            context = { table: owned, alias: joinOwned(key, context, owned), json: null, vector: null };
+            context = { table: owned, alias: joinOwned(frame, key, context, owned), json: null, vector: null };
           } else {
             const name = alias();
             const stored = alias();
@@ -186,7 +223,7 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
       } else if (field.target && !last) {
         if (context.json) unsupported('Unnormalized embedded reference');
         const source = context;
-        const joined = join(key, field.target, (name) => {
+        const joined = join(frame, key, field.target, (name) => {
           if (field.kind === 'collection') return `${col(name, field.connectionField)} = ${col(source.alias, source.table.primaryKey.columns[0])}`;
           const reference = col(source.alias, field.storageName);
           return source.vector
@@ -228,7 +265,7 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
         // A NOT NULL column of the root row has no nulls to place, so its sort needs no NULLS clause and a
         // default-order btree (the primary key or a declared index) can return it in order. Joined and
         // embedded paths can be NULL even for NOT NULL columns, so they keep the clause.
-        const notNull = !context.json && !context.vector && !field.list && context.alias === 't0'
+        const notNull = !context.json && !context.vector && !field.list && context.alias === frame.alias
           && context.table.columns.find((item) => item.name === (identity ? 'id' : field.storageName))?.nullable === false;
         return { sql, uncollated, field: identity ? { ...field, scalar: 'ID' } : field, type: dateNumeric ? 'double precision' : type, list: field.list || !!context.vector, vector: !!context.vector, dateNumeric, sortKey, notNull };
       }
@@ -327,15 +364,80 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
     return negated ? `COALESCE(${compare(left)}, FALSE)` : compare(left);
   };
   /**
+   * A subquery on the entity `entity` in a frame of its own (#108 part 2b), as `{ alias, from }`, `from` being its
+   * text from FROM to the end of its WHERE. `correlation(alias)` ties its rows to the enclosing row, and `scope`, a
+   * predicate planned on the entity, or null, restricts them. The frame's alias comes first, then the scope's joins
+   * and conditions, which compile before the text is assembled so that the FROM holds their joins. A scope is trusted:
+   * it reads stored data through plain joins of its own frame.
+   */
+  const subquery = (entity, correlation, scope) => {
+    const table = tableByName(entity);
+    if (!table) unsupported(`Unknown persistent entity ${entity}`);
+    const frame = { entity, table, alias: alias(), joins: new Map() };
+    const restriction = scope ? ` AND ${where(scope, frame)}` : '';
+    const joins = joinsOf(frame);
+    return { alias: frame.alias, from: `FROM ${qualified(database.schema, table.name)} ${frame.alias}${joins ? ` ${joins}` : ''} WHERE ${correlation(frame.alias)}${restriction}` };
+  };
+  /**
+   * The scoped join of a client construct's crossing (#108 part 2b): the record that the reference `field` of the row
+   * `context` points to, when `scope` admits it, or NULLs, which is how a hidden record reads as a missing one. LIMIT 1
+   * keeps one row whatever joins the scope makes. Its key, apart from those of plain joins, names the path and the
+   * scopes of every reference crossed up to this one, so only constructs with the same chain share it.
+   */
+  const scopedJoin = (frame, key, field, context, scope) => {
+    if (!frame.joins.has(key)) {
+      const name = alias();
+      const target = subquery(field.target, (row) => `${col(row, 'id')} = ${col(context.alias, field.storageName)}`, scope);
+      frame.joins.set(key, { alias: name, sql: `LEFT JOIN LATERAL (SELECT ${target.alias}.* ${target.from} LIMIT 1) ${name} ON TRUE` });
+    }
+    return frame.joins.get(key).alias;
+  };
+  // The scope of `path` in a client construct's scopes, or null for a trusted construct and a scope that added nothing.
+  const scopeAt = (scopes, path) => (scopes && Object.hasOwn(scopes, path) ? scopes[path] : null);
+  /**
+   * The scopes of a client construct (#108 part 2b), checked against its shape: one own key for each scoped join and
+   * frame that emptinessScopePaths lists, each a predicate planned on its target, or null. A predicate without
+   * `scopes` is trusted. Anything else is not what createQueryPlan writes, and never compiles as trusted.
+   */
+  const scopesOf = (node, shape, label) => {
+    if (!Object.hasOwn(node, 'scopes') || node.scopes === undefined) return null;
+    const { scopes } = node;
+    if (!scopes || typeof scopes !== 'object' || Array.isArray(scopes)) detached(`${label} has scopes that are not an object`);
+    const { joins, frames } = emptinessScopePaths(shape, node.path);
+    for (const key of [...joins, ...frames]) {
+      if (!Object.hasOwn(scopes, key) || scopes[key] === undefined) detached(`${label} has no scope for ${key}`);
+      const scope = scopes[key];
+      if (scope !== null && (typeof scope !== 'object' || !SCOPE_KINDS.includes(scope.kind))) detached(`${label} has a scope for ${key} that is neither a query predicate nor null`);
+    }
+    return scopes;
+  };
+  /**
+   * NONE over a reference or a collection (#108 part 2b), the IS_EMPTY form, or with `empty` false the IS_NOT_EMPTY
+   * form, EXISTS: whether a record that `scope` admits is the one the reference `field` of the row `context` points
+   * to, or a child whose `shape.connectionField`, the child's storage column, points to that row. Without a scope a
+   * reference reads its own column, `IS NULL`, since a foreign key that is validated and not deferred keeps it from
+   * dangling; a collection keeps the subquery.
+   */
+  const frameForm = (context, field, shape, empty, scope) => {
+    if (!context.table) unsupported('Unnormalized embedded reference');
+    if (shape.rule === 'reference' && !scope) return `${col(context.alias, field.storageName)} IS ${empty ? '' : 'NOT '}NULL`;
+    const correlation = shape.rule === 'reference'
+      ? (row) => `${col(row, 'id')} = ${col(context.alias, field.storageName)}`
+      : (row) => `${col(row, shape.connectionField)} = ${col(context.alias, context.table.primaryKey.columns[0])}`;
+    return `${empty ? 'NOT ' : ''}EXISTS (SELECT 1 ${subquery(field.target, correlation, scope).from})`;
+  };
+  /**
    * The IS_EMPTY form of `field`, stored on the row or jsonb value `context`, by its emptiness shape, or with `empty`
    * false the IS_NOT_EMPTY form: the positive form of a leaf, which a btree can serve, and the NOT of an object or an
-   * owned form. Every form is two-valued and binds no parameters. A leaf is a column of any row, or the text of a
-   * jsonb member, never cast, since a cast can fail; a list a native array column, a jsonb list, or an owned list,
-   * whose null items are rows too, so `[null]` is not empty; an object a jsonb value or an owned single object whose
-   * stored members are all empty. An owned table is read in a subquery with an alias of its own, correlated to the
-   * key of the row that owns it: the root's id, or the `__id` of a joined or enclosing owned row.
+   * owned form. Every form is two-valued, and only scopes bind parameters. A leaf is a column of any row, or the text
+   * of a jsonb member, never cast, since a cast can fail; a list a native array column, a jsonb list, or an owned
+   * list, whose null items are rows too, so `[null]` is not empty; an object a jsonb value or an owned single object
+   * whose stored members are all empty; a reference or a collection, members included, a frame (frameForm) with the
+   * scope `at.scopes` holds for its path, `at.path`. An owned table is read in a subquery with an alias of its own,
+   * correlated to the key of the row that owns it: the root's id, or the `__id` of a joined or enclosing owned row.
    */
-  const emptyForm = (context, field, shape, empty = true) => {
+  const emptyForm = (context, field, shape, empty = true, at = { path: field.name, scopes: null }) => {
+    if (shape.rule === 'reference' || shape.rule === 'collection') return frameForm(context, field, shape, empty, scopeAt(at.scopes, at.path));
     const compare = empty ? '=' : '>';
     const negate = (form) => (empty ? form : `NOT ${form}`);
     const leaf = (value) => {
@@ -349,7 +451,7 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
       const forms = shape.members.map((member) => {
         const stored = field.fields?.find((item) => item.name === member.name);
         if (!stored) unsupported('Invalid query path');
-        return emptyForm(row, stored, member.shape);
+        return emptyForm(row, stored, member.shape, true, { path: `${at.path}.${member.name}`, scopes: at.scopes });
       });
       return forms.length ? `(${forms.join(' AND ')})` : 'TRUE';
     };
@@ -378,34 +480,60 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
     return leaf(column);
   };
   /**
-   * IS_EMPTY and IS_NOT_EMPTY (#108, part 2a). Every emptiness predicate, leaves included, compiles here from where
-   * its path is stored, not from path(), whose values cast jsonb members and materialize jsonb lists, and which
-   * rejects paths that end at an embedded field. The checks of createQueryPlan run again, with its codes, on the
-   * entity's GraphQL type or on the field descriptions, so a plan built by hand gets the same answers; they leave
-   * only single embedded objects before the last field, reached through the LEFT JOIN of each owned single object.
+   * IS_EMPTY and IS_NOT_EMPTY (#108, parts 2a and 2b), on the row of `frame`. Every emptiness predicate, leaves
+   * included, compiles here from where its path is stored, not from path(), whose values cast jsonb members and
+   * materialize jsonb lists, and which rejects paths that end at an embedded field. The checks of createQueryPlan run
+   * again, with its codes, on the entity's GraphQL type or on the field descriptions, so a plan built by hand gets the
+   * same answers; they leave only single embedded objects and single references before the last field. An owned
+   * single object is reached through its LEFT JOIN. A reference is crossed through the plain LEFT JOIN that legacy
+   * paths share, for a trusted predicate, which reads stored data; a client construct, whose `scopes` the plan lifted
+   * from the marker the runtime filled, crosses it through a scoped join instead from its first crossing whose scope
+   * is not null on, so that every later hop, a null scope included, correlates through that scoped join and never
+   * shares a join with a trusted or legacy path. Its ends and members are frames with their own scopes.
    */
-  const emptiness = ({ path: parts, operator, value }) => {
-    const steps = resolveModelPath(models, plan.entity, parts);
-    const options = { operator, value, path: parts.join('.') };
-    const gqltype = models.entities.find((item) => item.name === plan.entity)?.gqltype;
+  const emptiness = (node, frame) => {
+    const { path: parts, operator, value } = node;
+    const steps = resolveModelPath(models, frame.entity, parts);
+    const label = parts.join('.');
+    const options = { operator, value, path: label, referenceEmptiness: REFERENCE_EMPTINESS };
+    const gqltype = models.entities.find((item) => item.name === frame.entity)?.gqltype;
     const shape = gqltype ? describeEmptiness(gqltype, parts, options) : describeModelEmptiness(steps, options);
-    let context = { table: root, alias: 't0', json: null };
+    const scopes = scopesOf(node, shape, `${operator} on ${label}`);
+    let context = { table: frame.table, alias: frame.alias, json: null };
+    // The scopes of the references crossed so far; once one of them is not null, the chain is scoped.
+    const chain = [];
+    let scoped = false;
+    const chainKey = (key) => `scoped ${key} ${scopeIdentity(chain, identities)}`;
     steps.slice(0, -1).forEach((field, index) => {
-      if (field.kind !== 'embedded' || field.list) unsupported('Invalid query path');
-      const owned = ownedOf(context, field);
-      context = owned
-        ? { table: owned, alias: joinOwned(parts.slice(0, index + 1).join('.'), context, owned), json: null }
-        : { table: null, alias: null, json: context.json ? `(${context.json} -> ${literal(field.storageName)})` : col(context.alias, field.storageName) };
+      const key = parts.slice(0, index + 1).join('.');
+      if (field.kind === 'embedded' && !field.list) {
+        const owned = ownedOf(context, field);
+        context = owned
+          ? { table: owned, alias: joinOwned(frame, scoped ? chainKey(key) : key, context, owned), json: null }
+          : { table: null, alias: null, json: context.json ? `(${context.json} -> ${literal(field.storageName)})` : col(context.alias, field.storageName) };
+      } else if (field.kind === 'reference' && !field.inferred && context.table) {
+        const scope = scopeAt(scopes, key);
+        chain.push(scope);
+        scoped ||= scope !== null;
+        const joined = scoped
+          ? scopedJoin(frame, chainKey(key), field, context, scope)
+          : join(frame, key, field.target, (name) => `${col(name, 'id')} = ${col(context.alias, field.storageName)}`);
+        context = { table: tableByName(field.target), alias: joined, json: null };
+      } else unsupported('Invalid query path');
     });
-    return emptyForm(context, steps.at(-1), shape, operator === 'IS_EMPTY');
+    return emptyForm(context, steps.at(-1), shape, operator === 'IS_EMPTY', { path: label, scopes });
   };
   // A negation reaches every predicate below it, including those nested in AND/OR groups; the emptiness forms are
-  // two-valued, so they need no null-safe form under it.
-  const where = (node, negated = false) => {
+  // two-valued, so they need no null-safe form under it. A frame's scope is never negated.
+  const where = (node, frame = rootFrame, negated = false) => {
     if (!node) return 'TRUE';
-    if (node.kind === 'predicate' && isEmptinessOperator(node.operator)) return `(${emptiness(node)})`;
-    if (node.kind === 'predicate') return `(${predicate(path(node.path), node.operator, node.value, negated)})`;
-    return `(${node.terms.map((term) => where(term, negated)).join(node.kind === 'and' ? ' AND ' : ' OR ')})`;
+    if (node.kind === 'predicate' && isEmptinessOperator(node.operator)) return `(${emptiness(node, frame)})`;
+    if (node.kind === 'predicate') {
+      const sql = predicate(path(node.path, 'filter', frame), node.operator, node.value, negated);
+      if (Object.hasOwn(node, 'scopes') && node.scopes !== undefined) detached(`${node.operator} on ${[].concat(node.path).join('.')} has scopes, but is not an emptiness condition`);
+      return `(${sql})`;
+    }
+    return `(${node.terms.map((term) => where(term, frame, negated)).join(node.kind === 'and' ? ' AND ' : ' OR ')})`;
   };
   let condition = where(plan.where);
   if (extra) {
@@ -465,7 +593,7 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
   }
   // Laterals follow every join, so their expressions can read the root row and any joined alias.
   const lateralSQL = [...laterals.values()].map((item) => ` CROSS JOIN LATERAL (SELECT ${item.sql} AS value OFFSET 0) ${item.alias}`).join('');
-  let text = `SELECT ${select} FROM ${qualified(database.schema, root.name)} t0 ${[...joins.values()].map((item) => item.sql).join(' ')}${lateralSQL} WHERE ${condition}${group}`;
+  let text = `SELECT ${select} FROM ${qualified(database.schema, root.name)} t0 ${joinsOf(rootFrame)}${lateralSQL} WHERE ${condition}${group}`;
   if (plan.mode === 'aggregate') text = `SELECT * FROM (${text}) aggregated`;
   if (order.length) text += ` ORDER BY ${order.join(', ')}`;
   if (plan.pagination) text += ` LIMIT ${bind(plan.pagination.limit, 'bigint')} OFFSET ${bind(plan.pagination.offset, 'bigint')}`;

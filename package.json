@@ -1,6 +1,6 @@
 {
   "name": "simfinity-workspace",
-  "version": "3.10.0",
+  "version": "3.11.0",
   "private": true,
   "description": "Development and release tooling for the Simfinity packages",
   "type": "module",
@@ -35,7 +35,7 @@
     "graphql-middleware": "^6.1.35",
     "js-yaml": "^4.3.2",
     "mongoose": "^8.24.2",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   },
   "overrides": {
     "graphql-middleware": {

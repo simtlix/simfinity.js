@@ -82,6 +82,14 @@ const queries = createMongoQueries({
 });
 
 const lookups = (pipeline) => pipeline.filter((stage) => stage.$lookup).map((stage) => stage.$lookup);
+const PAGE = [{ $skip: 0 }, { $limit: 100 }];
+// A frame of reference and collection emptiness (#108 part 2b) without a scope, as trusted constructs read it.
+const frame = (from, localField, foreignField, alias) => ({
+  $lookup: {
+    from, localField, foreignField, pipeline: [{ $limit: 1 }, { $project: { _id: 1 } }], as: alias,
+  },
+});
+const none = (alias) => ({ [`${alias}.0`]: { $exists: false } });
 const matchOf = (pipeline) => pipeline.find((stage) => stage.$match)?.$match;
 const groupOf = (pipeline) => pipeline.find((stage) => stage.$group).$group;
 const aggregate = (aggregation, input = {}) => queries.buildAggregationQuery(input, NoteType, aggregation);
@@ -415,8 +423,11 @@ describe('MongoDB embedded id paths', () => {
     // Lists are never read inside, and the root identity is `_id`.
     expect(matchOf(await supplied.buildQuery({ parts: { terms: [{ operator: 'IS_EMPTY' }] }, id: { operator: 'IS_NOT_EMPTY' } }, OrderType)))
       .toEqual({ 'parts.0': { $exists: false }, _id: { $ne: null } });
-    // A reference member makes the object UNSUPPORTED_QUERY until reference emptiness ships.
-    await expectRejection(generated.buildQuery({ meta: { terms: [{ operator: 'IS_EMPTY' }] } }, OrderType), 'UNSUPPORTED_QUERY');
+    // A reference member reads its target through a frame; without a client scope marker it reads stored data.
+    const meta = { $or: [{ meta: null }, { $and: [{ 'meta.label': emptyString }, none('__sf_q0')] }] };
+    expect(await generated.buildQuery({ meta: { terms: [{ operator: 'IS_EMPTY' }] } }, OrderType)).toStrictEqual([
+      frame('users', 'meta.ref', '_id', '__sf_q0'), { $match: meta }, ...PAGE, { $unset: ['__sf_q0'] },
+    ]);
     expect(matchOf(await generated.buildQuery({ meta: term('label', 'IS_EMPTY') }, OrderType))).toEqual({ 'meta.label': emptyString });
   });
 
@@ -536,14 +547,27 @@ describe('MongoDB filters on NonNull object fields', () => {
     expect(included).toEqual({ __sf_l0: true, __sf_l1: true });
   });
 
-  test('tests NonNull fields themselves with the emptiness operators, and rejects their references and collections', async () => {
+  test('tests NonNull fields themselves with the emptiness operators, and their references and collections through frames', async () => {
     expect(matchOf(await nnQueries.buildQuery({ meta: { terms: [{ operator: 'IS_EMPTY' }] }, pages: { operator: 'IS_NOT_EMPTY' } }, NnBookType)))
       .toEqual({ $or: [{ meta: null }, { $and: [{ 'meta.label': { $in: [null, ''] } }] }], pages: { $ne: null } });
     expect(await nnQueries.buildFilterGroupMatch({ conditions: [{ field: 'meta', operator: 'IS_NOT_EMPTY' }] }, NnBookType, [], {}))
       .toEqual({ $nor: [{ $or: [{ meta: null }, { $and: [{ 'meta.label': { $in: [null, ''] } }] }] }] });
-    for (const field of ['author', 'reviews']) {
-      await expectRejection(nnQueries.buildFilterGroupMatch({ conditions: [{ field, operator: 'IS_EMPTY' }] }, NnBookType, [], {}), 'UNSUPPORTED_QUERY');
-      await expectRejection(nnQueries.buildQuery({ [field]: { terms: [{ operator: 'IS_NOT_EMPTY' }] } }, NnBookType), 'UNSUPPORTED_QUERY');
+    // A reference is empty when no record it points to exists; a collection, when no child points to the record. A
+    // collection frame also tests its local key, since $lookup matches a missing one with every child whose
+    // connection field is null.
+    const forms = {
+      author: [frame('authors', 'author', '_id', '__sf_q0'), none('__sf_q0')],
+      reviews: [frame('reviews', '_id', 'bookKey', '__sf_q0'), { $or: [{ _id: null }, none('__sf_q0')] }],
+    };
+    for (const [field, [lookup, empty]] of Object.entries(forms)) {
+      const clauses = [];
+      const included = {};
+      expect(await nnQueries.buildFilterGroupMatch({ conditions: [{ field, operator: 'IS_EMPTY' }] }, NnBookType, clauses, included)).toStrictEqual(empty);
+      expect(clauses).toStrictEqual([lookup]);
+      expect(included).toEqual({ __sf_q0: true });
+      expect(await nnQueries.buildQuery({ [field]: { terms: [{ operator: 'IS_NOT_EMPTY' }] } }, NnBookType)).toStrictEqual([
+        lookup, { $match: { $nor: [empty] } }, ...PAGE, { $unset: ['__sf_q0'] },
+      ]);
       // Only trusted code writes an operator on the object filter itself.
       await expectRejection(nnQueries.buildQuery({ [field]: { operator: 'IS_EMPTY' } }, NnBookType), 'MISSING_FILTER_PATH');
     }
@@ -607,8 +631,8 @@ describe('MongoDB emptiness paths', () => {
     ['tree.children.label', 'INVALID_FILTER_PATH'],
     // Re-entry through a single embedded member (rule 4).
     ['node', 'INVALID_FILTER_OPERATOR'], ['node.child', 'INVALID_FILTER_OPERATOR'],
-    // A collection member (rule 6).
-    ['withChildren', 'UNSUPPORTED_QUERY'], ['withChildren.children', 'UNSUPPORTED_QUERY'],
+    // A collection member and a collection end whose target has no model here, as resolveQueryPath rejects it.
+    ['withChildren', 'INVALID_FILTER_PATH'], ['withChildren.children', 'INVALID_FILTER_PATH'],
   ])('rejects %s with %s', async (path, code) => {
     await expectRejection(holder(path), code);
     await expectRejection(holder(path, 'IS_NOT_EMPTY'), code);
@@ -656,15 +680,118 @@ describe('MongoDB emptiness paths', () => {
     expect(matchOf(await holder('loose'))).toEqual({ $or: [{ loose: null }, { $and: [{ 'loose.a': null }] }] });
   });
 
-  test('rejects references and collections without adding a lookup, also when the related model is missing', async () => {
-    for (const path of ['owner', 'owner.name', 'owner.address.name', 'children', 'ghost.name', 'meta', 'meta.ref', 'valueOf']) {
+  // Without a client scope marker, from a direct call, references and collections read stored data: crossings share the
+  // lookup aliases of the other operators, and ends and members are frames.
+  test('compiles references and collections with stored semantics, crossed, reached or as members', async () => {
+    const userJoin = [
+      { $lookup: { from: 'users', foreignField: '_id', localField: 'owner', as: '__sf_l0' } },
+      { $unwind: { path: '$__sf_l0', preserveNullAndEmptyArrays: true } },
+    ];
+    // `[stages, IS_EMPTY form, IS_NOT_EMPTY form]`; the IS_NOT_EMPTY form of a reference, a collection or an object is the
+    // $nor of its IS_EMPTY form.
+    const cases = {
+      owner: [[frame('users', 'owner', '_id', '__sf_q0')], none('__sf_q0')],
+      'owner.name': [userJoin, { '__sf_l0.name': emptyString }, { '__sf_l0.name': { $nin: [null, ''] } }],
+      // The joined `_id` is the record identity, so it takes the null rule.
+      'owner.id': [userJoin, { '__sf_l0._id': null }, { '__sf_l0._id': { $ne: null } }],
+      'owner.address': [[...userJoin, frame('addresses', '__sf_l0.address', '_id', '__sf_q0')], none('__sf_q0')],
+      'owner.address.name': [[
+        ...userJoin,
+        { $lookup: { from: 'addresses', foreignField: '_id', localField: '__sf_l0.address', as: '__sf_l1' } },
+        { $unwind: { path: '$__sf_l1', preserveNullAndEmptyArrays: true } },
+      ], { '__sf_l1.name': emptyString }, { '__sf_l1.name': { $nin: [null, ''] } }],
+      children: [[frame('children', '_id', 'noteKey', '__sf_q0')], { $or: [{ _id: null }, none('__sf_q0')] }],
+      meta: [[frame('users', 'meta.ref', '_id', '__sf_q0')], { $or: [{ meta: null }, { $and: [{ 'meta.label': emptyString }, none('__sf_q0')] }] }],
+      'meta.ref': [[frame('users', 'meta.ref', '_id', '__sf_q0')], none('__sf_q0')],
+      valueOf: [[frame('addresses', 'valueOf', '_id', '__sf_q0')], none('__sf_q0')],
+    };
+    for (const [path, [stages, empty, notEmpty = { $nor: [empty] }]] of Object.entries(cases)) {
       const [head, ...rest] = path.split('.');
-      const clauses = [];
-      await expectRejection(queries.buildFilterGroupMatch({ conditions: [{ field: head, path: rest.join('.'), operator: 'IS_EMPTY' }] }, NoteType, clauses, {}), 'UNSUPPORTED_QUERY');
-      expect(clauses).toEqual([]);
+      for (const [operator, match] of [['IS_EMPTY', empty], ['IS_NOT_EMPTY', notEmpty]]) {
+        const clauses = [];
+        const included = {};
+        const built = await queries.buildFilterGroupMatch({ conditions: [{ field: head, path: rest.join('.'), operator }] }, NoteType, clauses, included);
+        expect(built, `${path} ${operator}`).toStrictEqual(match);
+        expect(clauses, `${path} ${operator}`).toStrictEqual(stages);
+        expect(Object.keys(included), `${path} ${operator}`).toEqual(stages.filter((stage) => stage.$lookup).map((stage) => stage.$lookup.as));
+        // The same term in a field filter, with the stages before the $match and their aliases unset at the end.
+        const term = { ...(rest.length ? { path: rest.join('.') } : {}), operator };
+        expect(await queries.buildQuery({ [head]: { terms: [term] } }, NoteType), `${path} ${operator}`)
+          .toStrictEqual([...stages, { $match: match }, ...PAGE, { $unset: Object.keys(included) }]);
+      }
     }
-    // Other operators keep their codes.
+  });
+
+  // The joined `_id` is the target's identity whatever its declared scalar: an application scalar keeps the plain null
+  // form there, as at the root, and an embedded `id` member of the target follows the target's schema.
+  test('reads the identity and embedded id members of a joined target from its own schema', async () => {
+    const Json = new GraphQLScalarType({ name: 'QueryPathIdJson', serialize: (value) => value, parseValue: (value) => value });
+    const Tag = new GraphQLObjectType({ name: 'QueryPathIdTag', fields: { id: idField, label: { type: GraphQLString } } });
+    const Target = new GraphQLObjectType({
+      name: 'QueryPathIdTarget', fields: { id: { type: Json }, tag: { type: Tag, extensions: { relation: { embedded: true } } } },
+    });
+    const Source = new GraphQLObjectType({
+      name: 'QueryPathIdSource', fields: { id: idField, target: { type: Target, extensions: { relation: { embedded: false } } } },
+    });
+    // The target's subdocument schema stores only `_id`, so its `tag.id` is `tag._id`.
+    const targetModel = { collection: { collectionName: 'targets' }, schema: new mongoose.Schema({ tag: new mongoose.Schema({ label: String }) }) };
+    const built = createMongoQueries({
+      getModel: (type) => (type === Source ? modelFor('sources') : type === Target ? targetModel : null), getRegistrations: () => [],
+    });
+    const join = [
+      { $lookup: { from: 'targets', foreignField: '_id', localField: 'target', as: '__sf_l0' } },
+      { $unwind: { path: '$__sf_l0', preserveNullAndEmptyArrays: true } },
+    ];
+    const match = async (path, operator) => {
+      const pipeline = await built.buildQuery({ AND: [{ conditions: [{ field: path, operator }] }] }, Source);
+      expect(pipeline.slice(0, 2), path).toStrictEqual(join);
+      return pipeline[2].$match;
+    };
+    expect(await match('target.id', 'IS_EMPTY')).toStrictEqual({ '__sf_l0._id': null });
+    expect(await match('target.id', 'IS_NOT_EMPTY')).toStrictEqual({ '__sf_l0._id': { $ne: null } });
+    expect(await match('target.tag.id', 'IS_EMPTY')).toStrictEqual({ '__sf_l0.tag._id': null });
+    expect(await match('target.tag', 'IS_EMPTY'))
+      .toStrictEqual({ $or: [{ '__sf_l0.tag': null }, { $and: [{ '__sf_l0.tag._id': null }, { '__sf_l0.tag.label': emptyString }] }] });
+  });
+
+  // As resolveQueryPath rejects other operators there, before any lookup is added.
+  test.each([
+    ['ghost', 'queries'], ['ghost.name', 'queries'], ['withChildren', 'holder'], ['withChildren.children', 'holder'],
+  ])('rejects %s, whose related model is not available, with INVALID_FILTER_PATH and no lookup', async (path, on) => {
+    const [built, type] = on === 'queries' ? [queries, NoteType] : [holderQueries, HolderType];
+    const [head, ...rest] = path.split('.');
+    for (const operator of ['IS_EMPTY', 'IS_NOT_EMPTY']) {
+      const clauses = [];
+      const included = {};
+      const error = await built.buildFilterGroupMatch({ conditions: [{ field: head, path: rest.join('.'), operator }] }, type, clauses, included)
+        .then(() => null, (caught) => caught);
+      expect([error?.extensions?.code, error?.message]).toEqual(['INVALID_FILTER_PATH', `Related model is not available for ${path}`]);
+      expect(clauses).toEqual([]);
+      expect(included).toEqual({});
+      await expectRejection(built.buildQuery({ [head]: { terms: [{ ...(rest.length ? { path: rest.join('.') } : {}), operator }] } }, type), 'INVALID_FILTER_PATH');
+    }
+  });
+
+  test('keeps the code of other operators on a relation whose model is not available (regression pin, passes on 3.10.0)', async () => {
     await expectRejection(queries.buildQuery({ ghost: { terms: [{ path: 'name', value: 'x' }] } }, NoteType), 'INVALID_FILTER_PATH');
+  });
+
+  // A collection member inside an embedded type, which only a supplied model reaches (describeModels rejects it): a
+  // frame on the embedded object's `_id`, as legacy paths join it, with the null guard.
+  test('compiles a collection member inside an embedded type as a frame on the object _id', async () => {
+    const supplied = createMongoQueries({
+      getModel: (type) => (type === HolderType ? modelFor('holders') : type === ChildType ? modelFor('children') : null), getRegistrations: () => [],
+    });
+    const lookup = frame('children', 'withChildren._id', 'holderKey', '__sf_q0');
+    const member = { $or: [{ 'withChildren._id': null }, none('__sf_q0')] };
+    const object = { $or: [{ withChildren: null }, { $and: [{ 'withChildren.title': emptyString }, member] }] };
+    for (const [path, empty] of [['withChildren', object], ['withChildren.children', member]]) {
+      expect(await supplied.buildQuery({ AND: [{ conditions: [{ field: path, operator: 'IS_EMPTY' }] }] }, HolderType)).toStrictEqual([
+        lookup, { $match: empty }, ...PAGE, { $unset: ['__sf_q0'] },
+      ]);
+      expect(matchOf(await supplied.buildQuery({ AND: [{ conditions: [{ field: path, operator: 'IS_NOT_EMPTY' }] }] }, HolderType)))
+        .toStrictEqual({ $nor: [empty] });
+    }
   });
 
   test('compiles String scalars by their base scalar, and other scalars by the null rule', async () => {

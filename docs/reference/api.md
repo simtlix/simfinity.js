@@ -27,7 +27,7 @@ Shared examples can import the selected instance from [your application’s runt
 | Work with its model | [getModel](#getmodel) | Registered backend-native Model |
 | Inspect a create input | [getInputType](#getinputtype) | Generated `GraphQLInputObjectType` |
 | Create in an owned or existing transaction | [saveObject](#saveobject) | Saved object |
-| Set the maximum query page size | [configureQueryLimits](#configurequerylimits) | Process-wide configuration |
+| Set the maximum query page size and reference frames | [configureQueryLimits](#configurequerylimits) | Process-wide configuration |
 | Cap nested collection operations | [configureMutationLimits](#configuremutationlimits) | Process-wide configuration |
 | Index a PostgreSQL column for case-insensitive filters | [caseFoldExpression](#casefoldexpression) | SQL expression text |
 
@@ -47,10 +47,15 @@ await adapter.initialize();
 ## configureQueryLimits
 
 ```javascript
-simfinity.configureQueryLimits({ maxPageSize: 500 });
+simfinity.configureQueryLimits({ maxPageSize: 500, maxReferenceFrames: 10 });
 ```
 
-Sets the process-wide maximum for explicit list and aggregate page sizes. Configure it once at startup. `maxPageSize` must be a positive safe integer and defaults to 1000; calling without arguments resets that default. Invalid configuration throws `INVALID_QUERY_LIMITS` (400). Unpaged lists use `Math.min(100, maxPageSize)` and unpaged aggregate queries remain unbounded. See [pagination](/guide/queries#pagination-and-total-count) for request validation and compatibility details.
+Sets the process-wide query limits. Configure them once at startup; every runtime and facade shares them. `configureQueryLimits(options?: QueryLimitsOptions): void` takes two options, each a positive safe integer:
+
+- `maxPageSize`, default 1000, the maximum for explicit list and aggregate page sizes. Unpaged lists use `Math.min(100, maxPageSize)` and unpaged aggregate queries remain unbounded. See [pagination](/guide/queries#pagination-and-total-count) for request validation and compatibility details.
+- `maxReferenceFrames`, default 10, the most distinct scoped joins and frames that the client's `IS_EMPTY` and `IS_NOT_EMPTY` conditions of one list, aggregate or collection-field call may read through; more fail with `FILTER_DEPTH_EXCEEDED` (400) before middleware runs. Each reference that a condition crosses counts as a scoped join and each reference or collection that it ends at or reads as a member as a frame, once per path and kind; conditions that middleware and scopes add are not counted. See [references and collections](/guide/queries#references-and-collections).
+
+The call checks every option before it sets any: an invalid one throws `INVALID_QUERY_LIMITS` (400) and keeps both limits. An option that a call omits takes its default again, so `configureQueryLimits({ maxPageSize: 500 })` also restores the default `maxReferenceFrames`, and calling without arguments restores both defaults. The TypeScript type of the options is `QueryLimitsOptions`.
 
 ## configureMutationLimits
 

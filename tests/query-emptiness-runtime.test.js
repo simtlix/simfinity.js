@@ -16,10 +16,17 @@ import { createEmptinessTypes, emptinessQuery, registerEmptinessTypes } from './
 // members an object-level condition reads are authorized like named paths. Database-free: the adapters plan every
 // read with createQueryPlan, as the SQL adapter does, or only record what they receive. The core rules are in
 // query-emptiness.test.js, and each backend's forms with that backend.
+//
+// Part 2b lifts rule 6 and decision 3 for an adapter that declares queryFeatures.referenceEmptiness, so each test
+// that pins them runs twice: undeclared, with 2a's UNSUPPORTED_QUERY and its new message, and declared, with rows,
+// where a client's construct carries its filled scope marker into the plan and a trusted one plans without it. The
+// marker itself is tested in reference-emptiness-runtime.test.js.
 
 const OPERATORS = QLOperator.getValues().map((entry) => entry.value);
 const LEGACY = ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE'];
-const LATER = 'emptiness through references and collections arrives with reference emptiness (#108)';
+const NOT_SUPPORTED = 'the database adapter does not support emptiness through references and collections';
+// Every operator, and reference emptiness.
+const DECLARED = { operators: OPERATORS, referenceEmptiness: true };
 const embedded = { relation: { embedded: true } };
 const reference = (connectionField) => ({ relation: { embedded: false, ...(connectionField ? { connectionField } : {}) } });
 
@@ -48,16 +55,21 @@ const predicatesOf = (node) => {
 const predicate = (path, operator, value = null) => ({ kind: 'predicate', path: path.split('.'), operator, value });
 
 // A database-free adapter. With `plan`, each read is recorded and then planned with createQueryPlan over
-// describeModels, with the declared operators as the compiler's, so the compiler answers what the gate lets
-// through; without it, reads are only recorded, so types that describeModels rejects (interfaces, self-embedding
-// types) can be served. `batch` adds findChildrenBatch. Each call keeps its arguments and its plan.
+// describeModels, with the declared operators and reference emptiness as the compiler's, so the compiler answers
+// what the gate lets through; without it, reads are only recorded, so types that describeModels rejects
+// (interfaces, self-embedding types) can be served. `batch` adds findChildrenBatch. Each call keeps its arguments and
+// its plan.
 const createAdapter = ({
   queryFeatures, plan, batch, calls, rows = {},
 }) => {
   let described = null;
   const read = (method, Model, args, mode) => {
     calls.push({ method, type: Model.name, args: structuredClone(args) });
-    if (plan) calls.at(-1).plan = createQueryPlan(described, Model.name, args, { mode, operators: queryFeatures?.operators ?? LEGACY });
+    if (plan) {
+      calls.at(-1).plan = createQueryPlan(described, Model.name, args, {
+        mode, operators: queryFeatures?.operators ?? LEGACY, referenceEmptiness: queryFeatures?.referenceEmptiness === true,
+      });
+    }
     return mode === 'aggregate' ? [] : rows[Model.name] ?? [];
   };
   return {
@@ -193,15 +205,18 @@ const build = (options = {}) => {
 
 // The members' 403 come from inspectClientPaths with FORBIDDEN_FILTER_PATH and the full member path.
 const nonQueryable = (path, owner) => ({ code: 'FORBIDDEN_FILTER_PATH', status: 403, message: `Query path ${path} uses the non-queryable field ${owner}` });
-const unsupported = (message) => ({ code: 'UNSUPPORTED_QUERY', status: 400, message: `${message}: ${LATER}` });
+const unsupported = (message) => ({ code: 'UNSUPPORTED_QUERY', status: 400, message: `${message}: ${NOT_SUPPORTED}` });
 const decision3 = (path, operator = 'IS_EMPTY') => ({
   code: 'UNSUPPORTED_QUERY',
   status: 400,
-  message: `Query path shop enters QrShop, whose find scope tests ${path} with ${operator}: ${LATER}; until then, use EQ null in the QrShop find scope`,
+  message: `Query path shop enters QrShop, whose find scope tests ${path} with ${operator}: ${NOT_SUPPORTED}; use EQ null in the QrShop find scope`,
 });
+// A predicate of a client's construct, with the target scopes its filled marker carried.
+const scoped = (path, operator, scopes) => ({ ...predicate(path, operator), scopes });
+const deletedNull = { kind: 'predicate', path: ['deletedAt'], operator: 'EQ', value: null };
 
 describe('the gate around middleware', () => {
-  it('gives a client\'s path-less condition on a scoped collection 400 for an admin and a restricted caller alike, and never runs the scope', async () => {
+  it('gives a client\'s path-less condition on a scoped collection 400 for an admin and a restricted caller alike, and never runs the scope, when the adapter does not declare reference emptiness', async () => {
     const { run, calls } = build();
     for (const restricted of [false, true]) {
       const context = {
@@ -224,7 +239,35 @@ describe('the gate around middleware', () => {
     expect(failure(await run('{ qrItems(reviews: {terms: [{path: "text", value: "x"}]}) { id } }'))).toBeNull();
   });
 
-  it('gives the same condition on an aggregate or a collection field, batched or not, 400 for every caller, and never runs QrItem\'s middleware or scopes', async () => {
+  it('reads a client\'s path-less condition on a scoped collection through the Review frame scope, run after middleware, for an admin and a restricted caller alike', async () => {
+    const { run, calls } = build({ queryFeatures: DECLARED });
+    for (const restricted of [false, true]) {
+      const context = {
+        ran: [],
+        scopes: { review: (args) => { if (restricted) args.deletedAt = { operator: 'EQ', value: null }; } },
+      };
+      for (const operator of ['IS_EMPTY', 'IS_NOT_EMPTY']) {
+        calls.length = 0;
+        const result = await run(`{ qrItems(reviews: {terms: [{operator: ${operator}}]}) { id } }`, context);
+        expect(result.errors, `${restricted} ${operator}`).toBeUndefined();
+        // The admin's Review scope adds nothing.
+        expect(calls.map(({ method, plan }) => [method, plan.where]), `${restricted} ${operator}`)
+          .toEqual([['find', scoped('reviews', operator, { reviews: restricted ? deletedNull : null })]]);
+      }
+      // Middleware, Item's own scope, then the Review scope of the frame, in each call.
+      expect(context.ran).toEqual([0, 1].flatMap(() => ['middleware QrItem find', 'scope item', 'scope review']));
+    }
+    // A legacy path into the same collection keeps its answers: 403 for the restricted caller only.
+    calls.length = 0;
+    const restricted = await run('{ qrItems(reviews: {terms: [{path: "text", value: "x"}]}) { id } }', {
+      scopes: { review: (args) => { args.deletedAt = { operator: 'EQ', value: null }; } },
+    });
+    expect(failure(restricted)).toEqual({ code: 'FORBIDDEN_FILTER_PATH', status: 403, message: 'Query path reviews enters the scoped collection QrItem.reviews' });
+    expect(calls).toEqual([]);
+    expect(failure(await run('{ qrItems(reviews: {terms: [{path: "text", value: "x"}]}) { id } }'))).toBeNull();
+  });
+
+  it('gives the same condition on an aggregate or a collection field, batched or not, 400 for every caller, and never runs QrItem\'s middleware or scopes, when the adapter does not declare reference emptiness', async () => {
     const aggregation = 'aggregation: {groupId: "note", facts: [{operation: COUNT, factName: "n", path: "id"}]}';
     for (const batch of [false, true]) {
       const { run, calls } = build({ batch });
@@ -245,7 +288,33 @@ describe('the gate around middleware', () => {
     }
   });
 
-  it('rejects a reference crossing that middleware or a scope adds to an aggregate or a collection field, before the adapter runs', async () => {
+  it('reads the same condition on an aggregate or a collection field, batched or not, through the Review frame scope of each call', async () => {
+    const aggregation = 'aggregation: {groupId: "note", facts: [{operation: COUNT, factName: "n", path: "id"}]}';
+    for (const batch of [false, true]) {
+      const { run, calls } = build({ batch, queryFeatures: DECLARED });
+      for (const restricted of [false, true]) {
+        calls.length = 0;
+        const scopes = { review: (args) => { if (restricted) args.deletedAt = { operator: 'EQ', value: null }; } };
+        const label = `batch ${batch}, restricted ${restricted}`;
+        const aggregate = { ran: [], scopes };
+        expect((await run(`{ qrItems_aggregate(reviews: {terms: [{operator: IS_EMPTY}]}, ${aggregation}) { groupId } }`, aggregate)).errors, label).toBeUndefined();
+        expect(aggregate.ran, label).toEqual(['middleware QrItem aggregate', 'scope item aggregate', 'scope review']);
+        const field = { ran: [], scopes };
+        expect((await run('{ qrShops { items(reviews: {terms: [{operator: IS_NOT_EMPTY}]}) { id } } }', field)).errors, label).toBeUndefined();
+        // One Review scope run for each shop's call.
+        expect(field.ran.filter((entry) => entry === 'scope review'), label).toHaveLength(2);
+        const reviews = { reviews: restricted ? deletedNull : null };
+        const children = scoped('reviews', 'IS_NOT_EMPTY', reviews);
+        // Sibling calls get the same filled marker, so a batching adapter reads both shops at once.
+        expect(calls.filter((call) => call.type === 'QrItem').map(({ method, plan }) => [method, plan.where]), label).toEqual([
+          ['aggregate', scoped('reviews', 'IS_EMPTY', reviews)],
+          ...(batch ? [['findChildrenBatch', children]] : [['findChildren', children], ['findChildren', children]]),
+        ]);
+      }
+    }
+  });
+
+  it('rejects a reference crossing that middleware or a scope adds to an aggregate or a collection field, before the adapter runs, when the adapter does not declare reference emptiness', async () => {
     const aggregation = 'aggregation: {groupId: "note", facts: [{operation: COUNT, factName: "n", path: "id"}]}';
     // QrShop's middleware call adds nothing, so the shops list is served.
     const onItem = (body) => (params) => { if (params.type.gqltype.name === 'QrItem') body(params); };
@@ -268,7 +337,32 @@ describe('the gate around middleware', () => {
     }
   });
 
-  it('rejects a reference crossing that middleware or a scope adds with UNSUPPORTED_QUERY, before the adapter runs', async () => {
+  it('plans a reference crossing that middleware or a scope adds to an aggregate or a collection field as a trusted condition, without scopes', async () => {
+    const aggregation = 'aggregation: {groupId: "note", facts: [{operation: COUNT, factName: "n", path: "id"}]}';
+    const onItem = (body) => (params) => { if (params.type.gqltype.name === 'QrItem') body(params); };
+    for (const batch of [false, true]) {
+      const { run, calls } = build({ batch, queryFeatures: DECLARED });
+      for (const [source, scope, method] of [
+        [`{ qrItems_aggregate(${aggregation}) { groupId } }`, 'item aggregate', 'aggregate'],
+        ['{ qrShops { items { id } } }', 'item', batch ? 'findChildrenBatch' : 'findChildren'],
+      ]) {
+        const label = `batch ${batch}: ${source}`;
+        const reads = () => calls.filter((call) => call.type === 'QrItem').map((call) => [call.method, call.plan.where]);
+        calls.length = 0;
+        const middleware = await run(source, { middleware: onItem(({ args }) => { args.shop = { terms: [{ path: 'name', operator: 'IS_EMPTY' }] }; }) });
+        expect(middleware.errors, label).toBeUndefined();
+        expect(new Set(reads().map(JSON.stringify)), label).toEqual(new Set([JSON.stringify([method, predicate('shop.name', 'IS_EMPTY')])]));
+        calls.length = 0;
+        const scopedRead = await run(source, {
+          scopes: { [scope]: (args) => { args.AND = [...(args.AND ?? []), { conditions: [{ field: 'shop', path: 'dims', operator: 'IS_NOT_EMPTY' }] }]; } },
+        });
+        expect(scopedRead.errors, label).toBeUndefined();
+        expect(new Set(reads().map(JSON.stringify)), label).toEqual(new Set([JSON.stringify([method, predicate('shop.dims', 'IS_NOT_EMPTY')])]));
+      }
+    }
+  });
+
+  it('rejects a reference crossing that middleware or a scope adds with UNSUPPORTED_QUERY, before the adapter runs, when the adapter does not declare reference emptiness', async () => {
     const { run, calls } = build();
     const middleware = await run('{ qrItems { id } }', {
       middleware: ({ args }) => { args.shop = { terms: [{ path: 'name', operator: 'IS_EMPTY' }] }; },
@@ -290,7 +384,50 @@ describe('the gate around middleware', () => {
     expect(predicatesOf(calls[0].plan.where)).toEqual([predicate('note', 'IS_EMPTY'), predicate('plain', 'IS_NOT_EMPTY')]);
   });
 
-  it('checks lists, counts, aggregates, collection fields batched or not, and get_by_id scopes, whatever the adapter declares', async () => {
+  it('plans a reference crossing, a reference member or a reference end that middleware or a scope adds as a trusted condition, without scopes', async () => {
+    const { run, calls } = build({ queryFeatures: DECLARED });
+    const where = async (context) => {
+      calls.length = 0;
+      const result = await run('{ qrItems { id } }', context);
+      expect(result.errors).toBeUndefined();
+      return calls.map((call) => [call.method, call.plan.where]);
+    };
+    expect(await where({ middleware: ({ args }) => { args.shop = { terms: [{ path: 'name', operator: 'IS_EMPTY' }] }; } }))
+      .toEqual([['find', predicate('shop.name', 'IS_EMPTY')]]);
+    expect(await where({ scopes: { item: (args) => { args.AND = [...(args.AND ?? []), { conditions: [{ field: 'shop', path: 'dims', operator: 'IS_NOT_EMPTY' }] }]; } } }))
+      .toEqual([['find', predicate('shop.dims', 'IS_NOT_EMPTY')]]);
+    expect(await where({ middleware: ({ args }) => { args.odim = { terms: [{ operator: 'IS_EMPTY' }] }; } })).toEqual([['find', predicate('odim', 'IS_EMPTY')]]);
+    expect(await where({ middleware: ({ args }) => { args.reviews = { terms: [{ operator: 'IS_NOT_EMPTY' }] }; } })).toEqual([['find', predicate('reviews', 'IS_NOT_EMPTY')]]);
+  });
+
+  it('accepts what an undeclared adapter rejects on lists, counts, aggregates and collection fields, batched or not, with scopes for the client and none for a get_by_id scope', async () => {
+    const aggregation = 'aggregation: {groupId: "note", facts: [{operation: COUNT, factName: "n", path: "id"}]}';
+    for (const batch of [false, true]) {
+      const { run, calls } = build({ batch, queryFeatures: DECLARED });
+      for (const source of [
+        '{ qrItems(odim: {terms: [{operator: IS_EMPTY}]}, pagination: {page: 1, size: 5, count: true}) { id } }',
+        `{ qrItems_aggregate(shop: {terms: [{path: "name", operator: IS_NOT_EMPTY}]}, ${aggregation}) { groupId } }`,
+        '{ qrShops { items(odim: {terms: [{operator: IS_EMPTY}]}) { id } } }',
+      ]) expect((await run(source)).errors, source).toBeUndefined();
+      // Rule 3 stays.
+      const listItem = await run('{ qrShops { items(reviews: {terms: [{path: "text", operator: IS_EMPTY}]}) { id } } }');
+      expect(listItem.errors.map((error) => error.extensions.code)).toEqual(['INVALID_FILTER_PATH', 'INVALID_FILTER_PATH']);
+      const byId = await run('{ qrItem(id: "i1") { id } }', {
+        scopes: { 'item get_by_id': (args) => { args.shop = { terms: [{ path: 'name', operator: 'IS_EMPTY' }] }; } },
+      });
+      expect(byId.errors).toBeUndefined();
+      // QrShop's find scope runs and adds nothing here, so each scope is null.
+      const odim = scoped('odim', 'IS_EMPTY', { 'odim.shop': null });
+      expect(calls.filter((call) => call.type === 'QrItem').map(({ method, plan }) => [method, plan.where])).toEqual([
+        ['find', odim], ['count', odim],
+        ['aggregate', scoped('shop.name', 'IS_NOT_EMPTY', { shop: null })],
+        ...(batch ? [['findChildrenBatch', odim]] : [['findChildren', odim], ['findChildren', odim]]),
+        ['find', { kind: 'and', terms: [predicate('id', 'EQ', 'i1'), predicate('shop.name', 'IS_EMPTY')] }],
+      ]);
+    }
+  });
+
+  it('checks lists, counts, aggregates, collection fields batched or not, and get_by_id scopes, for an adapter that does not declare reference emptiness', async () => {
     const aggregation = 'aggregation: {groupId: "note", facts: [{operation: COUNT, factName: "n", path: "id"}]}';
     for (const batch of [false, true]) {
       const { run, calls } = build({ batch });
@@ -396,9 +533,8 @@ describe('the runtime gate and createQueryPlan', () => {
     [{ dims: { terms: [{ path: 'w-x', ...IS }] } }, 'INVALID_FILTER_PATH'], [{ dims: { terms: [{ path: 5, ...IS }] } }, 'INVALID_FILTER_PATH', true],
     [nested({ field: 'shop', path: 'name', ...IS }, 6), 'FILTER_DEPTH_EXCEEDED'], [nested({ field: 'lines', path: 'qty', ...IS }, 6), 'FILTER_DEPTH_EXCEEDED'],
   ];
-  // Rules 3 to 6, which come after the adapter's operators (rule 2).
+  // Rules 3 to 5, which come after the adapter's operators (rule 2).
   const LATER_RULES = [
-    [nested({ field: 'shop', path: 'name', ...IS }, 5), 'UNSUPPORTED_QUERY'],
     // Rule 3: values inside lists and collections, before any reference.
     [{ lines: { terms: [{ path: 'qty', ...IS }] } }, 'INVALID_FILTER_PATH'], [condition('reviews', 'text'), 'INVALID_FILTER_PATH'],
     [condition('shop', 'items.note'), 'INVALID_FILTER_PATH'], [{ olines: { terms: [{ path: 'shop', ...IS, value: 'x' }] } }, 'INVALID_FILTER_PATH'],
@@ -406,20 +542,31 @@ describe('the runtime gate and createQueryPlan', () => {
     [{ note: { ...IS, value: 'x' } }, 'INVALID_FILTER_VALUE'], [{ odim: { terms: [{ ...IS, value: 'x' }] } }, 'INVALID_FILTER_VALUE'],
     [condition('shop', undefined, { value: '' }), 'INVALID_FILTER_VALUE'], [{ tags: { ...IS, value: [] } }, 'INVALID_FILTER_VALUE'],
     [{ dims: { terms: [{ ...IS, value: false }] } }, 'INVALID_FILTER_VALUE'], [{ plain: { terms: [{ path: 'a', ...IS, value: 0 }] } }, 'INVALID_FILTER_VALUE'],
-    // Rule 6: references and collections, crossed, reached, or members.
+  ];
+  // Rule 6: references and collections, crossed, reached, or members, which only an adapter that does not declare
+  // reference emptiness rejects.
+  const RULE_6 = [
+    [nested({ field: 'shop', path: 'name', ...IS }, 5), 'UNSUPPORTED_QUERY'],
     [{ shop: { terms: [IS] } }, 'UNSUPPORTED_QUERY'], [condition('shop'), 'UNSUPPORTED_QUERY'], [condition('shop', 'name'), 'UNSUPPORTED_QUERY'],
     [{ reviews: { terms: [IS] } }, 'UNSUPPORTED_QUERY'], [{ odim: { terms: [IS] } }, 'UNSUPPORTED_QUERY'],
     [{ odim: { terms: [{ path: 'shop', ...IS }] } }, 'UNSUPPORTED_QUERY'], [condition('shop', 'items'), 'UNSUPPORTED_QUERY'],
     [condition('odim', 'shop.name'), 'UNSUPPORTED_QUERY'],
   ];
-  const TABLE = [...ACCEPTED, ...RULE_1, ...LATER_RULES];
+  const TABLE = [...ACCEPTED, ...RULE_1, ...LATER_RULES, ...RULE_6];
+  // [label, queryFeatures, the matching direct createQueryPlan options].
+  const ADAPTERS = [
+    ['an adapter that does not declare reference emptiness', { operators: OPERATORS }, { referenceEmptiness: false }],
+    ['an adapter that declares it, which plans the rule-6 rows', DECLARED, {}],
+  ];
+  const codeFor = (features, input, code) => (features.referenceEmptiness && RULE_6.some(([row]) => row === input) ? null : code);
 
-  it('gives every row the code of a direct createQueryPlan call, before the adapter runs, whoever writes it', async () => {
-    const { send, models } = setup({ operators: OPERATORS });
-    for (const [input, code, trusted = false] of TABLE) {
+  it.each(ADAPTERS)('gives every row the code of a direct createQueryPlan call, before the adapter runs, whoever writes it, for %s', async (_label, features, options) => {
+    const { send, models } = setup(features);
+    for (const [input, row, trusted = false] of TABLE) {
+      const code = codeFor(features, input, row);
       const label = `${trusted ? 'trusted' : 'client'} ${JSON.stringify(input)}`;
       const { error, calls } = await send(input, { trusted });
-      const direct = codeOf(() => createQueryPlan(models, 'QgItem', input));
+      const direct = codeOf(() => createQueryPlan(models, 'QgItem', input, options));
       expect(direct, label).toBe(code);
       expect(error?.code ?? null, label).toBe(code);
       expect(calls, label).toBe(code ? 0 : 1);
@@ -454,12 +601,15 @@ describe('the runtime gate and createQueryPlan', () => {
     }
   });
 
-  it('gives the messages of createQueryPlan for the form and the path, and describeEmptiness\'s for the other rules', async () => {
-    const { send, models } = setup({ operators: OPERATORS });
-    for (const [input, , trusted = false] of TABLE.filter(([, code]) => code)) {
+  it.each([
+    ['an adapter that does not declare reference emptiness', ...ADAPTERS[0].slice(1)],
+    ['an adapter that declares it, on the rows it still rejects (regression pin, passes on 3.10.0)', ...ADAPTERS[1].slice(1)],
+  ])('gives the messages of createQueryPlan for the form and the path, and describeEmptiness\'s for the other rules, for %s', async (_label, features, options) => {
+    const { send, models } = setup(features);
+    for (const [input, , trusted = false] of TABLE.filter(([input, code]) => codeFor(features, input, code))) {
       let message;
       try {
-        createQueryPlan(models, 'QgItem', input);
+        createQueryPlan(models, 'QgItem', input, options);
       } catch (error) {
         message = error.message;
       }
@@ -526,7 +676,7 @@ describe('joined scopes', () => {
   const legacy = '{ qrItems(shop: {terms: [{path: "name", value: "x"}]}) { id } }';
   const withShopScope = (scope) => ({ scopes: { shop: scope } });
 
-  it('rejects a target scope that uses an emptiness operator, naming the scope and its prefixed condition', async () => {
+  it('rejects a target scope that uses an emptiness operator, naming the scope and its prefixed condition, when the adapter does not declare reference emptiness', async () => {
     const { run, calls } = build();
     const result = await run(legacy, withShopScope((args) => { args.dims = { terms: [{ operator: 'IS_EMPTY' }] }; }));
     expect(failure(result)).toEqual(decision3('shop.dims'));
@@ -546,6 +696,28 @@ describe('joined scopes', () => {
     expect(own.errors).toBeUndefined();
     expect(calls[0].plan.where).toEqual(predicate('dims', 'IS_EMPTY'));
     expect((await run('{ qrItems(note: {operator: EQ, value: "x"}) { id } }', withShopScope((args) => { args.name = { operator: 'IS_EMPTY' }; }))).errors).toBeUndefined();
+  });
+
+  it('applies a target scope that uses an emptiness operator below a client\'s relation path as trusted conditions, for an adapter that declares reference emptiness', async () => {
+    const { run, calls } = build({ queryFeatures: DECLARED });
+    const client = predicate('shop.name', 'EQ', 'x');
+    for (const [scope, expected] of [
+      [(args) => { args.dims = { terms: [{ operator: 'IS_EMPTY' }] }; }, [predicate('shop.dims', 'IS_EMPTY')]],
+      [(args) => { args.dims = { terms: [{ path: '', operator: 'IS_NOT_EMPTY' }] }; }, [predicate('shop.dims', 'IS_NOT_EMPTY')]],
+      [(args) => { args.dims = { terms: [{ path: null, operator: 'IS_EMPTY' }, { path: 'w', operator: 'EQ', value: 1 }] }; },
+        [predicate('shop.dims', 'IS_EMPTY'), predicate('shop.dims.w', 'EQ', 1)]],
+      [(args) => { args.name = { operator: 'IS_NOT_EMPTY' }; }, [predicate('shop.name', 'IS_NOT_EMPTY')]],
+      [(args) => { args.AND = [{ conditions: [{ field: 'dims', path: 'w', operator: 'IS_EMPTY' }] }]; }, [predicate('shop.dims.w', 'IS_EMPTY')]],
+      [(args) => { args.OR = [{ conditions: [{ field: 'lines', operator: 'IS_EMPTY' }] }]; }, [predicate('shop.lines', 'IS_EMPTY')]],
+      // Through a reference of the target too, and a reference end: stored data, without scopes.
+      [(args) => { args.owner = { terms: [{ path: 'name', operator: 'IS_EMPTY' }] }; }, [predicate('shop.owner.name', 'IS_EMPTY')]],
+      [(args) => { args.owner = { terms: [{ operator: 'IS_NOT_EMPTY' }] }; }, [predicate('shop.owner', 'IS_NOT_EMPTY')]],
+    ]) {
+      calls.length = 0;
+      const result = await run(legacy, withShopScope(scope));
+      expect(result.errors, JSON.stringify(expected)).toBeUndefined();
+      expect(predicatesOf(calls[0].plan.where), JSON.stringify(expected)).toEqual([client, ...expected]);
+    }
   });
 
   it('keeps the 403 of a restricted caller\'s legacy path into a scoped collection, or into a target whose scope crosses a collection (regression pin, passes on 3.9.0)', async () => {
@@ -604,7 +776,21 @@ describe('joined scopes', () => {
     });
   });
 
-  it('rejects a joined scope reached only through a sort term, a groupId or a fact path', async () => {
+  it('applies a joined scope reached only through a sort term, a groupId or a fact path as a trusted condition, for an adapter that declares reference emptiness', async () => {
+    const { run, calls } = build({ queryFeatures: DECLARED });
+    const scope = withShopScope((args) => { args.name = { operator: 'IS_EMPTY' }; });
+    for (const source of [
+      '{ qrItems(sort: {terms: [{field: "shop.name", order: ASC}]}) { id } }',
+      '{ qrItems_aggregate(aggregation: {groupId: "shop.name", facts: [{operation: COUNT, factName: "n", path: "id"}]}) { groupId } }',
+      '{ qrItems_aggregate(aggregation: {groupId: "note", facts: [{operation: MAX, factName: "m", path: "shop.name"}]}) { groupId } }',
+    ]) {
+      calls.length = 0;
+      expect((await run(source, scope)).errors, source).toBeUndefined();
+      expect(calls[0].plan.where, source).toEqual(predicate('shop.name', 'IS_EMPTY'));
+    }
+  });
+
+  it('rejects a joined scope reached only through a sort term, a groupId or a fact path, when the adapter does not declare reference emptiness', async () => {
     const { run, calls } = build();
     const scope = withShopScope((args) => { args.name = { operator: 'IS_EMPTY' }; });
     for (const source of [
@@ -615,12 +801,16 @@ describe('joined scopes', () => {
     expect(calls).toEqual([]);
   });
 
-  describe('below a prefix that continues inside an embedded list or a collection', () => {
+  describe.each([
+    ['undeclared', { operators: OPERATORS }],
+    ['declared', DECLARED],
+  ])('below a prefix that continues inside an embedded list or a collection, with reference emptiness %s', (declaration, queryFeatures) => {
     // An item's embedded order lines reference a scoped shop, and its reviews, an unscoped collection, reference
-    // the scoped item again, so the joined scopes of olines.shop and reviews.item sit below a list.
+    // the scoped item again, so the joined scopes of olines.shop and reviews.item sit below a list. Their codes are
+    // permanent, whatever the adapter declares.
     const buildListPrefixes = () => {
       const calls = [];
-      const runtime = createRuntime(createAdapter({ queryFeatures: { operators: OPERATORS }, plan: true, calls }));
+      const runtime = createRuntime(createAdapter({ queryFeatures, plan: true, calls }));
       const Shop = new GraphQLObjectType({
         name: 'QjShop',
         extensions: { scope: { find: scopeOf('shop') } },
@@ -659,7 +849,7 @@ describe('joined scopes', () => {
     const lines = insideList('olines.shop.note', 'olines', 'an embedded list');
     const reviews = insideList('reviews.item.note', 'reviews', 'a collection');
 
-    it('gives the target scope\'s emptiness condition the permanent INVALID_FILTER_PATH of its prefixed condition, not the decision-3 rejection', async () => {
+    it('gives the target scope\'s emptiness condition the permanent INVALID_FILTER_PATH of its prefixed condition, not the decision-3 rejection (regression pin, passes on 3.10.0)', async () => {
       const { run, calls } = buildListPrefixes();
       const note = (args) => { args.note = { operator: 'IS_EMPTY' }; };
       expect(failure(await run(throughLines, { shop: note }))).toEqual(lines);
@@ -676,7 +866,7 @@ describe('joined scopes', () => {
       expect(calls).toEqual([]);
     });
 
-    it('matches the code of the same prefixed condition written by the client or by a scope', async () => {
+    it('matches the code of the same prefixed condition written by the client or by a scope (regression pin, passes on 3.10.0)', async () => {
       const { run, calls } = buildListPrefixes();
       expect(failure(await run('{ qjItems(olines: {terms: [{path: "shop.note", operator: IS_EMPTY}]}) { id } }'))).toEqual(lines);
       expect(failure(await run('{ qjItems(reviews: {terms: [{path: "item.note", operator: IS_EMPTY}]}) { id } }'))).toEqual(reviews);
@@ -686,7 +876,7 @@ describe('joined scopes', () => {
       expect(calls).toEqual([]);
     });
 
-    it('applies rule 3 of the prefix before the target scope\'s value check, as the final gate does', async () => {
+    it('applies rule 3 of the prefix before the target scope\'s value check, as the final gate does (regression pin, passes on 3.10.0)', async () => {
       const { run, calls } = buildListPrefixes();
       const valued = (args) => { args.note = { operator: 'IS_EMPTY', value: 'x' }; };
       expect(failure(await run(throughLines, { shop: valued }))).toEqual(lines);
@@ -698,13 +888,20 @@ describe('joined scopes', () => {
       expect(calls).toEqual([]);
     });
 
-    it('keeps the decision-3 rejection for a prefix through a reference alone, and applies EQ null scopes below list prefixes', async () => {
+    it('keeps the decision-3 rejection for a prefix through a reference alone only when undeclared, and applies EQ null scopes below list prefixes', async () => {
       const { run, calls } = buildListPrefixes();
-      expect(failure(await run('{ qjItems(shop: {terms: [{path: "name", value: "x"}]}) { id } }', { shop: (args) => { args.note = { operator: 'IS_EMPTY' }; } }))).toEqual({
-        code: 'UNSUPPORTED_QUERY',
-        status: 400,
-        message: `Query path shop enters QjShop, whose find scope tests shop.note with IS_EMPTY: ${LATER}; until then, use EQ null in the QjShop find scope`,
-      });
+      const throughShop = await run('{ qjItems(shop: {terms: [{path: "name", value: "x"}]}) { id } }', { shop: (args) => { args.note = { operator: 'IS_EMPTY' }; } });
+      if (declaration === 'declared') {
+        expect(throughShop.errors).toBeUndefined();
+        expect(predicatesOf(calls.at(-1).plan.where)).toEqual([predicate('shop.name', 'EQ', 'x'), predicate('shop.note', 'IS_EMPTY')]);
+        calls.length = 0;
+      } else {
+        expect(failure(throughShop)).toEqual({
+          code: 'UNSUPPORTED_QUERY',
+          status: 400,
+          message: `Query path shop enters QjShop, whose find scope tests shop.note with IS_EMPTY: ${NOT_SUPPORTED}; use EQ null in the QjShop find scope`,
+        });
+      }
       expect(calls).toEqual([]);
       // The legacy form of the same restriction is joined below both prefixes today.
       const eqNull = (args) => { args.note = { operator: 'EQ', value: null }; };
@@ -761,7 +958,17 @@ describe('member authorization', () => {
     expect(calls).toEqual([]);
   });
 
-  it('gives a queryable reference member UNSUPPORTED_QUERY and never runs its target\'s scope', async () => {
+  it('reads a queryable reference member through its target\'s frame scope, run after middleware, for an adapter that declares reference emptiness', async () => {
+    const { run, calls } = build({ queryFeatures: DECLARED });
+    const context = { ran: [], scopes: { shop: (args) => { args.name = { operator: 'EQ', value: 'a' }; } } };
+    expect((await run('{ qrItems(odim: {terms: [{operator: IS_EMPTY}]}) { id } }', context)).errors).toBeUndefined();
+    expect(context.ran).toEqual(['middleware QrItem find', 'scope item', 'scope shop']);
+    expect(calls.map(({ method, plan }) => [method, plan.where])).toEqual([
+      ['find', scoped('odim', 'IS_EMPTY', { 'odim.shop': { kind: 'predicate', path: ['name'], operator: 'EQ', value: 'a' } })],
+    ]);
+  });
+
+  it('gives a queryable reference member UNSUPPORTED_QUERY and never runs its target\'s scope, when the adapter does not declare reference emptiness', async () => {
     const { run, calls } = build();
     const context = { ran: [], scopes: { shop: (args) => { args.name = { operator: 'EQ', value: 'a' }; } } };
     expect(failure(await run('{ qrItems(odim: {terms: [{operator: IS_EMPTY}]}) { id } }', context)))
@@ -829,10 +1036,16 @@ describe('member authorization', () => {
     it('denies a single-reference member before the gate, and lets an allowed one reach it', async () => {
       const { run, calls } = build({ permissions: { ...base, QrODim: { w: auth.allow(), shop: () => false } } });
       expect(failure(await run('{ qrItems(odim: {terms: [{operator: IS_EMPTY}]}) { id } }'))).toEqual(denied('QrODim.shop'));
+      const declaredDenied = build({ permissions: { ...base, QrODim: { w: auth.allow(), shop: () => false } }, queryFeatures: DECLARED });
+      expect(failure(await declaredDenied.run('{ qrItems(odim: {terms: [{operator: IS_EMPTY}]}) { id } }'))).toEqual(denied('QrODim.shop'));
+      // The member is authorized as a named path and never descended: QrShop's own fields need no rule.
       const allowed = build({ permissions: base });
       expect(failure(await allowed.run('{ qrItems(odim: {terms: [{operator: IS_EMPTY}]}) { id } }')))
         .toEqual(unsupported('IS_EMPTY on odim reads the reference member odim.shop'));
-      expect([...calls, ...allowed.calls]).toEqual([]);
+      expect([...calls, ...declaredDenied.calls, ...allowed.calls]).toEqual([]);
+      const declared = build({ permissions: { ...base, QrShop: {} }, queryFeatures: DECLARED });
+      expect((await declared.run('{ qrItems(odim: {terms: [{operator: IS_EMPTY}]}) { id } }')).errors).toBeUndefined();
+      expect(declared.calls.map(({ plan }) => plan.where)).toEqual([scoped('odim', 'IS_EMPTY', { 'odim.shop': null })]);
     });
 
     it('does not check conditions that middleware adds', async () => {
@@ -947,13 +1160,13 @@ describe('types that describeModels rejects', () => {
 });
 
 describe('MCP list and aggregate tools', () => {
-  it('go through the same gate, since they execute the generated GraphQL fields', async () => {
+  it('go through the same gate, since they execute the generated GraphQL fields, for an adapter that does not declare reference emptiness', async () => {
     const { schema, calls } = build();
     const { callTool } = generateMCPTools(schema, { context: {} });
     const errorOf = (result) => (result.isError ? JSON.parse(result.content[0].text).errors[0] : null);
     const aggregation = { groupId: 'note', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }] };
     const reference = errorOf(await callTool('qrItems', { shop: { terms: [{ path: 'name', operator: 'IS_EMPTY' }] } }));
-    expect([reference.extensions.code, reference.message]).toEqual(['UNSUPPORTED_QUERY', `IS_EMPTY on shop.name crosses the reference shop: ${LATER}`]);
+    expect([reference.extensions.code, reference.message]).toEqual(['UNSUPPORTED_QUERY', `IS_EMPTY on shop.name crosses the reference shop: ${NOT_SUPPORTED}`]);
     const member = errorOf(await callTool('qrItems', { hidden: { terms: [{ operator: 'IS_EMPTY' }] } }));
     expect([member.extensions.code, member.message]).toEqual(['FORBIDDEN_FILTER_PATH', nonQueryable('hidden.secret', 'QrHidden.secret').message]);
     const value = errorOf(await callTool('qrItems_aggregate', { note: { operator: 'IS_EMPTY', value: 'x' }, aggregation }));
@@ -961,5 +1174,17 @@ describe('MCP list and aggregate tools', () => {
     expect(calls).toEqual([]);
     expect(errorOf(await callTool('qrItems_aggregate', { plain: { terms: [{ operator: 'IS_NOT_EMPTY' }] }, aggregation }))).toBeNull();
     expect(calls.map(({ method, plan }) => [method, plan.where])).toEqual([['aggregate', predicate('plain', 'IS_NOT_EMPTY')]]);
+  });
+
+  it('read through references with a scope marker for an adapter that declares reference emptiness', async () => {
+    const { schema, calls } = build({ queryFeatures: DECLARED });
+    const { callTool } = generateMCPTools(schema, { context: {} });
+    const aggregation = { groupId: 'note', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }] };
+    expect((await callTool('qrItems', { shop: { terms: [{ path: 'name', operator: 'IS_EMPTY' }] } })).isError).toBeFalsy();
+    expect((await callTool('qrItems_aggregate', { AND: [{ conditions: [{ field: 'reviews', operator: 'IS_NOT_EMPTY' }] }], aggregation })).isError).toBeFalsy();
+    expect(calls.map(({ method, plan }) => [method, plan.where])).toEqual([
+      ['find', scoped('shop.name', 'IS_EMPTY', { shop: null })],
+      ['aggregate', scoped('reviews', 'IS_NOT_EMPTY', { reviews: null })],
+    ]);
   });
 });

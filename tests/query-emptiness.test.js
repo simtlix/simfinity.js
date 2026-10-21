@@ -18,11 +18,16 @@ import {
 // the core rules that need no runtime: the shared module, the shape of what "empty" means for a path and the order of
 // its checks, the collectors the runtime reads, and createQueryPlan. It also holds what the shared test helper does
 // without a database. The runtime gate, joined scopes and member authorization are tested in
-// query-emptiness-runtime.test.js, and each backend's forms with that backend.
+// query-emptiness-runtime.test.js, and each backend's forms with that backend. Part 2b lifts rule 6 for callers that
+// support reference emptiness, which is the default here; its pins run with `referenceEmptiness: false`, the undeclared
+// adapter's case, and reference-emptiness.test.js holds the rest of part 2b.
 
 const LEGACY = ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE'];
 const TEXT = ['ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ'];
 const EMPTINESS = ['IS_EMPTY', 'IS_NOT_EMPTY'];
+// Rule 6's message when the caller does not support reference emptiness (#108 part 2b).
+const NOT_SUPPORTED = 'the database adapter does not support emptiness through references and collections';
+const UNDECLARED = { referenceEmptiness: false };
 const ENUM_ORDER = ['EQ', 'LT', 'GT', 'LTE', 'GTE', 'BTW', 'NE', 'IN', 'NIN', 'LIKE', ...TEXT, ...EMPTINESS];
 
 // Loaded on use, so that each test of the shared module fails on its own where the module lacks a name.
@@ -73,6 +78,9 @@ const DIMS = object({ w: NULL, label: STRING, tags: LIST });
 const INNER = object({ y: NULL, z: STRING });
 const UDIM = object({ w: NULL, label: STRING, tags: LIST, dims: object({ a: NULL, tags: LIST }) });
 const NEST = object({ w: NULL, meta: object({ code: STRING }), mlines: LIST });
+const ref = (target) => ({ rule: 'reference', target });
+const coll = (target, connectionField) => ({ rule: 'collection', target, connectionField });
+const through = (shape, ...crossings) => ({ ...shape, crossings: crossings.map(([path, target]) => ({ path, target })) });
 
 // Every path of the fixture that an emptiness condition accepts, with its shape.
 const ACCEPTED = [
@@ -102,11 +110,15 @@ const REJECTED = [
   ['QcItem', 'lines.qty', 'INVALID_FILTER_PATH'], ['QcItem', 'olines.qty', 'INVALID_FILTER_PATH'], ['QcItem', 'reviews.text', 'INVALID_FILTER_PATH'],
   ['QcItem', 'olines.shop', 'INVALID_FILTER_PATH'], ['QcItem', 'shop.items.note', 'INVALID_FILTER_PATH'],
   [OWNED_ROOT.name, 'ulist.sku', 'INVALID_FILTER_PATH'], [OWNED_ROOT.name, 'nest.mlines.sku', 'INVALID_FILTER_PATH'],
-  // Rule 6: references and collections, crossed, reached, or reached by member expansion.
-  ['QcItem', 'shop', 'UNSUPPORTED_QUERY'], ['QcItem', 'shop.name', 'UNSUPPORTED_QUERY'], ['QcItem', 'shop.items', 'UNSUPPORTED_QUERY'],
-  ['QcItem', 'reviews', 'UNSUPPORTED_QUERY'], ['QcItem', 'odim', 'UNSUPPORTED_QUERY'], ['QcItem', 'odim.shop', 'UNSUPPORTED_QUERY'],
-  ['QcItem', 'odim.shop.name', 'UNSUPPORTED_QUERY'], ['QcReview', 'item.note', 'UNSUPPORTED_QUERY'], ['QcReview', 'item.dims', 'UNSUPPORTED_QUERY'],
-  ['QcShop', 'items', 'UNSUPPORTED_QUERY'],
+];
+// Rule 6: references and collections, crossed, reached, or reached by member expansion. 2a rejected them with
+// UNSUPPORTED_QUERY, which a caller without reference emptiness still gives; part 2b describes them.
+const REFERENCES = [
+  ['QcItem', 'shop', ref('QcShop')], ['QcItem', 'shop.name', through(STRING, ['shop', 'QcShop'])],
+  ['QcItem', 'shop.items', through(coll('QcItem', 'shop'), ['shop', 'QcShop'])], ['QcItem', 'reviews', coll('QcReview', 'item')],
+  ['QcItem', 'odim', object({ w: NULL, tags: LIST, shop: ref('QcShop') })], ['QcItem', 'odim.shop', ref('QcShop')],
+  ['QcItem', 'odim.shop.name', through(STRING, ['odim.shop', 'QcShop'])], ['QcReview', 'item.note', through(STRING, ['item', 'QcItem'])],
+  ['QcReview', 'item.dims', through(DIMS, ['item', 'QcItem'])], ['QcShop', 'items', coll('QcItem', 'shop')],
 ];
 const typeNamed = (name) => models.entities.find((entity) => entity.name === name).gqltype;
 
@@ -285,16 +297,24 @@ describe('describeEmptiness', () => {
   it.each(REJECTED)('rejects %s.%s with %s', async (typeName, path, code) => {
     const { describeEmptiness } = await loadOperators();
     expect(codeOf(() => describeEmptiness(typeNamed(typeName), path.split('.'), { operator: 'IS_EMPTY' }))).toBe(code);
+    expect(codeOf(() => describeEmptiness(typeNamed(typeName), path.split('.'), { operator: 'IS_EMPTY', ...UNDECLARED }))).toBe(code);
+  });
+
+  it.each(REFERENCES)('describes %s.%s through references and collections, and rejects it with UNSUPPORTED_QUERY without reference emptiness', async (typeName, path, shape) => {
+    const { describeEmptiness } = await loadOperators();
+    expect(describeEmptiness(typeNamed(typeName), path.split('.'), { operator: 'IS_EMPTY' })).toEqual(shape);
+    expect(describeEmptiness(typeNamed(typeName), path.split('.'), { operator: 'IS_NOT_EMPTY', referenceEmptiness: true })).toEqual(shape);
+    expect(codeOf(() => describeEmptiness(typeNamed(typeName), path.split('.'), { operator: 'IS_EMPTY', ...UNDECLARED }))).toBe('UNSUPPORTED_QUERY');
   });
 
   it('explains each rejection', async () => {
     const { describeEmptiness } = await loadOperators();
-    const message = (path) => errorOf(() => describeEmptiness(fixture.Item, path.split('.'), { operator: 'IS_EMPTY', path })).message;
+    const message = (path, options = {}) => errorOf(() => describeEmptiness(fixture.Item, path.split('.'), { operator: 'IS_EMPTY', path, ...options })).message;
     expect(message('lines.qty')).toBe('IS_EMPTY cannot test lines.qty: emptiness of a value inside a list is not defined, and lines is an embedded list');
     expect(message('reviews.text')).toBe('IS_EMPTY cannot test reviews.text: emptiness of a value inside a list is not defined, and reviews is a collection');
-    expect(message('shop.name')).toBe('IS_EMPTY on shop.name crosses the reference shop: emptiness through references and collections arrives with reference emptiness (#108)');
-    expect(message('reviews')).toBe('IS_EMPTY on reviews ends at the collection reviews: emptiness through references and collections arrives with reference emptiness (#108)');
-    expect(message('odim')).toBe('IS_EMPTY on odim reads the reference member odim.shop: emptiness through references and collections arrives with reference emptiness (#108)');
+    expect(message('shop.name', UNDECLARED)).toBe(`IS_EMPTY on shop.name crosses the reference shop: ${NOT_SUPPORTED}`);
+    expect(message('reviews', UNDECLARED)).toBe(`IS_EMPTY on reviews ends at the collection reviews: ${NOT_SUPPORTED}`);
+    expect(message('odim', UNDECLARED)).toBe(`IS_EMPTY on odim reads the reference member odim.shop: ${NOT_SUPPORTED}`);
     // Rule 1 reports what resolveModelPath reports.
     expect(message('shop.nope')).toBe('Unknown field shop.nope');
     expect(message('note.x')).toBe('Field note cannot be traversed');
@@ -305,6 +325,9 @@ describe('describeEmptiness', () => {
   it('accepts only an omitted or null value, after the path rules and before rule 6', async () => {
     const { describeEmptiness } = await loadOperators();
     for (const value of ['x', '', [], {}, false, 0]) {
+      for (const path of ['shop', 'odim', 'reviews']) {
+        expect(codeOf(() => describeEmptiness(fixture.Item, [path], { operator: 'IS_EMPTY', value, ...UNDECLARED }))).toBe('INVALID_FILTER_VALUE');
+      }
       expect(codeOf(() => describeEmptiness(fixture.Item, ['note'], { operator: 'IS_EMPTY', value }))).toBe('INVALID_FILTER_VALUE');
       expect(codeOf(() => describeEmptiness(fixture.Item, ['dims'], { operator: 'IS_NOT_EMPTY', value }))).toBe('INVALID_FILTER_VALUE');
       // Rule 3 comes before the value, and the value before rule 6.
@@ -327,24 +350,33 @@ describe('describeEmptiness', () => {
     expect(describeEmptiness(Root, ['withInterface', 'label'], { operator: 'IS_EMPTY' })).toEqual(STRING);
   });
 
-  it('rejects a collection member with UNSUPPORTED_QUERY (rule 6), never reading it as a list', async () => {
-    expect(await describeOn('withCollection')).toBe('UNSUPPORTED_QUERY');
+  it('reads a collection member by the collection rule, never as a list, and rejects it with UNSUPPORTED_QUERY without reference emptiness (rule 6)', async () => {
+    const { describeEmptiness } = await loadOperators();
+    expect(describeEmptiness(Root, ['withCollection'], { operator: 'IS_EMPTY' })).toEqual(object({ title: STRING, children: coll('QcTarget', 'parent') }));
+    expect(await describeOn('withCollection', UNDECLARED)).toBe('UNSUPPORTED_QUERY');
     expect(await describeOn('withCollection', { value: 1 })).toBe('INVALID_FILTER_VALUE');
+    expect(await describeOn('withCollection', { value: 1, ...UNDECLARED })).toBe('INVALID_FILTER_VALUE');
     expect(await describeOn('withCollection.title')).toBeNull();
   });
 
-  it('rejects a reference or an interface member inside a nested single embedded object, as one at the top (rules 3 and 6)', async () => {
+  it('reads a reference member inside a nested single embedded object as one at the top, and rejects an interface member (rules 3 and 6)', async () => {
     const { describeEmptiness } = await loadOperators();
-    const reads = 'emptiness through references and collections arrives with reference emptiness (#108)';
-    for (const path of ['mid', 'mid.deep', 'mid.deep.owner']) expect(await describeOn(path), path).toBe('UNSUPPORTED_QUERY');
-    expect(errorOf(() => describeEmptiness(Root, ['mid'], { operator: 'IS_EMPTY' })).message)
-      .toBe(`IS_EMPTY on mid reads the reference member mid.deep.owner: ${reads}`);
-    expect(errorOf(() => describeEmptiness(Root, ['mid', 'deep'], { operator: 'IS_NOT_EMPTY' })).message)
-      .toBe(`IS_NOT_EMPTY on mid.deep reads the reference member mid.deep.owner: ${reads}`);
+    const deep = object({ owner: ref('QcTarget'), n: STRING });
+    expect(describeEmptiness(Root, ['mid'], { operator: 'IS_EMPTY' })).toEqual(object({ x: STRING, deep }));
+    expect(describeEmptiness(Root, ['mid', 'deep'], { operator: 'IS_EMPTY' })).toEqual(deep);
+    expect(describeEmptiness(Root, ['mid', 'deep', 'owner'], { operator: 'IS_EMPTY' })).toEqual(ref('QcTarget'));
+    for (const path of ['mid', 'mid.deep', 'mid.deep.owner']) expect(await describeOn(path, UNDECLARED), path).toBe('UNSUPPORTED_QUERY');
+    expect(errorOf(() => describeEmptiness(Root, ['mid'], { operator: 'IS_EMPTY', ...UNDECLARED })).message)
+      .toBe(`IS_EMPTY on mid reads the reference member mid.deep.owner: ${NOT_SUPPORTED}`);
+    expect(errorOf(() => describeEmptiness(Root, ['mid', 'deep'], { operator: 'IS_NOT_EMPTY', ...UNDECLARED })).message)
+      .toBe(`IS_NOT_EMPTY on mid.deep reads the reference member mid.deep.owner: ${NOT_SUPPORTED}`);
     expect(await describeOn('mid', { value: 'x' })).toBe('INVALID_FILTER_VALUE');
     expect(describeEmptiness(Root, ['mid', 'x'], { operator: 'IS_EMPTY' })).toEqual(STRING);
     expect(describeEmptiness(Root, ['mid', 'deep', 'n'], { operator: 'IS_EMPTY' })).toEqual(STRING);
-    for (const path of ['midShape', 'midShape.deep', 'midBoth']) expect(await describeOn(path), path).toBe('INVALID_FILTER_PATH');
+    for (const path of ['midShape', 'midShape.deep', 'midBoth']) {
+      expect(await describeOn(path), path).toBe('INVALID_FILTER_PATH');
+      expect(await describeOn(path, UNDECLARED), path).toBe('INVALID_FILTER_PATH');
+    }
     // Rule 3 at any depth comes before the value and before a reference member met earlier.
     expect(await describeOn('midShape', { value: 'x' })).toBe('INVALID_FILTER_PATH');
     expect(errorOf(() => describeEmptiness(Root, ['midShape'], { operator: 'IS_EMPTY' })).message)
@@ -353,22 +385,25 @@ describe('describeEmptiness', () => {
       .toBe('IS_EMPTY cannot test midBoth: midBoth.deep.shape is an interface or union field, whose emptiness is not defined');
   });
 
-  it('rejects a nested reference member from model descriptions too, with and without GraphQL types', async () => {
+  it('reads a nested reference member from model descriptions too, with and without GraphQL types, and rejects it without reference emptiness', async () => {
     const { describeModelEmptiness } = await loadOperators();
-    const reads = 'emptiness through references and collections arrives with reference emptiness (#108)';
     for (const described of [rootModels, untypedRootModels]) {
-      const planOn = (input) => createQueryPlan(described, 'QcModelRoot', input);
-      expect(errorOf(() => planOn({ mid: { terms: [{ operator: 'IS_EMPTY' }] } }))).toMatchObject({
-        message: `IS_EMPTY on mid reads the reference member mid.deep.owner: ${reads}`, extensions: { code: 'UNSUPPORTED_QUERY' },
+      const planOn = (input, options) => createQueryPlan(described, 'QcModelRoot', input, options);
+      expect(planOn({ mid: { terms: [{ operator: 'IS_EMPTY' }] } }).where).toEqual(predicate('mid', 'IS_EMPTY'));
+      expect(errorOf(() => planOn({ mid: { terms: [{ operator: 'IS_EMPTY' }] } }, UNDECLARED))).toMatchObject({
+        message: `IS_EMPTY on mid reads the reference member mid.deep.owner: ${NOT_SUPPORTED}`, extensions: { code: 'UNSUPPORTED_QUERY' },
       });
-      expect(errorOf(() => planOn({ AND: [{ conditions: [{ field: 'mid', path: 'deep', operator: 'IS_NOT_EMPTY' }] }] }))).toMatchObject({
-        message: `IS_NOT_EMPTY on mid.deep reads the reference member mid.deep.owner: ${reads}`, extensions: { code: 'UNSUPPORTED_QUERY' },
+      expect(errorOf(() => planOn({ AND: [{ conditions: [{ field: 'mid', path: 'deep', operator: 'IS_NOT_EMPTY' }] }] }, UNDECLARED))).toMatchObject({
+        message: `IS_NOT_EMPTY on mid.deep reads the reference member mid.deep.owner: ${NOT_SUPPORTED}`, extensions: { code: 'UNSUPPORTED_QUERY' },
       });
       expect(codeOf(() => planOn({ mid: { terms: [{ operator: 'IS_EMPTY', value: 'x' }] } }))).toBe('INVALID_FILTER_VALUE');
-      expect(predicatesOf(planOn({ mid: { terms: [{ path: 'x', operator: 'IS_EMPTY' }, { path: 'deep.n', operator: 'IS_NOT_EMPTY' }] } }).where))
+      expect(codeOf(() => planOn({ mid: { terms: [{ operator: 'IS_EMPTY', value: 'x' }] } }, UNDECLARED))).toBe('INVALID_FILTER_VALUE');
+      expect(predicatesOf(planOn({ mid: { terms: [{ path: 'x', operator: 'IS_EMPTY' }, { path: 'deep.n', operator: 'IS_NOT_EMPTY' }] } }, UNDECLARED).where))
         .toEqual([predicate('mid.x', 'IS_EMPTY'), predicate('mid.deep.n', 'IS_NOT_EMPTY')]);
     }
-    expect(codeOf(() => describeModelEmptiness(resolveModelPath(rootModels, 'QcModelRoot', 'mid'), { operator: 'IS_EMPTY' }))).toBe('UNSUPPORTED_QUERY');
+    const steps = resolveModelPath(rootModels, 'QcModelRoot', 'mid');
+    expect(describeModelEmptiness(steps, { operator: 'IS_EMPTY' })).toEqual(object({ x: STRING, deep: object({ owner: ref('QcTarget'), n: STRING }) }));
+    expect(codeOf(() => describeModelEmptiness(steps, { operator: 'IS_EMPTY', ...UNDECLARED }))).toBe('UNSUPPORTED_QUERY');
   });
 
   it('keeps an embedded id member under its declared scalar, and the null rule for the record identity only', async () => {
@@ -423,15 +458,20 @@ describe('describeEmptiness', () => {
     const paths = [
       ...ACCEPTED.map(([typeName, path]) => [typeName, path]),
       ...REJECTED.filter(([, path]) => !['ghost.label'].includes(path)).map(([typeName, path]) => [typeName, path]),
+      ...REFERENCES.map(([typeName, path]) => [typeName, path]),
       ...EMPTINESS_CASES.flatMap((item) => Object.keys(item.expectEmpty).filter((path) => path !== 'meta')
         .map((path) => [item.root === 'owned' ? owned(item.name).name : { item: 'QcItem', sid: 'QcSid' }[item.root], path])),
     ];
     for (const [typeName, path] of paths) {
       for (const value of [undefined, 'x']) {
-        const options = { operator: 'IS_EMPTY', value, path };
-        const fromTypes = outcome(() => describeEmptiness(typeNamed(typeName), path.split('.'), options));
-        const fromModels = outcome(() => describeModelEmptiness(resolveModelPath(models, typeName, path), options));
-        expect(fromModels, `${typeName}.${path} ${value}`).toEqual(fromTypes);
+        for (const referenceEmptiness of [true, false]) {
+          const options = {
+            operator: 'IS_EMPTY', value, path, referenceEmptiness,
+          };
+          const fromTypes = outcome(() => describeEmptiness(typeNamed(typeName), path.split('.'), options));
+          const fromModels = outcome(() => describeModelEmptiness(resolveModelPath(models, typeName, path), options));
+          expect(fromModels, `${typeName}.${path} ${value} ${referenceEmptiness}`).toEqual(fromTypes);
+        }
       }
     }
   });
@@ -494,9 +534,13 @@ describe('emptinessMemberPaths', () => {
 });
 
 describe('collectQueryOperators', () => {
-  it('reports the form, raw field and path, value and group depth of each condition', () => {
-    const entry = (fields) => ({ rawPath: undefined, value: undefined, hasValue: false, ambiguous: false, depth: 0, ...fields, segments: fields.path.split('.') });
-    expect(collectQueryOperators({
+  it('reports the form, raw field and path, value, group depth and construct of each condition', () => {
+    // The construct is the term or condition object itself, and null for a field filter's own operator.
+    const entry = (fields, construct = null) => ({
+      rawPath: undefined, value: undefined, hasValue: false, ambiguous: false, depth: 0, ...fields, segments: fields.path.split('.'),
+      construct, emptiness: EMPTINESS.includes(fields.operator),
+    });
+    const args = {
       note: { operator: 'IS_EMPTY' },
       dims: { terms: [{ operator: 'IS_EMPTY' }, { path: 'w', operator: 'EQ', value: 1 }, { path: '', operator: 'IS_NOT_EMPTY', value: null }] },
       shop: { operator: 'IS_EMPTY', terms: [{ path: 'name', value: 'a' }] },
@@ -511,23 +555,29 @@ describe('collectQueryOperators', () => {
         OR: [{ conditions: [{ field: 'outer', path: 'inner', value: 2 }] }],
       }],
       sort: { terms: [{ field: 'note', order: 'ASC' }] },
-    })).toEqual([
+    };
+    const terms = args.dims.terms;
+    const conditions = args.AND[0].conditions;
+    const entries = collectQueryOperators(args);
+    expect(entries).toEqual([
       entry({ operator: 'IS_EMPTY', path: 'note', form: 'filter', field: 'note' }),
       // A term without a path names the field itself.
-      entry({ operator: 'IS_EMPTY', path: 'dims', form: 'term', field: 'dims' }),
-      entry({ operator: 'EQ', path: 'dims.w', form: 'term', field: 'dims', rawPath: 'w', value: 1, hasValue: true }),
-      entry({ operator: 'IS_NOT_EMPTY', path: 'dims', form: 'term', field: 'dims', rawPath: '', value: null, hasValue: true }),
+      entry({ operator: 'IS_EMPTY', path: 'dims', form: 'term', field: 'dims' }, terms[0]),
+      entry({ operator: 'EQ', path: 'dims.w', form: 'term', field: 'dims', rawPath: 'w', value: 1, hasValue: true }, terms[1]),
+      entry({ operator: 'IS_NOT_EMPTY', path: 'dims', form: 'term', field: 'dims', rawPath: '', value: null, hasValue: true }, terms[2]),
       entry({ operator: 'IS_EMPTY', path: 'shop', form: 'beside-terms', field: 'shop' }),
-      entry({ operator: 'EQ', path: 'shop.name', form: 'term', field: 'shop', rawPath: 'name', value: 'a', hasValue: true }),
+      entry({ operator: 'EQ', path: 'shop.name', form: 'term', field: 'shop', rawPath: 'name', value: 'a', hasValue: true }, args.shop.terms[0]),
       entry({ operator: 'IS_NOT_EMPTY', path: 'lines', form: 'filter', field: 'lines' }),
-      entry({ operator: 'IS_EMPTY', path: 'shop.name.x', form: 'condition', field: 'shop.name', rawPath: 'x', ambiguous: true }),
-      entry({ operator: 'IS_EMPTY', path: 'plain', form: 'condition', field: 'plain', rawPath: '' }),
-      entry({ operator: 'IS_EMPTY', path: 'outer.inner.z', form: 'condition', field: 'outer.inner.z' }),
-      entry({ operator: 'IS_NOT_EMPTY', path: 'outer.inner', form: 'condition', field: 'outer.inner', rawPath: '' }),
-      entry({ operator: 'IS_EMPTY', path: 'outer.inner', form: 'condition', field: 'outer.inner', rawPath: null }),
-      entry({ operator: 'EQ', path: 'shop.name.y', form: 'condition', field: 'shop.name', rawPath: 'y', value: 'a', hasValue: true, ambiguous: true }),
-      entry({ operator: 'EQ', path: 'outer.inner', form: 'condition', field: 'outer', rawPath: 'inner', value: 2, hasValue: true, depth: 1 }),
+      entry({ operator: 'IS_EMPTY', path: 'shop.name.x', form: 'condition', field: 'shop.name', rawPath: 'x', ambiguous: true }, conditions[0]),
+      entry({ operator: 'IS_EMPTY', path: 'plain', form: 'condition', field: 'plain', rawPath: '' }, conditions[1]),
+      entry({ operator: 'IS_EMPTY', path: 'outer.inner.z', form: 'condition', field: 'outer.inner.z' }, conditions[2]),
+      entry({ operator: 'IS_NOT_EMPTY', path: 'outer.inner', form: 'condition', field: 'outer.inner', rawPath: '' }, conditions[3]),
+      entry({ operator: 'IS_EMPTY', path: 'outer.inner', form: 'condition', field: 'outer.inner', rawPath: null }, conditions[4]),
+      entry({ operator: 'EQ', path: 'shop.name.y', form: 'condition', field: 'shop.name', rawPath: 'y', value: 'a', hasValue: true, ambiguous: true }, conditions[5]),
+      entry({ operator: 'EQ', path: 'outer.inner', form: 'condition', field: 'outer', rawPath: 'inner', value: 2, hasValue: true, depth: 1 }, args.AND[0].OR[0].conditions[0]),
     ]);
+    expect(entries[1].construct).toBe(terms[0]);
+    expect(entries[7].construct).toBe(conditions[0]);
   });
 
   it('reads each group once, at the deepest level it appears at', () => {
@@ -544,25 +594,30 @@ describe('collectQueryOperators', () => {
   it('keeps skipping malformed entries', () => {
     expect(collectQueryOperators(null)).toEqual([]);
     expect(collectQueryOperators({ note: 'x', dims: { terms: [null, 'x', [1]] }, AND: [null, { conditions: [null, 5] }] })).toEqual([]);
-    expect(collectQueryOperators({ AND: [{ conditions: [{ operator: 'IS_EMPTY' }] }] })).toEqual([{
+    const condition = { operator: 'IS_EMPTY' };
+    expect(collectQueryOperators({ AND: [{ conditions: [condition] }] })).toEqual([{
       operator: 'IS_EMPTY', path: undefined, segments: [], form: 'condition', field: undefined, rawPath: undefined,
-      value: undefined, hasValue: false, ambiguous: false, depth: 0,
+      value: undefined, hasValue: false, ambiguous: false, depth: 0, construct: condition, emptiness: true,
     }]);
   });
 });
 
 describe('collectQueryPathEntries', () => {
   it('adds the field of every emptiness term without a path, next to the paths of its sibling terms', () => {
-    expect(collectQueryPathEntries({
+    const args = {
       dims: { terms: [{ operator: 'IS_EMPTY' }, { path: 'w', operator: 'EQ', value: 1 }] },
       plain: { terms: [{ path: 'a', operator: 'EQ', value: 1 }, { path: '', operator: 'IS_NOT_EMPTY' }, { path: null, operator: 'IS_EMPTY' }] },
       // Other operators keep today's paths.
       tags: { terms: [{ operator: 'EQ', value: 'x' }, { path: 'x', operator: 'EQ', value: 1 }] },
       lines: { terms: [{ operator: 'EQ', value: 1 }] },
-    })).toEqual([
-      { segments: ['dims'], group: null }, { segments: ['dims', 'w'], group: null },
-      { segments: ['plain', 'a'], group: null }, { segments: ['plain'], group: null },
-      { segments: ['tags', 'x'], group: null }, { segments: ['lines'], group: null },
+    };
+    const entry = (path, operator, construct = null) => ({
+      segments: path.split('.'), group: null, operator, construct,
+    });
+    expect(collectQueryPathEntries(args)).toEqual([
+      entry('dims', 'IS_EMPTY', args.dims.terms[0]), entry('dims.w', 'EQ', args.dims.terms[1]),
+      entry('plain.a', 'EQ', args.plain.terms[0]), entry('plain', 'IS_NOT_EMPTY', args.plain.terms[1]),
+      entry('tags.x', 'EQ', args.tags.terms[1]), entry('lines', 'EQ'),
     ]);
     expect(collectQueryPaths({ dims: { terms: [{ path: 'w', operator: 'EQ', value: 1 }, { path: '', operator: 'IS_EMPTY' }] } }))
       .toEqual([['dims', 'w'], ['dims']]);
@@ -575,19 +630,30 @@ describe('collectQueryPathEntries', () => {
       sort: { terms: [{ field: 'note', order: 'ASC' }] },
     };
     const group = args.AND[0];
-    const member = (path, owner = null) => ({ segments: path.split('.'), group: owner, member: true });
+    const [dimsW, dims] = args.dims.terms;
+    const [odim, inner] = group.conditions;
+    // Members carry the operator and the construct of the condition that reads them.
+    const entry = (path, owner, operator, construct) => ({
+      segments: path.split('.'), group: owner, operator, construct,
+    });
+    const member = (path, owner, operator, construct) => ({ ...entry(path, owner, operator, construct), member: true });
     expect(collectQueryPathEntries(args, 'find', { gqltype: fixture.Item, expandMembers: true })).toEqual([
-      { segments: ['dims', 'w'], group: null },
-      { segments: ['dims'], group: null }, member('dims.w'), member('dims.label'), member('dims.tags'),
-      { segments: ['odim'], group }, member('odim.w', group), member('odim.tags', group), member('odim.shop', group),
-      { segments: ['outer', 'inner'], group }, member('outer.inner.y', group), member('outer.inner.z', group),
-      { segments: ['note'], group: null },
+      entry('dims.w', null, 'EQ', dimsW),
+      entry('dims', null, 'IS_EMPTY', dims), member('dims.w', null, 'IS_EMPTY', dims), member('dims.label', null, 'IS_EMPTY', dims),
+      member('dims.tags', null, 'IS_EMPTY', dims),
+      entry('odim', group, 'IS_NOT_EMPTY', odim), member('odim.w', group, 'IS_NOT_EMPTY', odim), member('odim.tags', group, 'IS_NOT_EMPTY', odim),
+      member('odim.shop', group, 'IS_NOT_EMPTY', odim),
+      entry('outer.inner', group, 'IS_EMPTY', inner), member('outer.inner.y', group, 'IS_EMPTY', inner), member('outer.inner.z', group, 'IS_EMPTY', inner),
+      // Sort, groupId and fact paths have no operator and no construct.
+      entry('note', null, null, null),
     ]);
     // Without the flag or the type, and for other operators, nothing is expanded.
     expect(collectQueryPathEntries(args)).toEqual(collectQueryPathEntries(args, 'find', { gqltype: fixture.Item }));
-    expect(collectQueryPathEntries(args, 'find', { expandMembers: true }).some((entry) => entry.member)).toBe(false);
+    expect(collectQueryPathEntries(args, 'find', { expandMembers: true }).some((item) => item.member)).toBe(false);
     expect(collectQueryPathEntries({ AND: [{ conditions: [{ field: 'dims', operator: 'EQ', value: 1 }] }] }, 'find', { gqltype: fixture.Item, expandMembers: true }))
-      .toEqual([{ segments: ['dims'], group: expect.any(Object) }]);
+      .toEqual([{
+        segments: ['dims'], group: expect.any(Object), operator: 'EQ', construct: expect.any(Object),
+      }]);
   });
 
   it('expands fields filters and pathed terms too, and nothing for lists, scalars and virtual members', () => {
@@ -611,7 +677,11 @@ describe('collectQueryPathEntries', () => {
     expect(paths({ outer: { terms: [{ operator: 'IS_EMPTY' }] } })).toEqual(['outer', 'outer.x*', 'outer.inner*', 'outer.inner.y*', 'outer.inner.z*']);
     expect(paths({ aggregation: { groupId: 'dims', facts: [{ path: 'dims.w' }] } })).toEqual(['aggregation']);
     expect(collectQueryPathEntries({ aggregation: { groupId: 'dims', facts: [{ path: 'dims.w' }] } }, 'aggregate', { gqltype: fixture.Item, expandMembers: true }))
-      .toEqual([{ segments: ['dims'], group: null }, { segments: ['dims', 'w'], group: null }]);
+      .toEqual([{
+        segments: ['dims'], group: null, operator: null, construct: null,
+      }, {
+        segments: ['dims', 'w'], group: null, operator: null, construct: null,
+      }]);
   });
 });
 
@@ -680,7 +750,7 @@ describe('query plans with emptiness operators', () => {
       [condition('shop.name', 'x'), 'AMBIGUOUS_FILTER_FIELD'], [condition('outer.inner', 'z'), 'AMBIGUOUS_FILTER_FIELD'],
       [{ shop: { terms: [{ path: 'nope', ...IS_EMPTY }] } }, 'INVALID_FILTER_FIELD'], [{ shop: { terms: [{ path: 'name.x', ...IS_EMPTY }] } }, 'INVALID_FILTER_PATH'],
       [condition('ghost', 'label'), 'INVALID_FILTER_FIELD'], [{ lines: { terms: [{ path: 'nope', ...IS_EMPTY }] } }, 'INVALID_FILTER_FIELD'],
-      [nested({ field: 'shop', path: 'name', ...IS_EMPTY }, 5), 'UNSUPPORTED_QUERY'], [nested({ field: 'shop', path: 'name', ...IS_EMPTY }, 6), 'FILTER_DEPTH_EXCEEDED'],
+      [nested({ field: 'shop', path: 'name', ...IS_EMPTY }, 6), 'FILTER_DEPTH_EXCEEDED'],
       [nested({ field: 'lines', path: 'qty', ...IS_EMPTY }, 6), 'FILTER_DEPTH_EXCEEDED'],
       // Rule 3: leaves through lists and collections.
       [{ lines: { terms: [{ path: 'qty', ...IS_EMPTY }] } }, 'INVALID_FILTER_PATH'], [condition('reviews', 'text'), 'INVALID_FILTER_PATH'],
@@ -690,13 +760,23 @@ describe('query plans with emptiness operators', () => {
       [condition('shop', undefined, { value: '' }), 'INVALID_FILTER_VALUE'], [{ dims: { terms: [{ ...IS_EMPTY, value: [] }] } }, 'INVALID_FILTER_VALUE'],
       [{ tags: { ...IS_EMPTY, value: [] } }, 'INVALID_FILTER_VALUE'], [{ plain: { terms: [{ path: 'a', ...IS_EMPTY, value: 0 }] } }, 'INVALID_FILTER_VALUE'],
       [{ dims: { terms: [{ ...IS_EMPTY, value: false }] } }, 'INVALID_FILTER_VALUE'], [{ outer: { terms: [{ ...IS_EMPTY, value: {} }] } }, 'INVALID_FILTER_VALUE'],
-      // Rule 6: references and collections, crossed, reached, or members.
-      [{ shop: { terms: [IS_EMPTY] } }, 'UNSUPPORTED_QUERY'], [condition('shop'), 'UNSUPPORTED_QUERY'], [condition('shop', 'name'), 'UNSUPPORTED_QUERY'],
-      [{ reviews: { terms: [IS_EMPTY] } }, 'UNSUPPORTED_QUERY'], [{ odim: { terms: [IS_EMPTY] } }, 'UNSUPPORTED_QUERY'],
-      [{ odim: { terms: [{ path: 'shop', ...IS_EMPTY }] } }, 'UNSUPPORTED_QUERY'], [condition('shop', 'items'), 'UNSUPPORTED_QUERY'],
     ];
-    for (const [input, code] of cases) expect(codeOf(() => plan(input)), JSON.stringify(input)).toBe(code);
-    expect(codeOf(() => createQueryPlan(models, 'QcReview', { item: { terms: [{ path: 'dims', ...IS_EMPTY }] } }))).toBe('UNSUPPORTED_QUERY');
+    for (const [input, code] of cases) {
+      expect(codeOf(() => plan(input)), JSON.stringify(input)).toBe(code);
+      expect(codeOf(() => plan(input, UNDECLARED)), JSON.stringify(input)).toBe(code);
+    }
+    // Rule 6: references and collections, crossed, reached, or members. Without reference emptiness they fail last.
+    const references = [
+      { shop: { terms: [IS_EMPTY] } }, condition('shop'), condition('shop', 'name'), { reviews: { terms: [IS_EMPTY] } }, { odim: { terms: [IS_EMPTY] } },
+      { odim: { terms: [{ path: 'shop', ...IS_EMPTY }] } }, condition('shop', 'items'), nested({ field: 'shop', path: 'name', ...IS_EMPTY }, 5),
+    ];
+    for (const input of references) {
+      expect(predicatesOf(plan(input).where).map((node) => node.operator), JSON.stringify(input)).toEqual(['IS_EMPTY']);
+      expect(codeOf(() => plan(input, UNDECLARED)), JSON.stringify(input)).toBe('UNSUPPORTED_QUERY');
+    }
+    const review = { item: { terms: [{ path: 'dims', ...IS_EMPTY }] } };
+    expect(createQueryPlan(models, 'QcReview', review).where).toEqual(predicate('item.dims', 'IS_EMPTY'));
+    expect(codeOf(() => createQueryPlan(models, 'QcReview', review, UNDECLARED))).toBe('UNSUPPORTED_QUERY');
   });
 
   it('rejects an operator the compiler does not declare after rule 1 and before the other rules (rule 2)', () => {
@@ -721,14 +801,17 @@ describe('query plans with emptiness operators', () => {
         const [head, ...rest] = path.split('.');
         return { AND: [{ conditions: [{ field: head, path: rest.join('.'), operator: 'IS_EMPTY' }] }] };
       }),
-      ...REJECTED.filter(([typeName]) => typeName === 'QcItem').map(([, path]) => ({ AND: [{ conditions: [{ field: path, operator: 'IS_NOT_EMPTY' }] }] })),
+      ...[...REJECTED, ...REFERENCES].filter(([typeName]) => typeName === 'QcItem')
+        .map(([, path]) => ({ AND: [{ conditions: [{ field: path, operator: 'IS_NOT_EMPTY' }] }] })),
       { odim: { terms: [{ operator: 'IS_EMPTY', value: 'x' }] } },
     ];
     for (const input of inputs) {
-      const typed = errorOf(() => plan(input)) ?? plan(input);
-      const untyped = errorOf(() => createQueryPlan(untypedModels, 'QcItem', input)) ?? createQueryPlan(untypedModels, 'QcItem', input);
-      if (typed instanceof Error) expect([untyped.extensions?.code, untyped.message], JSON.stringify(input)).toEqual([typed.extensions?.code, typed.message]);
-      else expect(untyped, JSON.stringify(input)).toEqual(typed);
+      for (const options of [undefined, UNDECLARED]) {
+        const typed = errorOf(() => plan(input, options)) ?? plan(input, options);
+        const untyped = errorOf(() => createQueryPlan(untypedModels, 'QcItem', input, options)) ?? createQueryPlan(untypedModels, 'QcItem', input, options);
+        if (typed instanceof Error) expect([untyped.extensions?.code, untyped.message], JSON.stringify(input)).toEqual([typed.extensions?.code, typed.message]);
+        else expect(untyped, JSON.stringify(input)).toEqual(typed);
+      }
     }
     expect(createQueryPlan(untypedModels, 'QcSid', { id: { operator: 'IS_EMPTY' } }).where).toEqual(predicate('id', 'IS_EMPTY'));
   });

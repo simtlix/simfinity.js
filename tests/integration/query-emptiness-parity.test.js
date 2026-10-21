@@ -4,7 +4,9 @@
 // conditions; so do counted pages, aggregates, collection fields read one parent at a time and batched, and conditions
 // on the record's own fields that scopes and middleware add. The roots include an inferred inverse reference, which
 // takes the null rule. Every rejection gets the same code on both backends, and the same message wherever the runtime
-// gate writes it.
+// gate writes it. What 2a rejected under rule 6 and decision 3 (#108, part 2b) returns rows with both bundled adapters,
+// which declare referenceEmptiness, and keeps UNSUPPORTED_QUERY, reworded, with an adapter and a SQL plugin that declare
+// the operators without it.
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { GraphQLID, graphql } from 'graphql';
@@ -23,7 +25,7 @@ const mongoUri = process.env.SIMFINITY_MONGODB_URI;
 const postgresUri = process.env.SIMFINITY_POSTGRES_URI;
 const OPERATORS = ['IS_EMPTY', 'IS_NOT_EMPTY'];
 const IS_EMPTY = { operator: 'IS_EMPTY' };
-const LATER = 'emptiness through references and collections arrives with reference emptiness (#108)';
+const NOT_SUPPORTED = 'the database adapter does not support emptiness through references and collections';
 const IN_LIST = 'emptiness of a value inside a list is not defined';
 const ITEM_CASES = EMPTINESS_CASES.filter((item) => item.root === 'item');
 // Every case, with those of the inferred inverse reference Card.ownerId.
@@ -75,6 +77,20 @@ const shopRows = (path, operator, keep = () => true) => SHOPS.map((shop) => ({
     .map((item) => ({ key: item.name })).sort(byKey),
 }));
 const expected = (rootKey, path, operator) => expectedEmptinessKeys(rootKey, path, operator, CASES);
+// The item rows of a REFERENCE_CONDITIONS entry, and those rows under each shop that a list of shops reads.
+const referenceRows = (rows) => ({
+  none: [],
+  all: ITEM_CASES.map((item) => item.name).sort(),
+  S2: ITEM_CASES.filter((item, index) => shopOf(index) === 'S2').map((item) => item.name).sort(),
+  // odim's only other members are `w` and `tags`.
+  odim: intersection([expected('item', 'odim.w', 'IS_EMPTY'), expected('item', 'odim.tags', 'IS_EMPTY')]),
+})[rows];
+const rowsByShop = (keys, shops = SHOPS) => shops.map((shop) => ({
+  key: shop,
+  items: ITEM_CASES.filter((item, index) => shopOf(index) === shop && keys.includes(item.name)).map((item) => ({ key: item.name })).sort(byKey),
+}));
+// A Shop find scope that hides S2.
+const hideS2 = (args) => { args.key = { operator: 'NE', value: 'S2' }; };
 // The first error of a failed operation.
 class Failure {
   constructor({ message, extensions = {} }) {
@@ -106,11 +122,15 @@ const CLIENT_REJECTIONS = [
   [{ note: { ...IS_EMPTY, value: '' } }, 'INVALID_FILTER_VALUE', 400], [{ tags: { operator: 'IS_NOT_EMPTY', value: [] } }, 'INVALID_FILTER_VALUE', 400],
   [{ dims: { terms: [{ ...IS_EMPTY, value: {} }] } }, 'INVALID_FILTER_VALUE', 400], [condition('count', undefined, { value: 0 }), 'INVALID_FILTER_VALUE', 400],
   [condition('plain', 'a', { value: false }), 'INVALID_FILTER_VALUE', 400], [{ odim: { terms: [{ ...IS_EMPTY, value: 'x' }] } }, 'INVALID_FILTER_VALUE', 400],
-  // Rule 6: references and collections, crossed, reached, or members.
-  [{ shop: { terms: [IS_EMPTY] } }, 'UNSUPPORTED_QUERY', 400, LATER], [condition('shop', 'name'), 'UNSUPPORTED_QUERY', 400, LATER],
-  [{ reviews: { terms: [{ operator: 'IS_NOT_EMPTY' }] } }, 'UNSUPPORTED_QUERY', 400, LATER], [{ odim: { terms: [IS_EMPTY] } }, 'UNSUPPORTED_QUERY', 400, LATER],
-  [{ odim: { terms: [{ path: 'shop', ...IS_EMPTY }] } }, 'UNSUPPORTED_QUERY', 400, LATER], [condition('odim.shop.name'), 'UNSUPPORTED_QUERY', 400, LATER],
-  [nested({ field: 'shop', path: 'name', ...IS_EMPTY }, 5), 'UNSUPPORTED_QUERY', 400, LATER],
+];
+// What 2a rejected under rule 6, references and collections crossed, reached or members, with the rows a client reads
+// on a declaring adapter: [args, rows, rows when the Shop find scope hides S2]. Every item has a shop, S1 or S2, whose
+// only stored member is its key; no item has a review or an `odim.shop`.
+const REFERENCE_CONDITIONS = [
+  [{ shop: { terms: [IS_EMPTY] } }, 'none', 'S2'], [condition('shop', 'key'), 'none', 'S2'], [condition('shop', 'name'), 'all', 'all'],
+  [{ reviews: { terms: [{ operator: 'IS_NOT_EMPTY' }] } }, 'none', 'none'], [{ reviews: { terms: [IS_EMPTY] } }, 'all', 'all'],
+  [{ odim: { terms: [IS_EMPTY] } }, 'odim', 'odim'], [{ odim: { terms: [{ path: 'shop', ...IS_EMPTY }] } }, 'all', 'all'],
+  [condition('odim.shop.name'), 'all', 'all'], [nested({ field: 'shop', path: 'name', ...IS_EMPTY }, 5), 'all', 'all'],
 ];
 // What only middleware and scopes can write, and what they add that 2a cannot answer.
 const TRUSTED_REJECTIONS = [
@@ -122,7 +142,6 @@ const TRUSTED_REJECTIONS = [
   [{ reviews: IS_EMPTY }, 'MISSING_FILTER_PATH', 400],
   // A path through a virtual field that trusted code adds is a broken model.
   [condition('ghost', 'label'), 'INVALID_MODEL', 500],
-  [condition('shop', 'name'), 'UNSUPPORTED_QUERY', 400, LATER],
   [{ lines: { terms: [{ path: 'qty', ...IS_EMPTY }] } }, 'INVALID_FILTER_PATH', 400, IN_LIST],
   [{ note: { operator: 'IS_NOT_EMPTY', value: 'x' } }, 'INVALID_FILTER_VALUE', 400],
 ];
@@ -134,8 +153,8 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL emptiness parity'
   const statements = [];
   const commands = [];
   let pool;
-  // By backend name: `plain` reads collection fields one parent at a time, `batched` in batches, and `legacy`
-  // declares no operator beyond those of 3.7.0.
+  // By backend name: `plain` reads collection fields one parent at a time, `batched` in batches, `legacy` declares no
+  // operator beyond those of 3.7.0, and `undeclared` declares every operator but not referenceEmptiness.
   let backends;
 
   const execute = (runtime, source, variableValues, contextValue = {}) => graphql({ schema: runtime.schema, source, variableValues, contextValue });
@@ -212,11 +231,15 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL emptiness parity'
         plain: await runtimeOf('mongodb', createRuntime(createMongoAdapter()), 'Qy'),
         batched: await runtimeOf('mongodb', createRuntime(createMongoAdapter({ batchedCollections: true, collectionBatchSize: 2 })), 'Qyb'),
         legacy: await runtimeOf('mongodb', createRuntime({ ...createMongoAdapter(), queryFeatures: undefined }), 'Qyl', { initialize: false }),
+        undeclared: await runtimeOf('mongodb', createRuntime({ ...createMongoAdapter(), queryFeatures: { operators: createMongoAdapter().queryFeatures.operators } }), 'Qyu', { initialize: false }),
       },
       postgres: {
         plain: await runtimeOf('postgres', createPostgres({ pool, schema: namespace }), 'Qy'),
         batched: await runtimeOf('postgres', createPostgres({ pool: recording, schema: `${namespace}_b`, batchedCollections: true }), 'Qyb'),
         legacy: await runtimeOf('postgres', createSQL({ plugin: { ...postgresPlugin({ pool, schema: `${namespace}_l` }), queryFeatures: undefined } }), 'Qyl', { initialize: false }),
+        undeclared: await runtimeOf('postgres', createSQL({
+          plugin: { ...postgresPlugin({ pool, schema: `${namespace}_u` }), queryFeatures: { operators: postgresPlugin().queryFeatures.operators } },
+        }), 'Qyu', { initialize: false }),
       },
     };
     for (const runtimes of Object.values(backends)) {
@@ -232,7 +255,7 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL emptiness parity'
       await mongoose.disconnect();
     }
     if (pool) {
-      for (const schema of [namespace, `${namespace}_b`, `${namespace}_l`]) await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      for (const schema of [namespace, `${namespace}_b`, `${namespace}_l`, `${namespace}_u`]) await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
       await pool.end();
     }
   });
@@ -251,7 +274,7 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL emptiness parity'
       // Every record matches exactly one of the two operators.
       expect(alike([...expected(rootKey, path, 'IS_EMPTY'), ...expected(rootKey, path, 'IS_NOT_EMPTY')].sort()), path).toEqual(all);
     }
-  });
+  }, 60000);
 
   it('counts the records of every path before paging, alike', async () => {
     for (const rootKey of ROOTS) {
@@ -439,6 +462,59 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL emptiness parity'
     }
   });
 
+  it('answers what 2a rejected under rule 6 on both bundled adapters, which declare referenceEmptiness, alike on lists, aggregates and collection fields read either way', async () => {
+    for (const [args, rows, hidden] of REFERENCE_CONDITIONS) {
+      const label = JSON.stringify(args);
+      expect(await keys('item', args), label).toEqual(alike(referenceRows(rows)));
+      // A shop that the Shop find scope hides reads as missing.
+      expect(await keys('item', args, () => ({ scopes: { shop: hideS2 } })), `${label} S2 hidden`).toEqual(alike(referenceRows(hidden)));
+      const groups = await both('plain', (types) => aggregateOperation(types, 'item', args));
+      expect(each(groups, (found) => found.map((group) => group.groupId).sort()), `aggregate ${label}`).toEqual(alike(referenceRows(rows)));
+      if (throughShop([args])) continue;
+      for (const kind of ['plain', 'batched']) {
+        expect(await both(kind, (types) => shopsOperation(types, args)), `${kind} items ${label}`).toEqual(alike(rowsByShop(referenceRows(rows))));
+      }
+    }
+  });
+
+  // The undeclared runtimes have no storage, so these tests read no collection field, whose parents they could not list.
+  it('keeps UNSUPPORTED_QUERY, with the same reworded message on both backends, for what 2a rejected under rule 6 when the adapter or plugin does not declare referenceEmptiness', async () => {
+    for (const [args] of REFERENCE_CONDITIONS) {
+      const label = JSON.stringify(args);
+      const rejection = [args, 'UNSUPPORTED_QUERY', 400, NOT_SUPPORTED];
+      for (const [surface, build] of [['list', (types) => operation(types, 'item', args)], ['aggregate', (types) => aggregateOperation(types, 'item', args)]]) {
+        const found = await both('undeclared', build);
+        expectRejection(found, rejection, `${surface} ${label}`);
+        expect(found.mongodb.message, `${surface} ${label}`).toBe(found.postgres.message);
+      }
+    }
+  });
+
+  it('reads what middleware and scopes add through references with stored semantics on both bundled adapters, and keeps UNSUPPORTED_QUERY for it when the adapter or plugin does not declare referenceEmptiness', async () => {
+    // The Shop find scope hides S2, which trusted conditions do not read: every shop is stored, with only its key.
+    for (const [args, rows] of [[condition('shop', 'name'), 'all'], [{ shop: { terms: [IS_EMPTY] } }, 'none'], [condition('shop', 'key'), 'none']]) {
+      const label = JSON.stringify(args);
+      // Middleware, or Item's own scope, adds `args` on the operation it is given.
+      const writers = (operationName) => [
+        ['middleware', () => ({ middleware: (params) => { if (isItem(params, operationName)) Object.assign(params.args, structuredClone(args)); }, scopes: { shop: hideS2 } })],
+        ['scope', () => ({ scopes: { [operationName]: (scopeArgs) => { Object.assign(scopeArgs, structuredClone(args)); }, shop: hideS2 } })],
+      ];
+      const rejection = [args, 'UNSUPPORTED_QUERY', 400, NOT_SUPPORTED];
+      for (const [writer, context] of writers('find')) {
+        expect(await keys('item', {}, context), `${writer} ${label}`).toEqual(alike(referenceRows(rows)));
+        for (const kind of ['plain', 'batched']) {
+          expect(await both(kind, (types) => shopsOperation(types, {}), context), `${writer} ${kind} items ${label}`).toEqual(alike(rowsByShop(referenceRows(rows), ['S1', 'S3'])));
+        }
+        expectRejection(await both('undeclared', (types) => operation(types, 'item', {}), context), rejection, `${writer} undeclared ${label}`);
+      }
+      for (const [writer, context] of writers('aggregate')) {
+        const groups = await both('plain', (types) => aggregateOperation(types, 'item', {}), context);
+        expect(each(groups, (found) => found.map((group) => group.groupId).sort()), `${writer} aggregate ${label}`).toEqual(alike(referenceRows(rows)));
+        expectRejection(await both('undeclared', (types) => aggregateOperation(types, 'item', {}), context), rejection, `${writer} undeclared aggregate ${label}`);
+      }
+    }
+  });
+
   it('rejects the forms only middleware and scopes write, and what they add that 2a cannot answer, with the same code and message on both backends', async () => {
     const middleware = (args) => () => ({ middleware: (params) => { if (isItem(params, 'find')) Object.assign(params.args, args); } });
     const scope = (args) => () => ({ scopes: { find: (scopeArgs) => { Object.assign(scopeArgs, args); } } });
@@ -452,12 +528,29 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL emptiness parity'
     }
   });
 
-  it('rejects a joined target find scope that uses an emptiness operator with the same message on both backends, naming the scope', async () => {
-    const found = await both('plain', (types) => operation(types, 'item', { shop: { terms: [{ path: 'name', operator: 'EQ', value: 'S1' }] } }), () => ({
+  it('applies a joined target find scope that uses an emptiness operator as a trusted condition on both bundled adapters, alike', async () => {
+    // A legacy client path into S1, whose stored shop has no name, under a Shop find scope that tests Shop's name.
+    const inS1 = ITEM_CASES.filter((item, index) => shopOf(index) === 'S1').map((item) => item.name).sort();
+    expect(inS1.length).toBeGreaterThan(1);
+    const client = { shop: { terms: [{ path: 'key', operator: 'EQ', value: 'S1' }] } };
+    const scoped = (scope) => () => ({ scopes: { shop: (args) => { Object.assign(args, structuredClone(scope)); } } });
+    expect(await keys('item', client, scoped({ name: IS_EMPTY }))).toEqual(alike(inS1));
+    expect(await keys('item', client, scoped({ name: { operator: 'IS_NOT_EMPTY' } }))).toEqual(alike([]));
+    // A legacy join keeps its 403 for a scope that reads a collection, emptiness or not.
+    for (const operator of OPERATORS) {
+      expect(await keys('item', client, scoped({ items: { terms: [{ operator }] } })), operator).toEqual(alike(expect.objectContaining({
+        code: 'FORBIDDEN_FILTER_PATH', status: 403, message: 'Query path shop enters QyShop, whose find scope filters through the collection QyShop.items',
+      })));
+    }
+  });
+
+  it('rejects a joined target find scope that uses an emptiness operator with the same message on both backends, naming the scope, when the adapter or plugin does not declare referenceEmptiness', async () => {
+    const found = await both('undeclared', (types) => operation(types, 'item', { shop: { terms: [{ path: 'name', operator: 'EQ', value: 'S1' }] } }), () => ({
       scopes: { shop: (args) => { args.name = IS_EMPTY; } },
     }));
     expectRejection(found, [null, 'UNSUPPORTED_QUERY', 400], 'joined scope');
-    expect(found.mongodb.message).toBe(`Query path shop enters QyShop, whose find scope tests shop.name with IS_EMPTY: ${LATER}; until then, use EQ null in the QyShop find scope`);
+    expect(found.mongodb.message).toBe(`Query path shop enters QyuShop, whose find scope tests shop.name with IS_EMPTY: ${NOT_SUPPORTED}; use EQ null in the QyuShop find scope`);
+    expect(found.postgres.message).toBe(found.mongodb.message);
   });
 
   it('rejects the emptiness operators for an adapter or SQL plugin that does not declare them, alike', async () => {

@@ -49,6 +49,10 @@ export const bindPlugin = (plugin) => {
   // describes, and then holds only for that one: a copy such as { ...postgresPlugin(options), compileQuery } inherits
   // the bundled declaration, which does not describe its compiler, and compiles the operators of 3.7.0 until it
   // declares its own. A declaration that names none describes the plugin's compileQuery, whichever it is.
+  // `referenceEmptiness: true` (#108 part 2b) says that compileQuery compiles emptiness predicates that cross or end at
+  // references and collections, and the `scopes` of client constructs; it is copied under the same rule, and only
+  // when true, so a plugin that does not declare it binds the `{ operators }` of earlier versions and its plans keep
+  // UNSUPPORTED_QUERY for such paths. Undefined and null mean false.
   const { queryFeatures } = plugin;
   if (queryFeatures != null && (typeof queryFeatures !== 'object' || Array.isArray(queryFeatures)
     || !Array.isArray(queryFeatures.operators) || queryFeatures.operators.some((value) => typeof value !== 'string'))) {
@@ -57,8 +61,14 @@ export const bindPlugin = (plugin) => {
   if (queryFeatures?.compileQuery !== undefined && typeof queryFeatures.compileQuery !== 'function') {
     invalid('SQL plugin queryFeatures.compileQuery must be a function');
   }
+  if (queryFeatures?.referenceEmptiness != null && typeof queryFeatures.referenceEmptiness !== 'boolean') {
+    invalid('SQL plugin queryFeatures.referenceEmptiness must be a boolean');
+  }
   const declared = queryFeatures != null && (queryFeatures.compileQuery === undefined || queryFeatures.compileQuery === bound.compileQuery);
-  bound.queryFeatures = Object.freeze({ operators: Object.freeze([...(declared ? queryFeatures.operators : LEGACY_QUERY_OPERATORS)]) });
+  bound.queryFeatures = Object.freeze({
+    operators: Object.freeze([...(declared ? queryFeatures.operators : LEGACY_QUERY_OPERATORS)]),
+    ...(declared && queryFeatures.referenceEmptiness === true ? { referenceEmptiness: true } : {}),
+  });
   for (const [group, names] of Object.entries(methods)) {
     const members = {};
     for (const key of names) {

@@ -7,7 +7,7 @@ import {
 } from 'graphql';
 import * as simfinity from '../../packages/mongodb/src/index.js';
 import { createMongoAdapter, createRuntime, createValidatedScalar } from '../../packages/mongodb/src/index.js';
-import { createMongoQueries } from '../../packages/mongodb/src/mongo/queries.js';
+import { MONGO_QUERY_OPERATORS, createMongoQueries } from '../../packages/mongodb/src/mongo/queries.js';
 import { createQueryPlan, describeModels } from '../../packages/core/src/index.js';
 import {
   createEmptinessTypes, emptinessArgs, emptinessQuery, expectedEmptinessKeys, readMongoEmptinessDocuments,
@@ -347,11 +347,13 @@ describe('MongoDB emptiness codes, compared with createQueryPlan', () => {
     [{ tags: { ...IS_EMPTY, value: [] } }, 'INVALID_FILTER_VALUE'], [{ plain: { terms: [{ path: 'a', ...IS_EMPTY, value: 0 }] } }, 'INVALID_FILTER_VALUE'],
     [{ dims: { terms: [{ ...IS_EMPTY, value: false }] } }, 'INVALID_FILTER_VALUE'], [{ outer: { terms: [{ ...IS_EMPTY, value: {} }] } }, 'INVALID_FILTER_VALUE'],
     [condition('id', undefined, { value: HEX }), 'INVALID_FILTER_VALUE'],
-    // Rule 6: references and collections, crossed, reached, or members.
-    [{ shop: { terms: [IS_EMPTY] } }, 'UNSUPPORTED_QUERY'], [condition('shop'), 'UNSUPPORTED_QUERY'], [condition('shop', 'name'), 'UNSUPPORTED_QUERY'],
-    [{ reviews: { terms: [IS_EMPTY] } }, 'UNSUPPORTED_QUERY'], [{ odim: { terms: [IS_EMPTY] } }, 'UNSUPPORTED_QUERY'],
-    [{ odim: { terms: [{ path: 'shop', ...IS_EMPTY }] } }, 'UNSUPPORTED_QUERY'], [condition('shop', 'items'), 'UNSUPPORTED_QUERY'],
-    [condition('odim.shop.name'), 'UNSUPPORTED_QUERY'], [nested({ field: 'shop', path: 'name', ...IS_EMPTY }, 5), 'UNSUPPORTED_QUERY'],
+  ];
+  // Rule 6 (#108 part 2b): references and collections, crossed, reached, or members, which MongoDB compiles and a plan
+  // without reference emptiness rejects.
+  const REFERENCES = [
+    { shop: { terms: [IS_EMPTY] } }, condition('shop'), condition('shop', 'name'), { reviews: { terms: [IS_EMPTY] } },
+    { odim: { terms: [IS_EMPTY] } }, { odim: { terms: [{ path: 'shop', ...IS_EMPTY }] } }, condition('shop', 'items'),
+    condition('odim.shop.name'), nested({ field: 'shop', path: 'name', ...IS_EMPTY }, 5),
   ];
   const CODES = [
     // Rule 1: form, syntax, fields and depth.
@@ -377,7 +379,7 @@ describe('MongoDB emptiness codes, compared with createQueryPlan', () => {
     }
   });
 
-  test('rules 3 to 6 give the shared messages', async () => {
+  test('rules 3 to 5 give the shared messages', async () => {
     for (const [input] of SHARED) {
       const mongo = await errorOf(() => simfinity.buildQuery(input, types.Item));
       const plan = await errorOf(() => createQueryPlan(models, types.Item.name, input));
@@ -387,6 +389,17 @@ describe('MongoDB emptiness codes, compared with createQueryPlan', () => {
       .toBe('Filter on dims takes IS_EMPTY only in a term; to test the field itself, use a term without a path: dims: { terms: [{ operator: IS_EMPTY }] }');
     expect((await errorOf(() => simfinity.buildQuery({ reviews: { operator: 'IS_NOT_EMPTY', terms: [{ path: 'text', value: 'x' }] } }, types.Item))).message)
       .toBe('Filter on reviews takes IS_NOT_EMPTY only in a term; to test the field itself, use a term without a path: reviews: { terms: [{ operator: IS_NOT_EMPTY }] }');
+  });
+
+  test('references and collections are accepted by both, and rejected by a plan without reference emptiness', async () => {
+    for (const input of REFERENCES) {
+      expect(await mongoOutcome(input), JSON.stringify(input)).toBeNull();
+      expect(await planOutcome(input), JSON.stringify(input)).toBeNull();
+      if (input.AND?.[0]?.conditions) expect(await codeOf(() => simfinity.buildFilterGroupMatch(input.AND[0], types.Item, [], {})), JSON.stringify(input)).toBeNull();
+      const plan = await errorOf(() => createQueryPlan(models, types.Item.name, input, { referenceEmptiness: false }));
+      expect(plan?.extensions?.code, JSON.stringify(input)).toBe('UNSUPPORTED_QUERY');
+      expect(plan.message, JSON.stringify(input)).toMatch(/: the database adapter does not support emptiness through references and collections$/);
+    }
   });
 
   test('every accepted path is accepted by both, in every form', async () => {
@@ -762,10 +775,37 @@ describe.each(servers)('MongoDB emptiness on a %s', (label, uri, prefix) => {
     });
 
     test('rejected conditions fail before the query runs', async () => {
-      expect(await errorCode(fixture, 'item', { odim: { terms: [{ operator: 'IS_EMPTY' }] } })).toBe('UNSUPPORTED_QUERY');
       expect(await errorCode(fixture, 'item', { lines: { terms: [{ path: 'qty', operator: 'IS_EMPTY' }] } })).toBe('INVALID_FILTER_PATH');
       expect(await errorCode(fixture, 'item', { note: { operator: 'IS_EMPTY', value: '' } })).toBe('INVALID_FILTER_VALUE');
-      expect(await errorCode(fixture, 'item', { AND: [{ conditions: [{ field: 'shop', operator: 'IS_NOT_EMPTY' }] }] })).toBe('UNSUPPORTED_QUERY');
+    });
+
+    // #108 part 2b: the adapter declares reference emptiness, so an object with a reference member and a reference end
+    // return rows. No item of this fixture has a shop, and Shop has no find scope.
+    const REFERENCE_FILTERS = [
+      [{ odim: { terms: [{ operator: 'IS_EMPTY' }] } }, 'IS_EMPTY'],
+      [{ AND: [{ conditions: [{ field: 'odim', operator: 'IS_NOT_EMPTY' }] }] }, 'IS_NOT_EMPTY'],
+      [{ AND: [{ conditions: [{ field: 'shop', operator: 'IS_NOT_EMPTY' }] }] }, 'IS_NOT_EMPTY'],
+      [{ shop: { terms: [{ operator: 'IS_EMPTY' }] } }, 'IS_EMPTY'],
+    ];
+    test('an object with a reference member and a reference end return rows', async () => {
+      const all = await keysOf(fixture, 'item', {});
+      // The object is empty when its stored members are: `w`, `tags`, and the `shop` that no item has.
+      const odim = intersection([expectedKeys('item', 'odim.w', 'IS_EMPTY'), expectedKeys('item', 'odim.tags', 'IS_EMPTY')]);
+      expect(odim.length).toBeGreaterThan(0);
+      expect(odim.length).toBeLessThan(all.length);
+      const expected = [odim, all.filter((key) => !odim.includes(key)), [], all];
+      for (const [index, [args]] of REFERENCE_FILTERS.entries()) expect(await keysOf(fixture, 'item', args), JSON.stringify(args)).toEqual(expected[index]);
+    });
+
+    test('an adapter that does not declare reference emptiness keeps UNSUPPORTED_QUERY for them', async () => {
+      const adapter = Object.create(createMongoAdapter(), { queryFeatures: { value: { operators: [...MONGO_QUERY_OPERATORS] } } });
+      const undeclared = createFixture(`${prefix}Undeclared`, { adapter, preventCreatingCollection: true });
+      for (const [args] of REFERENCE_FILTERS) {
+        const { source, variables } = emptinessQuery(undeclared.types, 'item', args);
+        const error = (await undeclared.execute(source, variables)).errors?.[0];
+        expect(error?.extensions?.code, JSON.stringify(args)).toBe('UNSUPPORTED_QUERY');
+        expect(error.message, JSON.stringify(args)).toMatch(/: the database adapter does not support emptiness through references and collections$/);
+      }
     });
 
     test('an application scalar is empty only when missing or null, at the root and as a member: an array is a value', async () => {

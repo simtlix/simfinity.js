@@ -179,7 +179,9 @@ export interface SQLChildrenQueryCompiler<
 }
 /**
  * A SQL plugin's query language features: core's `QueryFeatures`, optionally tied to the `compileQuery` they describe,
- * as a `compileChildrenQuery` names the `compileQuery` it reproduces.
+ * as a `compileChildrenQuery` names the `compileQuery` it reproduces. `referenceEmptiness` may be null, which means
+ * false like undefined; any other value that is not a boolean throws `INVALID_SQL_PLUGIN` (400). The adapter's
+ * bound `queryFeatures` holds `referenceEmptiness: true` only when the declaration holds and says true.
  */
 export interface SQLQueryFeatures<
   Configuration extends object = SQLConfiguration,
@@ -314,8 +316,20 @@ export interface SQLPlugin<
    * `{ kind: 'predicate', path, operator, value: null }`, whose `path` may end at an embedded object, an embedded list
    * or a scalar list as well as at a scalar, after `createQueryPlan` has applied their checks; it compiles the
    * emptiness of the record's own fields described by `QueryOperator`, and builds `IS_NOT_EMPTY` as its exact
-   * complement. Declaring them does not lift the `UNSUPPORTED_QUERY` (400) that emptiness through references and
-   * collections gets in the plans.
+   * complement. Emptiness through references and collections fails with `UNSUPPORTED_QUERY` (400) in the plans
+   * unless the declaration also says `referenceEmptiness: true`, under the same `compileQuery` rule as `operators`.
+   *
+   * With `referenceEmptiness: true`, an emptiness predicate's `path` may also cross single references and end at a
+   * reference or a collection, and an embedded object may have reference and collection members. A predicate without
+   * `scopes` comes from trusted code (middleware, scopes, direct calls) and reads stored data: a reference is empty
+   * when it points to no record, a collection when no child points to the record, and a leaf through a reference
+   * reads that record's value. A predicate with `scopes` is a client's: `scopes` has one key per dotted path that it
+   * crosses (each a join that admits the target only where the predicate there admits it), and per reference or
+   * collection end and member (each restricted to the records the predicate admits); each value is a
+   * `QueryPredicate` planned on the target entity, or null when the target's scope added nothing, and a record that
+   * a scope hides reads as missing. A null hop after a restricted one still reads through that restricted join. A
+   * `scopes` that lacks a key for one of those paths must not compile as trusted; `postgresPlugin()` fails such a
+   * plan with `DETACHED_CLIENT_FILTER` (500).
    */
   queryFeatures?: SQLQueryFeatures<Configuration, Description, Id> | null | undefined;
   naming: SQLNaming;

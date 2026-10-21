@@ -1,11 +1,16 @@
 import { paginationStages } from './query-limits.js';
 import SimfinityError from './errors/simfinity.error.js';
 import {
-  QUERY_OPERATORS, describeEmptiness, describeModelEmptiness, emptinessMemberPaths, isEmptinessOperator, textQueryOperator,
-  validateTextFilterValue,
+  QUERY_OPERATORS, describeEmptiness, describeModelEmptiness, emptinessMemberPaths, emptinessScopeTargets, isEmptinessOperator,
+  textQueryOperator, validateTextFilterValue,
 } from './query-operators.js';
 
 const fail = (message, code = 'INVALID_FILTER_VALUE') => { throw new SimfinityError(message, code, 400); };
+// A client scope marker that cannot be honored: only the runtime writes `__scope` on a term or group
+// condition, and fills it after middleware (#108 part 2b).
+const detached = (message) => {
+  throw new SimfinityError(`${message}; only the runtime writes and fills client scope markers (docs/guide/middleware.md)`, 'DETACHED_CLIENT_FILTER', 500);
+};
 const operators = new Set(QUERY_OPERATORS);
 const reserved = new Set(['AND', 'OR', 'sort', 'pagination', 'aggregation']);
 // `aggregation` is a generated argument only on aggregate endpoints; on find and count a field of
@@ -19,37 +24,45 @@ const isPathless = (path) => path == null || path === '';
 const hasTermPath = (term) => typeof term?.path === 'string' && term.path !== '';
 
 /**
- * Internal: the model paths named by generated query arguments, as `{ segments, group }` entries.
- * Covers filter keys and relation terms, AND/OR conditions, list sort terms, and aggregation
- * groupId and fact paths; aggregate sort terms name result keys. Outside aggregate mode a key
- * named `aggregation` is a field filter like any other. `group` is the AND/OR group
- * object whose `conditions` hold the path, or null for the other forms. Malformed entries are
- * left to the backends. An emptiness term without a path (omitted, null or "") names its field,
- * also next to sibling terms that have paths.
+ * Internal: the model paths named by generated query arguments, as `{ segments, group, operator,
+ * construct }` entries. Covers filter keys and relation terms, AND/OR conditions, list sort terms,
+ * and aggregation groupId and fact paths; aggregate sort terms name result keys. Outside aggregate
+ * mode a key named `aggregation` is a field filter like any other. `group` is the AND/OR group
+ * object whose `conditions` hold the path, or null for the other forms. `operator` is the operator
+ * that reads the path, an omitted one read as `EQ`, or null for sort, groupId and fact paths.
+ * `construct` is the term or group condition object that names the path, or null for a field
+ * filter's own operator and for sort, groupId and fact paths. Malformed entries are left to the
+ * backends. An emptiness term without a path (omitted, null or "") names its field, also next to
+ * sibling terms that have paths.
  *
  * With `expandMembers` and the queried `gqltype`, the path of each emptiness condition is followed by
- * the stored member paths that condition reads (emptinessMemberPaths), as `{ segments, group,
- * member: true }` entries, so that the checks of client paths apply to them. Only client arguments
- * are expanded.
+ * the stored member paths that condition reads (emptinessMemberPaths), as entries with the same
+ * group, operator and construct and `member: true`, so that the checks of client paths apply to them.
+ * Only client arguments are expanded.
  */
 export const collectQueryPathEntries = (args, operation = 'find', { gqltype, expandMembers = false } = {}) => {
   const entries = [];
-  const add = (path, group = null) => {
-    if (typeof path === 'string' && path) entries.push({ segments: path.split('.'), group });
+  const add = (path, group = null, operator = null, construct = null) => {
+    if (typeof path === 'string' && path) entries.push({ segments: path.split('.'), group, operator, construct });
   };
-  const addEmptiness = (path, group = null) => {
-    add(path, group);
+  const addEmptiness = (path, group, operator, construct) => {
+    add(path, group, operator, construct);
     if (!expandMembers || typeof path !== 'string' || !path) return;
-    for (const segments of emptinessMemberPaths(gqltype, path.split('.'))) entries.push({ segments, group, member: true });
+    for (const segments of emptinessMemberPaths(gqltype, path.split('.'))) {
+      entries.push({
+        segments, group, operator, construct, member: true,
+      });
+    }
   };
   if (!args || typeof args !== 'object') return entries;
+  const operatorOf = (item) => item?.operator ?? 'EQ';
   const visit = (group) => {
     if (!group || typeof group !== 'object') return;
     for (const condition of listOf(group.conditions)) {
       if (typeof condition?.field !== 'string') continue;
       const path = isPathless(condition.path) ? condition.field : `${condition.field}.${condition.path}`;
-      if (isEmptinessOperator(condition.operator)) addEmptiness(path, group);
-      else add(path, group);
+      if (isEmptinessOperator(condition.operator)) addEmptiness(path, group, condition.operator, condition);
+      else add(path, group, operatorOf(condition), condition);
     }
     for (const item of nestedGroups(group)) visit(item);
   };
@@ -59,22 +72,24 @@ export const collectQueryPathEntries = (args, operation = 'find', { gqltype, exp
     const terms = listOf(value.terms);
     const pathless = (term) => isEmptinessOperator(term?.operator) && isPathless(term.path);
     if (!terms.some(hasTermPath)) {
-      if (isEmptinessOperator(value.operator) || terms.some(pathless)) addEmptiness(name);
-      else add(name);
+      const term = terms.find(pathless);
+      if (term) addEmptiness(name, null, term.operator, term);
+      else if (isEmptinessOperator(value.operator)) addEmptiness(name, null, value.operator, null);
+      else add(name, null, operatorOf(value));
       continue;
     }
     let field = false;
     for (const term of terms) {
       if (hasTermPath(term)) {
-        if (isEmptinessOperator(term.operator)) addEmptiness(`${name}.${term.path}`);
-        else add(`${name}.${term.path}`);
+        if (isEmptinessOperator(term.operator)) addEmptiness(`${name}.${term.path}`, null, term.operator, term);
+        else add(`${name}.${term.path}`, null, operatorOf(term), term);
       } else if (!field && pathless(term)) {
-        addEmptiness(name);
+        addEmptiness(name, null, term.operator, term);
         field = true;
       }
     }
     // An emptiness operator beside terms is rejected later; until then it reads the field too.
-    if (!field && isEmptinessOperator(value.operator)) addEmptiness(name);
+    if (!field && isEmptinessOperator(value.operator)) addEmptiness(name, null, value.operator, null);
   }
   for (const item of nestedGroups(args)) visit(item);
   if (operation === 'aggregate') {
@@ -86,8 +101,8 @@ export const collectQueryPathEntries = (args, operation = 'find', { gqltype, exp
 
 /**
  * Internal: every condition the arguments hold, as `{ operator, path, segments, form, field, rawPath,
- * value, hasValue, ambiguous, depth }` entries: field filters, relation terms and AND/OR group
- * conditions at any depth, with an omitted operator read as `EQ`.
+ * value, hasValue, ambiguous, depth, construct, emptiness }` entries: field filters, relation terms
+ * and AND/OR group conditions at any depth, with an omitted operator read as `EQ`.
  * - `form` is 'filter' (an argument's own operator, without a terms array), 'beside-terms' (an
  *   operator written next to a terms array, which the compilers read only to reject an emptiness
  *   operator), 'term' or 'condition'.
@@ -98,6 +113,10 @@ export const collectQueryPathEntries = (args, operation = 'find', { gqltype, exp
  * - `ambiguous` marks a condition with both a dotted field and a non-empty path.
  * - `depth` is 0 for argument filters and for the groups listed in args.AND and args.OR, and one more
  *   for each nested group; a group reached at several depths reports the deepest.
+ * - `construct` is the term or group condition object itself, or null for a field filter's own
+ *   operator ('filter' and 'beside-terms'). These objects are the only ones that carry a client scope
+ *   marker, `__scope` (#108 part 2b).
+ * - `emptiness` tells whether the operator is IS_EMPTY or IS_NOT_EMPTY.
  * Sort, pagination and aggregation hold no operators. Malformed entries are skipped and left to the
  * backends; a group reached twice is read once.
  */
@@ -108,8 +127,9 @@ export const collectQueryOperators = (args, operation = 'find') => {
   const add = (item, form, field, rawPath, depth, ambiguous = false) => {
     if (!isObject(item)) return;
     const path = isPathless(rawPath) ? field : `${field}.${rawPath}`;
+    const operator = item.operator ?? 'EQ';
     entries.push({
-      operator: item.operator ?? 'EQ',
+      operator,
       path,
       segments: typeof path === 'string' && path ? path.split('.') : [],
       form,
@@ -119,6 +139,8 @@ export const collectQueryOperators = (args, operation = 'find') => {
       hasValue: Object.hasOwn(item, 'value'),
       ambiguous,
       depth,
+      construct: form === 'term' || form === 'condition' ? item : null,
+      emptiness: isEmptinessOperator(operator),
     });
   };
   // The deepest level of each group, as the backends' depth limit counts it; a group inside itself is
@@ -210,27 +232,68 @@ export const resolveModelPath = (models, entityName, path) => {
  * operator on an object filter without terms, or beside terms, fails with MISSING_FILTER_PATH. A
  * filter path of other operators that has more than one segment and ends at an object fails with
  * INVALID_FILTER_PATH; a bare object field keeps MISSING_FILTER_PATH.
+ *
+ * With `referenceEmptiness` (#108 part 2b; by default true when `operators` is omitted and false
+ * when it is given), an emptiness path may also cross single references, end at a reference or a
+ * collection, or read reference and collection members; without it they fail with UNSUPPORTED_QUERY.
+ * Such a predicate is trusted, with stored semantics, unless its term or group condition carries the
+ * client scope marker the runtime fills, `__scope: { id, scopes }`. Then the predicate gets `scopes:
+ * { [path]: where | null }`, with one key for each path emptinessScopePaths lists for it: the plan of
+ * that path's target find scope arguments, planned on the target type in its own frame, or null when
+ * the scope added nothing. A `__scope` without filled `scopes`, without one of those keys, or on a
+ * construct that reads no reference or collection fails with DETACHED_CLIENT_FILTER (500) after the
+ * checks above; a `__scope` anywhere else is never read.
  */
-export const createQueryPlan = (models, entityName, input = {}, { mode = 'find', operators: supported } = {}) => {
+export const createQueryPlan = (models, entityName, input = {}, {
+  mode = 'find', operators: supported, referenceEmptiness = supported == null,
+} = {}) => {
   const allowed = supported == null ? null : new Set(supported);
+  const references = referenceEmptiness === true;
   const combine = (kind, terms) => {
     const active = terms.filter(Boolean);
     return active.length > 1 ? { kind, terms: active } : active[0] || null;
   };
+  // The client scope marker of a construct, lifted into the predicate's `scopes`: each target scope's
+  // arguments are planned on the target type, as trusted find arguments in their own frame, whatever
+  // the query's mode, with the operator names already read (`operators` may be a one-time iterable).
+  const liftScopes = (marker, shape, segments, operator) => {
+    const label = `${operator} on ${segments.join('.')}`;
+    const targets = emptinessScopeTargets(shape, segments);
+    const paths = Object.keys(targets);
+    if (!paths.length) detached(`${label} carries a client scope marker, but reads no reference or collection`);
+    const scopes = marker?.scopes;
+    if (!scopes || typeof scopes !== 'object' || Array.isArray(scopes)) detached(`${label} carries a client scope marker whose scopes are not filled`);
+    const lifted = {};
+    for (const path of paths) {
+      if (!Object.hasOwn(scopes, path) || scopes[path] === undefined) detached(`${label} carries a client scope marker without the scope of ${path}`);
+      lifted[path] = scopes[path] === null
+        ? null
+        : createQueryPlan(models, targets[path], scopes[path], { mode: 'find', operators: allowed ?? undefined, referenceEmptiness: references }).where;
+    }
+    return lifted;
+  };
+  const hasMarker = (construct) => construct != null && typeof construct === 'object' && Object.hasOwn(construct, '__scope');
   // Rule 1 has resolved the path; rule 2 is the compiler's operators, rules 3 to 6 describeEmptiness's.
-  const emptiness = (path, steps, operator, value) => {
+  const emptiness = (path, steps, operator, value, construct) => {
     if (allowed && !allowed.has(operator)) fail(`The ${operator} filter operator is not supported by this query compiler`, 'UNSUPPORTED_QUERY');
     const segments = Array.isArray(path) ? path : path.split('.');
-    const options = { operator, value, path: segments.join('.') };
+    const options = {
+      operator, value, path: segments.join('.'), referenceEmptiness: references,
+    };
     const gqltype = models.entities.find((item) => item.name === entityName)?.gqltype;
-    if (gqltype) describeEmptiness(gqltype, segments, options);
-    else describeModelEmptiness(steps, options);
-    return { kind: 'predicate', path: segments, operator, value: null };
+    const shape = gqltype ? describeEmptiness(gqltype, segments, options) : describeModelEmptiness(steps, options);
+    const node = {
+      kind: 'predicate', path: segments, operator, value: null,
+    };
+    if (hasMarker(construct)) node.scopes = liftScopes(construct.__scope, shape, segments, operator);
+    return node;
   };
-  const predicate = (path, operator, value) => {
+  // `construct` is the term or group condition that holds the predicate, the only objects whose
+  // `__scope` is read; null for a field filter's own operator.
+  const predicate = (path, operator, value, construct = null) => {
     const steps = resolveModelPath(models, entityName, path);
     const op = operator ?? 'EQ';
-    if (isEmptinessOperator(op)) return emptiness(path, steps, op, value);
+    if (isEmptinessOperator(op)) return emptiness(path, steps, op, value, construct);
     const field = steps.at(-1);
     if (field.kind !== 'scalar' && !field.inferred) {
       fail(`Filter on object field ${path} requires a scalar path`, steps.length > 1 ? 'INVALID_FILTER_PATH' : 'MISSING_FILTER_PATH');
@@ -243,6 +306,7 @@ export const createQueryPlan = (models, entityName, input = {}, { mode = 'find',
     if (['IN', 'NIN', 'BTW'].includes(op) && !Array.isArray(value)) fail(`${op} requires an array value`);
     if (op === 'BTW' && value.length !== 2) fail('BTW requires two values');
     if (textQueryOperator(op)) validateTextFilterValue(op, value, field.scalar, path);
+    if (hasMarker(construct)) detached(`${op} on ${Array.isArray(path) ? path.join('.') : path} carries a client scope marker, but is not an emptiness condition`);
     return { kind: 'predicate', path: Array.isArray(path) ? path : path.split('.'), operator: op, value: value === undefined ? null : value };
   };
   const validateGroup = (value, keys = ['conditions', 'AND', 'OR']) => {
@@ -256,7 +320,7 @@ export const createQueryPlan = (models, entityName, input = {}, { mode = 'find',
     for (const condition of value.conditions || []) {
       if (!condition || typeof condition.field !== 'string') fail('Invalid filter path', 'INVALID_FILTER_PATH');
       if (condition.field.includes('.') && condition.path) fail('Filter condition cannot use both dotted field syntax and a separate path', 'AMBIGUOUS_FILTER_FIELD');
-      terms.push(predicate(condition.path ? `${condition.field}.${condition.path}` : condition.field, condition.operator, condition.value));
+      terms.push(predicate(condition.path ? `${condition.field}.${condition.path}` : condition.field, condition.operator, condition.value, condition));
     }
     for (const item of value.AND || []) terms.push(group(item, depth + 1));
     terms.push(combine('or', (value.OR || []).map((item) => group(item, depth + 1))));
@@ -282,11 +346,11 @@ export const createQueryPlan = (models, entityName, input = {}, { mode = 'find',
     else for (const term of value.terms) {
       if (!term || typeof term !== 'object' || Array.isArray(term)) fail('Expected a relationship filter term');
       if (isEmptinessOperator(term.operator) && isPathless(term.path)) {
-        terms.push(predicate(name, term.operator, term.value));
+        terms.push(predicate(name, term.operator, term.value, term));
         continue;
       }
       if (typeof term.path !== 'string' || !term.path) fail('Relationship terms require a path', 'INVALID_FILTER_PATH');
-      terms.push(predicate(`${name}.${term.path}`, term.operator, term.value));
+      terms.push(predicate(`${name}.${term.path}`, term.operator, term.value, term));
     }
   }
   for (const item of input.AND || []) terms.push(group(item));

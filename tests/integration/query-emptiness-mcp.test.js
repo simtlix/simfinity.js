@@ -3,7 +3,10 @@
 // conditions without a path, and return the rows the cases of tests/helpers/query-emptiness.js expect; the adapter
 // receives no `value` key; the tool schemas and descriptions state the rules; an SDK client that validates tool
 // input and output runs them; and rejected conditions come back as tool errors with the codes of the runtime gate,
-// before the adapter runs.
+// before the adapter runs. Conditions through references and collections (#108, part 2b) return rows with both bundled
+// adapters, which declare referenceEmptiness: a reference-emptiness call on the fixture of reference emptiness reads a
+// record that the target's find scope hides as a missing one, and the adapter receives the filled client scope marker.
+// An adapter that declares the operators without referenceEmptiness gets UNSUPPORTED_QUERY tool errors.
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { graphql } from 'graphql';
@@ -17,15 +20,16 @@ import { postgresPlugin } from '../../packages/postgres/src/index.js';
 import { createSQLAdapter } from '../../packages/sql/src/adapter.js';
 import { createMCPServer, generateMCPTools } from '../../packages/mcp/src/index.js';
 import {
-  EMPTINESS_CASES, createEmptinessTypes, expectedEmptinessKeys, registerEmptinessTypes, seedEmptiness,
+  EMPTINESS_CASES, REFERENCE_CASES, createEmptinessTypes, createReferenceEmptinessTypes, expectedEmptinessKeys, expectedReferenceRows,
+  registerEmptinessTypes, registerReferenceEmptinessTypes, seedEmptiness, seedReferenceEmptiness,
 } from '../helpers/query-emptiness.js';
 
 const mongoUri = process.env.SIMFINITY_MONGODB_URI;
 const postgresUri = process.env.SIMFINITY_POSTGRES_URI;
 const OPERATORS = ['IS_EMPTY', 'IS_NOT_EMPTY'];
-const LATER = 'emptiness through references and collections arrives with reference emptiness (#108)';
+const NOT_SUPPORTED = 'the database adapter does not support emptiness through references and collections';
 const IN_LIST = 'emptiness of a value inside a list is not defined';
-const NO_VALUE = 'IS_EMPTY and IS_NOT_EMPTY take no value, and a term or group condition without path applies them to an embedded object or list itself';
+const NO_VALUE = 'IS_EMPTY and IS_NOT_EMPTY take no value, and a term or group condition without path applies them to the field itself: an embedded object or list, or a reference or collection where the database adapter supports it';
 // The item and sid cases; the owned roots are left out.
 const CASES = EMPTINESS_CASES.filter((item) => item.root !== 'owned');
 const byKey = { sort: { terms: [{ field: 'key', order: 'ASC' }] } };
@@ -36,6 +40,16 @@ const keysOf = (result, field) => {
 const firstError = (result) => JSON.parse(result.content[0].text).errors[0];
 const intersection = (lists) => lists.reduce((kept, keys) => kept.filter((key) => keys.includes(key)));
 const expected = (path, operator, rootKey = 'item') => expectedEmptinessKeys(rootKey, path, operator, CASES);
+const aggregation = { groupId: 'key', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }] };
+const referenceRows = (name, shape) => expectedReferenceRows(REFERENCE_CASES.find((item) => item.name === name), shape);
+// Conditions that 2a rejected under rule 6: a path that crosses or ends at a reference, one that ends at a collection,
+// and an object with a reference member, with what an adapter that does not declare referenceEmptiness says of each.
+const REFERENCE_CONDITIONS = [
+  [{ shop: { terms: [{ path: 'name', operator: 'IS_EMPTY' }] } }, 'IS_EMPTY on shop.name crosses the reference shop'],
+  [{ shop: { terms: [{ operator: 'IS_NOT_EMPTY' }] } }, 'IS_NOT_EMPTY on shop ends at the reference shop'],
+  [{ reviews: { terms: [{ operator: 'IS_EMPTY' }] } }, 'IS_EMPTY on reviews ends at the collection reviews'],
+  [{ odim: { terms: [{ operator: 'IS_EMPTY' }] } }, 'IS_EMPTY on odim reads the reference member odim.shop'],
+];
 
 // Each backend's adapter, wrapped so that `reads` receives the arguments of every find, count and aggregate call.
 const recording = (adapter, reads) => ({
@@ -58,6 +72,7 @@ const backends = [
         api,
         // Rejected before the adapter runs, so it needs no storage.
         legacy: () => createRuntime({ ...createMongoAdapter(), queryFeatures: undefined }),
+        undeclared: () => createRuntime({ ...createMongoAdapter(), queryFeatures: { operators: createMongoAdapter().queryFeatures.operators } }),
         async initialize() { for (const { model } of api.getRegistrations()) if (model) await model.createCollection(); },
         async close() {
           if (mongoose.connection.readyState) {
@@ -80,6 +95,9 @@ const backends = [
       return {
         api,
         legacy: () => createRuntime(createSQLAdapter({ ...postgresPlugin({ pool, schema: `${namespace}_l` }), queryFeatures: undefined })),
+        undeclared: () => createRuntime(createSQLAdapter({
+          ...postgresPlugin({ pool, schema: `${namespace}_u` }), queryFeatures: { operators: postgresPlugin().queryFeatures.operators },
+        })),
         initialize: () => adapter.initialize(),
         async close() { await pool.query(`DROP SCHEMA IF EXISTS "${namespace}" CASCADE`); await pool.end(); },
       };
@@ -97,9 +115,14 @@ for (const backend of backends) {
       database = await backend.create(namespace, reads);
       const types = createEmptinessTypes('Qz', { backend: backend.backend });
       registerEmptinessTypes(database.api, types);
+      // The fixture of reference emptiness, whose scopes read the context's shape.
+      const referenceTypes = createReferenceEmptinessTypes('Qm', { backend: backend.backend });
+      registerReferenceEmptinessTypes(database.api, referenceTypes);
       schema = database.api.createSchema();
       await database.initialize();
-      await seedEmptiness((source, variableValues) => graphql({ schema, source, variableValues, contextValue: {} }), types, CASES);
+      const execute = (source, variableValues) => graphql({ schema, source, variableValues, contextValue: {} });
+      await seedEmptiness(execute, types, CASES);
+      await seedReferenceEmptiness(execute, referenceTypes);
       ({ tools, callTool } = generateMCPTools(schema, { context: () => ({}) }));
     }, 60000);
     afterAll(async () => { await database?.close(); });
@@ -175,8 +198,7 @@ for (const backend of backends) {
         .toEqual(groups.map((key) => ({ groupId: key, facts: { n: 1 } })));
     });
 
-    it('returns INVALID_FILTER_VALUE, INVALID_FILTER_PATH and UNSUPPORTED_QUERY tool errors before the adapter runs', async () => {
-      const aggregation = { groupId: 'key', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }] };
+    it('returns INVALID_FILTER_VALUE and INVALID_FILTER_PATH tool errors before the adapter runs', async () => {
       const REJECTED = [
         [{ note: { operator: 'IS_EMPTY', value: 'x' } }, 'INVALID_FILTER_VALUE', 'IS_EMPTY takes no value on note: omit it or pass null'],
         [{ count: { operator: 'IS_NOT_EMPTY', value: 0 } }, 'INVALID_FILTER_VALUE', 'IS_NOT_EMPTY takes no value on count: omit it or pass null'],
@@ -185,12 +207,6 @@ for (const backend of backends) {
         // A path that continues inside an embedded list or a collection.
         [{ lines: { terms: [{ path: 'qty', operator: 'IS_EMPTY' }] } }, 'INVALID_FILTER_PATH', IN_LIST],
         [{ reviews: { terms: [{ path: 'text', operator: 'IS_NOT_EMPTY' }] } }, 'INVALID_FILTER_PATH', IN_LIST],
-        // A path that crosses or ends at a reference, a path that ends at a collection, and an object with a
-        // reference member.
-        [{ shop: { terms: [{ path: 'name', operator: 'IS_EMPTY' }] } }, 'UNSUPPORTED_QUERY', LATER],
-        [{ shop: { terms: [{ operator: 'IS_NOT_EMPTY' }] } }, 'UNSUPPORTED_QUERY', LATER],
-        [{ reviews: { terms: [{ operator: 'IS_EMPTY' }] } }, 'UNSUPPORTED_QUERY', LATER],
-        [{ odim: { terms: [{ operator: 'IS_EMPTY' }] } }, 'UNSUPPORTED_QUERY', LATER],
       ];
       reads.length = 0;
       for (const [args, code, wording] of REJECTED) {
@@ -203,6 +219,59 @@ for (const backend of backends) {
         }
       }
       expect(reads).toEqual([]);
+    });
+
+    it('returns the rows of conditions through references and collections, which the bundled adapter declares, from list and aggregate tools', async () => {
+      // No item of this fixture has a shop, a review or an `odim.shop`.
+      const items = CASES.filter((item) => item.root === 'item').map((item) => item.name).sort();
+      const rows = [items, [], items, intersection([expected('odim.w', 'IS_EMPTY'), expected('odim.tags', 'IS_EMPTY')])];
+      for (const [index, [args]] of REFERENCE_CONDITIONS.entries()) {
+        expect(keysOf(await callTool('qzItems', { ...args, ...byKey }), 'qzItems'), JSON.stringify(args)).toEqual(rows[index]);
+        const result = await callTool('qzItems_aggregate', { ...args, aggregation });
+        expect(result.isError, result.content[0].text).toBe(false);
+        expect(result.structuredContent.qzItems_aggregate.map((group) => group.groupId).sort(), JSON.stringify(args)).toEqual(rows[index]);
+      }
+      expect(rows[3].length).toBeGreaterThan(0);
+    });
+
+    it('returns UNSUPPORTED_QUERY tool errors for conditions through references and collections when the adapter declares the operators without referenceEmptiness', async () => {
+      const api = database.undeclared();
+      api.preventCreatingCollection(true);
+      registerEmptinessTypes(api, createEmptinessTypes('QzUndeclared', { backend: backend.backend }));
+      const undeclared = generateMCPTools(api.createSchema(), { context: () => ({}) });
+      for (const [args, wording] of REFERENCE_CONDITIONS) {
+        for (const [name, extra] of [['qzUndeclaredItems', {}], ['qzUndeclaredItems_aggregate', { aggregation }]]) {
+          const result = await undeclared.callTool(name, { ...args, ...extra });
+          expect(result.isError, `${name} ${JSON.stringify(args)}`).toBe(true);
+          expect(firstError(result).extensions?.code, `${name} ${JSON.stringify(args)}`).toBe('UNSUPPORTED_QUERY');
+          expect(firstError(result).message, `${name} ${JSON.stringify(args)}`).toBe(`${wording}: ${NOT_SUPPORTED}`);
+        }
+      }
+    });
+
+    it('reads a record that the target\'s find scope hides as missing in reference-emptiness calls, and passes the filled marker to the adapter', async () => {
+      const restricted = generateMCPTools(schema, { context: () => ({ shape: 'NE' }) });
+      const shopEmpty = { shop: { terms: [{ operator: 'IS_EMPTY' }] }, ...byKey };
+      // S2, c's shop, is hidden under NE; an admin reads the stored shops.
+      reads.length = 0;
+      expect(keysOf(await restricted.callTool('qmProducts', shopEmpty), 'qmProducts')).toEqual(referenceRows('shop IS_EMPTY', 'NE'));
+      // The tool's own read; the others read the nested collections of its rows.
+      expect(reads.filter((args) => Object.hasOwn(args, 'shop')).map((args) => args.shop)).toEqual([{
+        terms: [{ operator: 'IS_EMPTY', __scope: { id: 0, scopes: { shop: { AND: [{ conditions: [{ field: 'name', operator: 'NE', value: 'S2' }] }] } } } }],
+      }]);
+      expect(keysOf(await callTool('qmProducts', shopEmpty), 'qmProducts')).toEqual(referenceRows('shop IS_EMPTY', 'admin'));
+      expect(referenceRows('shop IS_EMPTY', 'NE')).not.toEqual(referenceRows('shop IS_EMPTY', 'admin'));
+      // A group condition through a hidden Pro on a counted page, and a collection whose hidden reviews read as missing
+      // in an aggregate.
+      const chain = referenceRows('pro.shop IS_EMPTY', 'NE');
+      const page = await restricted.callTool('qmProducts', {
+        AND: [{ conditions: [{ field: 'pro', path: 'shop', operator: 'IS_EMPTY' }] }], ...byKey, pagination: { page: 1, size: 2, count: true },
+      });
+      expect(keysOf(page, 'qmProducts')).toEqual(chain.slice(0, 2));
+      expect(page.structuredContent.totalCount).toBe(chain.length);
+      const grouped = await restricted.callTool('qmProducts_aggregate', { reviews: { terms: [{ operator: 'IS_EMPTY' }] }, aggregation });
+      expect(grouped.isError, grouped.content[0].text).toBe(false);
+      expect(grouped.structuredContent.qmProducts_aggregate.map((group) => group.groupId).sort()).toEqual(referenceRows('reviews IS_EMPTY', 'NE'));
     });
 
     it('returns UNSUPPORTED_QUERY tool errors for an adapter that does not declare the operators', async () => {
