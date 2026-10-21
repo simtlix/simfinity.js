@@ -1,7 +1,8 @@
 # @simtlix/eslint-plugin-simfinity
 
 Optional editor/CI checks for **Simfinity 3.8.0**, shared by MongoDB and PostgreSQL.
-The plugin provides ten precise rules. It does not execute application
+Published version 0.2.0 provides ten precise rules. This source adds an
+**unreleased eleventh rule**, `valid-policy-expression`. It does not execute application
 code or load Simfinity, GraphQL, database drivers or the MCP SDK.
 
 The plugin has its own version (`0.2.0`) and is outside Simfinity's five runtime
@@ -12,7 +13,9 @@ npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.2.0'
 ```
 
 Version 0.2.0 adds `no-async-auth-extractor` and `no-auth-plugin-as-middleware`.
-Version 0.1.0 contains the preceding eight rules. Runtime versions are independent.
+Version 0.1.0 contains the preceding eight rules. The new policy-expression rule
+requires an archive built from this source; npm 0.2.0 does not include it yet.
+Runtime versions are independent.
 
 ESLint **9.30.1 or later within 9.x**, ESM flat config and Node.js
 `^18.18.0 || ^20.9.0 || >=21.1.0` are supported. ESLint 10 and CommonJS
@@ -28,8 +31,8 @@ export default [simfinity.configs['recommended-3.8']];
 Selecting `recommended-3.8` explicitly selects the **3.8.0 runtime contract**.
 The plugin does not discover your installed runtime version, infer a database,
 or claim compatibility with older/newer contracts. The two new authorization
-checks were also revalidated against Simfinity 3.10.0; their runtime contracts
-are unchanged. All ten rules are errors
+checks and the unreleased expression check were also revalidated against Simfinity
+3.10.0; their runtime contracts are unchanged. All eleven source rules are errors
 in this preset and can be individually disabled using normal ESLint config.
 
 For TypeScript, install `@typescript-eslint/parser` in the application and add:
@@ -54,6 +57,7 @@ export default [
 | `valid-required-claims` | Missing/empty/non-string claims or an inline empty/sparse list with invalid entries | Supply nonempty strings; roles use OR, permissions use AND |
 | `no-async-auth-extractor` | An async function or async generator in a built-in auth extractor position | Resolve data in the GraphQL context or use an async custom rule |
 | `no-auth-plugin-as-middleware` | A proven `createAuthPlugin()` result passed to Simfinity `use()` | Install the plugin in the GraphQL server's Envelop plugins |
+| `valid-policy-expression` (unreleased) | Malformed inline policy syntax in `createRuleFromExpression` or configured permission rules | Use valid operators, operands, logical arrays and `parent`/`args`/`ctx` references |
 | `valid-query-limits` | Explicit `maxPageSize` is not a positive safe integer or `undefined` | Set a valid cap; omission/undefined restores 1000 |
 | `valid-connection-field` | A locally registered relation has a dotted or non-string link field under 3.8.0 | Use a field name; declare embedded references on their owning type |
 
@@ -74,13 +78,29 @@ imported permission maps and unknown values are skipped.
 Authorization checks cover `createAuthPlugin`, not the deprecated middleware
 factories. Maps and rule/claim arrays must be inline to inspect their entries;
 constructor/call results and mutable object/array aliases remain unknown.
-Permission rules preserve booleans, custom/async functions and expression objects
-such as `{ allOf: [] }`. Beyond an empty object, policy-expression validation is
-outside this batch. Composition accepts functions, not permission-map booleans,
+Permission rules preserve booleans, custom/async functions and valid expression objects
+such as `{ allOf: [] }`. Composition accepts functions, not permission-map booleans,
 arrays or expression objects. `createRule` checks only its first argument.
 Required names are not trimmed: `' '` is valid. All checks preserve the application's
 choice of roles, permissions and AND/OR semantics. Rule-array traversal is bounded
 to 200 nodes per `createAuthPlugin` call.
+
+`valid-policy-expression` checks the first argument of `createRuleFromExpression`
+and nonempty inline expressions in `createAuthPlugin` field rules, including nested
+rule arrays. It catches unknown operators, invalid `eq`/`in` arity, sparse arrays,
+malformed `allOf`/`anyOf`/`not`, invalid reference objects/paths, nested literal
+references and provably invalid operands or membership lists. It preserves booleans,
+multiple operator keys (implicit AND), empty logical arrays, explicit null and valid
+equality literals. It does not decide whether a valid expression grants access or
+infer incompatible comparison types (AUTH-12).
+
+Expression/rule traversal is bounded to 200 per recognized call, and oversized
+containers are skipped. Object/array aliases, dynamic expressions, call/constructor
+results, spreads, computed keys, getters and method syntax remain unknown. Primitive
+constant aliases and TypeScript assertions are supported. Direct `isPolicyExpression`
+and `evaluateExpression` calls are not checked: applications can intentionally use
+them to validate untrusted inputs. The rule loads no runtime to perform its analysis;
+a separate repository test compares hand-paired fixtures with the shared runtime.
 
 The extractor rule checks `requireAuth`'s first argument, `requireRole`'s
 `userPath`/`rolePath`, `requirePermission`'s `userPath`/`permissionsPath`, and
@@ -130,14 +150,14 @@ directory and install the resulting archive in the consuming application.
 The isolated consumer packs/installs the actual archive, exercises JS/TS flat
 config and TypeScript config declarations, checks rule IDs/locations, and verifies
 that `--fix` changes no source. No runtime dependency is installed or executed.
-The bounded trial lints both Barber backends and injects eight in-memory sentinel
+The bounded trial lints both Barber backends and injects ten in-memory sentinel
 violations per backend to check coverage; it does not run the applications or
 certify their business policies. `.github/workflows/eslint-plugin.yml` owns this
 package's checks. `release-eslint-plugin.yml` publishes stable plugin tags via OIDC
 and tests the exact packed archive before publication. Runtime releases do not
 install, test, version or publish this plugin.
 
-The authorization rules address AUTH-02/04/06/07 and bounded AUTH-08/14 variants
+The source authorization rules address AUTH-02/04/06/07 and bounded AUTH-08/11/14 variants
 within the documented limits.
 The remaining authorization candidates are tracked in
 [issue #117](https://github.com/simtlix/simfinity.js/issues/117), under the

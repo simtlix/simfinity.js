@@ -17,6 +17,12 @@ Version 0.2.0 adds `no-async-auth-extractor` and `no-auth-plugin-as-middleware`
 to the eight rules in 0.1.0. Their contracts were revalidated against both
 Simfinity 3.8.0 and 3.10.0; this does not certify every rule for newer runtimes.
 
+The repository source additionally includes **unreleased** `valid-policy-expression`
+(AUTH-11), an eleventh rule in `recommended-3.8`, checked against the same two runtime
+versions. npm 0.2.0 does not include it yet. To try it before publication, pack the
+plugin source and install that archive as described in its
+[README](https://github.com/simtlix/simfinity.js/tree/master/tools/eslint-plugin-simfinity#contributing-and-verification).
+
 Use Node.js 24 for development. The plugin supports ESLint 9.30.1–9.x, ESM flat
 config and Node.js `^18.18.0 || ^20.9.0 || >=21.1.0`. Selecting this preset explicitly
 selects the 3.8.0 runtime contract; it does not detect your installed runtime or
@@ -129,6 +135,48 @@ constructor/call results, object/array aliases and nonempty policy-expression
 objects unknown. It does not validate the expression DSL, match permission keys
 against the schema or inspect the deprecated middleware factories. Nested rule
 inspection is bounded to 200 nodes per plugin call.
+
+## valid-policy-expression
+
+**Unreleased; available in the repository source.** This check validates syntax in
+the first argument to `createRuleFromExpression` and in nonempty inline expressions
+inside `createAuthPlugin` permission maps, including nested rule arrays. It reports
+proven contract errors without deciding the application's permissions.
+
+```javascript
+import { createAuthPlugin, createRuleFromExpression } from '@simtlix/simfinity-core/auth';
+
+createRuleFromExpression({ eq: [{ ref: 'context.user.id' }, 1] }); // diagnostic: use ctx
+createRuleFromExpression({ eq: [1] }); // diagnostic: exactly two operands
+createAuthPlugin({ Book: { title: { anyOf: [true, { unknown: true }] } } }); // diagnostic
+createRuleFromExpression({ in: [{ ref: 'ctx.id' }, [{ ref: 'parent.id' }]] }); // diagnostic: nested literal ref
+
+createRuleFromExpression({ eq: [{ ref: 'ctx.user.id' }, { ref: 'parent.ownerId' }] });
+createRuleFromExpression({ in: [{ ref: 'ctx.id' }, { ref: 'args.allowedIds' }] });
+createAuthPlugin({ Book: { title: { allOf: [] }, summary: { anyOf: [] } } }); // valid syntax
+```
+
+`eq` and `in` take dense two-element arrays. `allOf` and `anyOf` take dense arrays
+of expressions; empty arrays remain valid logical identities. `not` takes an
+expression. Unknown operators invalidate the AST even inside an `anyOf` with a
+valid true branch. Multiple operator keys retain implicit AND semantics.
+
+References must contain only `ref`, use `parent`, `args` or `ctx`, and have no empty,
+`__proto__`, `prototype` or `constructor` segments. Root and array-index paths are
+valid. References nested inside literals are not resolved by the runtime and are
+rejected. A literal `in` list can contain null, booleans, strings, finite numbers,
+bigints or genuine ObjectIds; the lint rule does not infer constructor results.
+Undefined, NaN and function operands are invalid. Explicit null and object/array,
+RegExp or Date equality literals remain supported where the runtime accepts them.
+
+The analysis reads inline containers and safe primitive aliases, with a traversal
+budget of 200 per recognized call. Oversized containers, object/array aliases,
+dynamic values, call/constructor results, spreads, computed properties, getters and
+method syntax remain unknown. Empty/invalid permission rules already diagnosed by
+`valid-permissions` do not receive duplicate expression errors. Direct calls to
+`isPolicyExpression` or `evaluateExpression` remain available for intentional
+invalid-input validation. Valid syntax does not imply a grant: comparison types,
+runtime reference values and application authorization intent are outside this rule.
 
 ## valid-auth-composition
 
@@ -296,7 +344,7 @@ outside this first release. Alias analysis is bounded to 40 and type traversal
 to 200 nodes per file. No application imports, factories or database connections
 run during analysis.
 
-The bounded consumer trial lints both Barber backends and checks eight injected
+The bounded consumer trial lints both Barber backends and checks ten injected
 policy, relation and authorization-contract violations per backend in memory.
 It does not certify their business policies
 or measure accuracy against the entire candidate catalogue. Native operations
@@ -308,5 +356,5 @@ include an isolated packed JS/TS consumer. The broader candidates in
 [issue #112](https://github.com/simtlix/simfinity.js/issues/112) are follow-up work.
 Authorization delivery and remaining candidates are tracked in
 [issue #117](https://github.com/simtlix/simfinity.js/issues/117). The authorization
-rules cover AUTH-02/04/06/07 and bounded AUTH-08/14 variants. This area remains open for its other candidates and
+source rules cover AUTH-02/04/06/07 and bounded AUTH-08/11/14 variants. This area remains open for its other candidates and
 the limitations above.

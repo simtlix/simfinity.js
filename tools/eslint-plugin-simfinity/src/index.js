@@ -8,6 +8,7 @@ import validAuthComposition from './rules/valid-auth-composition.js';
 import validRequiredClaims from './rules/valid-required-claims.js';
 import noAsyncAuthExtractor from './rules/no-async-auth-extractor.js';
 import noAuthPluginAsMiddleware from './rules/no-auth-plugin-as-middleware.js';
+import validPolicyExpression from './rules/valid-policy-expression.js';
 
 const plugin = {
   meta: { name: '@simtlix/eslint-plugin-simfinity', version: '0.2.0', namespace: 'simfinity' },
@@ -22,6 +23,7 @@ const plugin = {
     'valid-required-claims': validRequiredClaims,
     'no-async-auth-extractor': noAsyncAuthExtractor,
     'no-auth-plugin-as-middleware': noAuthPluginAsMiddleware,
+    'valid-policy-expression': validPolicyExpression,
   },
   configs: {},
 };
