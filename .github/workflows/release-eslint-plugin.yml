@@ -3,6 +3,15 @@ name: Release ESLint plugin
 on:
   push:
     tags: ['eslint-plugin-v*']
+  pull_request:
+    branches: [master]
+    paths:
+      - 'tools/eslint-plugin-simfinity/**'
+      - 'scripts/**'
+      - 'tests/eslint-plugin-*.test.js'
+      - 'examples/barber/mongodb/**'
+      - 'examples/barber/postgres/**'
+      - '.github/workflows/release-eslint-plugin.yml'
   workflow_dispatch:
 
 permissions:
@@ -29,7 +38,7 @@ jobs:
         id: pack
         env:
           ESLINT_RELEASE_TAG: ${{ github.ref_name }}
-          ESLINT_RELEASE_PREVIEW: ${{ github.event_name == 'workflow_dispatch' }}
+          ESLINT_RELEASE_PREVIEW: ${{ github.event_name != 'push' }}
         run: node scripts/release-eslint-plugin.js pack "$RUNNER_TEMP/eslint-release" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

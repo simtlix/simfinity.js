@@ -7,8 +7,13 @@ const workflow = existsSync(path) ? yaml.load(readFileSync(path, 'utf8')) : {};
 const scripts = job => (job?.steps || []).map(step => step.run || '').join('\n');
 
 describe('independent ESLint publication workflow', () => {
-  it('uses plugin tags; dispatch only previews and never publishes', () => {
-    expect(workflow.on).toEqual({ push: { tags: ['eslint-plugin-v*'] }, workflow_dispatch: null });
+  it('uses plugin tags; PRs and dispatch only preview and never publish', () => {
+    expect(workflow.on.push).toEqual({ tags: ['eslint-plugin-v*'] });
+    expect(workflow.on).toHaveProperty('workflow_dispatch', null);
+    expect(workflow.on.pull_request.paths).toContain('.github/workflows/release-eslint-plugin.yml');
+    expect(workflow.on.pull_request.paths).toContain('tools/eslint-plugin-simfinity/**');
+    const pack = workflow.jobs.pack.steps.find(step => step.id === 'pack');
+    expect(pack.env.ESLINT_RELEASE_PREVIEW).toBe('${{ github.event_name != \'push\' }}');
     expect(workflow.jobs?.publish?.if).toBe('github.event_name == \'push\' && startsWith(github.ref, \'refs/tags/eslint-plugin-v\')');
     expect(workflow.jobs?.release?.needs).toEqual(['pack', 'publish']);
     expect(workflow.jobs?.docs?.needs).toBe('release');
