@@ -22,6 +22,26 @@ const unwrap = (type) => {
   return { named, required, list, itemRequired };
 };
 
+// Follows a validated scalar's baseScalarType chain to the scalar it is stored as, stopping where the
+// chain repeats, as MongoDB's resolveStorageScalar does.
+const rootScalar = (type) => {
+  let base = type;
+  const visited = new Set();
+  while (base?.baseScalarType && !visited.has(base)) {
+    visited.add(base);
+    base = base.baseScalarType;
+  }
+  return base;
+};
+
+/**
+ * Internal: the name of the scalar a field type is stored as: the end of its baseScalarType chain, by
+ * its own name (`Date` stays `Date`). An enum or a scalar without a base gives its own name, and a
+ * chain that repeats stops where it repeats. Never throws; describeModels rejects cyclic chains and
+ * unsupported scalars on top of it.
+ */
+export const effectiveScalarName = (type) => rootScalar(type)?.name;
+
 const scalarDescription = (type) => {
   if (isEnumType(type)) {
     const storedValues = new Map();
@@ -32,14 +52,10 @@ const scalarDescription = (type) => {
     }
     return { scalar: 'Enum', values: [...storedValues.keys()], enumValues: type.getValues().map(({ name, value }) => ({ name, value })) };
   }
-  let base = type;
-  const visited = new Set();
-  while (base.baseScalarType) {
-    if (visited.has(base)) invalid(`Cyclic base scalar ${type.name}`);
-    visited.add(base);
-    base = base.baseScalarType;
-  }
-  const scalar = ['DateTime', 'Date', 'Time'].includes(base.name) ? 'DateTime' : base.name;
+  // The walk stops on a type that still has a base only where the chain repeats.
+  if (rootScalar(type).baseScalarType) invalid(`Cyclic base scalar ${type.name}`);
+  const name = effectiveScalarName(type);
+  const scalar = ['DateTime', 'Date', 'Time'].includes(name) ? 'DateTime' : name;
   if (!['String', 'ID', 'Int', 'Float', 'Boolean', 'DateTime'].includes(scalar)) {
     invalid(`Unsupported scalar ${type.name}: declare a supported baseScalarType`);
   }

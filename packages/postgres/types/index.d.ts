@@ -236,6 +236,14 @@ export interface PostgresRuntime extends Runtime<PostgresModel, PostgresSession>
  * `QLOperator` value. The case-insensitive text operators fold case with {@link caseFoldExpression}, which needs a UTF8
  * database with the ICU collation `und-x-icu`: on another database, such as one in LATIN1 or on a server built without
  * ICU, they fail with UNSUPPORTED_QUERY (400), and every other operation works.
+ *
+ * `IS_EMPTY` and `IS_NOT_EMPTY` compile from where a path is stored, binding no parameters: `(c IS NULL OR c = '')`
+ * for a String column and `c IS NULL` for any other, the uuid identity included; `COALESCE(cardinality(c), 0) = 0`
+ * for a native array; jsonb members as text without a cast, and jsonb lists through a `jsonb_typeof` guard; an
+ * embedded object as missing, JSON `null`, or every stored member empty; and owned objects and lists through their
+ * state column and a `NOT EXISTS` subquery on the owned table, null list items counting as items. `IS_NOT_EMPTY` is
+ * the positive form of a leaf, which a btree can serve, and the `NOT` of an object or owned form. Declaring the two
+ * operators does not lift the UNSUPPORTED_QUERY (400) that emptiness through references and collections gets.
  */
 export function postgresPlugin(options?: PostgresConfiguration): SQLPlugin<
   PostgresConfiguration,

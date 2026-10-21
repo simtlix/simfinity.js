@@ -22,7 +22,7 @@ export const postgresPlugin = (options) => ({
   // QLOperator value is rejected until the compiler supports it. The declaration names the compileQuery it describes,
   // so a copy of this plugin with another compileQuery compiles the operators of 3.7.0 until it declares its own.
   queryFeatures: {
-    operators: ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE', 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ'],
+    operators: ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE', 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ', 'IS_EMPTY', 'IS_NOT_EMPTY'],
     compileQuery,
   },
   naming: { validateIdentifier: identifier, generatedName },

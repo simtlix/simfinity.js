@@ -309,6 +309,13 @@ export interface SQLPlugin<
    * any other operator with `UNSUPPORTED_QUERY` (400) before compiling. A value that is not an object whose `operators`
    * is an array of strings throws `INVALID_SQL_PLUGIN` (400). A declaration whose `compileQuery` is another function
    * than this plugin's `compileQuery`, as in a copy that overrides it, gives the operators of 3.7.0.
+   *
+   * A plugin that declares `IS_EMPTY` and `IS_NOT_EMPTY` receives their predicates as
+   * `{ kind: 'predicate', path, operator, value: null }`, whose `path` may end at an embedded object, an embedded list
+   * or a scalar list as well as at a scalar, after `createQueryPlan` has applied their checks; it compiles the
+   * emptiness of the record's own fields described by `QueryOperator`, and builds `IS_NOT_EMPTY` as its exact
+   * complement. Declaring them does not lift the `UNSUPPORTED_QUERY` (400) that emptiness through references and
+   * collections gets in the plans.
    */
   queryFeatures?: SQLQueryFeatures<Configuration, Description, Id> | null | undefined;
   naming: SQLNaming;

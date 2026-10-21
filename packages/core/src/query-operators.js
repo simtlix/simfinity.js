@@ -3,7 +3,14 @@ import SimfinityError from './errors/simfinity.error.js';
 
 // Internal: the filter operators and the value rules every backend applies to them. They are shared
 // by the core runtime, the query plan and the MongoDB compiler through the
-// `./internal/query-operators` subpath, which is not public API.
+// `./internal/query-operators` subpath, which is not public API. The emptiness operators live in
+// query-emptiness.js and are re-exported here, so the subpath stays the only one.
+
+export {
+  EMPTINESS_QUERY_OPERATORS, describeEmptiness, describeModelEmptiness, emptinessMemberPaths, isEmptinessOperator,
+  validateEmptinessValue,
+} from './query-emptiness.js';
+export { effectiveScalarName } from './metadata.js';
 
 /** Every `QLOperator` value, in declaration order. QLOperator is the only list of operators. */
 export const QUERY_OPERATORS = Object.freeze(QLOperator.getValues().map((entry) => entry.value));

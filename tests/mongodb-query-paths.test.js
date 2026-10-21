@@ -3,7 +3,8 @@ import {
 } from 'vitest';
 import mongoose from 'mongoose';
 import {
-  graphql, GraphQLID, GraphQLInt, GraphQLList, GraphQLNonNull, GraphQLObjectType, GraphQLScalarType, GraphQLString,
+  graphql, GraphQLID, GraphQLInt, GraphQLInterfaceType, GraphQLList, GraphQLNonNull, GraphQLObjectType, GraphQLScalarType,
+  GraphQLString, GraphQLUnionType,
 } from 'graphql';
 import {
   auth, createMongoAdapter, createRuntime, createValidatedScalar, SimfinityError,
@@ -398,6 +399,27 @@ describe('MongoDB embedded id paths', () => {
     expect(pipeline.find((stage) => stage.$sort)).toEqual({ $sort: { 'lines.id': 1 } });
   });
 
+  test('resolves the id members that emptiness conditions read as the other operators do', async () => {
+    const emptyString = { $in: [null, ''] };
+    const form = (field, key) => ({ $or: [{ [field]: null }, { $and: [{ [`${field}.${key}`]: null }, { [`${field}.sku`]: emptyString }] }] });
+    const objects = { line: { terms: [{ operator: 'IS_EMPTY' }] }, part: { terms: [{ path: '', operator: 'IS_EMPTY' }] } };
+    // Generated nested objects have no `_id`: the declared member, also for an entity type.
+    for (const built of [generated, schemaLess]) {
+      expect(matchOf(await built.buildQuery(objects, OrderType))).toEqual({ $and: [{ $or: form('line', 'id').$or }, { $or: form('part', 'id').$or }] });
+      expect(matchOf(await built.buildQuery({ line: term('id', 'IS_NOT_EMPTY') }, OrderType))).toEqual({ 'line.id': { $ne: null } });
+    }
+    // A supplied subdocument schema with an automatic `_id` stores one, so the object is never empty: a known
+    // difference from PostgreSQL.
+    expect(matchOf(await supplied.buildQuery(objects, OrderType))).toEqual({ $and: [{ $or: form('line', '_id').$or }, { $or: form('part', '_id').$or }] });
+    expect(matchOf(await supplied.buildQuery({ part: term('id', 'IS_EMPTY') }, OrderType))).toEqual({ 'part._id': null });
+    // Lists are never read inside, and the root identity is `_id`.
+    expect(matchOf(await supplied.buildQuery({ parts: { terms: [{ operator: 'IS_EMPTY' }] }, id: { operator: 'IS_NOT_EMPTY' } }, OrderType)))
+      .toEqual({ 'parts.0': { $exists: false }, _id: { $ne: null } });
+    // A reference member makes the object UNSUPPORTED_QUERY until reference emptiness ships.
+    await expectRejection(generated.buildQuery({ meta: { terms: [{ operator: 'IS_EMPTY' }] } }, OrderType), 'UNSUPPORTED_QUERY');
+    expect(matchOf(await generated.buildQuery({ meta: term('label', 'IS_EMPTY') }, OrderType))).toEqual({ 'meta.label': emptyString });
+  });
+
   test.each([
     ['generated', 'bad'],
     ['generated', 12],
@@ -514,6 +536,19 @@ describe('MongoDB filters on NonNull object fields', () => {
     expect(included).toEqual({ __sf_l0: true, __sf_l1: true });
   });
 
+  test('tests NonNull fields themselves with the emptiness operators, and rejects their references and collections', async () => {
+    expect(matchOf(await nnQueries.buildQuery({ meta: { terms: [{ operator: 'IS_EMPTY' }] }, pages: { operator: 'IS_NOT_EMPTY' } }, NnBookType)))
+      .toEqual({ $or: [{ meta: null }, { $and: [{ 'meta.label': { $in: [null, ''] } }] }], pages: { $ne: null } });
+    expect(await nnQueries.buildFilterGroupMatch({ conditions: [{ field: 'meta', operator: 'IS_NOT_EMPTY' }] }, NnBookType, [], {}))
+      .toEqual({ $nor: [{ $or: [{ meta: null }, { $and: [{ 'meta.label': { $in: [null, ''] } }] }] }] });
+    for (const field of ['author', 'reviews']) {
+      await expectRejection(nnQueries.buildFilterGroupMatch({ conditions: [{ field, operator: 'IS_EMPTY' }] }, NnBookType, [], {}), 'UNSUPPORTED_QUERY');
+      await expectRejection(nnQueries.buildQuery({ [field]: { terms: [{ operator: 'IS_NOT_EMPTY' }] } }, NnBookType), 'UNSUPPORTED_QUERY');
+      // Only trusted code writes an operator on the object filter itself.
+      await expectRejection(nnQueries.buildQuery({ [field]: { operator: 'IS_EMPTY' } }, NnBookType), 'MISSING_FILTER_PATH');
+    }
+  });
+
   test('requires terms on flat NonNull object filters and resolves their paths', async () => {
     await expectRejection(nnQueries.buildQuery({ meta: { value: 'x' } }, NnBookType), 'MISSING_FILTER_PATH');
     const pipeline = await nnQueries.buildQuery({
@@ -523,6 +558,119 @@ describe('MongoDB filters on NonNull object fields', () => {
     }, NnBookType);
     expect(lookups(pipeline)).toEqual([authorLookup[0].$lookup, reviewsLookup[0].$lookup]);
     expect(matchOf(pipeline)).toEqual({ '__sf_l0.name': 'Ann', 'meta.label': 'x', '__sf_l1.stars': { $gte: 4 } });
+  });
+});
+
+describe('MongoDB emptiness paths', () => {
+  const emptyString = { $in: [null, ''] };
+  // Types that describeModels rejects, which MongoDB's default mode still serves.
+  const Shape = new GraphQLInterfaceType({ name: 'QueryPathShape', fields: { label: { type: GraphQLString } } });
+  const Circle = new GraphQLObjectType({ name: 'QueryPathCircle', interfaces: [Shape], fields: { label: { type: GraphQLString } } });
+  const Either = new GraphQLUnionType({ name: 'QueryPathEither', types: [Circle] });
+  const embedded = { relation: { embedded: true } };
+  const WithShape = new GraphQLObjectType({ name: 'QueryPathWithShape', fields: { label: { type: GraphQLString }, shape: { type: Shape } } });
+  const WithChildren = new GraphQLObjectType({
+    name: 'QueryPathWithChildren',
+    fields: { title: { type: GraphQLString }, children: { type: new GraphQLList(ChildType), extensions: { relation: { embedded: false, connectionField: 'holderKey' } } } },
+  });
+  const Node = new GraphQLObjectType({
+    name: 'QueryPathNode', fields: () => ({ label: { type: GraphQLString }, child: { type: Node, extensions: { ...embedded, readOnly: true } } }),
+  });
+  const Tree = new GraphQLObjectType({
+    name: 'QueryPathTree', fields: () => ({ label: { type: GraphQLString }, children: { type: new GraphQLList(Tree), extensions: embedded } }),
+  });
+  const Loose = new GraphQLObjectType({ name: 'QueryPathLoose', fields: { a: { type: GraphQLInt } } });
+  const HolderType = new GraphQLObjectType({
+    name: 'QueryPathHolder',
+    fields: {
+      id: idField,
+      shape: { type: Shape },
+      shapes: { type: new GraphQLList(Shape) },
+      either: { type: new GraphQLList(Either) },
+      withShape: { type: WithShape, extensions: embedded },
+      withChildren: { type: WithChildren, extensions: embedded },
+      node: { type: Node, extensions: embedded },
+      tree: { type: Tree, extensions: embedded },
+      // An object field without a relation is read as embedded.
+      loose: { type: Loose },
+      virtualLabel: { type: GraphQLString, resolve: () => 'v', extensions: { virtual: true } },
+    },
+  });
+  const holderQueries = createMongoQueries({ getModel: (type) => (type === HolderType ? modelFor('holders') : null), getRegistrations: () => [] });
+  const holder = (path, operator = 'IS_EMPTY') => holderQueries.buildQuery({ AND: [{ conditions: [{ field: path, operator }] }] }, HolderType);
+
+  test.each([
+    // An interface or union field, on the path or among the members (rule 3).
+    ['shape', 'INVALID_FILTER_PATH'], ['shapes', 'INVALID_FILTER_PATH'], ['either', 'INVALID_FILTER_PATH'],
+    ['withShape', 'INVALID_FILTER_PATH'],
+    // Inside a list.
+    ['tree.children.label', 'INVALID_FILTER_PATH'],
+    // Re-entry through a single embedded member (rule 4).
+    ['node', 'INVALID_FILTER_OPERATOR'], ['node.child', 'INVALID_FILTER_OPERATOR'],
+    // A collection member (rule 6).
+    ['withChildren', 'UNSUPPORTED_QUERY'], ['withChildren.children', 'UNSUPPORTED_QUERY'],
+  ])('rejects %s with %s', async (path, code) => {
+    await expectRejection(holder(path), code);
+    await expectRejection(holder(path, 'IS_NOT_EMPTY'), code);
+  });
+
+  // QLTypeFilterExpression also gives interface and union lists terms. An emptiness term there tests the field itself
+  // or a path through it, which rules 3 and 1 reject with the runtime gate's codes and messages.
+  test.each(['shapes', 'either'])('rejects emptiness terms on the %s list as the gate does', async (field) => {
+    const rejection = (filter) => holderQueries.buildQuery({ [field]: filter }, HolderType).then(() => null, (caught) => caught);
+    const outcome = async (filter) => {
+      const error = await rejection(filter);
+      expect(error, JSON.stringify(filter)).toBeInstanceOf(SimfinityError);
+      return [error.extensions.code, error.message];
+    };
+    for (const operator of ['IS_EMPTY', 'IS_NOT_EMPTY']) {
+      const itself = ['INVALID_FILTER_PATH', `${operator} cannot test ${field}: ${field} is an interface or union field, whose emptiness is not defined`];
+      const through = ['INVALID_FILTER_PATH', `Field ${field} cannot be traversed`];
+      for (const path of [undefined, null, '']) expect(await outcome({ terms: [{ path, operator }] })).toEqual(itself);
+      expect(await outcome({ terms: [{ path: 'label', operator }] })).toEqual(through);
+      // Every emptiness term is checked, after the terms of other operators too.
+      expect(await outcome({ terms: [{ path: 'label', operator: 'EQ', value: 'x' }, { path: 'label', operator, value: null }] })).toEqual(through);
+      // An operator beside the terms comes first, as the gate reads it.
+      expect(await outcome({ operator, terms: [{ path: 'label', operator: 'IS_EMPTY' }] })).toEqual(itself);
+    }
+    // Other operators keep reading the filter as a value.
+    expect(await outcome({ terms: [{ path: 'label', value: 'x' }] })).toEqual(['INVALID_FILTER_VALUE', `Expected a scalar value for ${field}`]);
+  });
+
+  // Paths that other operators already reject with the same code.
+  test.each([
+    ['virtualLabel', 'INVALID_FILTER_FIELD'], ['nope', 'INVALID_FILTER_FIELD'], ['loose.b', 'INVALID_FILTER_FIELD'],
+    ['shape.label', 'INVALID_FILTER_PATH'], ['withChildren.children.n', 'INVALID_FILTER_PATH'],
+  ])('keeps %s rejected with %s (regression pin, passes on 3.9.0)', async (path, code) => {
+    await expectRejection(holder(path), code);
+    await expectRejection(holder(path, 'IS_NOT_EMPTY'), code);
+  });
+
+  test('accepts leaves next to those members, lists that reach their own type, and object fields without a relation', async () => {
+    expect(matchOf(await holder('withShape.label'))).toEqual({ 'withShape.label': emptyString });
+    expect(matchOf(await holder('withChildren.title', 'IS_NOT_EMPTY'))).toEqual({ 'withChildren.title': { $nin: [null, ''] } });
+    expect(matchOf(await holder('node.child.child.label'))).toEqual({ 'node.child.child.label': emptyString });
+    const tree = { $or: [{ tree: null }, { $and: [{ 'tree.label': emptyString }, { 'tree.children.0': { $exists: false } }] }] };
+    expect(matchOf(await holder('tree'))).toEqual(tree);
+    expect(matchOf(await holder('tree', 'IS_NOT_EMPTY'))).toEqual({ $nor: [tree] });
+    expect(matchOf(await holder('loose'))).toEqual({ $or: [{ loose: null }, { $and: [{ 'loose.a': null }] }] });
+  });
+
+  test('rejects references and collections without adding a lookup, also when the related model is missing', async () => {
+    for (const path of ['owner', 'owner.name', 'owner.address.name', 'children', 'ghost.name', 'meta', 'meta.ref', 'valueOf']) {
+      const [head, ...rest] = path.split('.');
+      const clauses = [];
+      await expectRejection(queries.buildFilterGroupMatch({ conditions: [{ field: head, path: rest.join('.'), operator: 'IS_EMPTY' }] }, NoteType, clauses, {}), 'UNSUPPORTED_QUERY');
+      expect(clauses).toEqual([]);
+    }
+    // Other operators keep their codes.
+    await expectRejection(queries.buildQuery({ ghost: { terms: [{ path: 'name', value: 'x' }] } }, NoteType), 'INVALID_FILTER_PATH');
+  });
+
+  test('compiles String scalars by their base scalar, and other scalars by the null rule', async () => {
+    expect(matchOf(await queries.buildQuery({
+      workEmail: { operator: 'IS_EMPTY' }, strictWork: { operator: 'IS_NOT_EMPTY' }, due: { operator: 'IS_EMPTY' }, price: { operator: 'IS_NOT_EMPTY' },
+    }, NoteType))).toEqual({ workEmail: emptyString, strictWork: { $nin: [null, ''] }, due: null, price: { $ne: null } });
   });
 });
 

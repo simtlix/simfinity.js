@@ -1,5 +1,7 @@
 import { resolveModelPath, SimfinityError } from '@simtlix/simfinity-core';
-import { textQueryOperator, validateTextFilterValue } from '@simtlix/simfinity-core/internal/query-operators';
+import {
+  describeEmptiness, describeModelEmptiness, isEmptinessOperator, textQueryOperator, validateTextFilterValue,
+} from '@simtlix/simfinity-core/internal/query-operators';
 import { identifier as q, literal, qualified } from '../schema/sql.js';
 import { encodeScalar, storageTypes, invalidValue } from '../codecs.js';
 import { caseFoldExpression as fold } from './case-fold.js';
@@ -88,6 +90,12 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
     }
     return joins.get(key).alias;
   };
+  // The owned table that stores `field` of the row `context`, or undefined when the row stores it; values inside
+  // jsonb never own tables.
+  const ownedOf = (context, field) => context.table && database.tables.find((item) => item.ownership?.ownerTable === context.table.name && item.ownership.field === field.name);
+  // The LEFT JOIN of an owned single object, one per path, which filters and the emptiness forms share. A missed
+  // join, and an object in another state, read as NULL.
+  const joinOwned = (key, context, owned) => join(key, owned.name, (name) => `${col(name, '__owner_id')} = ${col(context.alias, context.table.primaryKey.columns[0])} AND ${col(context.alias, owned.ownership.stateColumn)} = 'present'`);
   const arrayFrom = (vector, expression) => `ARRAY(SELECT ${expression} FROM ${vector.from} WHERE ${vector.where})`;
   const jsonItems = (expression, missing = '[]') => `jsonb_array_elements(CASE WHEN jsonb_typeof(${expression}) = 'array' THEN ${expression} ELSE '${missing}'::jsonb END)`;
   const helper = (name, ...args) => `${qualified(database.schema, `__simfinity_${name}`)}(${args.join(', ')})`;
@@ -146,8 +154,7 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
           const state = `${col(ownerAlias, owned.ownership.stateColumn)} = 'present'`;
           const presence = (name) => owned.ownership.nullableItems && usage !== 'sort' ? ` AND ${col(name, '__item_present')}` : '';
           if (!field.list && !context.vector) {
-            const joined = join(key, owned.name, (name) => `${col(name, '__owner_id')} = ${ownerId} AND ${state}`);
-            context = { table: owned, alias: joined, json: null, vector: null };
+            context = { table: owned, alias: joinOwned(key, context, owned), json: null, vector: null };
           } else {
             const name = alias();
             const stored = alias();
@@ -319,9 +326,84 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
     const left = ignoreCase ? uncollated : sql;
     return negated ? `COALESCE(${compare(left)}, FALSE)` : compare(left);
   };
-  // A negation reaches every predicate below it, including those nested in AND/OR groups.
+  /**
+   * The IS_EMPTY form of `field`, stored on the row or jsonb value `context`, by its emptiness shape, or with `empty`
+   * false the IS_NOT_EMPTY form: the positive form of a leaf, which a btree can serve, and the NOT of an object or an
+   * owned form. Every form is two-valued and binds no parameters. A leaf is a column of any row, or the text of a
+   * jsonb member, never cast, since a cast can fail; a list a native array column, a jsonb list, or an owned list,
+   * whose null items are rows too, so `[null]` is not empty; an object a jsonb value or an owned single object whose
+   * stored members are all empty. An owned table is read in a subquery with an alias of its own, correlated to the
+   * key of the row that owns it: the root's id, or the `__id` of a joined or enclosing owned row.
+   */
+  const emptyForm = (context, field, shape, empty = true) => {
+    const compare = empty ? '=' : '>';
+    const negate = (form) => (empty ? form : `NOT ${form}`);
+    const leaf = (value) => {
+      if (shape.rule === 'string') return empty ? `(${value} IS NULL OR ${value} = '')` : `(${value} IS NOT NULL AND ${value} <> '')`;
+      return `${value} IS ${empty ? '' : 'NOT '}NULL`;
+    };
+    // The CASE keeps jsonb_array_length from failing (22023) on a value that is not an array.
+    const jsonList = (json) => `COALESCE(jsonb_array_length(CASE WHEN jsonb_typeof(${json}) = 'array' THEN ${json} END), 0) ${compare} 0`;
+    // An embedded type without stored members is always empty.
+    const members = (row) => {
+      const forms = shape.members.map((member) => {
+        const stored = field.fields?.find((item) => item.name === member.name);
+        if (!stored) unsupported('Invalid query path');
+        return emptyForm(row, stored, member.shape);
+      });
+      return forms.length ? `(${forms.join(' AND ')})` : 'TRUE';
+    };
+    const jsonObject = (json) => negate(`(${json} IS NULL OR ${json} = 'null'::jsonb OR ${members({ table: null, alias: null, json })})`);
+    if (context.json) {
+      const json = `(${context.json} -> ${literal(field.storageName)})`;
+      if (shape.rule === 'object') return jsonObject(json);
+      if (shape.rule === 'list') return jsonList(json);
+      return leaf(`(${context.json} ->> ${literal(field.storageName)})`);
+    }
+    const owned = ownedOf(context, field);
+    if (owned) {
+      // A missed join leaves the state NULL, which is not 'present'.
+      const state = `${col(context.alias, owned.ownership.stateColumn)} IS DISTINCT FROM 'present'`;
+      const name = alias();
+      const rows = `SELECT 1 FROM ${qualified(database.schema, owned.name)} ${name} WHERE ${col(name, '__owner_id')} = ${col(context.alias, context.table.primaryKey.columns[0])}`;
+      if (shape.rule === 'list') return negate(`(${state} OR NOT EXISTS (${rows}))`);
+      // An object marked present without a row, which the owned-shape check rejects, is empty too.
+      return negate(`(${state} OR NOT EXISTS (${rows} AND NOT ${members({ table: owned, alias: name, json: null })}))`);
+    }
+    // The record identity is the uuid primary key, whatever scalar it is declared with.
+    const identity = !context.table.ownership && ['id', '_id'].includes(field.name);
+    const column = col(context.alias, identity ? 'id' : field.storageName);
+    if (field.kind === 'embedded') return shape.rule === 'object' ? jsonObject(column) : jsonList(column);
+    if (shape.rule === 'list') return `COALESCE(cardinality(${column}), 0) ${compare} 0`;
+    return leaf(column);
+  };
+  /**
+   * IS_EMPTY and IS_NOT_EMPTY (#108, part 2a). Every emptiness predicate, leaves included, compiles here from where
+   * its path is stored, not from path(), whose values cast jsonb members and materialize jsonb lists, and which
+   * rejects paths that end at an embedded field. The checks of createQueryPlan run again, with its codes, on the
+   * entity's GraphQL type or on the field descriptions, so a plan built by hand gets the same answers; they leave
+   * only single embedded objects before the last field, reached through the LEFT JOIN of each owned single object.
+   */
+  const emptiness = ({ path: parts, operator, value }) => {
+    const steps = resolveModelPath(models, plan.entity, parts);
+    const options = { operator, value, path: parts.join('.') };
+    const gqltype = models.entities.find((item) => item.name === plan.entity)?.gqltype;
+    const shape = gqltype ? describeEmptiness(gqltype, parts, options) : describeModelEmptiness(steps, options);
+    let context = { table: root, alias: 't0', json: null };
+    steps.slice(0, -1).forEach((field, index) => {
+      if (field.kind !== 'embedded' || field.list) unsupported('Invalid query path');
+      const owned = ownedOf(context, field);
+      context = owned
+        ? { table: owned, alias: joinOwned(parts.slice(0, index + 1).join('.'), context, owned), json: null }
+        : { table: null, alias: null, json: context.json ? `(${context.json} -> ${literal(field.storageName)})` : col(context.alias, field.storageName) };
+    });
+    return emptyForm(context, steps.at(-1), shape, operator === 'IS_EMPTY');
+  };
+  // A negation reaches every predicate below it, including those nested in AND/OR groups; the emptiness forms are
+  // two-valued, so they need no null-safe form under it.
   const where = (node, negated = false) => {
     if (!node) return 'TRUE';
+    if (node.kind === 'predicate' && isEmptinessOperator(node.operator)) return `(${emptiness(node)})`;
     if (node.kind === 'predicate') return `(${predicate(path(node.path), node.operator, node.value, negated)})`;
     return `(${node.terms.map((term) => where(term, negated)).join(node.kind === 'and' ? ' AND ' : ' OR ')})`;
   };

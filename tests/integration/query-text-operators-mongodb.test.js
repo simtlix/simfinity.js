@@ -20,6 +20,8 @@ const standaloneUri = process.env.SIMFINITY_STANDALONE_MONGODB_URI;
 
 const LEGACY = ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE'];
 const TEXT = ['ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ'];
+// The emptiness operators (#108, part 2a), which take no value; query-emptiness-mongodb.test.js tests them.
+const EMPTINESS = ['IS_EMPTY', 'IS_NOT_EMPTY'];
 // The operators that match every non-null string for an empty value.
 const OPEN_ENDED = ['ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH'];
 
@@ -422,7 +424,7 @@ describe('MongoDB text operator compilation', () => {
   describe('queryFeatures', () => {
     test('the adapter declares every QLOperator value, listed explicitly', () => {
       for (const adapter of [fixture.adapter, createMongoAdapter({ batchedCollections: true })]) {
-        expect(adapter.queryFeatures).toEqual({ operators: [...LEGACY, ...TEXT] });
+        expect(adapter.queryFeatures).toEqual({ operators: [...LEGACY, ...TEXT, ...EMPTINESS] });
         expect(Object.isFrozen(adapter.queryFeatures)).toBe(true);
         expect(Object.isFrozen(adapter.queryFeatures.operators)).toBe(true);
       }
@@ -432,7 +434,7 @@ describe('MongoDB text operator compilation', () => {
 
     test('every declared operator compiles on a String leaf', async () => {
       for (const operator of fixture.adapter.queryFeatures.operators) {
-        const value = ['IN', 'NIN', 'BTW'].includes(operator) ? ['a', 'b'] : 'a';
+        const value = ['IN', 'NIN', 'BTW'].includes(operator) ? ['a', 'b'] : EMPTINESS.includes(operator) ? undefined : 'a';
         expect(await matchOf({ name: { operator, value } })).toHaveProperty('name');
       }
     });
@@ -442,8 +444,9 @@ describe('MongoDB text operator compilation', () => {
         adapter: { ...createMongoAdapter(), queryFeatures: undefined },
         preventCreatingCollection: true,
       });
-      for (const operator of TEXT) {
-        const result = await copy.execute(`{ ${copy.products}(name: {operator: ${operator}, value: "a"}) { key } }`);
+      for (const operator of [...TEXT, ...EMPTINESS]) {
+        const value = EMPTINESS.includes(operator) ? '' : ', value: "a"';
+        const result = await copy.execute(`{ ${copy.products}(name: {operator: ${operator}${value}}) { key } }`);
         expect(result.errors?.[0].extensions.code).toBe('UNSUPPORTED_QUERY');
       }
     });
