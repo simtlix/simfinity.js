@@ -830,9 +830,14 @@ describe.each(servers)('MongoDB emptiness on a %s', (label, uri, prefix) => {
         const found = scans(await fixture.model('Item').aggregate(pipeline).explain('queryPlanner'));
         return [...new Set(found.map((scan) => `${scan.stage} ${JSON.stringify(scan.indexBounds ?? null)}`))];
       };
-      expect(await bounds({ note: { operator: 'IS_EMPTY' } })).toEqual([`IXSCAN ${JSON.stringify({ note: ['[null, null]', '["", ""]'] })}`]);
-      expect(await bounds({ note: { operator: 'IS_NOT_EMPTY' } }))
-        .toEqual([`IXSCAN ${JSON.stringify({ note: ['[MinKey, null)', '(null, "")', '("", MaxKey]'] })}`]);
+      // Before 8.0, equality with null also matched the deprecated undefined type, so the null interval
+      // starts at undefined.
+      const { versionArray } = await fixture.model('Item').db.db.admin().serverInfo();
+      const undefinedMatchesNull = versionArray[0] < 8;
+      const empty = undefinedMatchesNull ? ['[undefined, undefined]', '[null, null]', '["", ""]'] : ['[null, null]', '["", ""]'];
+      const notEmpty = [undefinedMatchesNull ? '[MinKey, undefined)' : '[MinKey, null)', '(null, "")', '("", MaxKey]'];
+      expect(await bounds({ note: { operator: 'IS_EMPTY' } })).toEqual([`IXSCAN ${JSON.stringify({ note: empty })}`]);
+      expect(await bounds({ note: { operator: 'IS_NOT_EMPTY' } })).toEqual([`IXSCAN ${JSON.stringify({ note: notEmpty })}`]);
     });
   });
 });

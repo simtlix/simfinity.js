@@ -560,10 +560,10 @@ describe.skipIf(!uri)('PostgreSQL emptiness rows', () => {
   });
 
   describe('plans', () => {
-    const explain = async (rootKey, args, setup) => {
-      const models = describeModels(batched.api.getRegistrations());
-      const entity = batched.all.roots[rootKey].type.name;
-      const { text, values } = compileQuery(models, batched.api.describeDatabase(), createQueryPlan(models, entity, args));
+    const explain = async (runtime, rootKey, args, setup) => {
+      const models = describeModels(runtime.api.getRegistrations());
+      const entity = runtime.all.roots[rootKey].type.name;
+      const { text, values } = compileQuery(models, runtime.api.describeDatabase(), createQueryPlan(models, entity, args));
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
@@ -580,14 +580,25 @@ describe.skipIf(!uri)('PostgreSQL emptiness rows', () => {
     const scans = (plan) => nodes(plan).filter((node) => node['Index Cond']).map((node) => [node['Node Type'], node['Index Name'], node['Index Cond']]);
 
     it('serves the String form with a BitmapOr of two scans of a btree on the column', async () => {
-      const plan = await explain('item', { note: { operator: 'IS_EMPTY' } }, [`CREATE INDEX qp_note ON "${namespace}"."QpItem" ("note")`]);
-      const bitmap = nodes(plan).find((node) => node['Node Type'] === 'BitmapOr');
-      expect(bitmap, JSON.stringify(plan)).toBeDefined();
-      expect(scans(bitmap)).toEqual([['Bitmap Index Scan', 'qp_note', '(note IS NULL)'], ['Bitmap Index Scan', 'qp_note', '(note = \'\'::text)']]);
+      // The index is built on an empty table of its own schema, before any row exists. Built over the seeded
+      // table, whose updates leave HOT chains, it is marked indcheckxmin, and transactions as old as its
+      // creation, or older, cannot use it: whether the planner sees it then depends on page pruning.
+      const schema = `${namespace}_plan`;
+      const fresh = runtimeFor(pool, schema);
+      try {
+        await fresh.api.initializeDatabase();
+        await pool.query(`CREATE INDEX qp_note ON "${schema}"."QpItem" ("note")`);
+        const plan = await explain(fresh, 'item', { note: { operator: 'IS_EMPTY' } }, []);
+        const bitmap = nodes(plan).find((node) => node['Node Type'] === 'BitmapOr');
+        expect(bitmap, JSON.stringify(plan)).toBeDefined();
+        expect(scans(bitmap)).toEqual([['Bitmap Index Scan', 'qp_note', '(note IS NULL)'], ['Bitmap Index Scan', 'qp_note', '(note = \'\'::text)']]);
+      } finally {
+        await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      }
     });
 
     it('serves the null form with the generated index of an ID column', async () => {
-      const plan = await explain('item', { ref: { operator: 'IS_EMPTY' } }, []);
+      const plan = await explain(batched, 'item', { ref: { operator: 'IS_EMPTY' } }, []);
       expect(scans(plan).map(([, index, condition]) => [index, condition])).toEqual([['QpItem__ref__idx', '(ref IS NULL)']]);
     });
   });
