@@ -118,3 +118,9 @@ Custom Mongoose middleware must preserve the transaction session and operation i
 | `NOT_VALID_ID` | Status 400 for a malformed ID; 404 when an update targets a missing record. |
 
 GraphQL may carry these errors in an HTTP 200 response; `extensions.status` is metadata, not a transport status override.
+
+## Supplied sessions and version conflicts (next release)
+
+[Optimistic concurrency](./concurrency) is a separate opt-in declaration from transactional reference integrity. In transactional-integrity mode, an adapter-detected `VERSION_CONFLICT` or `VERSION_EXHAUSTED` aborts a supplied transaction as other guarded-write failures do; a core-detected early version error does not. Hidden callers' stale/exhausted-version conflicts reach the adapter after hooks authorize the write. In default integrity-off mode, the caller owns aborting a supplied transaction. Core result diagnostics preserve that existing ownership and do not promise to abort every invalid adapter-wrapper result. Errors reach the caller unchanged; the transaction owner must retry a driver's `WriteConflict` with a fresh transaction, rather than retrying inside the old snapshot.
+
+The MongoDB protected pre-read uses a snapshot read without a claim lock. A losing writer's validators and `onUpdating`/`onDelete` may run and repeat before the conditional write conflicts, but `onUpdated` never runs for the rejected edit. Keep external effects in an outbox. Native Mongoose/driver writes still need their own version protocol and reference policy. Supplied-model query middleware must retain the conditional predicate/increment, and pre/post save middleware must preserve initialized version 1 and the returned value; this feature adds no post-save guard. Published 3.11.0 does not include optimistic concurrency.

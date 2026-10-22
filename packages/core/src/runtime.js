@@ -33,6 +33,12 @@ import {
 import {
   fieldMetadataNamesFixed, fieldMetadataTypes, fixFieldMetadataNames, renameFieldMetadataTypes,
 } from './introspection.js';
+import {
+  MAX_RECORD_VERSION, RecordVersion, RecordVersionRef, assertVersionInput, concurrencyDeclared, createVersionFieldConfig,
+  isProtectedType, isVersionField, readStoredVersion, recordVersionFieldMisuse, retainedStoredVersion, unadvancedVersionError,
+  unexpectedDeleteError, versionConflictError, versionConnectionCollision, versionEmbeddedMisuse, versionExhaustedError,
+  versionFieldCollision, versionManagedError,
+} from './record-version.js';
 
 // Resolvers Simfinity generates. Any other resolver on a registered type when its schema is first
 // created is application code, such as a masking resolver, recorded once per type so later
@@ -84,6 +90,33 @@ const runtimeBoundTypes = new WeakMap();
 const forbiddenPath = (message) => new SimfinityError(message, 'FORBIDDEN_FILTER_PATH', 403);
 // Generated inputs never write a readOnly field, nor a virtual one, which virtual implies.
 const isReadOnlyField = (field) => !!field.extensions?.readOnly || isVirtualField(field);
+
+// Optimistic concurrency (#98). A type is protected once it carries the version field createSchema()
+// injects, which it keeps for good, so code that builds schemas and runs requests asks this instead of
+// reading the live `extensions.concurrency`.
+const isProtected = (gqltype) => isVersionField(gqltype.getFields().version);
+// Whether each registered type was protected when the first createSchema() that contained it returned,
+// for every runtime of this copy of the core code. A failed createSchema() records nothing.
+const protectionStatus = new WeakMap();
+
+const invalidWriteFeatures = (message) => {
+  throw new SimfinityError(`DatabaseAdapter writeFeatures ${message}`, 'INVALID_WRITE_FEATURES', 500);
+};
+
+// Reads an adapter's `writeFeatures` declaration once, into a frozen copy. Undefined or null declares
+// nothing; a plain object may declare `optimisticConcurrency` as a boolean, and its other members are
+// left for later features. Anything else throws INVALID_WRITE_FEATURES (500).
+const resolveWriteFeatures = (writeFeatures) => {
+  if (writeFeatures == null) return Object.freeze({ optimisticConcurrency: false });
+  if (typeof writeFeatures !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(writeFeatures))) {
+    invalidWriteFeatures('must be a plain object');
+  }
+  const { optimisticConcurrency } = writeFeatures;
+  if (optimisticConcurrency !== undefined && typeof optimisticConcurrency !== 'boolean') {
+    invalidWriteFeatures('optimisticConcurrency must be a boolean');
+  }
+  return Object.freeze({ optimisticConcurrency: optimisticConcurrency === true });
+};
 
 // Query scopes restrict reads, so a scope Simfinity cannot run must fail rather than be skipped.
 const SCOPE_OPERATIONS = ['find', 'get_by_id', 'aggregate'];
@@ -280,6 +313,24 @@ const assertFieldMetadataNamesFree = (roots) => {
   if (clash) throw reservedTypeNameError(clash);
 };
 
+// A schema with protected types contains RecordVersion, and RecordVersionRef whenever a generated input
+// reaches a collection of protected items, so an application type with either name, other than the
+// instances this module exports, is rejected there (#98). Like the field metadata names, they are first
+// checked before anything is built, reading input objects by their own name only, and then in the whole
+// schema when it is constructed.
+const versionTypeClash = (roots, options) => [RecordVersion, RecordVersionRef]
+  .map((own) => findSchemaType(roots, own.name, own, options)).find(Boolean) || null;
+// A scalar named RecordVersion with core's own description is almost always core's scalar from a
+// second copy of this package, which protected types cannot work with.
+const reservedVersionTypeNameError = (clash) => new SimfinityError(
+  clash instanceof GraphQLScalarType && clash.name === RecordVersion.name && clash.description === RecordVersion.description
+    ? 'RecordVersion is reserved for optimistic concurrency, and this RecordVersion comes from another copy of '
+      + '@simtlix/simfinity-core: two copies of the package are loaded; import RecordVersion from the facade the '
+      + 'application uses'
+    : `${clash.name} is reserved for optimistic concurrency; rename the application type`,
+  'RESERVED_TYPE_NAME', 500,
+);
+
 const buildSchemaConfig = (query, mutation) => {
   const config = { query };
   if (Object.keys(mutation.getFields()).length > 0) {
@@ -292,12 +343,15 @@ const buildSchemaConfig = (query, mutation) => {
 // those are renamed SimfinityFieldExtensionsType and SimfinityRelationType, with a number appended
 // when the schema also has those names, in every schema the process constructs from then on. A
 // construction that fails puts the previous metadata types back, so only a schema that exists fixes
-// the names.
-const constructSchema = (query, mutation) => {
+// the names. With `reserveVersionTypeNames`, for a schema with protected types, an application type
+// named RecordVersion or RecordVersionRef fails, even one that only an input field reaches.
+const constructSchema = (query, mutation, reserveVersionTypeNames = false) => {
   const config = buildSchemaConfig(query, mutation);
   const roots = Object.values(config);
   const clash = fieldMetadataClash(roots);
   if (clash && fieldMetadataNamesFixed()) throw reservedTypeNameError(clash);
+  const versionClash = reserveVersionTypeNames && versionTypeClash(roots);
+  if (versionClash) throw reservedVersionTypeNameError(versionClash);
   let names = null;
   if (clash) {
     const taken = (name) => findSchemaType(roots, name) !== null;
@@ -431,6 +485,21 @@ const readOwnField = markGenerated((parent, args, context, info) => {
   return typeof property === 'function' ? property.call(parent, args, context, info) : property;
 });
 
+// Puts the version field into a protected type's getFields() map, after the type's own fields, unless
+// the type carries it already: from an earlier schema, another runtime of this core copy that shares
+// the type, or the type it was copied from. The resolver reads only the parent, so it binds the type to
+// no runtime, and a record without a stored version, such as a MongoDB document written before the
+// type was protected, reads as version 1. An invalid stored version is reported under the type being
+// resolved, which a renamed copy shares the resolver with, or under the type it was injected into.
+const injectVersionField = (gqltype) => {
+  if (isProtected(gqltype)) return;
+  const typeName = gqltype.name;
+  gqltype.getFields().version = createVersionFieldConfig(markGenerated((parent, args, context, info) => readStoredVersion(
+    retainedStoredVersion(parent) ?? ownValue(parent, 'version'),
+    { typeName: info?.parentType?.name ?? typeName, id: ownValue(parent, '_id') ?? ownValue(parent, 'id') },
+  )));
+};
+
 const cloneInput = (value, type) => {
   if (value === null || value === undefined || !type) return value;
   if (type instanceof GraphQLNonNull) return cloneInput(value, type.ofType);
@@ -479,6 +548,9 @@ export const createRuntime = (adapter) => {
     operators: supportedOperators, referenceEmptiness: supportsReferenceEmptiness,
   } = resolveQueryFeatures(adapter.queryFeatures);
   const supportsEveryOperator = QUERY_OPERATORS.every((operator) => supportedOperators.has(operator));
+  // The write features the adapter implements, read once: with optimisticConcurrency, schemas may
+  // contain protected types (#98).
+  const writeFeatures = resolveWriteFeatures(adapter.writeFeatures);
 
   const stateValue = adapter.stateValue || ((state) => state.name);
   const runtimeIdentity = {};
@@ -494,6 +566,9 @@ export const createRuntime = (adapter) => {
   const selfCollectionNameHolders = new Map();
   const qualifiedSelfCollections = new Map();
   const registeredMutations = {};
+  // Models createModel() returned for this runtime, as opposed to models supplied to connect(). A type
+  // with one was built for storage without a version field, even by a createSchema() that failed later.
+  const generatedModels = new WeakSet();
   const registeredQueries = {};
   const middlewares = [];
 
@@ -555,9 +630,9 @@ export const createRuntime = (adapter) => {
     }
   };
 
-  // Object and interface types a schema of this runtime can reach from its registered types and
-  // custom operation results, following the same references as GraphQLSchema.
-  const collectSchemaOutputTypes = () => {
+  // Object and interface types reachable from these roots, following the output references of
+  // GraphQLSchema: fields, interfaces and union members. Input objects cannot hold either.
+  const collectOutputTypes = (roots) => {
     const visited = new Set();
     const outputTypes = [];
     const visit = (type) => {
@@ -573,14 +648,20 @@ export const createRuntime = (adapter) => {
       named.getInterfaces().forEach(visit);
       for (const field of Object.values(named.getFields())) visit(field.type);
     };
+    roots.forEach(visit);
+    return outputTypes;
+  };
+
+  // Object and interface types a schema of this runtime can reach from its registered types and
+  // custom operation results, following the same references as GraphQLSchema.
+  const collectSchemaOutputTypes = () => {
     const registeredTypes = Object.values(typesDict.types).map(({ gqltype }) => gqltype);
     const customOperations = [
       ...Object.values(registeredMutations),
       ...Object.values(registeredQueries),
     ];
     const customOutputTypes = customOperations.map(({ outputModel }) => outputModel);
-    [...registeredTypes, ...customOutputTypes].forEach(visit);
-    return outputTypes;
+    return collectOutputTypes([...registeredTypes, ...customOutputTypes]);
   };
 
   const hasUnresolvedRelation = (gqltype) => Object.values(gqltype.getFields()).some(
@@ -813,8 +894,10 @@ const createOneToManyInputType = (name, inputNamePrefix, itemType, connection,
             + `\`${operation}\` operation in generated inputs, ${omittedOperation[operation]()}`);
         }
       }
-      // Null IDs are skipped, so `deleted` accepts them whatever the collection's item nullability.
-      fields.deleted = { type: new GraphQLList(GraphQLID) };
+      // Null entries are skipped, so `deleted` accepts them whatever the collection's item nullability.
+      // A protected item is deleted at the version the client read, whether or not the parent is
+      // protected (#98).
+      fields.deleted = { type: new GraphQLList(isProtected(itemType) ? RecordVersionRef : GraphQLID) };
       return fields;
     },
   });
@@ -1049,6 +1132,14 @@ const buildInputType = (gqltype, reachable) => {
       description: fieldEntry.description,
     };
   }
+  // The version field is readOnly, so only this adds it, last and required, to a protected type's
+  // update input, which updates, state actions and nested `updated` entries take (#98). Create inputs,
+  // and the `added` items built from them, never get it. An update input that would hold only the
+  // version, with no writable id or other field, is left without fields as before (#161), so the type
+  // has no update mutation, state actions or nested `updated` entries, and keeps its delete mutation.
+  if (isProtected(gqltype) && Object.keys(fieldsArgForUpdate).length > 0) {
+    fieldsArgForUpdate.version = { type: new GraphQLNonNull(RecordVersion), description: argTypes.version.description };
+  }
 
   const inputTypeForAdd = new GraphQLInputObjectType({
     name: `${gqltype.name}Input`,
@@ -1221,8 +1312,9 @@ const materializeModel = async (args, gqltype, linkToParent, operation, session)
   const collectionFields = {};
 
   for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
-    // A virtual field stores nothing, whatever middleware or saveObject() passes for it.
-    if (isVirtualField(fieldEntry)) continue;
+    // A virtual field stores nothing, whatever middleware or saveObject() passes for it, and Simfinity
+    // writes the version field of a protected type itself (#98).
+    if (isVirtualField(fieldEntry) || isVersionField(fieldEntry)) continue;
     const fieldValue = ownValue(args, fieldEntryName);
     if (fieldEntry.extensions && fieldEntry.extensions.validations
       && fieldEntry.extensions.validations[operation]) {
@@ -1338,10 +1430,58 @@ const iterateOnCollectionFields = async (materializedModel, gqltype, objectId, s
 const readByIdIsInert = (Model) => typeof adapter.readByIdIsInert === 'function'
   && adapter.readByIdIsInert(Model) === true;
 
+// Optimistic concurrency (#98). Every update, state action, delete and nested entry of a protected
+// type first reads its record whole, plain and locked: the pre-read, which also serves the embedded
+// merge, the from-state check and onDelete. Its version is normalized before any hook sees it, so a
+// MongoDB document stored before the type was protected shows 1, as on PostgreSQL.
+const normalizeProtectedVersion = (record, gqltype, id) => {
+  record.version = readStoredVersion(record.version,
+    { typeName: gqltype.name, id: ownValue(record, '_id') ?? ownValue(record, 'id') ?? id });
+  return record.version;
+};
+
+const readProtectedRecord = async (Model, gqltype, id, session) => {
+  const record = await adapter.getById(Model, id, session, { plain: true, lock: true });
+  if (record) normalizeProtectedVersion(record, gqltype, id);
+  return record;
+};
+
+// Whether a stale or exhausted version that the pre-read found is reported at once, before the
+// record's validators, hooks and action run (decision 9): to every caller of a type without a
+// get_by_id scope, and to a caller who can read the record through that scope. The record is read as
+// a by-ID read does, in the operation's session and by its stored key, not the client's spelling of
+// the ID. A scope function that throws counts as hiding the record; errors of the gates and of
+// adapter.find propagate.
+const reportEarlyConflict = async (type, record, context, session) => {
+  if (!getScope(type.gqltype, 'get_by_id')) return true;
+  const key = String(record._id ?? record.id);
+  const args = { id: { operator: 'EQ', value: key } };
+  try {
+    return await findVisibleById(type, args, session, context, key) !== null;
+  } catch (error) {
+    if (failedByIdScopes.has(args)) return false;
+    throw error;
+  }
+};
+
+// Outcome 3 of the pre-read: the stored version is not the expected one, or an update or a state
+// action (`advances`) would take it past MAX_RECORD_VERSION; a delete does not advance it. When the
+// conflict is not reported early, the operation continues exactly as with a matching version, and the
+// conditional write reports it.
+const assertRecordVersion = async (gqltype, id, record, expectedVersion, advances, context, session) => {
+  let error = null;
+  if (record.version !== expectedVersion) error = versionConflictError(gqltype.name, id);
+  else if (advances && expectedVersion === MAX_RECORD_VERSION) error = versionExhaustedError(gqltype.name, id);
+  if (error && await reportEarlyConflict(typesDict.types[gqltype.name], record, context, session)) throw error;
+};
+
 // The record is read for the onDelete hook; adapter.delete casts the ID, deletes and returns the
 // record itself. Without a hook, the read is skipped when it is inert. A nested delete passes the
-// child it has already read as `current`.
-const onDelete = async (Model, controller, id, session, context, current) => {
+// child it has already read as `current`, and a protected delete its pre-read record, null when it is
+// missing, with `precondition`: the type and the version the record must still have. The adapter then
+// deletes it only at that version, and a record it deleted at another one, which an adapter wrapper
+// that drops the options would delete, fails with DATABASE_ERROR and rolls back with the transaction.
+const onDelete = async (Model, controller, id, session, context, current, precondition = null) => {
   const hasHook = !!(controller && controller.onDelete);
   let currentObject = current;
   if (currentObject === undefined && (hasHook || !readByIdIsInert(Model))) {
@@ -1352,7 +1492,13 @@ const onDelete = async (Model, controller, id, session, context, current) => {
     await controller.onDelete(currentObject, session, context);
   }
 
-  return adapter.delete(Model, id, session);
+  if (!precondition) return adapter.delete(Model, id, session);
+  const { gqltype, expectedVersion } = precondition;
+  const deleted = await adapter.delete(Model, id, session, { expectedVersion });
+  if (deleted && readStoredVersion(deleted.version, { typeName: gqltype.name, id }) !== expectedVersion) {
+    throw unexpectedDeleteError(gqltype.name, id);
+  }
+  return deleted;
 };
 
 const getEmbeddedFieldNames = (gqltype) => {
@@ -1427,7 +1573,7 @@ const clearNullEmbeddedMembers = (merged, fieldEntry, patch) => {
 // onUpdating, so that a malformed ID fails before the hook, and before nested collection items, so
 // that the SQL adapter locks the parent row before child writes; otherwise it skips the read only
 // when it is inert. A state action or a nested update has already read and checked the record
-// (`recordChecked`).
+// (`recordChecked`). A protected type never reads here: its pre-read record serves the merge (#98).
 const readsStoredEmbedded = (Model, controller, materializedModel, embeddedFieldNames, recordChecked) => {
   const usesStored = embeddedFieldNames.some((name) => {
     const value = ownValue(materializedModel.modelArgs, name);
@@ -1441,17 +1587,29 @@ const readsStoredEmbedded = (Model, controller, materializedModel, embeddedField
     || !readByIdIsInert(Model);
 };
 
+// Whether an update sets the version field, at the top level or inside an operator such as $set or
+// $unset. The adapter writes the version of a protected type (#98).
+const setsVersion = (update) => [update, ...Object.entries(update)
+  .filter(([key]) => key.startsWith('$')).map(([, value]) => value)]
+  .some((target) => target !== null && typeof target === 'object' && Object.hasOwn(target, 'version'));
+
+// The update of a protected type (#98) takes from its caller the version captured before the
+// pre-read, `expectedVersion`, the immutable observed version, and the pre-read record (null when
+// missing). It merges embedded values from that record and writes only at the expected version,
+// which the adapter advances; onUpdating
+// cannot set the version, and a result that did not advance it fails with DATABASE_ERROR.
 const onUpdateSubject = async (Model, gqltype, controller, args, session, linkToParent, context,
-  recordChecked = false) => {
+  recordChecked = false, { expectedVersion, observedVersion, record } = {}) => {
+  const versioned = isProtected(gqltype);
   const materializedModel = await materializeModel(args, gqltype, linkToParent, 'UPDATE', session);
   const objectId = args.id;
   const argTypes = gqltype.getFields();
   const embeddedFieldNames = getEmbeddedFieldNames(gqltype);
 
   if (embeddedFieldNames.length > 0
-    && readsStoredEmbedded(Model, controller, materializedModel, embeddedFieldNames, recordChecked)) {
+    && (versioned || readsStoredEmbedded(Model, controller, materializedModel, embeddedFieldNames, recordChecked))) {
     const projection = Object.fromEntries(embeddedFieldNames.map((name) => [name, 1]));
-    const currentObject = await adapter.getById(Model, objectId, session, {
+    const currentObject = versioned ? record : await adapter.getById(Model, objectId, session, {
       projection,
       plain: true,
       lock: true,
@@ -1476,7 +1634,8 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
   }
 
   for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
-    if (args[fieldEntryName] === null && !(fieldEntry.type instanceof GraphQLNonNull) && !isVirtualField(fieldEntry)) {
+    if (args[fieldEntryName] === null && !(fieldEntry.type instanceof GraphQLNonNull) && !isVirtualField(fieldEntry)
+      && !isVersionField(fieldEntry)) {
       materializedModel.modelArgs.$unset = {
         ...materializedModel.modelArgs.$unset,
         [getFieldStorageName(fieldEntryName, fieldEntry)]: '',
@@ -1491,11 +1650,24 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
 
   if (controller && controller.onUpdating) {
     await controller.onUpdating(objectId, update, session, context);
+    if (versioned && setsVersion(update)) throw versionManagedError(gqltype.name, 'onUpdating');
   }
 
   if (linkToParent) linkToParent(update);
-  const result = await adapter.update(Model, objectId, update, session);
+  const result = versioned
+    ? await adapter.update(Model, objectId, update, session, { expectedVersion })
+    : await adapter.update(Model, objectId, update, session);
   if (!result) throw new SimfinityError(`${gqltype.name} ${objectId} is not valid`, 'NOT_VALID_ID', 404);
+  // Diagnose a result that did not advance beyond the pre-read, including a dropped precondition
+  // when the caller sent one revision less. This cannot prove arbitrary wrappers honored the atomic
+  // condition: they must still forward it. The observation is captured before application code runs.
+  if (versioned) {
+    const returnedVersion = readStoredVersion(result.version, { typeName: gqltype.name, id: objectId });
+    if (returnedVersion !== expectedVersion + 1
+      || (observedVersion !== undefined && returnedVersion <= observedVersion)) {
+      throw unadvancedVersionError(gqltype.name, objectId);
+    }
+  }
 
   if (materializedModel.collectionFields) {
     // Children link to, and are owned through, the parent's stored key, as when a new parent is
@@ -1512,18 +1684,27 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
   return result;
 };
 
+// A protected type's version is captured before the action can change `args`, and checked on the
+// plain pre-read record before the from-state check, which reads `state` from that record (#98).
 const onStateChanged = async (Model, gqltype, controller, args, session, actionField, context) => {
-  const storedModel = await adapter.getById(Model, args.id, session, { lock: true });
+  const versioned = isProtected(gqltype);
+  const expectedVersion = versioned ? assertVersionInput(args.version) : undefined;
+  const storedModel = versioned
+    ? await readProtectedRecord(Model, gqltype, args.id, session)
+    : await adapter.getById(Model, args.id, session, { lock: true });
+  const observedVersion = versioned ? storedModel?.version : undefined;
   if (!storedModel) {
     throw new SimfinityError(`${gqltype.name} ${args.id} is not valid`, 'NOT_VALID_ID', 404);
   }
+  if (versioned) await assertRecordVersion(gqltype, args.id, storedModel, expectedVersion, true, context, session);
   if (storedModel.state === stateValue(actionField.from)) {
     if (actionField.action) {
       await actionField.action(args, session);
     }
 
     args.state = stateValue(actionField.to);
-    let result = await onUpdateSubject(Model, gqltype, controller, args, session, null, context, true);
+    let result = await onUpdateSubject(Model, gqltype, controller, args, session, null, context, true,
+      versioned ? { expectedVersion, observedVersion, record: storedModel } : undefined);
     result = adapter.toObject(result);
     result.state = actionField.to.value;
     return result;
@@ -1538,11 +1719,15 @@ const onSaveObject = async (Model, gqltype, controller, args, session, linkToPar
       typesDict.types[gqltype.name].stateMachine.initialState,
     );
   }
+  // A protected record starts at version 1, whatever saveObject() or middleware supplied (#98).
+  const versioned = isProtected(gqltype);
+  if (versioned) materializedModel.modelArgs.version = 1;
 
   const newObject = adapter.newRecord(Model, materializedModel.modelArgs, session);
 
   if (controller && controller.onSaving) {
     await controller.onSaving(newObject, args, session, context);
+    if (versioned && newObject.version !== 1) throw versionManagedError(gqltype.name, 'onSaving');
   }
 
   if (linkToParent) linkToParent(newObject);
@@ -1634,12 +1819,30 @@ const assertCollectionWrites = (gqltype, input) => {
   }
 };
 
+// The capture and the pre-read of a protected top-level update or delete (#98): the version the
+// client sent is checked before anything is read, then against the pre-read record. A missing record
+// is not reported here; the update fails at its write with NOT_VALID_ID and the delete returns null,
+// as for an unprotected type.
+const preReadTopLevel = async (Model, gqltype, { id, version }, advances, context, session) => {
+  const expectedVersion = assertVersionInput(version);
+  const record = await readProtectedRecord(Model, gqltype, id, session);
+  const observedVersion = record?.version;
+  if (record) await assertRecordVersion(gqltype, id, record, expectedVersion, advances, context, session);
+  return { expectedVersion, observedVersion, record };
+};
+
+// A delete passes the ID, or { id, version } for a protected type, which each attempt copies; every
+// other operation passes its input, which attemptInputs copies. Either way, a retry checks the version
+// the request sent.
 const executeOperation = (Model, gqltype, controller, args, operation, actionField,
   session, context, inputType) => {
   const limit = getMaxNestedOperations();
   if (limit !== null && operation !== operations.DELETE) assertNestedOperations(gqltype, args, limit);
   if (operation !== operations.DELETE) assertCollectionWrites(gqltype, args);
-  const nextInput = operation === operations.DELETE ? () => args : attemptInputs(args, inputType);
+  const versioned = isProtected(gqltype);
+  let nextInput = () => args;
+  if (operation !== operations.DELETE) nextInput = attemptInputs(args, inputType);
+  else if (versioned) nextInput = () => ({ ...args });
   return adapter.withTransaction(
     session,
     async (mySession) => {
@@ -1647,10 +1850,17 @@ const executeOperation = (Model, gqltype, controller, args, operation, actionFie
       switch (operation) {
         case operations.SAVE:
           return onSaveObject(Model, gqltype, controller, attemptArgs, mySession, null, context);
-        case operations.UPDATE:
-          return onUpdateSubject(Model, gqltype, controller, attemptArgs, mySession, null, context);
-        case operations.DELETE:
-          return onDelete(Model, controller, attemptArgs, mySession, context);
+        case operations.UPDATE: {
+          const precondition = versioned
+            ? await preReadTopLevel(Model, gqltype, attemptArgs, true, context, mySession) : undefined;
+          return onUpdateSubject(Model, gqltype, controller, attemptArgs, mySession, null, context, false, precondition);
+        }
+        case operations.DELETE: {
+          if (!versioned) return onDelete(Model, controller, attemptArgs, mySession, context);
+          const { expectedVersion, record } = await preReadTopLevel(Model, gqltype, attemptArgs, false, context,
+            mySession);
+          return onDelete(Model, controller, attemptArgs.id, mySession, context, record, { gqltype, expectedVersion });
+        }
         case operations.STATE_CHANGED:
           return onStateChanged(Model, gqltype, controller,
             attemptArgs, mySession, actionField, context);
@@ -1683,14 +1893,28 @@ const executeItemFunction = async (gqltype, collectionField, parentKey, session,
     if (item.$set) delete item.$set[connection.storageFieldName];
   };
 
+  // A protected child is updated or deleted at the version its entry carries (#98). A deleted entry is
+  // { id, version } for item middleware; one that is not an object, such as a string ID, has no version.
+  const versioned = isProtected(collectionGQLType) && operationType !== operations.SAVE;
   for (const element of collectionFieldsList) {
     if (element === null) continue;
-    const args = operationType === operations.DELETE ? { id: element } : { input: element };
+    let args = { input: element };
+    if (operationType === operations.DELETE) {
+      args = versioned ? { id: element?.id, version: element?.version } : { id: element };
+    }
     await executeMiddleware({ type, args, operation: operationType, context });
 
+    // Captured after the item's middleware, before the child is read.
+    let expectedVersion;
+    if (versioned) {
+      expectedVersion = assertVersionInput(operationType === operations.DELETE ? args.version : args.input.version);
+    }
+
     // The ownership check reads the child (the SQL adapter locks its row). onDelete receives this
-    // record, and an update reads the child again only to merge embedded values.
+    // record, and an update reads the child again only to merge embedded values, unless the child is
+    // protected: then this is its pre-read, whose version is checked after ownership.
     let child;
+    let observedVersion;
     if (operationType === operations.UPDATE || operationType === operations.DELETE) {
       const id = operationType === operations.DELETE ? args.id : args.input.id;
       child = await adapter.getById(type.model, id, session, { plain: true, lock: true });
@@ -1699,6 +1923,11 @@ const executeItemFunction = async (gqltype, collectionField, parentKey, session,
       }
       if (String(child[connection.storageFieldName]) !== String(parentKey)) {
         throw new ForbiddenError('Child does not belong to this parent');
+      }
+      if (versioned) {
+        observedVersion = normalizeProtectedVersion(child, collectionGQLType, id);
+        await assertRecordVersion(collectionGQLType, id, child, expectedVersion, operationType === operations.UPDATE,
+          context, session);
       }
     }
 
@@ -1709,10 +1938,11 @@ const executeItemFunction = async (gqltype, collectionField, parentKey, session,
         break;
       case operations.UPDATE:
         await onUpdateSubject(type.model, collectionGQLType, type.controller,
-          args.input, session, linkToParent, context, true);
+          args.input, session, linkToParent, context, true, versioned ? { expectedVersion, observedVersion, record: child } : undefined);
         break;
       case operations.DELETE:
-        await onDelete(type.model, type.controller, args.id, session, context, child);
+        await onDelete(type.model, type.controller, args.id, session, context, child,
+          versioned ? { gqltype: collectionGQLType, expectedVersion } : null);
     }
   }
 };
@@ -2298,6 +2528,29 @@ const loadReference = (type, id, requiredId, context) => {
   });
 };
 
+// The query arguments whose get_by_id scope function threw in findVisibleById. The error propagates
+// as it was thrown; the conflict path (reportEarlyConflict) tells it from errors of the gates and of
+// adapter.find this way. Each caller (resolveById and reportEarlyConflict) allocates fresh args
+// and calls findVisibleById exactly once with that object; never reuse marked args for another read.
+const failedByIdScopes = new WeakSet();
+
+// The record that the type's get_by_id scope shows the caller, or null. `args` holds an `id` EQ
+// condition, to which the scope adds its own; the gates check them as for every read, and adapter.find
+// reads in `session`, pinned to `requiredId`. get_by_id middleware is not run here; resolveById runs it
+// first.
+const findVisibleById = async (type, args, session, context, requiredId) => {
+  try {
+    await executeScope({ type, args, operation: 'get_by_id', context });
+  } catch (error) {
+    failedByIdScopes.add(args);
+    throw error;
+  }
+  assertStoredQueryPaths(type.gqltype, args, 'find');
+  assertQueryConditions(type.gqltype, args, 'find');
+  const results = await adapter.find(type.model, type.gqltype, args, session, { requiredId, context });
+  return results[0] || null;
+};
+
 // `requiredId` marks a generated single-reference read. Middleware still runs per call; then, when the
 // adapter reads by ID in batches, and unless the type has a get_by_id scope or middleware changed the
 // ID, the read joins the request's batch.
@@ -2311,12 +2564,7 @@ const resolveById = async (type, args, context, requiredId) => {
     }
     return adapter.getById(type.model, args.id, null, { requiredId, context });
   }
-  const queryArgs = { id: { operator: 'EQ', value: args.id } };
-  await executeScope({ type, args: queryArgs, operation: 'get_by_id', context });
-  assertStoredQueryPaths(type.gqltype, queryArgs, 'find');
-  assertQueryConditions(type.gqltype, queryArgs, 'find');
-  const results = await adapter.find(type.model, type.gqltype, queryArgs, null, { requiredId, context });
-  return results[0] || null;
+  return findVisibleById(type, { id: { operator: 'EQ', value: args.id } }, null, context, requiredId);
 };
 
 // Batched collection reads. A generated collection field reads its children with one
@@ -2707,10 +2955,13 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
               : `mutation that takes no input or an input of its own, since getInputType(${type.gqltype.name}) `
                 + 'has no fields.'));
         }
+        // A protected type is deleted at the version the client read (#98).
+        const deleteArgs = { id: { type: new GraphQLNonNull(GraphQLID) } };
+        if (isProtected(type.gqltype)) deleteArgs.version = { type: new GraphQLNonNull(RecordVersion) };
         rootQueryArgs.fields[`delete${type.simpleEntityEndpointName}`] = {
           type: type.gqltype,
           description: 'delete',
-          args: { id: { type: new GraphQLNonNull(GraphQLID) } },
+          args: deleteArgs,
           extensions: { simfinityMutation: { typeName: type.gqltype.name, operation: operations.DELETE } },
           async resolve(parent, args, context) {
             const params = {
@@ -2721,8 +2972,10 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
             };
 
             await executeMiddleware(params);
+            // A protected delete takes the version as middleware left it.
+            const target = isProtected(type.gqltype) ? { id: args.id, version: args.version } : args.id;
             return executeOperation(type.model, type.gqltype, type.controller,
-              args.id, operations.DELETE, null, null, context, null);
+              target, operations.DELETE, null, null, context, null);
           },
         };
       }
@@ -3179,6 +3432,104 @@ const warnUndeclaredVirtualFields = () => {
   }
 };
 
+// The types a model stores: the registered types and the embedded types they reach at any depth,
+// readOnly fields included, as assertPlainConnectionFields visits them.
+const collectStoredTypes = () => {
+  const stored = new Set();
+  const visit = (gqltype) => {
+    if (stored.has(gqltype)) return;
+    stored.add(gqltype);
+    for (const field of Object.values(gqltype.getFields())) {
+      const named = field.extensions?.relation?.embedded && getNamedType(field.type);
+      if (named instanceof GraphQLObjectType) visit(named);
+    }
+  };
+  for (const { gqltype } of Object.values(typesDict.types)) visit(gqltype);
+  return [...stored];
+};
+
+const invalidModel = (message) => new SimfinityError(message, 'INVALID_MODEL', 400);
+
+// Optimistic concurrency (#98), declared per type with `extensions.concurrency`. These checks run in
+// this order, after stored identities are known and before adapter.prepare(), so a rejected schema
+// changes nothing. `applicationTypes` are the roots of the schema's types. Returns the registrations of
+// the protected types and whether the included roots reserve the version names.
+const assertConcurrencyDeclarations = (applicationTypes) => {
+  const registrations = Object.values(typesDict.types);
+  // The shape of every declaration.
+  const protectedTypes = registrations.filter(({ gqltype }) => concurrencyDeclared(gqltype));
+  // Generated inputs, models and stored data follow the protection a type had when the first schema
+  // containing it was created, and an injected field is never removed, so neither can change later.
+  // Inputs or a model that an earlier createSchema() built without the field, even one that failed
+  // afterwards, count as such a schema; a model supplied to connect() does not.
+  for (const registration of registrations) {
+    const { gqltype } = registration;
+    const declared = protectedTypes.includes(registration);
+    const builtWithoutField = !isProtected(gqltype)
+      && (!!registration.inputType || generatedModels.has(registration.model));
+    if (declared && (protectionStatus.get(gqltype) === false || builtWithoutField)) {
+      throw invalidModel(`${gqltype.name} declares optimistic concurrency after a schema was created without it; `
+        + `declare it before the first createSchema() that contains ${gqltype.name}`);
+    }
+    if (!declared && isProtected(gqltype)) {
+      throw invalidModel(`${gqltype.name} no longer declares optimistic concurrency, but Simfinity already added its `
+        + 'version field; keep extensions.concurrency on a type once it has that field');
+    }
+  }
+  // Another runtime that registers a protected type injects its field when that runtime creates a
+  // schema, which would change a schema already built here, so this schema must register every
+  // protected type it contains, whatever the adapter supports.
+  const reachedTypes = collectOutputTypes(applicationTypes);
+  for (const type of reachedTypes) {
+    if (type instanceof GraphQLObjectType && typesDict.types[type.name]?.gqltype !== type && isProtectedType(type)) {
+      throw invalidModel(`${type.name} declares optimistic concurrency, so a schema that contains it must register it `
+        + 'in this runtime, with connect() or as a relation target');
+    }
+  }
+  // An embedded value's changes belong to the revision of the record that embeds it, wherever a model
+  // stores it.
+  const storedTypes = collectStoredTypes();
+  const storedFields = storedTypes.flatMap((gqltype) => Object.entries(gqltype.getFields())
+    .map(([fieldName, field]) => ({ gqltype, fieldName, field })));
+  for (const { gqltype, fieldName, field } of storedFields) {
+    const named = field.extensions?.relation?.embedded && getNamedType(field.type);
+    if (named instanceof GraphQLObjectType && isProtectedType(named)) {
+      throw invalidModel(versionEmbeddedMisuse(named.name, `${gqltype.name}.${fieldName}`));
+    }
+  }
+  // Only an entity has a record of its own whose version can advance.
+  const nonEntity = protectedTypes.find(({ storedIdentity }) => storedIdentity !== true);
+  if (nonEntity) {
+    throw invalidModel(`${nonEntity.gqltype.name} declares optimistic concurrency, so it must be an entity: register it `
+      + 'with connect() or make it a relation target');
+  }
+  // Nothing else may be stored, or link records, under the version field's name.
+  for (const { gqltype } of protectedTypes) {
+    const collision = versionFieldCollision(gqltype);
+    if (collision) throw invalidModel(collision);
+  }
+  for (const { gqltype, fieldName, field } of storedFields) {
+    const collision = versionConnectionCollision(gqltype, fieldName, field);
+    if (collision) throw invalidModel(collision);
+  }
+  // RecordVersion types managed version fields only, with or without protected types; registered
+  // operations may still use it in their own input and output types.
+  for (const gqltype of storedTypes) {
+    const misuse = recordVersionFieldMisuse(gqltype);
+    if (misuse) throw invalidModel(misuse);
+  }
+  const reserveVersionNames = protectedTypes.some(({ gqltype }) => reachedTypes.includes(gqltype));
+  if (protectedTypes.length && !writeFeatures.optimisticConcurrency) {
+    throw invalidModel(`The database adapter does not support optimistic concurrency, which ${protectedTypes[0].gqltype.name} `
+      + 'declares (extensions.concurrency)');
+  }
+  // A clash that only generated types or the fields of an input object reach is found when the schema
+  // is constructed.
+  const clash = reserveVersionNames && versionTypeClash(applicationTypes, { inputFields: false });
+  if (clash) throw reservedVersionTypeNameError(clash);
+  return { protectedTypes, reserveVersionNames };
+};
+
 const getRegistrations = () => Object.values(typesDict.types);
 
 const includedOperationTypes = (registrations, includedOperations) => Object.entries(registrations)
@@ -3252,16 +3603,21 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
   // An application type with the name of a field metadata type that an earlier schema fixed; one that
   // only generated types or the fields of an input object reach is found when the schema is
   // constructed.
-  assertFieldMetadataNamesFree(includedApplicationTypes(includedQueryTypes, includedMutationTypes,
-    includedCustomMutations, includedCustomQueries));
+  const applicationTypes = includedApplicationTypes(includedQueryTypes, includedMutationTypes,
+    includedCustomMutations, includedCustomQueries);
+  assertFieldMetadataNamesFree(applicationTypes);
   const referencedTypes = markReferencedTypesForModelGeneration();
   // Entities, which keep their own stored identity: connect() types and relation targets.
   Object.values(typesDict.types).forEach((typeInfo) => {
     typeInfo.storedIdentity = typeInfo.endpoint === true || referencedTypes.has(typeInfo);
   });
+  const { protectedTypes, reserveVersionNames } = assertConcurrencyDeclarations(applicationTypes);
   if (adapter.prepare) {
     adapter.prepare(getRegistrations(), { createCollection: !preventCollectionCreation });
   }
+  // prepare() describes protected types from their declaration. Models, inputs, resolvers and query
+  // arguments are built from here on, so they all see the field.
+  protectedTypes.forEach(({ gqltype }) => injectVersionField(gqltype));
 
   Object.values(typesDict.types).forEach((typeInfo) => {
     if (typeInfo.gqltype && !typeInfo.model) {
@@ -3272,6 +3628,8 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
       } else if (typeInfo.needsModel) {
         typeInfo.model = adapter.createModel(typeInfo.gqltype, null, { createCollection: false });
       }
+      const { model } = typeInfo;
+      if (model !== null && (typeof model === 'object' || typeof model === 'function')) generatedModels.add(model);
     }
   });
 
@@ -3316,13 +3674,17 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
       includedCustomQueries);
   }
 
-  const schema = constructSchema(query, mutation);
+  const schema = constructSchema(query, mutation, reserveVersionNames);
   // Reserve reachable types whose relation fields still have no resolver, such as an unregistered
   // custom operation result, so another runtime cannot later generate resolvers this schema executes.
   schemaTypes.forEach((type) => {
     if (type instanceof GraphQLObjectType && hasUnresolvedRelation(type)) {
       runtimeBoundTypes.set(type, runtimeIdentity);
     }
+  });
+  // The schema exists, so each registered type's protection is fixed from now on.
+  Object.values(typesDict.types).forEach(({ gqltype }) => {
+    if (!protectionStatus.has(gqltype)) protectionStatus.set(gqltype, isProtected(gqltype));
   });
   return schema;
 };
@@ -3494,6 +3856,8 @@ const connect = (model, gqltype, simpleEntityEndpointName,
   };
   assertNotBoundElsewhere(gqltype);
   validateScope(gqltype);
+  // The declaration's shape only; it reads extensions, never the fields (#98).
+  concurrencyDeclared(gqltype);
   if (adapter.validateRegistration) adapter.validateRegistration(registration);
 
   invalidateCollectionInputs(gqltype);
@@ -3524,6 +3888,7 @@ const addNoEndpointType = (gqltype) => {
     gqltype, endpoint: false, model: null, needsModel,
   };
   validateScope(gqltype);
+  concurrencyDeclared(gqltype);
   if (adapter.validateRegistration) adapter.validateRegistration(registration);
 
   invalidateCollectionInputs(gqltype);
@@ -3537,7 +3902,9 @@ const LIST_QUERY_ARGS = ['pagination', 'sort', 'AND', 'OR'];
 
 // `omit` is a collection's back-reference field, which its parent supplies, so it gets no filter.
 // A field named like a generated argument gets no top-level filter either; it is reported once.
-// A virtual field is not part of the query language, so it gets no filter at all.
+// A virtual field is not part of the query language, so it gets no filter at all, and neither does the
+// version field of a protected type (#98): a MongoDB record without a stored version reads as 1, which
+// a filter could not match.
 const createArgsForQuery = (gqltype, omit = null) => {
     const argsObject = {};
     const argTypes = gqltype.getFields();
@@ -3550,7 +3917,7 @@ const createArgsForQuery = (gqltype, omit = null) => {
     }
 
     for (const [fieldEntryName, fieldEntry] of Object.entries(argTypes)) {
-      if (fieldEntryName === omit || isVirtualField(fieldEntry)) continue;
+      if (fieldEntryName === omit || isVirtualField(fieldEntry) || isVersionField(fieldEntry)) continue;
       let filterType = null;
 
       if (fieldEntry.type instanceof GraphQLScalarType

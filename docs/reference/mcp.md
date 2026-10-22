@@ -47,7 +47,7 @@ The arguments object of every input schema is closed with `additionalProperties:
 
 ### Output schemas
 
-An output schema mirrors the generated selection set; nullable GraphQL positions accept `null`. A scalar gets a JSON `type` only when it is a GraphQL spec scalar (`Int`, `Float`, `String`, `Boolean`, `ID`) or a [`createValidatedScalar`](/reference/scalars#createvalidatedscalar) chain that ends at one, because only those serialize through a spec scalar. Every other scalar is published without a `type` or `format`, since its own `serialize` decides its JSON form:
+An output schema mirrors the generated selection set; nullable GraphQL positions accept `null`. A scalar gets a JSON `type` only when it is a GraphQL spec scalar (`Int`, `Float`, `String`, `Boolean`, `ID`) or a [`createValidatedScalar`](/reference/scalars#createvalidatedscalar) chain that ends at one, because only those serialize through a spec scalar. In the next release, `RecordVersion` is an additional managed exception, with integer `minimum: 1` and `maximum: 9007199254740991` in both input and output schemas. Every other scalar is published without a `type` or `format`, since its own `serialize` decides its JSON form:
 
 - `Date`, `DateTime` and `Time`, whose serializer may return an ISO instant, epoch milliseconds or `YYYY-MM-DD`. When neither the scalar nor the field has a description, the schema carries one such as `Date/time value; its JSON form is defined by the server's Date scalar (commonly an ISO 8601 string).`
 - Custom scalars with a hand-set `baseScalarType` storage hint, such as a `Decimal` hinted as `Float` that serializes `'12.30'`.
@@ -113,7 +113,7 @@ Every tool has `title` and `openWorldHint: false`. The behavioral hints depend o
 | Delete | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: true` |
 | State-machine action and custom mutation | `readOnlyHint: false` |
 
-`idempotentHint` describes the stored data only. A repeated call runs tool middleware, Simfinity middleware and controller hooks again. An update input can carry items to insert through an `added` list, as the generated input of a non-embedded one-to-many collection does at any depth, including `updated[].<collection>.added`; every repeat inserts those items again, so such updates are not idempotent. Embedded lists, which an update replaces as a whole, and single references keep the hint, and so does a collection without `added`, which Simfinity leaves out when the child has no writable field besides its back-reference. A repeated delete deletes nothing more, but it still calls the controller's `onDelete` hook, with `null` because the record no longer exists, so `onDelete` hooks must tolerate `null`.
+`idempotentHint` describes the stored data only. A repeated call runs tool middleware, Simfinity middleware and controller hooks again. An update input can carry items to insert through an `added` list, as the generated input of a non-embedded one-to-many collection does at any depth, including `updated[].<collection>.added`; every repeat inserts those items again, so unprotected updates of this shape are not idempotent. In the next release, protected updates keep `idempotentHint: true` even with `added` items, because a repeat with the same version cannot apply another revision; protected deletes also keep the hint. Embedded lists, which an update replaces as a whole, and single references keep the hint, and so does a collection without `added`, which Simfinity leaves out when the child has no writable field besides its back-reference. A repeated delete deletes nothing more, but it still calls the controller's `onDelete` hook, with `null` because the record no longer exists, so `onDelete` hooks must tolerate `null`.
 
 `toolOverrides` annotations are merged over these hints, so you can mark a tool idempotent when your hooks make repeats harmless. A state-machine action is usually safe to mark idempotent, because a repeat fails the transition's from-state check, unless the action keeps the record in the same state and its input inserts collection items.
 
@@ -323,7 +323,7 @@ A successful call returns text JSON and structured data using the original Graph
 }
 ```
 
-`structuredContent` holds the GraphQL `data` plus the keys MCP adds next to the root field: `totalCount` on counted list calls, or, when an oversized mutation result is replaced, only the root ids and a `truncated` notice. These keys are `__totalCount` and `__truncated` when the root field itself is named `totalCount` or `truncated`. The text content is the same JSON, pretty-printed by default; with `textFormat: 'compact'`, it carries no whitespace, as in `{"series":[]}`, which is about half the bytes for nested results. Error results and limit diagnostics follow the same format.
+`structuredContent` holds the GraphQL `data` plus the keys MCP adds next to the root field: `totalCount` on counted list calls, or, when an oversized mutation result is replaced, the root ids (next release: `{ id, version }` for protected results) and a `truncated` notice. These keys are `__totalCount` and `__truncated` when the root field itself is named `totalCount` or `truncated`. The text content is the same JSON, pretty-printed by default; with `textFormat: 'compact'`, it carries no whitespace, as in `{"series":[]}`, which is about half the bytes for nested results. Error results and limit diagnostics follow the same format.
 
 Execution errors return `isError: true` and text containing `{ errors, data? }`. Partial GraphQL data is preserved when available and within `maxResultBytes`; `structuredContent` is omitted on errors.
 
@@ -363,7 +363,7 @@ A generated list field keeps its marker when an application replaces or wraps it
 
 ### Oversized results
 
-When a mutation result exceeds `maxResultBytes`, the write has already run, so the result is not reported as a failure that invites a retry. A mutation that succeeded returns `isError: false`, `_meta: { truncated: true }`, and only the id of the root value (or the ids of a returned list, when every item has one) next to a `truncated` notice:
+When a mutation result exceeds `maxResultBytes`, the write has already run, so the result is not reported as a failure that invites a retry. A mutation that succeeded returns `isError: false`, `_meta: { truncated: true }`, and the id of the root value (or the ids of a returned list, when every item has one) next to a `truncated` notice. In the next release, protected results retain `{ id, version }` within the cap so the caller keeps the new revision. This unprotected example keeps only the id:
 
 ```javascript
 {
@@ -426,3 +426,9 @@ A suggestion is given for a declared argument that matches the key ignoring lett
 | `MCP_SDK_NOT_INSTALLED`, `MCP_SDK_INCOMPATIBLE`, `MCP_SDK_LOAD_FAILED` | SDK initialization failures in transport/server factories. `MCP_SDK_INCOMPATIBLE` also covers SDK modules that lack the expected exports (`Server`, the request schemas, `StdioServerTransport` or `StreamableHTTPServerTransport`); its message suggests `npm install @modelcontextprotocol/sdk@^1.31.0`. |
 
 Remote non-success responses with a usable GraphQL body preserve that body's errors. An aborted signal is checked before in-process execution and again after awaiting the context factory, preventing a cancelled call from starting a mutation. This does not undo or cancel database work that already started. Active remote cancellation rejects during fetch, body reading or a retry backoff. Through `createHTTPMCPHandler`, a call's signal is aborted only when its HTTP connection closes, not by an MCP cancellation notification. Application context factories and middleware may also throw.
+
+## Optimistic concurrency (next release)
+
+`RecordVersion` maps to `{ type: 'integer', minimum: 1, maximum: 9007199254740991 }` for inputs and outputs. Protected tool detection uses core's scalar instance; a schema rebuilt from SDL/introspection uses the fallback scalar name plus its exact managed-version description. A same-named application scalar with a different description is not detected. Tool descriptions tell callers to send the version read from the record, and to re-read and reapply on `VERSION_CONFLICT` or `TRANSACTION_RETRY_EXCEEDED`, since another request or an earlier call may have applied the change. Protected updates and deletes have an idempotent stored-data hint: repeating the same precondition cannot apply another revision, even if the update has nested `added` entries; hooks can still repeat. Transition hints remain unchanged.
+
+Default selections include `version`. An application's `toolOverrides.selection` should include it too. Oversized protected mutation results retain `{ id, version }` per root record when the compact value fits the cap; otherwise the compact value is omitted as before. Notices describe what was retained without inviting a blind retry. Custom operations returning a protected type must supply the stored version themselves. See [optimistic concurrency](/guide/concurrency); the feature is not in published 3.11.0.

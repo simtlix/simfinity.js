@@ -16,7 +16,7 @@ import {
   GraphQLObjectType,
   isSpecifiedScalarType,
 } from 'graphql';
-import { SimfinityError } from '@simtlix/simfinity-core';
+import { MAX_RECORD_VERSION, RecordVersion, SimfinityError } from '@simtlix/simfinity-core';
 import { virtualFieldOptions } from '@simtlix/simfinity-core/internal/relation-storage';
 
 // Every QLOperator value; tests/mcp-text-operators.test.js fails when the enum gains one this text does not name.
@@ -122,6 +122,23 @@ const VALIDATED_SCALAR_BASE = Symbol.for('simfinity.validatedScalarBase');
 // application's scalar `serialize` decides their JSON form.
 const DATE_TIME_SCALARS = new Set(['Date', 'DateTime', 'Time']);
 
+// SDL/introspection rebuilds lose scalar identity, but preserve this name and description.
+const isRecordVersionType = (type) => type === RecordVersion || (type instanceof GraphQLScalarType
+  && type.name === 'RecordVersion' && type.description === RecordVersion.description);
+
+const hasRecordVersionField = (type) => {
+  const named = getNamedType(type);
+  return (named instanceof GraphQLInputObjectType || named instanceof GraphQLObjectType)
+    && !!named.getFields().version && isRecordVersionType(getNamedType(named.getFields().version.type));
+};
+
+// A protected child in a nested collection does not protect its parent's write.
+const hasVersionPrecondition = (field) => (field.args || []).some((arg) => (
+  (arg.name === 'version' && isRecordVersionType(getNamedType(arg.type))) || hasRecordVersionField(arg.type)
+));
+
+const VERSION_PRECONDITION_TEXT = 'Send the version read from the record; a VERSION_CONFLICT or TRANSACTION_RETRY_EXCEEDED means the record changed, or an earlier call was applied, so re-read and retry.';
+
 /**
  * The GraphQL spec scalar whose JSON form a scalar's output takes, or null.
  * A validated scalar serializes through its base, so the walk follows only
@@ -168,7 +185,9 @@ const serializedSpecScalar = (type) => {
 const scalarToJSONSchema = (type, { output = false } = {}) => {
   const root = resolveRootScalar(type);
   let schema;
-  if (output) {
+  if (isRecordVersionType(type)) {
+    schema = { type: 'integer', minimum: 1, maximum: MAX_RECORD_VERSION };
+  } else if (output) {
     const spec = serializedSpecScalar(type);
     schema = (spec && scalarPrimitiveSchema(spec.name)) || {};
   } else {
@@ -1003,9 +1022,10 @@ const buildVirtualFieldToolDescription = (fieldName, field, entityType) => {
 
 /**
  * MCP behavioral hints for a tool. `idempotentHint` describes the stored
- * data only: a repeated call runs middleware and controller hooks again.
- * An update is idempotent unless its input can carry collection items to
- * insert (`added`), which create new child records on every call. A delete is
+ * data only: middleware and controller hooks may still run on repeated calls.
+ * An update is idempotent when protected by a version precondition, or unless
+ * its input can carry collection items to insert (`added`), which otherwise
+ * create new child records on every call. A delete is
  * idempotent because a repeat deletes nothing more; it still calls
  * controller.onDelete, with null since the record is gone, so onDelete hooks
  * must tolerate null. Transitions and custom mutations get no hints beyond
@@ -1025,7 +1045,7 @@ const buildAnnotations = (op, title, field) => {
     case 'virtualField':
       return { ...base, readOnlyHint: true };
     case 'update':
-      return { ...base, readOnlyHint: false, idempotentHint: !acceptsAddedItems(field) };
+      return { ...base, readOnlyHint: false, idempotentHint: hasVersionPrecondition(field) || !acceptsAddedItems(field) };
     case 'delete':
       return {
         ...base, readOnlyHint: false, destructiveHint: true, idempotentHint: true,
@@ -2124,9 +2144,9 @@ const countPropertySchema = (countKey) => ({
   description: `Total number of matching records across all pages. Present when pagination.count is true and the server computed a total.${countKey === 'totalCount' ? '' : ' Named __totalCount because the list field itself is named totalCount.'}`,
 });
 
-const truncationPropertySchema = () => ({
+const truncationPropertySchema = (returnsVersion) => ({
   type: 'object',
-  description: 'Present instead of the full result when an applied mutation returned more than maxResultBytes: only the id (or ids) of the root value is kept next to this notice, when they fit within maxResultBytes.',
+  description: `Present instead of the full result when an applied mutation returned more than maxResultBytes: only the ${returnsVersion ? 'id and version (or ids and versions)' : 'id (or ids)'} of the root value is kept next to this notice, when they fit within maxResultBytes.`,
   properties: {
     applied: { type: 'boolean' },
     message: { type: 'string' },
@@ -2136,10 +2156,12 @@ const truncationPropertySchema = () => ({
   required: ['applied', 'message', 'resultBytes', 'maxResultBytes'],
 });
 
-/** Reduce a mutation's root value to `{ id }` (or `[{ id }, ...]`), or undefined when an id is missing. */
-const compactMutationValue = (value) => {
+/** Reduce a mutation's root value to `{ id }` or `{ id, version }` for protected types (also in lists), or undefined when an id is missing. */
+const compactMutationValue = (value, returnsVersion) => {
   const pick = (item) => (item !== null && typeof item === 'object'
-    && (typeof item.id === 'string' || typeof item.id === 'number') ? { id: item.id } : undefined);
+    && (typeof item.id === 'string' || typeof item.id === 'number')
+    ? { id: item.id, ...(returnsVersion && Object.hasOwn(item, 'version') ? { version: item.version } : {}) }
+    : undefined);
   if (Array.isArray(value)) {
     const ids = value.map(pick);
     return ids.length > 0 && ids.every(Boolean) ? ids : undefined;
@@ -2221,10 +2243,11 @@ const oversizedMutationMessage = ({
 
 /**
  * Result for a mutation whose payload exceeds maxResultBytes. The write has
- * already run, so a success stays a success (the root id or ids next to a
+ * already run, so a success stays a success (the root ids and, for protected
+ * types, versions next to a
  * notice) and an error says whether the root field returned. The notice is a
- * limit diagnostic, so the cap does not apply to it; the root id, or the id
- * list, is kept only when it fits within the cap.
+ * limit diagnostic, so the cap does not apply to it; the compact root value
+ * is kept only when it fits within the cap.
  * @param {Object} params
  * @param {Object} params.entry toolIndex entry of the mutation tool
  * @param {string} params.name tool name
@@ -2244,16 +2267,21 @@ const oversizedMutationResult = ({
   // The outputSchema declares an integer, and a fractional cap is accepted.
   // Byte counts are integers, so `bytes > cap` and `bytes > floor(cap)` agree.
   const cap = Math.floor(maxResultBytes);
-  let compact = compactMutationValue(root);
+  let compact = compactMutationValue(root, entry.returnsVersion);
   let idNote = '';
   if (compact !== undefined) {
+    const keepsVersion = (Array.isArray(compact) ? compact : [compact]).some((item) => Object.hasOwn(item, 'version'));
     if (Buffer.byteLength(JSON.stringify(compact), 'utf8') > cap) {
-      idNote = Array.isArray(compact)
+      idNote = keepsVersion
+        ? '; its id and version values together exceed maxResultBytes and were omitted too'
+        : Array.isArray(compact)
         ? '; its ids alone exceed maxResultBytes and were omitted too'
         : '; its id alone exceeds maxResultBytes and was omitted too';
       compact = undefined;
     } else {
-      idNote = Array.isArray(compact) ? '; only the ids are returned' : '; only the id is returned';
+      idNote = keepsVersion
+        ? (Array.isArray(compact) ? '; only the ids and versions are returned' : '; only the id and version are returned')
+        : (Array.isArray(compact) ? '; only the ids are returned' : '; only the id is returned');
     }
   }
   // Without errors the root field returned; with errors only a non-null root
@@ -2648,7 +2676,8 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
         ? nestedCollections
         : normalizeNestedCollections(override.nestedCollections, `toolOverrides.${toolName}.nestedCollections`);
       const title = override.title || buildToolTitle(op, fieldName, entityType);
-      const description = override.description || buildToolDescription(op, fieldName, field, entityType);
+      const baseDescription = override.description || buildToolDescription(op, fieldName, field, entityType);
+      const description = hasVersionPrecondition(field) ? `${baseDescription} ${VERSION_PRECONDITION_TEXT}` : baseDescription;
       const annotations = { ...buildAnnotations(op, title, field), ...(override.annotations || {}) };
       const virtuals = virtualFieldsFor(field.type);
       const selection = override.selection
@@ -2668,6 +2697,7 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
       // the notice that replaces an oversized mutation result.
       const countKey = op === 'list' && hasPagination ? resultKey(fieldName, 'totalCount') : undefined;
       const truncationKey = kind === 'mutation' ? resultKey(fieldName, 'truncated') : undefined;
+      const returnsVersion = hasRecordVersionField(field.type);
       // An explicit selection override makes the mirrored output schema
       // unreliable, so it is omitted rather than published wrong.
       if (!override.selection) {
@@ -2676,7 +2706,7 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
           tool.outputSchema.properties[countKey] = countPropertySchema(countKey);
         }
         if (truncationKey && maxResultBytes) {
-          tool.outputSchema.properties[truncationKey] = truncationPropertySchema();
+          tool.outputSchema.properties[truncationKey] = truncationPropertySchema(returnsVersion);
         }
       }
       tools.push(tool);
@@ -2693,6 +2723,7 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
         argNames: new Set((field.args || []).map((arg) => arg.name)),
         countKey,
         truncationKey,
+        returnsVersion,
         idempotent: annotations.idempotentHint === true,
         // Generated find fields of a core that reports counts to a root-value
         // sink (see COUNT_SINK) advertise it with this marker.

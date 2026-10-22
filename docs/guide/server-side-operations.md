@@ -179,7 +179,7 @@ const refreshOrder = async (topic, order, session, context) => {
        FROM ${table('OrderLine')} WHERE "order" = $1`,
     [order.id],
   );
-  await simfinity.getModel(OrderType).update(order.id, { total: rows[0].total }, { session });
+  await simfinity.getModel(OrderType).update(order.id, { total: rows[0].total }, { session, version: false });
   order.total = rows[0].total; // The mutation returns this record.
   await session.query(
     'INSERT INTO app.outbox (topic, entity_id, actor) VALUES ($1, $2, $3)',
@@ -196,6 +196,8 @@ export const orderController = {
 :::
 
 Pass the controller as the fifth argument of `connect()`, as in `simfinity.connect(null, OrderType, 'order', 'orders', orderController)`. `OutboxModel` and the `app.outbox` table are application-defined.
+
+In the next release, these derived-total writes deliberately preserve the current revision: MongoDB `updateOne` leaves `version` untouched, and PostgreSQL uses `{ session, version: false }`. This option is ignored on unprotected handles and is not in published 3.11.0; see [writes made by hooks](./concurrency#writes-made-by-hooks).
 
 A derived value needs both hooks. `onSaved` runs after a create, including `addorder` with its lines and a `saveObject()` call, and `onUpdated` after an update; each receives the stored record, with `_id` on MongoDB and `id` on PostgreSQL. The mutation returns that same record after the hook, so the hook also sets `total` on it; without that line, a client that selects `total` from `addorder`, `updateorder` or `checkout` receives the total as it was before the hook ran. The order's hooks run only when a mutation writes the order. The `addorderline`, `updateorderline` and `deleteorderline` mutations that `connect()` generates for `OrderLineType` change lines without them and leave the total stale. Leave those mutations out of the schema, so that lines change only through their order:
 
@@ -410,11 +412,11 @@ Inside a hook or a custom mutation, pass the session you received. A call withou
 
 ## What Simfinity does not provide
 
-- No generated mutation updates or deletes several unrelated records in one transaction. Each root mutation field runs in its own transaction, and nested writes only reach the children of one parent. Write a custom mutation instead: `saveObject()` for new records and the native model with the session for changes, with your own checks. A generated mutation that runs a list of operations in one transaction is proposed in [#100](https://github.com/simtlix/simfinity.js/issues/100); optimistic concurrency, in [#98](https://github.com/simtlix/simfinity.js/issues/98).
+- No generated mutation updates or deletes several unrelated records in one transaction. Each root mutation field runs in its own transaction, and nested writes only reach the children of one parent. Write a custom mutation instead: `saveObject()` for new records and the native model with the session for changes, with your own checks. A generated mutation that runs a list of operations in one transaction is proposed in [#100](https://github.com/simtlix/simfinity.js/issues/100). The next release adds record-level [optimistic concurrency](./concurrency); it does not add operation-list transactions.
 - No programmatic update or delete through the lifecycle. `saveObject()` creates records only.
 - No generated read inside a caller's transaction. Generated queries never receive a session, so read uncommitted data through the native model. Virtual field resolvers receive no session either.
 - No custom root reads of stored records. A [custom query](./queries#custom-queries) is for results that are not stored records, and its callback bypasses the generated scopes and rules. Expose a read of stored records that generated filters, scopes and aggregates cannot express as a [virtual field](./queries#virtual-fields) on the type it belongs to, and read it from server code through [in-process execution](#execute-the-generated-schema-in-process); see [reading stored records through a custom mutation](./anti-patterns#reading-stored-records-through-a-custom-mutation).
 - No IDs in nested `added` items, and no references between records added in the same mutation.
-- No caller-supplied condition on generated updates or deletes, such as an expected version. Check the stored record with the session in `onUpdating` or `onDelete`, or use a native conditional update.
+- No arbitrary caller-supplied condition on generated updates or deletes. The next release adds an expected-version precondition through declarative [optimistic concurrency](./concurrency); other conditions still require application checks with the session or a native conditional write.
 
 Continue with [usage anti-patterns](./anti-patterns) for the approaches these paths replace.

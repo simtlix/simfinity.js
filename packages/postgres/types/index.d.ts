@@ -7,7 +7,9 @@ export {
   buildErrorFormatter,
   createValidatedScalar,
   InternalServerError,
+  MAX_RECORD_VERSION,
   plugins,
+  RecordVersion,
   scalars,
   SimfinityError,
   validators,
@@ -17,6 +19,7 @@ export type {
   AuthRule,
   AuthRuleFunction,
   AuthSchemaPlugin,
+  ConcurrencyDeclaration,
   CreateSchemaOptions,
   EntityController,
   EnvelopSchemaPlugin,
@@ -169,8 +172,10 @@ export interface PostgresModel {
   find(args?: Record<string, any>, options?: { session?: PostgresSession }): Promise<PostgresRecord[]>;
   /** Native helpers bypass GraphQL validators/controllers; references use storage column names. */
   create(data: Record<string, any>, options?: { session?: PostgresSession }): Promise<PostgresRecord>;
-  update(id: string, changes: Record<string, any>, options?: { session?: PostgresSession }): Promise<PostgresRecord | null>;
-  delete(id: string, options?: { session?: PostgresSession }): Promise<PostgresRecord | null>;
+  /** Protected entities require changes.version; version:false ignores that field and does not advance it. */
+  update(id: string, changes: Record<string, any>, options?: { session?: PostgresSession; version?: false }): Promise<PostgresRecord | null>;
+  /** Protected entities require the version read, or false to bypass the version precondition. */
+  delete(id: string, options?: { session?: PostgresSession; version?: number | false }): Promise<PostgresRecord | null>;
 }
 export interface PostgresConfiguration {
   pool: PostgresPool;

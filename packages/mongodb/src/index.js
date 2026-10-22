@@ -1,5 +1,7 @@
 import {
   InternalServerError,
+  MAX_RECORD_VERSION,
+  RecordVersion,
   SimfinityError,
   buildErrorFormatter,
   createRuntime,
@@ -35,6 +37,8 @@ export {
   createRuntime,
   createValidatedScalar,
   InternalServerError,
+  MAX_RECORD_VERSION,
+  RecordVersion,
   SimfinityError,
 };
 
