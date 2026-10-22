@@ -86,6 +86,33 @@ Selectors treat a custom query like any other query tool:
 
 Custom inputs do not acquire generated pagination or filtering behavior. Apply domain limits inside the callback and configure [authorization](#preserve-authorization) for its root and output fields. If a custom query and a custom mutation share a name, MCP publishes only the query's tool and skips the mutation with a warning; use distinct names to expose both. A custom query named like a [virtual field tool](/reference/mcp#virtual-field-tools), `<byIdQuery>_<field>`, takes that tool name, and the virtual field's tool is skipped with a warning.
 
+## Named view tools
+
+[Named views](./queries#named-views), registered with `registerView()`, are published as list tools with `readOnlyHint: true`. Each tool is titled by the view's field name. Its description starts with the view's description and appends the generated sentence: `Supports per-field filters (operators: ...; ...), nested AND/OR filter groups, pagination (page/size) and sorting.` This is the same filter sentence as the generated list tool's. A `toolOverrides` title or description takes precedence.
+
+The input schema includes the typed params next to the generated filters, `AND`/`OR`, `sort` and `pagination`. Param descriptions and defaults are preserved. A `NonNull` param without a default is required, and unknown arguments are rejected. For the view in the queries guide:
+
+```javascript
+const { callTool } = mcp.generateMCPTools(schema, {
+  include: ['upcomingBookings'],
+});
+
+const result = await callTool('upcomingBookings', {
+  from: '2026-11-01',
+  pagination: { page: 1, size: 20, count: true },
+});
+```
+
+The result carries `totalCount` next to the list when `pagination.count` is true. The rows and output schema use the base type's selection, including its usual virtual-field selection rules. Callers send sorting and pagination; the tool also applies `limits.defaultPagination` when pagination is omitted.
+
+Selectors use the view's name and base type:
+
+- `include` and `exclude` match the field name, the published name with `toolNamePrefix`, or the category `'query'`. A prefix changes the published tool name, not its GraphQL field name.
+- `includeTypes` and `excludeTypes` match the base type, such as `'booking'`.
+- `toolOverrides` match the published name or field name. Exclude a view by name to hide its tool on one server.
+
+The view's base-type scope and [root authorization](./queries#named-views) still apply to every call.
+
 ## Start a stdio server
 
 Install the SDK for protocol transports:
