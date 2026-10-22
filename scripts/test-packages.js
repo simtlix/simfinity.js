@@ -1993,7 +1993,7 @@ const register = ${singleton ? 'registerView' : 'api.registerView'};
 type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 const sameOptions: Equals<ViewOptions, CoreViewOptions> = true;
 const exactRegister: Equals<typeof register, (name: string, options: ViewOptions) => void> = true;
-const sameMember: Equals<typeof api.registerView, typeof register> = true;
+${singleton ? 'const sameMember: Equals<typeof api.registerView, typeof register> = true;' : ''}
 const type = new GraphQLObjectType({ name: 'ViewItem', fields: { name: { type: GraphQLString } } });
 const status = new GraphQLEnumType({ name: 'ViewStatus', values: { OPEN: {} } });
 const input = new GraphQLInputObjectType({ name: 'ViewInput', fields: { text: { type: GraphQLString } } });
@@ -2020,7 +2020,7 @@ register('noDescription', { type, where: () => [] });
 register('objectWhere', { type, description: 'd', where: () => ({ conditions: [] }) });
 // @ts-expect-error A view has no other options.
 register('unknownOption', { type, description: 'd', where: () => [], transactional: true });
-void [sameOptions, exactRegister, sameMember];`;
+void [sameOptions, exactRegister${singleton ? ', sameMember' : ''}];`;
 
 const cases = [
   {

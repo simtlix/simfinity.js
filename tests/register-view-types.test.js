@@ -7,6 +7,11 @@ const read = (path) => readFileSync(new URL(`../packages/${path}/types/index.d.t
 const core = read('core');
 const mongo = read('mongodb');
 const postgres = read('postgres');
+const sql = read('sql');
+
+// Names of the `export type { ... } from '@simtlix/simfinity-core'` lists.
+const reexportedCoreTypes = (text) => [...text.matchAll(/^export type \{([^}]*)\} from '@simtlix\/simfinity-core';/gm)]
+  .flatMap(([, list]) => list.split(',').map((name) => name.trim()));
 
 describe('registerView declarations', () => {
   it('declares registerView on the core Runtime with its option types', () => {
@@ -17,14 +22,21 @@ describe('registerView declarations', () => {
     expect(core).toMatch(/^export interface FilterGroup \{$/m);
   });
 
-  it('declares the MongoDB facade function and re-exports the option type', () => {
+  it('declares the MongoDB facade function', () => {
     expect(mongo).toMatch(/^export function registerView\(/m);
-    const reexported = [...mongo.matchAll(/^export type \{([^}]*)\} from '@simtlix\/simfinity-core';/gm)]
-      .flatMap(([, list]) => list.split(',').map((name) => name.trim()));
-    expect(reexported).toContain('ViewOptions');
   });
 
   it('declares the PostgreSQL default-instance member', () => {
     expect(postgres).toMatch(/^export const registerView: PostgresRuntime\['registerView'\];$/m);
+  });
+
+  it.each([
+    ['mongodb', mongo],
+    ['postgres', postgres],
+    ['sql', sql],
+  ])('re-exports the view option types from %s', (name, text) => {
+    expect(reexportedCoreTypes(text)).toEqual(expect.arrayContaining(
+      ['FilterCondition', 'FilterGroup', 'ViewOptions', 'ViewParam', 'ViewParamType'],
+    ));
   });
 });
