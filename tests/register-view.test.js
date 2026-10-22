@@ -4,6 +4,7 @@ import {
   GraphQLObjectType, GraphQLScalarType, GraphQLString, graphql, validateSchema,
 } from 'graphql';
 import { createRuntime } from '../packages/core/src/runtime.js';
+import { QLOperator, SimfinityError } from '../packages/core/src/index.js';
 
 const createAdapter = () => ({
   prepare: vi.fn(),
@@ -296,12 +297,316 @@ test('strips the params before middleware, the scope and the adapter', async () 
   expect(seen[0].type).toBe(registration);
   expect(seen[0]).toMatchObject({ operation: 'find', entry: 'openItems' });
   expect(seen[0].args).toEqual(clientArgs);
-  expect(scoped).toEqual([clientArgs]);
-  expect(calls).toEqual([{ method: 'find', args: clientArgs }, { method: 'count', args: clientArgs }]);
+  // After middleware, the groups of where, none here, are appended to AND.
+  const listArgs = { ...clientArgs, AND: [] };
+  expect(scoped).toEqual([listArgs]);
+  expect(calls).toEqual([{ method: 'find', args: listArgs }, { method: 'count', args: listArgs }]);
 
   // A param the client omits arrives with its default, and is stripped as well.
   await graphql({ schema, source: '{ openItems(shop: "s1") { id } }', contextValue: {} });
   expect(seen[1].args).toEqual({});
-  expect(scoped[1]).toEqual({});
-  expect(calls[2]).toEqual({ method: 'find', args: {} });
+  expect(scoped[1]).toEqual({ AND: [] });
+  expect(calls[2]).toEqual({ method: 'find', args: { AND: [] } });
+});
+
+// The groups of a view's `where` are client constructs, appended after middleware.
+const NV_ROWS = {
+  NvItem: [
+    { _id: 'i1', id: 'i1', stock: 5, tenant: 'A', shop: 's1' },
+    { _id: 'i2', id: 'i2', stock: 0, tenant: 'A', shop: 's2' },
+    { _id: 'i3', id: 'i3', stock: 9, tenant: 'B', shop: 's1' },
+  ],
+  NvShop: [
+    { _id: 's1', id: 's1', name: 'North', state: 'OPEN' },
+    { _id: 's2', id: 's2', name: 'South', state: 'CLOSED' },
+  ],
+};
+const OPERATORS = QLOperator.getValues().map((entry) => entry.value);
+
+// The value a condition reads on an item: its own field, or, through the shop reference, the shop's id
+// or another field of the shop, also when the condition names it with a dotted field.
+const nvValue = (row, condition) => {
+  const path = condition.path ? `${condition.field}.${condition.path}` : condition.field;
+  const [head, ...rest] = path.split('.');
+  if (head !== 'shop' || !rest.length || rest[0] === 'id') return row[head];
+  return NV_ROWS.NvShop.find((shop) => shop.id === row.shop)?.[rest[0]];
+};
+// EQ and GTE are evaluated; any other operator keeps the row.
+const nvMatches = (row, condition) => {
+  if (condition.operator === 'EQ') return nvValue(row, condition) === condition.value;
+  if (condition.operator === 'GTE') return nvValue(row, condition) >= condition.value;
+  return true;
+};
+const nvGroupMatches = (row, group) => (group.conditions || []).every((condition) => nvMatches(row, condition))
+  && (group.AND || []).every((nested) => nvGroupMatches(row, nested));
+const nvRows = (Model, args) => NV_ROWS[Model.name].filter((row) => (args.AND || []).every((group) => nvGroupMatches(row, group)));
+
+// The shape of tests/scope-args.test.js: every read is recorded with a copy of its arguments.
+const createViewAdapter = (calls, queryFeatures) => {
+  const adapter = {
+    bind() {},
+    prepare() {},
+    createModel: (gqltype) => ({ name: gqltype.name }),
+    castId: String,
+    withTransaction: async (session, body) => body(session || {}),
+    async getById(Model, id) { return NV_ROWS[Model.name].find((row) => row._id === id) ?? null; },
+    async find(Model, gqltype, args) {
+      calls.push({ method: 'find', args: structuredClone(args) });
+      const rows = nvRows(Model, args);
+      if (!args.pagination) return rows;
+      const { page, size } = args.pagination;
+      return rows.slice((page - 1) * size, page * size);
+    },
+    async count(Model, gqltype, args) {
+      calls.push({ method: 'count', args: structuredClone(args) });
+      return nvRows(Model, args).length;
+    },
+  };
+  if (queryFeatures !== undefined) adapter.queryFeatures = queryFeatures;
+  return adapter;
+};
+
+const stock = (value) => ({ conditions: [{ field: 'stock', operator: 'GTE', value }] });
+const tenant = (value) => ({ conditions: [{ field: 'tenant', operator: 'EQ', value }] });
+const tenantScope = ({ args, context }) => {
+  args.AND = [...(args.AND || []), tenant(context.user.tenant)];
+};
+const openOnlyScope = ({ args, context }) => {
+  if (context.openOnly) args.state = { operator: 'EQ', value: 'OPEN' };
+};
+
+// Built inside each test: NvItem holds a reference, so its types bind to the first runtime that builds
+// their relation resolvers. Registers openItems, with `where`, and the `views` given, on NvItem.
+const build = ({
+  queryFeatures, where = ({ params }) => [stock(params.minStock)], scopes = {}, views = {}, middleware,
+} = {}) => {
+  const calls = [];
+  const runtime = createRuntime(createViewAdapter(calls, queryFeatures));
+  const Shop = new GraphQLObjectType({
+    name: 'NvShop',
+    extensions: { scope: { find: scopes.shop ?? openOnlyScope } },
+    fields: { id: { type: GraphQLID }, name: { type: GraphQLString }, state: { type: GraphQLString } },
+  });
+  const Item = new GraphQLObjectType({
+    name: 'NvItem',
+    extensions: { scope: { find: scopes.item ?? tenantScope } },
+    fields: {
+      id: { type: GraphQLID },
+      name: { type: GraphQLString },
+      stock: { type: GraphQLInt },
+      tenant: { type: GraphQLString },
+      shop: { type: Shop, extensions: { relation: { embedded: false } } },
+      score: { type: GraphQLInt, resolve: () => 1, extensions: { virtual: true } },
+    },
+  });
+  runtime.connect(null, Shop, 'nvShop', 'nvShops');
+  runtime.connect(null, Item, 'nvItem', 'nvItems');
+  if (middleware) runtime.use(middleware);
+  runtime.registerView('openItems', {
+    type: Item, description: 'Items in stock', params: { minStock: { type: GraphQLInt, defaultValue: 1 } }, where,
+  });
+  for (const [name, view] of Object.entries(views)) runtime.registerView(name, { type: Item, description: name, ...view });
+  return {
+    runtime, schema: runtime.createSchema(), calls, Item, Shop,
+  };
+};
+
+const ids = (rows) => rows.map((row) => row.id);
+const run = (schema, source, contextValue = { user: { tenant: 'A' } }) => graphql({ schema, source, contextValue });
+
+test('appends the where groups after middleware and the scope cannot see the view', async () => {
+  const scoped = [];
+  const { schema, calls } = build({
+    // Rebuilds the arguments and drops the client's groups, as a middleware may.
+    middleware: async (params, next) => {
+      if (params.operation === 'find') params.args = { ...params.args, AND: [] };
+      await next();
+    },
+    scopes: {
+      item: (payload) => {
+        scoped.push({ payload, args: structuredClone(payload.args) });
+        tenantScope(payload);
+      },
+    },
+  });
+  const result = await run(schema, '{ openItems { id } }');
+  expect(result.errors).toBeUndefined();
+  expect(ids(result.data.openItems)).toEqual(['i1']);
+  expect(scoped).toHaveLength(1);
+  expect(scoped[0].payload).not.toHaveProperty('entry');
+  expect(scoped[0].payload).not.toHaveProperty('view');
+  expect(scoped[0].args).toEqual({ AND: [stock(1)] }); // the where group, and no minStock
+  expect(calls).toEqual([{ method: 'find', args: { AND: [stock(1), tenant('A')] } }]);
+});
+
+test('runs the find scope for the list and for the count, and reports the count', async () => {
+  const { schema, calls } = build();
+  const context = { user: { tenant: 'A' } };
+  const result = await run(schema, '{ openItems(minStock: 0, pagination: { page: 1, size: 1, count: true }) { id } }', context);
+  expect(result.errors).toBeUndefined();
+  expect(ids(result.data.openItems)).toEqual(['i1']);
+  expect(context.count).toBe(2);
+  expect(calls.map((call) => call.method)).toEqual(['find', 'count']);
+  for (const call of calls) expect(call.args.AND).toEqual([stock(0), tenant('A')]);
+});
+
+test('receives { params, context } and never the client arguments', async () => {
+  const where = vi.fn(({ params }) => [stock(params.minStock)]);
+  const { schema } = build({ where });
+  const context = { user: { tenant: 'A' } };
+  const result = await run(schema, `{ openItems(minStock: 3, tenant: { operator: EQ, value: "A" },
+    pagination: { page: 1, size: 5 }) { id } }`, context);
+  expect(result.errors).toBeUndefined();
+  expect(where).toHaveBeenCalledTimes(1);
+  const [input] = where.mock.calls[0];
+  expect(input).toEqual({ params: { minStock: 3 }, context });
+  expect(input.context).toBe(context);
+  expect(Object.keys(input)).toEqual(['params', 'context']);
+});
+
+test('two aliases with different params return different rows and counts in one document', async () => {
+  const { schema, calls } = build();
+  const result = await run(schema, `{
+    a: openItems(minStock: 1, pagination: { page: 1, size: 10, count: true }) { id }
+    b: openItems(minStock: 6, pagination: { page: 1, size: 10, count: true }) { id }
+  }`);
+  expect(result.errors).toBeUndefined();
+  expect(ids(result.data.a)).toEqual(['i1']);
+  expect(ids(result.data.b)).toEqual([]);
+  // One context holds one count, so the counts are read from the adapter calls.
+  const counts = calls.filter((call) => call.method === 'count').map((call) => call.args.AND);
+  expect(counts).toHaveLength(2);
+  expect(counts).toEqual(expect.arrayContaining([[stock(1), tenant('A')], [stock(6), tenant('A')]]));
+});
+
+test('keeps the code and status of an error thrown by where', async () => {
+  const { schema, calls } = build({
+    where: () => { throw new SimfinityError('date must be YYYY-MM-DD', 'INVALID_INPUT', 400); },
+  });
+  const result = await run(schema, '{ openItems { id } }');
+  expect(result.errors[0].message).toBe('date must be YYYY-MM-DD');
+  expect(result.errors[0].extensions).toMatchObject({ code: 'INVALID_INPUT', status: 400 });
+  expect(calls).toEqual([]);
+});
+
+test.each([
+  ['a non-array result', () => ({ conditions: [] }), 'must return an array of AND groups'],
+  ['a group that is not an object', () => ['x'], 'returned a group that is not a plain object'],
+  ['a nested group that is not an object', () => [{ AND: [null] }], 'returned a group that is not a plain object'],
+  ['nested groups that are not an array', () => [{ OR: {} }], 'returned a group whose OR is not an array'],
+  ['conditions that are not an array', () => [{ conditions: {} }], 'returned a group whose conditions is not an array'],
+  ['a condition that is not an object', () => [{ conditions: [null] }], 'returned a condition that is not a plain object with a field name'],
+  ['a condition without a field', () => [{ conditions: [{ operator: 'EQ', value: 1 }] }],
+    'returned a condition that is not a plain object with a field name'],
+  ['an unknown field', () => [{ conditions: [{ field: 'nope', operator: 'EQ', value: 1 }] }], 'names nope, which is not a field of NvItem'],
+  ['an unknown field below a reference', () => [{ conditions: [{ field: 'shop', path: 'nope', operator: 'EQ', value: 1 }] }],
+    'names shop.nope, which is not a field of NvShop'],
+  ['a path past a scalar', () => [{ conditions: [{ field: 'stock.value', operator: 'EQ', value: 1 }] }],
+    'names stock.value, which is past NvItem.stock, whose type Int has no fields'],
+  ['a virtual field', () => [{ conditions: [{ field: 'score', operator: 'EQ', value: 1 }] }], 'names score, which is the virtual field NvItem.score'],
+])('fails with INVALID_VIEW when where returns %s', async (label, where, message) => {
+  const { schema, calls } = build({ where });
+  const result = await run(schema, '{ openItems { id } }');
+  expect(result.errors[0].message).toBe(`View openItems where ${message}`);
+  expect(result.errors[0].extensions).toMatchObject({ code: 'INVALID_VIEW', status: 500 });
+  expect(calls).toEqual([]);
+});
+
+// A param may not take the name of a field of the base type, so the shop's ID is shopId.
+const shopItems = {
+  params: { shopId: { type: new GraphQLNonNull(GraphQLID) } },
+  where: ({ params }) => [{ conditions: [{ field: 'shop', path: 'id', operator: 'EQ', value: params.shopId }] }],
+};
+
+test('gives a where reference path the joined find scope of its target', async () => {
+  const { schema, calls } = build({ views: { shopItems } });
+  const opened = await run(schema, '{ shopItems(shopId: "s2") { id } }', { user: { tenant: 'A' }, openOnly: true });
+  expect(opened.errors).toBeUndefined();
+  expect(ids(opened.data.shopItems)).toEqual([]); // s2 is CLOSED
+  // Joined scopes are prefixed into dotted fields and land inside the where group, as for a client group.
+  expect(calls[0].args.AND).toEqual([
+    {
+      conditions: [{ field: 'shop', path: 'id', operator: 'EQ', value: 's2' }],
+      AND: [{ conditions: [{ field: 'shop.state', operator: 'EQ', value: 'OPEN' }] }],
+    },
+    tenant('A'),
+  ]);
+
+  const all = await run(schema, '{ shopItems(shopId: "s2") { id } }');
+  expect(all.errors).toBeUndefined();
+  expect(ids(all.data.shopItems)).toEqual(['i2']);
+});
+
+test('marks a where emptiness condition through a reference on the same issued map as the client arguments', async () => {
+  const { schema, calls } = build({
+    queryFeatures: { operators: OPERATORS, referenceEmptiness: true },
+    views: { orphanItems: { where: () => [{ conditions: [{ field: 'shop', operator: 'IS_EMPTY' }] }] } },
+  });
+  const result = await run(schema, `{ orphanItems(AND: [{ conditions: [{ field: "shop", path: "name",
+    operator: IS_NOT_EMPTY }] }]) { id } }`);
+  expect(result.errors).toBeUndefined();
+  const { AND } = calls[0].args;
+  expect(AND[0].conditions[0]).toMatchObject({ field: 'shop', path: 'name', operator: 'IS_NOT_EMPTY' });
+  expect(AND[0].conditions[0].__scope).toMatchObject({ id: 0 }); // the client's condition
+  expect(AND[1].conditions[0]).toMatchObject({ field: 'shop', operator: 'IS_EMPTY' });
+  expect(AND[1].conditions[0].__scope).toMatchObject({ id: 1 }); // the where condition
+  // Markers live on conditions, never on groups.
+  expect(AND.some((group) => Object.hasOwn(group, '__scope'))).toBe(false);
+});
+
+test('fails with UNSUPPORTED_QUERY when where uses an emptiness operator through a reference and the adapter does not declare it', async () => {
+  const { schema, calls } = build({
+    queryFeatures: { operators: OPERATORS },
+    views: { orphanItems: { where: () => [{ conditions: [{ field: 'shop', operator: 'IS_EMPTY' }] }] } },
+  });
+  const result = await run(schema, '{ orphanItems { id } }');
+  expect(result.errors[0].extensions).toMatchObject({ code: 'UNSUPPORTED_QUERY', status: 400 });
+  expect(calls).toEqual([]);
+});
+
+test('fails with FILTER_DEPTH_EXCEEDED when where nests an emptiness condition at depth 6', async () => {
+  // Groups in args.AND are at depth 0, so the innermost group is at depth 6.
+  let group = { conditions: [{ field: 'name', operator: 'IS_EMPTY' }] };
+  for (let level = 0; level < 6; level += 1) group = { AND: [group] };
+  const { schema, calls } = build({ queryFeatures: { operators: OPERATORS }, where: () => [group] });
+  const result = await run(schema, '{ openItems { id } }');
+  expect(result.errors[0].extensions).toMatchObject({ code: 'FILTER_DEPTH_EXCEEDED', status: 400 });
+  expect(calls).toEqual([]);
+});
+
+test('does not mutate the groups where returns across requests', async () => {
+  const groups = [
+    { conditions: [{ field: 'stock', operator: 'GTE', value: 1 }, { field: 'shop', path: 'id', operator: 'EQ', value: 's1' }] },
+    { conditions: [{ field: 'shop', path: 'name', operator: 'IS_NOT_EMPTY' }] },
+  ];
+  const snapshot = structuredClone(groups);
+  const { schema, calls } = build({
+    queryFeatures: { operators: OPERATORS, referenceEmptiness: true },
+    where: () => groups,
+  });
+  const opened = await run(schema, '{ openItems { id } }', { user: { tenant: 'A' }, openOnly: true });
+  const all = await run(schema, '{ openItems { id } }');
+  expect(opened.errors).toBeUndefined();
+  expect(all.errors).toBeUndefined();
+  expect(ids(opened.data.openItems)).toEqual(['i1']);
+  expect(ids(all.data.openItems)).toEqual(['i1']);
+  // The first request joined the shop scope into its copy of the group and marked its copy of the emptiness condition.
+  expect(calls[0].args.AND[0].AND).toEqual([{ conditions: [{ field: 'shop.state', operator: 'EQ', value: 'OPEN' }] }]);
+  expect(calls[0].args.AND[1].conditions[0].__scope).toMatchObject({ id: 0 });
+  expect(calls[1].args.AND[0]).not.toHaveProperty('AND');
+  expect(groups).toEqual(snapshot); // no __scope, no AND appended by joined scopes
+});
+
+test('splits the params by the names the schema was built with', async () => {
+  const where = vi.fn(() => []);
+  const params = { minStock: { type: GraphQLInt, defaultValue: 1 } };
+  const { schema, calls } = build({ views: { counted: { params, where } } });
+  // Changing the params object after createSchema does not change how that schema's arguments are split.
+  delete params.minStock;
+  params.tenant = { type: GraphQLString };
+  const result = await run(schema, '{ counted(minStock: 2, tenant: { operator: EQ, value: "A" }) { id } }');
+  expect(result.errors).toBeUndefined();
+  expect(where.mock.calls[0][0].params).toEqual({ minStock: 2 });
+  expect(calls[0].args).toMatchObject({ tenant: { operator: 'EQ', value: 'A' } });
+  expect(calls[0].args).not.toHaveProperty('minStock');
 });

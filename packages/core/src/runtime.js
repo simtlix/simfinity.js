@@ -2070,22 +2070,24 @@ const hasScopeMarker = (construct) => construct != null && Object.hasOwn(constru
 
 // Marks the client's constructs that read references or collections, from the gate's conditions on the
 // client's arguments, then applies maxReferenceFrames to the distinct (kind, path) pairs of their
-// scoped joins and frames in this call, so every 2a code comes first. Returns the issued markers, as
-// id -> the client's operator and path, or null when the adapter does not compile reference
-// emptiness. Ids are ordinals in the order of the conditions, so identical arguments get identical
-// markers and sibling collection reads keep one batch key.
-const markClientConstructs = (checked) => {
+// scoped joins and frames in these conditions, so every 2a code comes first. Returns the issued
+// markers, as id -> the client's operator and path, or null when the adapter does not compile
+// reference emptiness. Ids are ordinals in the order of the conditions, so identical arguments get
+// identical markers and sibling collection reads keep one batch key. With `issued`, the markers of
+// the call so far, the ids continue on that map, so that a view's `where`, marked after the client's
+// arguments, shares them; the limit still applies to each set of conditions on its own.
+const markClientConstructs = (checked, issued) => {
   if (!supportsReferenceEmptiness) return null;
-  const issued = new Map();
+  const markers = issued ?? new Map();
   const pairs = new Set();
   for (const { entry, shape } of checked) {
     const { construct } = entry;
     if (!shape || !construct || hasScopeMarker(construct)) continue;
     const { joins, frames } = emptinessScopePaths(shape, entry.segments);
     if (!joins.length && !frames.length) continue;
-    const id = issued.size;
+    const id = markers.size;
     construct[SCOPE_MARKER] = { id };
-    issued.set(id, { operator: entry.operator, path: entry.path });
+    markers.set(id, { operator: entry.operator, path: entry.path });
     for (const path of joins) pairs.add(`join ${path}`);
     for (const path of frames) pairs.add(`frame ${path}`);
   }
@@ -2094,7 +2096,7 @@ const markClientConstructs = (checked) => {
     throw new SimfinityError(`Emptiness conditions through references and collections need ${pairs.size} scoped joins and `
       + `frames in one query field, more than the limit of ${limit} (maxReferenceFrames)`, 'FILTER_DEPTH_EXCEEDED', 400);
   }
-  return issued;
+  return markers;
 };
 
 // The detach check: every marker issued in this call sits, well formed (an object whose only own key
@@ -2850,20 +2852,80 @@ const readList = async (type, params, parent, info, context) => {
   return result;
 };
 
-// Separates a view's params from the rest of its arguments, which are exactly a generated list's.
-const splitViewArgs = (view, args) => {
+// Separates a view's params, named by `paramNames`, from the rest of its arguments, which are exactly
+// a generated list's.
+const splitViewArgs = (paramNames, args) => {
   const params = {};
   const rest = {};
   for (const [name, value] of Object.entries(args)) {
-    if (Object.hasOwn(view.params, name)) params[name] = value;
+    if (paramNames.has(name)) params[name] = value;
     else rest[name] = value;
   }
   return { params, args: rest };
 };
 
+const invalidWhere = (view, detail) => new SimfinityError(`View ${view.name} where ${detail}`, 'INVALID_VIEW', 500);
+
+// The groups a view's `where` returned are plain objects whose `conditions`, `AND` and `OR`, when set,
+// are arrays: of plain objects with a field name, and of groups like these. collectQueryPathEntries
+// skips anything else silently, so this comes before their paths are read.
+const assertViewGroupShapes = (view, groups) => {
+  for (const group of groups) {
+    if (!isNonNullPlainObject(group)) throw invalidWhere(view, 'returned a group that is not a plain object');
+    for (const key of ['conditions', 'AND', 'OR']) {
+      if (group[key] != null && !Array.isArray(group[key])) throw invalidWhere(view, `returned a group whose ${key} is not an array`);
+    }
+    for (const condition of group.conditions ?? []) {
+      if (!isNonNullPlainObject(condition) || typeof condition.field !== 'string' || condition.field === '') {
+        throw invalidWhere(view, 'returned a condition that is not a plain object with a field name');
+      }
+    }
+    assertViewGroupShapes(view, [...(group.AND ?? []), ...(group.OR ?? [])]);
+  }
+};
+
+// A `where` that does not return an array of groups, or names a field its type does not have, a path
+// past a field without fields, or a virtual field, is the author's bug: INVALID_VIEW (500), never the
+// FORBIDDEN_FILTER_PATH (403) that inspectClientPaths gives a client for a virtual field. Each path is
+// walked here, since walkQueryPath stops silently at an unknown segment.
+const assertViewGroups = (view, groups) => {
+  if (!Array.isArray(groups)) throw invalidWhere(view, 'must return an array of AND groups');
+  assertViewGroupShapes(view, groups);
+  for (const { segments } of collectQueryPathEntries({ AND: groups }, 'find', { gqltype: view.type })) {
+    let type = view.type;
+    let parent = null;
+    for (const [index, segment] of segments.entries()) {
+      const names = (detail) => invalidWhere(view, `names ${segments.slice(0, index + 1).join('.')}, which is ${detail}`);
+      if (typeof type.getFields !== 'function') throw names(`past ${parent}, whose type ${type.name} has no fields`);
+      const fields = type.getFields();
+      if (!Object.hasOwn(fields, segment)) throw names(`not a field of ${type.name}`);
+      if (isVirtualField(fields[segment])) throw names(`the virtual field ${type.name}.${segment}`);
+      parent = `${type.name}.${segment}`;
+      type = unwrapListAndNonNull(fields[segment].type);
+    }
+  }
+};
+
+// The `extend` of a view's read (see prepareRead). After middleware, the groups of `where` are read as
+// the client's constructs on a probe, whose AND holds copies of them (inspectClientPaths), so the
+// author's objects are never touched: their paths are inspected, their conditions checked and marked,
+// with ids that continue the client's, then the copies are appended to the top-level AND, where no
+// middleware can drop them. Returns their joined scopes, which attach to the appended copies.
+const viewExtension = (view, viewParams) => async (params, issued) => {
+  const groups = await view.where({ params: viewParams, context: params.context });
+  assertViewGroups(view, groups);
+  const probe = { AND: groups };
+  const scopes = inspectClientPaths(view.type, probe, 'find');
+  const checked = assertQueryConditions(view.type, probe, 'find');
+  markClientConstructs(checked, issued);
+  appendAndGroups(params.args, probe.AND);
+  return scopes;
+};
+
 // A view's root field: the generated list of its type, with the view's params before the generated
-// arguments. Each call reads the type's registration, whose model createSchema prepares, and strips
-// the params before the list pipeline runs.
+// arguments. Each call reads the type's registration, whose model createSchema prepares, strips the
+// params, by the names the field was built with, before the list pipeline runs, and has the pipeline
+// append the view's `where` after middleware (viewExtension).
 const buildViewField = (view) => {
   const paramArgs = {};
   for (const [paramName, param] of Object.entries(view.params)) {
@@ -2872,6 +2934,7 @@ const buildViewField = (view) => {
     if (Object.hasOwn(param, 'defaultValue')) arg.defaultValue = param.defaultValue;
     paramArgs[paramName] = arg;
   }
+  const paramNames = new Set(Object.keys(paramArgs));
   return {
     type: new GraphQLList(view.type),
     description: view.description,
@@ -2883,8 +2946,10 @@ const buildViewField = (view) => {
     },
     async resolve(parent, args, context, info) {
       const registration = typesDict.types[view.type.name];
-      const split = splitViewArgs(view, args);
-      const params = await prepareRead(registration, split.args, context, 'find', { entry: view.name });
+      const split = splitViewArgs(paramNames, args);
+      const params = await prepareRead(registration, split.args, context, 'find', {
+        entry: view.name, extend: viewExtension(view, split.params),
+      });
       return readList(registration, params, parent, info, context);
     },
   };
