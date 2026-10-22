@@ -11,6 +11,7 @@ import {
   GraphQLString,
 } from 'graphql';
 import mongoose from 'mongoose';
+import { isVersionField } from '@simtlix/simfinity-core/internal/record-version';
 import { SimfinityError } from '@simtlix/simfinity-core';
 import { getFieldStorageName, isVirtualField } from '@simtlix/simfinity-core/internal/relation-storage';
 
@@ -117,7 +118,9 @@ const generateSchemaDefinition = (gqlType, nested = false, ancestors = [], path 
     if (isVirtualField(fieldEntry)) continue;
     const { type } = fieldEntry;
 
-    if (matchesScalar(type, GraphQLID)) {
+    if (isVersionField(fieldEntry)) {
+      schemaArg[fieldEntryName] = Number;
+    } else if (matchesScalar(type, GraphQLID)) {
       schemaArg[fieldEntryName] = mongoose.Schema.Types.ObjectId;
     } else if (matchesScalar(type, GraphQLString)) {
       schemaArg[fieldEntryName] = withUnique(fieldEntry, String);

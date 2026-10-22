@@ -1,7 +1,33 @@
 import mongoose from 'mongoose';
 import { describeModels, SimfinityError } from '@simtlix/simfinity-core';
+import {
+  MAX_RECORD_VERSION, readStoredVersion, unadvancedVersionError, versionConflictError, versionExhaustedError,
+} from '@simtlix/simfinity-core/internal/record-version';
 import { withMongoTransaction } from './transactions.js';
 import { castModelId, mapIdCastError } from './ids.js';
+
+// Shared by default and integrity writes. Trust this library-owned operator using the model's own
+// Mongoose instance, so sanitizeFilter also works for models compiled by another copy.
+export const versionFilter = (Model, expected) => ({
+  version: expected === 1 ? Model.base.trusted({ $in: [1, null] }) : expected,
+});
+
+// A supplied model need not share its GraphQL type's name. Do not choose arbitrarily when one
+// model serves several registrations, or when a direct adapter caller has no runtime binding.
+export const versionTypeName = (Model, registrations = []) => {
+  const matches = registrations.filter(({ model }) => model === Model);
+  return matches.length === 1 ? matches[0].gqltype.name : Model.modelName;
+};
+
+// Bypass query middleware and use the write's cast key, in its still-active transaction.
+export const readVersionMiss = async (Model, id, session, expected, updating = false, typeName = Model.modelName) => {
+  const stored = await Model.collection.findOne({ _id: id }, { session, projection: { version: 1 } });
+  if (!stored) return null;
+  const version = readStoredVersion(stored.version, { typeName, id });
+  if (version !== expected) throw versionConflictError(typeName, id);
+  if (updating && version === MAX_RECORD_VERSION) throw versionExhaustedError(typeName, id);
+  return null;
+};
 
 const LOCK_FIELD = '_simfinityReferenceLock';
 // Distinct target ids per startup-audit query and per lock write, and ids the audit remembers per target.
@@ -99,9 +125,10 @@ export const createMongoIntegrity = (options = {}) => {
     return [...references.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, value]) => value);
   };
 
-  const lock = async (Model, id, session) => {
+  const lock = async (Model, id, session, expectedVersion) => {
     const result = await Model.collection.updateOne(
-      { _id: id }, { $set: { [LOCK_FIELD]: new mongoose.Types.ObjectId() } }, { session },
+      { _id: id, ...(expectedVersion === undefined ? {} : versionFilter(Model, expectedVersion)) },
+      { $set: { [LOCK_FIELD]: new mongoose.Types.ObjectId() } }, { session },
     );
     return result.matchedCount > 0;
   };
@@ -297,26 +324,45 @@ export const createMongoIntegrity = (options = {}) => {
     },
     // Protected writes cast the key before querying, without setters, as 3.5.3 did: the lock, the
     // reference checks and the identity checks must all use the key requested before middleware runs.
-    async updateRecord(Model, id, update, session) {
+    async updateRecord(Model, id, update, session, { expectedVersion } = {}) {
       assertWrite(Model, session);
       return abortOnWriteError(session, async () => {
         const objectId = castModelId(Model, id);
-        const updated = await Model.findByIdAndUpdate(objectId, update, { new: true }).session(session);
+        const versioned = expectedVersion !== undefined;
+        const query = (versioned
+          ? Model.findOneAndUpdate({ _id: objectId, ...versionFilter(Model, expectedVersion) },
+            { ...update, version: expectedVersion + 1 }, { new: true })
+          : Model.findByIdAndUpdate(objectId, update, { new: true })).session(session);
+        // No write at the ceiling, but still cast the raw existence lookup's key once.
+        const exhausted = versioned && expectedVersion >= MAX_RECORD_VERSION;
+        if (exhausted) query.cast(Model);
+        const updated = exhausted ? null : await query;
         if (!updated) {
+          if (versioned) await readVersionMiss(Model, query.getFilter()._id, session, expectedVersion, true,
+            versionTypeName(Model, binding.getRegistrations()));
           // A middleware can hide a completed write with a null result. Abort
           // even on a genuine no-match; core still reports its normal NOT_VALID_ID.
           await session.abortTransaction();
           return null;
         }
         if (!updated._id?.equals(objectId)) throw violation();
+        if (versioned) {
+          const typeName = versionTypeName(Model, binding.getRegistrations());
+          if (readStoredVersion(updated.version, { typeName, id }) !== expectedVersion + 1) {
+            throw unadvancedVersionError(typeName, id);
+          }
+        }
         await validateRecord(Model, updated, session);
         return updated;
       });
     },
-    async deleteRecord(Model, id, session) {
+    async deleteRecord(Model, id, session, { expectedVersion } = {}) {
       return abortOnWriteError(session, async () => {
         const objectId = castModelId(Model, id);
-        if (!await lock(Model, objectId, session)) return null;
+        if (!await lock(Model, objectId, session, expectedVersion)) {
+          return expectedVersion === undefined ? null : readVersionMiss(Model, objectId, session, expectedVersion, false,
+            versionTypeName(Model, binding.getRegistrations()));
+        }
         // One query per referencing collection: the $or of its per-path queries, each branch served
         // by its own path index. A self-reference ignores the deleted document itself. The $ne stays
         // inside each branch: hoisted, the planner can pick a scan of the _id index instead.

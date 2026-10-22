@@ -81,6 +81,7 @@ export default defineConfig({
         { text: 'Relationships', link: '/guide/relationships' },
         { text: 'Queries & filtering', link: '/guide/queries' },
         { text: 'Mutations', link: '/guide/mutations' },
+        { text: 'Optimistic concurrency (next release)', link: '/guide/concurrency' },
         { text: 'Validation', link: '/guide/validation' },
         { text: 'Controllers & hooks', link: '/guide/controllers' },
         { text: 'State machines', link: '/guide/state-machines' },

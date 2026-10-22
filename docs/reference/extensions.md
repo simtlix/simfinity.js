@@ -48,6 +48,8 @@ Scalar lists do not need relationship metadata. Object fields and object lists d
 
 ### readOnly
 
+In the next release, the injected `RecordVersion` field is a managed exception: clients send it in update and delete preconditions despite `readOnly: true`; see [concurrency](#concurrency).
+
 ```javascript
 createdBy: {
   type: GraphQLString,
@@ -166,9 +168,16 @@ The field-level shape is `{ CREATE: [validator], UPDATE: [validator] }`. Each va
 | --- | --- | --- |
 | `validations` | `{ CREATE, UPDATE }` validator arrays | Validates the full input and materialized model after field validation. |
 | `scope` | Plain object with optional `find`, `get_by_id` and `aggregate` functions | Adds filters to generated root reads. Any other shape throws `INVALID_SCOPE`. |
+| `concurrency` | `{ mode: 'optimistic' }` | Next release: opts an entity into managed record versions; declare before its first schema. |
 | `indexes` | `{ fields: string[], unique?: boolean }[]` | Declares PostgreSQL composite indexes over stored scalar/reference fields; MongoDB uses its model index configuration. |
 
 Type validators receive `(typeName, args, modelArgs, session)`. Scope callbacks receive `{ type, args, operation, context }` and mutate `args` in place. Omit a key to leave an operation unscoped; misspelled keys, non-function values, arrays and `scope: undefined` or `null` throw `INVALID_SCOPE` (500) at registration and `createSchema()`, and on reads if the scope is changed later. A type's `find` scope also restricts the referenced records that client filter, sort and aggregation paths reach. See [query scope](/guide/query-scope) for supported operations, [relationship paths](/guide/query-scope#relationship-paths-in-filters-sorts-and-aggregations) and their authorization boundaries.
+
+### concurrency
+
+Next release only: set `extensions: { concurrency: { mode: 'optimistic' } }` on an entity before its first successful schema. Simfinity injects `version: RecordVersion!`, initializes it at 1, requires the observed version on updates, state actions and deletes, and advances it atomically on updates. Protection cannot change after schema creation. Protected types must be registered in every runtime whose schema reaches them, cannot be embedded, and cannot collide with `version` as a field or storage name; other stored fields cannot use `RecordVersion`. An adapter must declare optimistic-concurrency support. See [optimistic concurrency](/guide/concurrency) for startup checks, nested inputs, visibility, storage migration and native-write obligations.
+
+The managed version is the exception to the usual `readOnly` input rule: introspection reports `readOnly: true` and the create input excludes it, but update inputs require it as `version: RecordVersion!`. Clients recognize the `RecordVersion` type and send the value back unchanged. The field is also `queryable: false`: no direct filter argument is generated, and client conditions, sorts, grouping and facts cannot name it. Middleware and scope conditions on it are unsupported too.
 
 ## Automatic MongoDB indexes
 

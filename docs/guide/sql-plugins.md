@@ -110,8 +110,8 @@ The exported `SQLPlugin` TypeScript interface documents the complete contract. A
 | `selectById` | `id`, optional `lock` |
 | `selectOwned` | `ids`, `ordered` |
 | `insert` | `data` |
-| `update` | `id`, `data` |
-| `deleteById` | `id` |
+| `update` | `id`, `data`; next release: optional `version: { column, expected }` |
+| `deleteById` | `id`; next release: optional `version: { column, expected }` |
 | `deleteOwned` | `ownerId` |
 
 With both `compileRecordBatch` and `maxRecordBatchValues`, the record store inserts the owned rows of a write in runs: consecutive rows of one table with the same columns in the same order, split so that rows times columns stay within the limit, and ended before a row of another table, before owned rows are deleted and before a validation error is thrown, so the rows reach the database in the per-row order. The operation, typed `SQLInsertManyOperation`, is `{ kind: 'insertMany', table, rows }`; no result rows are needed. A single row goes through `compileRecord` as an `insert`, and the configuration `multiRowInserts: false` keeps one `insert` per row. PostgreSQL sets the limit to 32,767 values. `bindPlugin` rejects a `compileRecordBatch` that is not a function, or a `maxRecordBatchValues` that is not a positive safe integer, `null` included, with `INVALID_SQL_PLUGIN`. A copy of a plugin that overrides `compileRecord` for `insert`, such as `{ ...postgresPlugin(options), compileRecord }`, inherits `compileRecordBatch` and `maxRecordBatchValues`, so owned rows inserted in runs of two or more do not reach the override: also override `compileRecordBatch`, set both members to `undefined`, or set `multiRowInserts: false`.
@@ -178,3 +178,11 @@ The runtime snapshots contract members, option properties and capability arrays.
 Implement the contract and export a factory from a separate package depending on SQL/core plus that engine's driver. Reuse the relational plan and typed core query plans; implement the engine's complete storage lowering, query and record compiler, codecs, initialization and transaction guarantees. Reusing only PostgreSQL's parameter syntax is insufficient.
 
 Run the shared query/lifecycle/relationship corpus against a disposable instance of the engine. Include raw-database tests proving FKs, required values, nullable lists, embedded ownership/presence, uniqueness, rollback and schema-drift detection. Verify packed installation and strict TypeScript consumers without PostgreSQL dependencies. The recording plugin in Simfinity's tests verifies delegation only; it is not another supported database adapter.
+
+## Optimistic concurrency (next release)
+
+A plugin must declare the `optimisticConcurrency` capability when a protected type adds the logical `Version` column and requirement; otherwise preparation fails with `UNSUPPORTED_SQL_CAPABILITY`. Encode safe integer versions from 1 to `9007199254740991` and decode valid `Version` values to JavaScript numbers. PostgreSQL stores them as `bigint NOT NULL DEFAULT 1`. Its decoder also accepts a custom bigint parser; malformed/unsafe values remain invalid for core's managed reader.
+
+`compileRecord(description, operation)` receives optional `operation.version: { column: string, expected: number }` on `update` and `deleteById`. A versioned update must atomically match ID and version, increment the version and return the updated row. Its `data` may be empty: still issue an update containing the increment. A versioned delete must atomically match both and return a deleted row, since the driver's portable result is `{ rows }`. For example, PostgreSQL compiles `UPDATE ... SET ..., "version" = "version" + 1 WHERE id = $1::uuid AND "version" = $k::bigint RETURNING *` and `DELETE ... WHERE id = $1::uuid AND "version" = $2::bigint RETURNING id`. Operations without `version` keep their existing contract.
+
+A spread copy of `postgresPlugin()` retains this capability when it overrides `compileRecord`; the override must honor `operation.version` or delegate versioned `update`/`deleteById` to the original. SQL checks returned updates for `expected + 1` and checks that a versioned delete returned a row after its locked read, raising `DATABASE_ERROR` on inconsistent results. These are defensive diagnostics, not proof an arbitrary compiler honored the predicate. Core adds its own observed-advancement check for lifecycle writes; native model handles have no extra pre-read merely to reproduce it. See [optimistic concurrency](./concurrency); 3.12.0 does not include this capability.

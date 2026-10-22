@@ -16,6 +16,20 @@ export const QLSort: GraphQLInputObjectType;
 export const QLValue: GraphQLScalarType<unknown, unknown>;
 
 /**
+ * The scalar of the `version` field that Simfinity adds to a type that declares optimistic
+ * concurrency (see {@link ConcurrencyDeclaration}). It holds safe integers from 1 to
+ * {@link MAX_RECORD_VERSION}, a JSON number on the wire: a string, a float, 0, a negative number and an
+ * unsafe integer fail GraphQL coercion. A client sends the version it read back unchanged in updates
+ * and deletes, and Simfinity advances it. Only the managed field may use it in a type, which
+ * `createSchema()` and `describeModels()` enforce with `INVALID_MODEL` (400); a registered mutation or
+ * custom query may use it in its own input and output types. Import it from the facade the application
+ * uses: the protection depends on one copy of core per process.
+ */
+export const RecordVersion: GraphQLScalarType;
+/** The highest version, `Number.MAX_SAFE_INTEGER`. The version of a record never goes past it. */
+export const MAX_RECORD_VERSION: number;
+
+/**
  * A `QLOperator` value. The operators of 3.7.0 are `EQ`, `NE`, `LT`, `LTE`, `GT`, `GTE`, `BTW`, `IN`,
  * `NIN` and `LIKE`. The literal text operators take a non-null string without U+0000 on a `String`
  * field or `String` list (a validated scalar filters by its base scalar), and match it literally:
@@ -99,7 +113,8 @@ export interface FieldDescription {
   itemRequired: boolean;
   unique: boolean;
   readOnly: boolean;
-  scalar?: 'ID' | 'String' | 'Int' | 'Float' | 'Boolean' | 'DateTime' | 'Enum';
+  /** `'Version'` is the managed version field of a type that declares optimistic concurrency (`version: true`). */
+  scalar?: 'ID' | 'String' | 'Int' | 'Float' | 'Boolean' | 'DateTime' | 'Enum' | 'Version';
   values?: string[];
   enumValues?: { name: string; value: unknown }[];
   target?: string;
@@ -107,6 +122,12 @@ export interface FieldDescription {
   fields?: FieldDescription[];
   private?: boolean;
   inferred?: boolean;
+  /**
+   * Set on the managed version field of a type that declares optimistic concurrency, which
+   * `describeModels()` appends after the type's own fields: `{ name: 'version', scalar: 'Version',
+   * required: true, readOnly: true, version: true }`.
+   */
+  version?: true;
 }
 export interface ModelDescription {
   entities: Array<{
@@ -121,6 +142,13 @@ export interface ModelDescription {
  * fields are left out of every entity and embedded type, and the types only they reach are not
  * described. Throws `INVALID_MODEL` (400) for an invalid `extensions.virtual` declaration, as
  * `createSchema()` does (see {@link VirtualFieldOptions}).
+ *
+ * A type that declares optimistic concurrency (see {@link ConcurrencyDeclaration}) is described with
+ * its version field last, before `createSchema()` has added it and after, and the call throws
+ * `INVALID_MODEL` (400) for an invalid declaration, for a field named `version` that Simfinity did not
+ * add, for a reference stored under `version` (`connectionField: 'version'`), for a collection of
+ * such items that links through `version`, for such a type used as an embedded value, and for any
+ * other field typed {@link RecordVersion}.
  */
 export function describeModels(registrations: ModelRegistration[]): ModelDescription;
 /**
@@ -312,6 +340,19 @@ export type ScopeFunction<Model = any, Session = any> = (params: ScopeParams<Mod
  * was changed.
  */
 export type TypeScopes<Model = any, Session = any> = Partial<Record<ScopeOperation, ScopeFunction<Model, Session>>>;
+/**
+ * Value of a type's `extensions.concurrency`: the entity is protected by optimistic concurrency.
+ * Simfinity adds a read-only `version: RecordVersion!` field to the type, which starts at 1 and grows
+ * by 1 with each accepted write; a client sends the version it read back in updates and deletes, and a
+ * write at another version fails with `VERSION_CONFLICT` (409). The only valid value is
+ * `{ mode: 'optimistic' }`: `null`, an array, another mode or an extra key throws `INVALID_MODEL`
+ * (400). So does a type that is not an entity, one used as an embedded value, one that already has a
+ * field named `version` (or a field stored under that name), and an adapter that does not declare
+ * `writeFeatures.optimisticConcurrency`.
+ */
+export interface ConcurrencyDeclaration {
+  mode: 'optimistic';
+}
 
 /**
  * Process-wide limits for generated add, update and state-action mutations. Any other option,
@@ -501,6 +542,15 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * collections also needs `referenceEmptiness: true`, and fails with `UNSUPPORTED_QUERY` without it.
    */
   queryFeatures?: QueryFeatures | null | undefined;
+  /**
+   * Optional. Declares the write features this adapter implements. `createRuntime` reads it once and
+   * throws `INVALID_WRITE_FEATURES` (500) unless it is undefined, null or an object whose
+   * `optimisticConcurrency`, if present, is a boolean. A schema with a type that declares
+   * `extensions.concurrency` (see {@link ConcurrencyDeclaration}) throws `INVALID_MODEL` (400) unless
+   * the adapter declares `optimisticConcurrency: true`, which commits it to the `options.expectedVersion`
+   * contract of `update` and `delete` and to the requirements on `find` below.
+   */
+  writeFeatures?: { optimisticConcurrency?: boolean } | null | undefined;
   bind?(runtime: Pick<Runtime<Model, Session>, 'getModel' | 'getType' | 'getRegistrations'>): void;
   validateRegistration?(registration: RuntimeRegistration<Model, Session>): void;
   /**
@@ -509,10 +559,16 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * must never be stored: an adapter that builds storage from a type's fields skips each field for
    * which {@link isVirtualField} returns true, on the types its embedded fields reach as well, or
    * builds it from `describeModels(registrations)`, which leaves them out. Generated writes, filters,
-   * sorts and aggregations never name a virtual field; a controller hook can still assign one.
+   * sorts and aggregations never name a virtual field; a controller hook can still assign one. The
+   * version field of a type that declares optimistic concurrency is injected after `prepare()`, so a
+   * type here may not have it yet; `describeModels(registrations)` describes it either way.
    */
   prepare?(registrations: RuntimeRegistration<Model, Session>[], options: { createCollection: boolean }): void;
-  /** Creates the model of a registered type. Its fields include virtual fields; see `prepare()`. */
+  /**
+   * Creates the model of a registered type. Its fields include virtual fields; see `prepare()`. A type
+   * that declares optimistic concurrency already has its injected version field here, which
+   * `describeModels(registrations)` describes as well.
+   */
   createModel(type: GraphQLObjectType, callback: ((model: Model) => void) | null | undefined, options: { createCollection: boolean }): Model;
   /**
    * Casts a reference or batch key to the stored identifier type. Throw a `SimfinityError` with
@@ -574,8 +630,31 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    */
   readByIdIsInert?(model: Model): boolean;
   prepareUpdate(set: Record<string, any>, unset: Record<string, string>): any;
-  update(model: Model, id: any, changes: any, session?: Session): any;
-  delete(model: Model, id: any, session?: Session): any;
+  /**
+   * With `options.expectedVersion`, one atomic write that matches the ID and a stored version equal to
+   * it (on MongoDB a missing or null stored version counts as 1), applies `changes`, sets the version
+   * to `expectedVersion + 1` and returns the updated record. When nothing matches, or when
+   * `expectedVersion >= MAX_RECORD_VERSION` and the write is skipped, it reads the record by ID in the
+   * same session: it returns null for a missing one, throws `VERSION_CONFLICT` (409) when the stored
+   * version differs, `VERSION_EXHAUSTED` (409) when stored and expected are `MAX_RECORD_VERSION`, and
+   * returns null otherwise. Without `options.expectedVersion` it behaves as before. A wrapper must
+   * forward every argument, `options` included.
+   */
+  update(model: Model, id: any, changes: any, session?: Session, options?: { expectedVersion?: number }): any;
+  /**
+   * With `options.expectedVersion`, one atomic delete that matches the ID and the version, and returns
+   * the deleted record. When nothing matches, it decides as `update` does, without the exhausted case:
+   * a delete does not advance the version, so a record at `MAX_RECORD_VERSION` is deleted like any
+   * other. Without it, it behaves as before. A wrapper must forward every argument, `options`
+   * included.
+   */
+  delete(model: Model, id: any, session?: Session, options?: { expectedVersion?: number }): any;
+  /**
+   * An adapter that declares `writeFeatures.optimisticConcurrency` must run `find` inside the given
+   * `session`, honor `options.requiredId` and accept `options.context`: the runtime reads through
+   * `find` with the caller's session to check, before a hook runs, whether the caller can read a
+   * record whose version is stale.
+   */
   find(model: Model, type: GraphQLObjectType, args: any, session?: Session | null, options?: { requiredId?: any; context?: any }): any;
   count(model: Model, type: GraphQLObjectType, args: any, session?: Session | null): Promise<number> | number;
   aggregate(model: Model, type: GraphQLObjectType, args: any, session?: Session | null): any;

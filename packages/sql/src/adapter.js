@@ -1,4 +1,5 @@
 import { describeModels, createQueryPlan, SimfinityError } from '@simtlix/simfinity-core';
+import { assertVersionInput } from '@simtlix/simfinity-core/internal/record-version';
 import { planRelationalSchema } from './schema/plan.js';
 import { locateVirtualFields } from './schema/virtual.js';
 import { bindPlugin, assertCapabilities } from './plugin.js';
@@ -146,6 +147,7 @@ export const createSQLAdapter = (sourcePlugin) => {
   const adapter = {
     // What the runtime may send: the plugin's queryFeatures, or the operators of 3.7.0 for a plugin without them.
     queryFeatures: plugin.queryFeatures,
+    writeFeatures: Object.freeze({ optimisticConcurrency: true }),
     configure(value) {
       if (configured || prepared) throw new SimfinityError(`${plugin.displayName} configuration is already bound`, 'DATABASE_ALREADY_CONFIGURED', 409);
       configured = Object.freeze({ ...value });
@@ -192,6 +194,25 @@ export const createSQLAdapter = (sourcePlugin) => {
         update: (id, changes, { session } = {}) => adapter.withTransaction(session, (transaction) => adapter.update(model, id, changes, transaction)),
         delete: (id, { session } = {}) => adapter.withTransaction(session, (transaction) => adapter.delete(model, id, transaction)),
       };
+      if (models.entities.find((entity) => entity.name === gqltype.name)?.fields.some((field) => field.version)) {
+        const handleVersion = (version) => {
+          if (version == null) throw new SimfinityError(`${gqltype.name} is protected by optimistic concurrency: pass changes.version, or { version: false } for a write that must not advance it, such as a value a hook keeps up to date`, 'REQUIRED_VALUE', 400);
+          return assertVersionInput(version);
+        };
+        model.create = (data, { session } = {}) => adapter.withTransaction(session, (transaction) => adapter.saveRecord(model, adapter.newRecord(model, { ...data, version: 1 }, transaction), transaction));
+        model.update = async (id, changes, { session, version: mode } = {}) => {
+          // Destructure once before retries: a getter or a caller-owned object must not change the precondition.
+          const { version, ...rest } = changes;
+          if (mode === false) return adapter.withTransaction(session, (transaction) => adapter.update(model, id, rest, transaction));
+          const expectedVersion = handleVersion(version);
+          return adapter.withTransaction(session, (transaction) => adapter.update(model, id, rest, transaction, { expectedVersion }));
+        };
+        model.delete = async (id, { session, version } = {}) => {
+          if (version === false) return adapter.withTransaction(session, (transaction) => adapter.delete(model, id, transaction));
+          const expectedVersion = handleVersion(version);
+          return adapter.withTransaction(session, (transaction) => adapter.delete(model, id, transaction, { expectedVersion }));
+        };
+      }
       handles.set(model.name, model);
       if (onModelCreated) onModelCreated(model);
       return model;
@@ -213,8 +234,10 @@ export const createSQLAdapter = (sourcePlugin) => {
       return read(name, null, (transaction) => execute(model, model.gqltype, args, transaction, 'find'));
     }),
     prepareUpdate(set, unset) { return { ...set, ...(Object.keys(unset).length ? { $unset: { ...unset } } : {}) }; },
-    update: safe((model, id, update, session) => records.update(nameOf(model), id, update, session)),
-    delete: safe((model, id, session) => records.remove(nameOf(model), id, session)),
+    update: safe((model, id, update, session, options) => options?.expectedVersion === undefined
+      ? records.update(nameOf(model), id, update, session) : records.update(nameOf(model), id, update, session, options)),
+    delete: safe((model, id, session, options) => options?.expectedVersion === undefined
+      ? records.remove(nameOf(model), id, session) : records.remove(nameOf(model), id, session, options)),
     find: safe((model, gqltype, args, session, { requiredId } = {}) => read(model?.name, session, (transaction) => execute(model, gqltype, args, transaction, 'find', requiredId == null ? null : { column: 'id', id: castId(requiredId) }))),
     count: safe((model, gqltype, args, session) => execute(model, gqltype, args, session, 'count')),
     aggregate: safe((model, gqltype, args, session) => execute(model, gqltype, args, session, 'aggregate')),

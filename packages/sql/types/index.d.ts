@@ -7,7 +7,9 @@ export {
   buildErrorFormatter,
   createValidatedScalar,
   InternalServerError,
+  MAX_RECORD_VERSION,
   plugins,
+  RecordVersion,
   scalars,
   SimfinityError,
   validators,
@@ -17,6 +19,7 @@ export type {
   AuthRule,
   AuthRuleFunction,
   AuthSchemaPlugin,
+  ConcurrencyDeclaration,
   CreateSchemaOptions,
   EntityController,
   EnvelopSchemaPlugin,
@@ -48,7 +51,7 @@ export type {
  * transaction, and sessionless reads that one statement answers then run on one acquired connection without `begin`
  * and `commit`.
  */
-export type SQLCapability = 'transactions' | 'foreignKeys' | 'deferredForeignKeys' | 'embeddedValues' | 'ownedRecords' | 'scalarLists' | 'uniqueValues' | 'nullableUnique' | 'singleStatementReads';
+export type SQLCapability = 'optimisticConcurrency' | 'transactions' | 'foreignKeys' | 'deferredForeignKeys' | 'embeddedValues' | 'ownedRecords' | 'scalarLists' | 'uniqueValues' | 'nullableUnique' | 'singleStatementReads';
 /** Core field metadata enriched by SQL runtime preparation. */
 export interface SQLFieldDescription extends FieldDescription {
   fields?: SQLFieldDescription[];
@@ -209,8 +212,8 @@ export type SQLRecordOperation<Table extends SQLTableDescription = SQLTableDescr
   | { kind: 'selectById'; table: Table; id: Id; lock?: boolean }
   | { kind: 'selectOwned'; table: Table; ids: Id[]; ordered: boolean }
   | { kind: 'insert'; table: Table; data: Record<string, unknown> }
-  | { kind: 'update'; table: Table; id: Id; data: Record<string, unknown> }
-  | { kind: 'deleteById'; table: Table; id: Id }
+  | { kind: 'update'; table: Table; id: Id; data: Record<string, unknown>; version?: { column: string; expected: number } }
+  | { kind: 'deleteById'; table: Table; id: Id; version?: { column: string; expected: number } }
   | { kind: 'deleteOwned'; table: Table; ownerId: Id };
 /** Owned rows of one table that share their columns in the same order; no result rows are needed. */
 export interface SQLInsertManyOperation<Table extends SQLTableDescription = SQLTableDescription> {
@@ -351,7 +354,11 @@ export interface SQLPlugin<
    * children are read with `compileQuery`. A value that is not a function throws INVALID_SQL_PLUGIN (400).
    */
   compileChildrenQuery?: SQLChildrenQueryCompiler<Configuration, Description, Id> | undefined;
-  /** The operation's table is the physical metadata from describeSchema. */
+  /**
+   * The operation's table is the physical metadata from describeSchema. With optimisticConcurrency,
+   * update must atomically match version.expected and increment version.column, even for empty data,
+   * and return the updated row. A versioned deleteById must condition on that version and return its row.
+   */
   compileRecord(description: Description, operation: SQLRecordOperation<Description['tables'][number], Id>): SQLStatement;
   /**
    * Optional, with `maxRecordBatchValues`: one statement that inserts every row of the operation. The runtime
@@ -382,8 +389,10 @@ export interface SQLModel<Client = unknown, Result extends SQLQueryResult = SQLQ
   find(args?: Record<string, unknown>, options?: { session?: SQLSession<Client, Result> }): Promise<SQLRecord<Id>[]>;
   /** Native helpers bypass GraphQL validators/controllers; fields use storage names. */
   create(data: Record<string, unknown>, options?: { session?: SQLSession<Client, Result> }): Promise<SQLRecord<Id>>;
-  update(id: Id, changes: Record<string, unknown>, options?: { session?: SQLSession<Client, Result> }): Promise<SQLRecord<Id> | null>;
-  delete(id: Id, options?: { session?: SQLSession<Client, Result> }): Promise<SQLRecord<Id> | null>;
+  /** Protected entities require changes.version; version:false ignores that field and does not advance it. */
+  update(id: Id, changes: Record<string, unknown>, options?: { session?: SQLSession<Client, Result>; version?: false }): Promise<SQLRecord<Id> | null>;
+  /** Protected entities require the version read, or false to bypass the version precondition. */
+  delete(id: Id, options?: { session?: SQLSession<Client, Result>; version?: number | false }): Promise<SQLRecord<Id> | null>;
 }
 export interface SQLRuntime<
   Configuration extends object = SQLConfiguration,

@@ -1,20 +1,113 @@
 import mongoose from 'mongoose';
 import { SimfinityError } from '@simtlix/simfinity-core';
+import { MAX_RECORD_VERSION, isProtectedType, isVersionField, readStoredVersion, retainStoredVersion } from '@simtlix/simfinity-core/internal/record-version';
 import { getListShape, normalizeConnectionField } from '@simtlix/simfinity-core/internal/relation-storage';
 
 import { createMongoModel } from './models.js';
 import { MONGO_QUERY_OPERATORS, createMongoQueries } from './queries.js';
 import { withMongoTransaction } from './transactions.js';
-import { createMongoIntegrity } from './integrity.js';
+import { createMongoIntegrity, readVersionMiss, versionFilter, versionTypeName } from './integrity.js';
 import {
   castModelId, castObjectId, castPathValue, invalidId, isQueryKeyCastFailure, mapIdCastError,
 } from './ids.js';
 
 const withSession = (query, session) => (session ? query.session(session) : query);
 
+const WRITE_FEATURES = Object.freeze({ optimisticConcurrency: true });
 // Every filter operator the query compiler supports, and emptiness through references and collections (#108 part
 // 2b); the runtime rejects any other operator.
 const QUERY_FEATURES = Object.freeze({ operators: MONGO_QUERY_OPERATORS, referenceEmptiness: true });
+
+const assertVersionModel = ({ gqltype, model }) => {
+  if (!model || !isProtectedType(gqltype)) return;
+  const path = model.schema?.path('version');
+  if (path?.instance !== 'Number' || path.options.immutable || path.options.select === false
+    || path.getters.length || path.setters.length
+    || (path.defaultValue !== undefined && path.defaultValue !== 1) || model.schema.options.versionKey === 'version') {
+    throw new SimfinityError(
+      `${gqltype.name} declares optimistic concurrency, so its Mongoose model must declare version: Number without immutable, select: false, getters, setters or a default other than 1`,
+      'INVALID_MODEL', 400,
+    );
+  }
+};
+
+// Mongoose 8 casts Number paths before query middleware/transforms. Capture invalid raw versions
+// at its private completion seam, then carry them to final same-record results after exec. Stored
+// identity, never final array position, associates toObject/toJSON copies and reordered batches.
+// Replacements must retain _id or an equivalent id; fabricated same-ID records cannot be distinguished
+// from conversions. No document/schema mutation or extra read is needed, including for frozen results.
+// Recheck these query-local completion seams when upgrading the Mongoose peer.
+const preserveStoredVersion = (query, many) => {
+  const method = many ? '_completeMany' : '_completeOne';
+  const complete = query?.[method];
+  const exec = query?.exec;
+  if (typeof complete !== 'function' || typeof exec !== 'function') {
+    throw new SimfinityError('Protected MongoDB reads require a Mongoose query with hydration completion support', 'DATABASE_ERROR', 500);
+  }
+  const captured = new Map();
+  const originals = new Map();
+  const keyOf = (record) => {
+    const key = record?._id ?? record?.id;
+    return key == null ? null : String(key);
+  };
+  const capture = (document) => {
+    const value = document?.version;
+    try { readStoredVersion(value); return null; }
+    catch {
+      const key = keyOf(document);
+      if (key !== null) captured.set(key, value);
+      return { key, value };
+    }
+  };
+  const associate = (record) => {
+    if (record === null || typeof record !== 'object') return;
+    const key = keyOf(record);
+    if (captured.has(key)) retainStoredVersion(record, captured.get(key));
+    else if (key === null && originals.has(record)) retainStoredVersion(record, originals.get(record));
+    // Middleware can reuse a result object across queries. Its prior raw value is no longer
+    // evidence about this result when the current query has no matching invalid storage value.
+    else retainStoredVersion(record, undefined);
+  };
+  if (many) {
+    query[method] = async function completeVersions(documents, ...args) {
+      const invalid = documents.map(capture);
+      const results = await complete.call(this, documents, ...args);
+      // Mongoose 8 _completeMany uses Promise.all over the raw documents in order. This
+      // establishes provenance only for its original hydrated objects, before transforms;
+      // final replacements still require an identifying key and never match by array position.
+      results.forEach((record, index) => {
+        const stored = invalid[index];
+        if (stored && record != null && keyOf(record) === stored.key) originals.set(record, stored.value);
+      });
+      return results;
+    };
+  } else {
+    query[method] = function completeVersion(document, metadata, projection, callback) {
+      const invalid = capture(document);
+      return complete.call(this, document, metadata, projection, (error, result) => {
+        const record = this.options?.includeResultMetadata ? result?.value : result;
+        // This completion callback establishes the original record's provenance even if a
+        // projection omits its identity. A later replacement still needs an identifying key.
+        if (!error && invalid && record != null && keyOf(record) === invalid.key) {
+          originals.set(record, invalid.value);
+        }
+        callback(error, result);
+      });
+    };
+  }
+  query.exec = async function execPreservingVersions(...args) {
+    try {
+      const result = await exec.apply(this, args);
+      if (many && Array.isArray(result)) result.forEach(associate);
+      else associate(this.options?.includeResultMetadata ? result?.value : result);
+      return result;
+    } finally {
+      captured.clear();
+      originals.clear();
+    }
+  };
+  return query;
+};
 
 // A write that fails only on malformed ObjectId values reports NOT_VALID_ID, not a driver error.
 const mapIdCastErrors = async (write) => {
@@ -214,6 +307,10 @@ export const createMongoAdapter = (options) => {
     session, body, (Model || session) ? Model : sessionModel(), ...rest,
   );
 
+  const versionedRead = (Model, query, many = false) => getRegistrations().some(
+    (registration) => registration.model === Model && isVersionField(registration.gqltype.getFields().version),
+  ) ? preserveStoredVersion(query, many) : query;
+
   const addPrivateConnectionField = (typeName, fieldName) => {
     if (!privateConnectionFields.has(typeName)) privateConnectionFields.set(typeName, new Set());
     privateConnectionFields.get(typeName).add(fieldName);
@@ -221,6 +318,7 @@ export const createMongoAdapter = (options) => {
 
   const adapter = {
     queryFeatures: QUERY_FEATURES,
+    writeFeatures: WRITE_FEATURES,
     bind(binding) {
       integrity.bind(binding);
       getRegistrations = binding.getRegistrations;
@@ -229,6 +327,7 @@ export const createMongoAdapter = (options) => {
       adapter.buildFilterGroupMatch = queries.buildFilterGroupMatch;
     },
     prepare(registrations, preparationOptions) {
+      for (const registration of registrations) assertVersionModel(registration);
       integrity.prepare(registrations, preparationOptions);
       for (const registration of registrations) {
         for (const field of Object.values(registration.gqltype.getFields())) {
@@ -317,7 +416,7 @@ export const createMongoAdapter = (options) => {
       let query = withSession(requiredId == null ? Model.findById(id, projection)
         : Model.findOne({ $and: [{ _id: requiredId }, { _id: id }] }, projection), session);
       if (plain) query = query.lean();
-      return mapQueryIdCastErrors(query);
+      return mapQueryIdCastErrors(versionedRead(Model, query));
     },
     getByIds(Model, ids) {
       integrity.assertReady();
@@ -325,7 +424,7 @@ export const createMongoAdapter = (options) => {
       // reads each ID once with getById.
       if (!batchesFindOne(Model)) throw new Error(`${Model.modelName} query middleware requires reads by ID`);
       // Trusted, so that the `sanitizeFilter` option does not wrap the operator in `$eq`.
-      return Model.find({ _id: mongoose.trusted({ $in: ids }) });
+      return versionedRead(Model, Model.find({ _id: mongoose.trusted({ $in: ids }) }), true);
     },
     // Without middleware or overrides of the by-ID statics (see readsByIdAreInert), a read by ID has
     // no side effects, and a malformed ID fails the update or delete before application code runs,
@@ -336,16 +435,43 @@ export const createMongoAdapter = (options) => {
     prepareUpdate(set, unset) {
       return Object.keys(unset).length > 0 ? { ...set, $unset: unset } : set;
     },
-    update(Model, id, update, session) {
-      if (integrity.enabled) return integrity.updateRecord(Model, id, update, session);
+    update(Model, id, update, session, writeOptions) {
+      if (integrity.enabled) return integrity.updateRecord(Model, id, update, session, writeOptions);
+      const expected = writeOptions?.expectedVersion;
+      if (expected !== undefined) {
+        return mapIdCastErrors(async () => {
+          const query = mapQueryIdCastErrors(withSession(Model.findOneAndUpdate(
+            { _id: id, ...versionFilter(Model, expected) }, { ...update, version: expected + 1 }, { new: true },
+          ), session), mapIdCastError);
+          if (expected >= MAX_RECORD_VERSION) {
+            try {
+              query.cast(Model);
+            } catch (error) {
+              // The skipped query has no exec/error flag; this cast only processes its filter.
+              throw error?.name === 'CastError' && error.path === '_id' ? invalidId() : error;
+            }
+            return readVersionMiss(Model, query.getFilter()._id, session, expected, true, versionTypeName(Model, getRegistrations()));
+          }
+          const updated = await query;
+          return updated ?? readVersionMiss(Model, query.getFilter()._id, session, expected, true, versionTypeName(Model, getRegistrations()));
+        });
+      }
       return mapQueryIdCastErrors(withSession(
         Model.findByIdAndUpdate(id, update, { new: true }), session,
       ), mapIdCastError);
     },
-    delete(Model, id, session) {
+    delete(Model, id, session, writeOptions) {
       if (integrity.enabled) {
         integrity.assertWrite(Model, session);
-        return integrity.deleteRecord(Model, id, session);
+        return integrity.deleteRecord(Model, id, session, writeOptions);
+      }
+      const expected = writeOptions?.expectedVersion;
+      if (expected !== undefined) {
+        const query = mapQueryIdCastErrors(withSession(Model.findOneAndDelete(
+          { _id: id, ...versionFilter(Model, expected) },
+        ), session));
+        return query.then((deleted) => deleted ?? readVersionMiss(Model, query.getFilter()._id, session, expected, false,
+          versionTypeName(Model, getRegistrations())));
       }
       return mapQueryIdCastErrors(withSession(Model.findByIdAndDelete(id), session));
     },
@@ -354,7 +480,7 @@ export const createMongoAdapter = (options) => {
       const pipeline = await queries.buildQuery(args, gqltype);
       // Mongoose does not cast aggregation stages, so cast the key type here, without setters.
       if (requiredId != null) pipeline.unshift({ $match: { _id: castModelId(Model, requiredId) } });
-      if (pipeline.length === 0) return withSession(Model.find({}), session);
+      if (pipeline.length === 0) return versionedRead(Model, withSession(Model.find({}), session), true);
       return withSession(Model.aggregate(pipeline), session);
     },
     async count(Model, gqltype, args, session) {

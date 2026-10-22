@@ -53,6 +53,7 @@
     },
     "./internal/object-id": "./src/auth/object-id.js",
     "./internal/query-operators": "./src/query-operators.js",
+    "./internal/record-version": "./src/record-version.js",
     "./internal/relation-storage": "./src/relation-storage.js",
     "./plugins": {
       "types": "./types/plugins.d.ts",
