@@ -105,12 +105,15 @@ export const analyze = context => {
   };
 
   // registerView(name, { type }) only reads the type to publish a root query field.
+  // The options may be wrapped (`as`, `satisfies`, `!`), and the callee must be a
+  // stable runtime function, like any other known consumer of a type.
   const isViewType = property => {
-    const options = property.parent;
+    let options = property.parent;
+    while (wrappers.has(options?.parent?.type) && options.parent.expression === options) options = options.parent;
     const call = options?.parent;
     if (property.type !== 'Property' || keyName(property) !== 'type'
       || call?.type !== 'CallExpression' || call.arguments[1] !== options) return false;
-    const callee = origin(call.callee, new Set(), false);
+    const callee = origin(call.callee);
     return callee?.kind === 'runtime-function' && callee.name === 'registerView';
   };
 
