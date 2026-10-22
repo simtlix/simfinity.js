@@ -35,6 +35,23 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22.12.0 or newer |
 
+## Upgrade to 3.12.0
+
+Version 3.12.0 adds named views. Every schema, filter, tool and adapter of 3.11.0 keeps its behavior; a view is a new root field only where an application registers one.
+
+### Named views
+
+- **Schema**: `registerView(name, { type, description, params, where })` adds one root field returning the registered base type's list. It takes the generated list arguments plus typed params. A param cannot share a name with any base-type field or a control argument; use `barbershopId` for a `barbershop` reference. The `_aggregate` suffix is reserved in view names. A view is included exactly when its base type is in `includedQueryTypes`.
+- **Errors**: `INVALID_VIEW` (500) identifies an invalid declaration or malformed `where` result, including unknown or virtual fields, paths past scalars and the reserved `__scope` key. `QUERY_NAME_CONFLICT` (500) now also covers duplicate view names and conflicts with included generated roots or custom queries.
+- **Resolution**: params go only to `where({ params, context })`. Its groups are copied and appended after middleware as client constructs, so references receive joined scopes and hidden records read as missing. The base type's `find` scope and count behavior stay unchanged. Middleware receives `operation: 'find'` and `entry: <view name>`; the scope payload is unchanged. `maxReferenceFrames` applies separately to the client's arguments and the `where` groups.
+- **Authorization**: authorize `RootQueryType.<view name>` explicitly under `defaultPolicy: 'DENY'`. Rows keep the base type's field rules. The paths that `where` names are the author's; field read rules and `queryable` do not check them. The type's scope remains the visibility boundary.
+- **MCP**: views are read-only list tools titled by their field name. Their descriptions append the generated filter sentence. Params appear beside the generated arguments, and counted pages report `totalCount`. Explicit title and description overrides keep precedence.
+- **TypeScript**: `registerView`, `ViewOptions`, `ViewParam`, `ViewParamType`, `FilterGroup` and `FilterCondition` are declared in core and re-exported by the MongoDB, PostgreSQL and SQL packages.
+- **Linting**: the application ESLint plugin tracks `registerView` as a runtime member and keeps the type passed in its `type` option tracked.
+- **Clients**: `@simtlix/simfinity-js-client` 1.1.0 resolves `client.find(type)` to the last root field returning a list of that type. Applications using that method should wait for a client fix before registering a view over that type. Call views with `client.execute(document, variables)`.
+
+See [named views](../guide/queries#named-views) and the [`registerView()` reference](../reference/api#registerview).
+
 ## Upgrade to 3.11.0
 
 Version 3.11.0 answers `IS_EMPTY` and `IS_NOT_EMPTY` through references and collections on both backends. Filters that are valid in 3.10.0 keep their results, and the bundled adapters compile them to the same MongoDB pipelines and PostgreSQL statements, with two exceptions: middleware that changes, in place, a field filter, term, condition or value array that another field shares through a GraphQL variable, and an adapter or SQL plugin whose `queryFeatures.referenceEmptiness` is not a boolean. Custom adapters and SQL plugins need a declaration before they receive the new conditions, but a copy of `createMongoAdapter()` or of the SQL adapter keeps the bundled declaration, so review copies whose methods compile filters themselves; see [reference emptiness in custom adapters and SQL plugins](#reference-emptiness-in-custom-adapters-and-sql-plugins). Keep all directly installed Simfinity packages at the same version.

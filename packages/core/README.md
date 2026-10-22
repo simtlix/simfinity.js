@@ -8,12 +8,13 @@ For relational storage, `@simtlix/simfinity-sql` builds on core and delegates ph
 
 ## Runtime
 
-`createRuntime(adapter)` creates a Simfinity runtime. Each instance owns its registrations, generated input types, middleware, scopes, hooks, custom queries and mutations, and state machines; the GraphQL type objects it builds resolvers for are bound to it, and query and mutation limits are process-wide. It exposes:
+`createRuntime(adapter)` creates a Simfinity runtime. Each instance owns its registrations, generated input types, middleware, scopes, hooks, custom queries and mutations, views, and state machines; the GraphQL type objects it builds resolvers for are bound to it, and query and mutation limits are process-wide. It exposes:
 
 - `connect`, `addNoEndpointType`, and `createSchema` for registration and schema creation;
 - `getModel`, `getType`, `getInputType`, and `getRegistrations` for runtime inspection;
 - `use`, `registerMutation`, and `saveObject` for middleware and write orchestration;
 - `registerCustomQuery` for reads whose results are not stored records, such as previews, other sources or permission evaluations;
+- `registerView` for a named list read of one registered type, with params and a fixed predicate, run through the type's scope;
 - `preventCreatingCollection` to pass validation-only storage setup to an adapter;
 - `configureQueryLimits` and `configureMutationLimits` for the process-wide page-size, reference-frame and nested-operation limits.
 
