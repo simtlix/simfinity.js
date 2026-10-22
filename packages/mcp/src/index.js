@@ -835,6 +835,9 @@ const isListType = (type) => {
 
 const hasArg = (field, name) => (field.args || []).some((arg) => arg.name === name);
 
+// A named view's root field: core marks it with extensions.simfinityQuery.view (see buildViewField in core's runtime.js).
+const isViewField = (field) => Boolean(field.extensions && field.extensions.simfinityQuery && field.extensions.simfinityQuery.view);
+
 // Operation names core stamps on generated mutation fields
 // (extensions.simfinityMutation.operation; see buildMutation in core's runtime.js).
 const MUTATION_OPERATIONS = Object.assign(Object.create(null), {
@@ -932,7 +935,7 @@ const PLACEHOLDER_DESCRIPTIONS = new Set(['add', 'update', 'delete']);
 
 const buildToolDescription = (op, fieldName, field, entityType) => {
   // A named view takes the generated list arguments, so its own description is followed by what they accept.
-  if (field.extensions?.simfinityQuery?.view) {
+  if (isViewField(field)) {
     return `${field.description} ${LIST_LANGUAGE_TEXT}`;
   }
   if (field.description && !PLACEHOLDER_DESCRIPTIONS.has(field.description)) {
@@ -2627,7 +2630,6 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
     for (const [fieldName, field] of Object.entries(rootType.getFields())) {
       const toolName = `${toolNamePrefix}${fieldName}`;
       const op = classifyOperation(kind, fieldName, field);
-      const query = field.extensions && field.extensions.simfinityQuery;
       const entityType = resolveEntityType(op, fieldName, field);
       if (!isIncluded({
         names: [fieldName, toolName],
@@ -2655,7 +2657,7 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
         ? nestedCollections
         : normalizeNestedCollections(override.nestedCollections, `toolOverrides.${toolName}.nestedCollections`);
       // A named view is titled by its name, not as the generated list of its type.
-      const title = override.title || (query && query.view ? fieldName : buildToolTitle(op, fieldName, entityType));
+      const title = override.title || (isViewField(field) ? fieldName : buildToolTitle(op, fieldName, entityType));
       const description = override.description || buildToolDescription(op, fieldName, field, entityType);
       const annotations = { ...buildAnnotations(op, title, field), ...(override.annotations || {}) };
       const virtuals = virtualFieldsFor(field.type);
@@ -2688,6 +2690,7 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
         }
       }
       tools.push(tool);
+      const query = field.extensions && field.extensions.simfinityQuery;
       toolIndex[toolName] = {
         operation: buildOperation(kind, fieldName, field, selection),
         kind,

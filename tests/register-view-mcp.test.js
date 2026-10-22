@@ -104,7 +104,8 @@ describe('named views through MCP', () => {
   it('selects a view by name, prefix and base type, and overrides keep precedence', () => {
     const itemTools = ['openItems', 'shopItems', 'nvItems', 'nvItems_aggregate'];
     expect(names({ include: ['openItems'] })).toEqual(['openItems']);
-    expect(names({ toolNamePrefix: 'app_', include: ['app_shopItems'] })).toEqual(['app_shopItems']);
+    const [prefixed] = generateMCPTools(schema, { toolNamePrefix: 'app_', include: ['app_shopItems'] }).tools;
+    expect(prefixed).toMatchObject({ name: 'app_shopItems', title: 'shopItems', annotations: { title: 'shopItems' } });
     expect(names({ exclude: ['openItems'] })).not.toContain('openItems');
     expect(names({ exclude: ['openItems'] })).toContain('shopItems');
     expect(names({ includeTypes: ['NvItem'] })).toEqual(expect.arrayContaining(itemTools));
@@ -148,17 +149,42 @@ describe('named views through MCP', () => {
       .toEqual(expect.arrayContaining(['id', 'name', 'stock']));
   });
 
-  it('authorizes the view by its root name under DENY and never reads a param as a field path', async () => {
+  it('authorizes the root by the view name under DENY and keeps the base type field rules on rows and client paths', async () => {
     const plugin = auth.createAuthPlugin({
       RootQueryType: { openItems: auth.requireAuth() },
-      NvItem: { '*': auth.allow() },
+      NvItem: {
+        id: auth.allow(), name: auth.allow(), shop: auth.allow(), stock: auth.deny(),
+      },
     }, { defaultPolicy: 'DENY' });
-    const { callTool: call } = generateMCPTools(build().schema, { schemaPlugins: [plugin], context: (extra) => extra });
-    const denied = await call('openItems', { shopId: 's1' }, {});
-    expect(JSON.parse(denied.content[0].text).errors[0].extensions.code).toBe('UNAUTHENTICATED');
-    const allowed = await call('openItems', { shopId: 's1', minStock: 2 }, { user: { id: 'u1' } });
-    expect(allowed.isError).toBe(false); // the params shopId and minStock are not field paths
-    const unruled = await call('shopItems', { shopId: 's1' }, { user: { id: 'u1' } });
-    expect(JSON.parse(unruled.content[0].text).errors[0].extensions.code).toBe('FORBIDDEN');
+    const { schema: authorized } = build();
+    const options = { schemaPlugins: [plugin], context: (extra) => extra };
+    const { callTool: call } = generateMCPTools(authorized, options);
+    // The same view, narrowed to the fields the caller may read.
+    const { callTool: narrowed } = generateMCPTools(authorized, {
+      ...options, toolOverrides: { openItems: { selection: '{ id name }' } },
+    });
+    const user = { user: { id: 'u1' } };
+    const errorsOf = (response) => JSON.parse(response.content[0].text).errors;
+
+    // The root: its RootQueryType rule, and the DENY default for a view without one.
+    expect(errorsOf(await narrowed('openItems', { shopId: 's1' }, {}))[0].extensions.code).toBe('UNAUTHENTICATED');
+    expect(errorsOf(await call('shopItems', { shopId: 's1' }, user))[0].extensions.code).toBe('FORBIDDEN');
+
+    // The rows: the default selection reads the denied stock of each row.
+    const full = await call('openItems', { shopId: 's1' }, user);
+    expect(full.isError).toBe(true);
+    expect(errorsOf(full).map(({ path, extensions }) => [path, extensions.code])).toEqual([
+      [['openItems', 0, 'stock'], 'FORBIDDEN'],
+      [['openItems', 1, 'stock'], 'FORBIDDEN'],
+    ]);
+
+    // Without stock in the selection the params pass, and the where on stock is the author's.
+    const allowed = await narrowed('openItems', { shopId: 's1', minStock: 2 }, user);
+    expect(allowed.isError).toBe(false);
+    expect(allowed.structuredContent.openItems).toEqual([{ id: 'i1', name: 'first' }, { id: 'i2', name: 'second' }]);
+
+    // A client filter on stock is a path on the base type, read by its rule.
+    const filtered = await narrowed('openItems', { shopId: 's1', stock: { operator: 'GTE', value: 1 } }, user);
+    expect(errorsOf(filtered)[0].extensions.code).toBe('FORBIDDEN');
   });
 });
