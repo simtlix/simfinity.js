@@ -312,7 +312,9 @@ test('strips the params before middleware, the scope and the adapter', async () 
 // The groups of a view's `where` are client constructs, appended after middleware.
 const NV_ROWS = {
   NvItem: [
-    { _id: 'i1', id: 'i1', stock: 5, tenant: 'A', shop: 's1' },
+    {
+      _id: 'i1', id: 'i1', stock: 5, tenant: 'A', shop: 's1', code: 'c1', label: 'first',
+    },
     { _id: 'i2', id: 'i2', stock: 0, tenant: 'A', shop: 's2' },
     { _id: 'i3', id: 'i3', stock: 9, tenant: 'B', shop: 's1' },
   ],
@@ -397,6 +399,9 @@ const build = ({
       tenant: { type: GraphQLString },
       shop: { type: Shop, extensions: { relation: { embedded: false } } },
       score: { type: GraphQLInt, resolve: () => 1, extensions: { virtual: true } },
+      // Stored, and not queryable by clients: one by its declaration, one for its application resolver.
+      code: { type: GraphQLString, extensions: { queryable: false } },
+      label: { type: GraphQLString, resolve: (item) => item.label },
     },
   });
   runtime.connect(null, Shop, 'nvShop', 'nvShops');
@@ -504,6 +509,8 @@ test.each([
   ['a path past a scalar', () => [{ conditions: [{ field: 'stock.value', operator: 'EQ', value: 1 }] }],
     'names stock.value, which is past NvItem.stock, whose type Int has no fields'],
   ['a virtual field', () => [{ conditions: [{ field: 'score', operator: 'EQ', value: 1 }] }], 'names score, which is the virtual field NvItem.score'],
+  ['a condition with a __scope key', () => [{ conditions: [{ field: 'stock', operator: 'GTE', value: 1, __scope: { id: 0 } }] }],
+    'condition on stock carries a __scope key, which Simfinity reserves'],
 ])('fails with INVALID_VIEW when where returns %s', async (label, where, message) => {
   const { schema, calls } = build({ where });
   const result = await run(schema, '{ openItems { id } }');
@@ -547,11 +554,35 @@ test('marks a where emptiness condition through a reference on the same issued m
   expect(result.errors).toBeUndefined();
   const { AND } = calls[0].args;
   expect(AND[0].conditions[0]).toMatchObject({ field: 'shop', path: 'name', operator: 'IS_NOT_EMPTY' });
-  expect(AND[0].conditions[0].__scope).toMatchObject({ id: 0 }); // the client's condition
+  // Both markers are filled: the shop's find scope adds nothing for this caller.
+  expect(AND[0].conditions[0].__scope).toEqual({ id: 0, scopes: { shop: null } }); // the client's condition
   expect(AND[1].conditions[0]).toMatchObject({ field: 'shop', operator: 'IS_EMPTY' });
-  expect(AND[1].conditions[0].__scope).toMatchObject({ id: 1 }); // the where condition
+  expect(AND[1].conditions[0].__scope).toEqual({ id: 1, scopes: { shop: null } }); // the where condition
   // Markers live on conditions, never on groups.
   expect(AND.some((group) => Object.hasOwn(group, '__scope'))).toBe(false);
+});
+
+test('lets where name fields that are not queryable by clients, which the client still may not name', async () => {
+  const { schema, calls } = build({
+    views: {
+      firstItems: {
+        where: () => [{ conditions: [{ field: 'code', operator: 'EQ', value: 'c1' }, { field: 'label', operator: 'EQ', value: 'first' }] }],
+      },
+    },
+  });
+  const result = await run(schema, '{ firstItems { id } }');
+  expect(result.errors).toBeUndefined();
+  expect(ids(result.data.firstItems)).toEqual(['i1']);
+  expect(calls[0].args.AND).toEqual([
+    { conditions: [{ field: 'code', operator: 'EQ', value: 'c1' }, { field: 'label', operator: 'EQ', value: 'first' }] },
+    tenant('A'),
+  ]);
+
+  for (const field of ['code', 'label']) {
+    const client = await run(schema, `{ firstItems(AND: [{ conditions: [{ field: "${field}", operator: EQ, value: "c1" }] }]) { id } }`);
+    expect(client.errors[0].extensions).toMatchObject({ code: 'FORBIDDEN_FILTER_PATH', status: 403 });
+  }
+  expect(calls).toHaveLength(1);
 });
 
 test('fails with UNSUPPORTED_QUERY when where uses an emptiness operator through a reference and the adapter does not declare it', async () => {

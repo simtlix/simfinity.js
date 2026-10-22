@@ -1814,7 +1814,9 @@ const copyClientFilters = (args, operation) => {
 // scope. When the adapter compiles reference emptiness (#108 part 2b), a client's emptiness term or
 // condition reads its references and collections through scoped joins and frames instead, so it
 // enters no joined scope either; every other entry, beside it or on the same path, records its own.
-const inspectClientPaths = (gqltype, args, operation) => {
+// Without `checkQueryable`, for a view's `where`, whose paths are the author's as a scope's are, a
+// non-queryable field is not rejected; a virtual one still is.
+const inspectClientPaths = (gqltype, args, operation, { checkQueryable = true } = {}) => {
   copyClientFilters(args, operation);
   const joinedScopes = new Map();
   const entries = collectQueryPathEntries(args, operation, { gqltype, expandMembers: true });
@@ -1828,7 +1830,7 @@ const inspectClientPaths = (gqltype, args, operation) => {
         throw forbiddenPath(`Query path ${path} uses the virtual field ${type.name}.${fieldName}, which is not stored`);
       }
       const queryable = field.extensions?.queryable;
-      if (queryable === false || (queryable !== true && hasApplicationResolver(type, fieldName))) {
+      if (checkQueryable && (queryable === false || (queryable !== true && hasApplicationResolver(type, fieldName)))) {
         throw forbiddenPath(`Query path ${path} uses the non-queryable field ${type.name}.${fieldName}`);
       }
       if (!joins) return;
@@ -2094,7 +2096,8 @@ const markClientConstructs = (checked, issued) => {
   const limit = getQueryMaxReferenceFrames();
   if (pairs.size > limit) {
     throw new SimfinityError(`Emptiness conditions through references and collections need ${pairs.size} scoped joins and `
-      + `frames in one query field, more than the limit of ${limit} (maxReferenceFrames)`, 'FILTER_DEPTH_EXCEEDED', 400);
+      + 'frames in one set of conditions (the client\'s arguments of a query field, or a view\'s where), more than the limit '
+      + `of ${limit} (maxReferenceFrames)`, 'FILTER_DEPTH_EXCEEDED', 400);
   }
   return markers;
 };
@@ -2868,7 +2871,8 @@ const invalidWhere = (view, detail) => new SimfinityError(`View ${view.name} whe
 
 // The groups a view's `where` returned are plain objects whose `conditions`, `AND` and `OR`, when set,
 // are arrays: of plain objects with a field name, and of groups like these. collectQueryPathEntries
-// skips anything else silently, so this comes before their paths are read.
+// skips anything else silently, so this comes before their paths are read. A condition never carries
+// a client scope marker key: only the runtime writes one.
 const assertViewGroupShapes = (view, groups) => {
   for (const group of groups) {
     if (!isNonNullPlainObject(group)) throw invalidWhere(view, 'returned a group that is not a plain object');
@@ -2878,6 +2882,9 @@ const assertViewGroupShapes = (view, groups) => {
     for (const condition of group.conditions ?? []) {
       if (!isNonNullPlainObject(condition) || typeof condition.field !== 'string' || condition.field === '') {
         throw invalidWhere(view, 'returned a condition that is not a plain object with a field name');
+      }
+      if (hasScopeMarker(condition)) {
+        throw invalidWhere(view, `condition on ${condition.field} carries a ${SCOPE_MARKER} key, which Simfinity reserves`);
       }
     }
     assertViewGroupShapes(view, [...(group.AND ?? []), ...(group.OR ?? [])]);
@@ -2910,12 +2917,13 @@ const assertViewGroups = (view, groups) => {
 // the client's constructs on a probe, whose AND holds copies of them (inspectClientPaths), so the
 // author's objects are never touched: their paths are inspected, their conditions checked and marked,
 // with ids that continue the client's, then the copies are appended to the top-level AND, where no
-// middleware can drop them. Returns their joined scopes, which attach to the appended copies.
+// middleware can drop them. Returns their joined scopes, which attach to the appended copies. Their
+// paths are the author's, as a scope's are, so a non-queryable field is not rejected.
 const viewExtension = (view, viewParams) => async (params, issued) => {
   const groups = await view.where({ params: viewParams, context: params.context });
   assertViewGroups(view, groups);
   const probe = { AND: groups };
-  const scopes = inspectClientPaths(view.type, probe, 'find');
+  const scopes = inspectClientPaths(view.type, probe, 'find', { checkQueryable: false });
   const checked = assertQueryConditions(view.type, probe, 'find');
   markClientConstructs(checked, issued);
   appendAndGroups(params.args, probe.AND);
