@@ -18,7 +18,7 @@ const result = await callTool(tools[0].name, {});
 Install the optional MCP SDK when constructing a server or transport:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.11.0 @modelcontextprotocol/sdk@^1.31.0
+npm install @simtlix/simfinity-mcp@3.12.0 @modelcontextprotocol/sdk@^1.31.0
 ```
 
 ```javascript

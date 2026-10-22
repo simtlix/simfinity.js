@@ -1,16 +1,18 @@
 # @simtlix/eslint-plugin-simfinity
 
 Optional editor/CI checks for **Simfinity 3.8.0**, shared by MongoDB and PostgreSQL.
-Version 0.3.0 provides eleven precise rules, including `valid-policy-expression`.
+Version 0.3.1 provides eleven precise rules, including `valid-policy-expression`.
 It does not execute application
 code or load Simfinity, GraphQL, database drivers or the MCP SDK.
 
-The plugin has its own version (`0.3.0`) and is outside Simfinity's five runtime
+The plugin has its own version (`0.3.1`) and is outside Simfinity's five runtime
 workspaces and their release workflow. Install it from npm in your application:
 
 ```sh
-npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.3.0'
+npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.3.1'
 ```
+
+Version 0.3.1 recognizes Simfinity 3.12.0 `registerView()` calls and preserves type tracking through TypeScript-wrapped options. It adds no rule and does not change the `recommended-3.8` preset contract.
 
 Version 0.3.0 adds `valid-policy-expression` to `recommended-3.8`, so upgrading
 can report malformed policies that earlier plugin versions did not diagnose.

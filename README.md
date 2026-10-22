@@ -110,7 +110,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.11.0
+npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.12.0
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies. Keep them within the ranges above so your application and Simfinity share a single Mongoose and GraphQL instance; npm reports an out-of-range version as a peer conflict. The MCP transports need the optional peer `@modelcontextprotocol/sdk@^1.31.0`, which is not installed automatically, and `graphql-middleware` is not a Simfinity dependency.
@@ -154,7 +154,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.11.0 @modelcontextprotocol/sdk@^1.31.0
+npm install @simtlix/simfinity-mcp@3.12.0 @modelcontextprotocol/sdk@^1.31.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
@@ -2840,9 +2840,9 @@ const BookInput = simfinity.getInputType(BookType);
 
 For jobs, workers, webhooks and other server code, read [server-side operations](docs/guide/server-side-operations.md): it shows when to use a mutation with nested writes, a controller hook, in-process execution of the generated schema, a custom mutation with `saveObject()` or the native model with the session, and what each of them runs. [Usage anti-patterns](docs/guide/anti-patterns.md) lists the approaches to avoid.
 
-The optional [application ESLint plugin](docs/guide/linting.md) provides eleven rules for specific Simfinity 3.8.0 contracts, including permission-map shapes, rule composition, required role/permission names and malformed authorization expressions. Install the separate development tool with `npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.3.0'`. It has no automatic permission or storage fixes. It complements the application skills; it does not certify authorization, scopes or transaction safety.
+The optional [application ESLint plugin](docs/guide/linting.md) provides eleven rules for specific Simfinity 3.8.0 contracts, including permission-map shapes, rule composition, required role/permission names and malformed authorization expressions. Install the separate development tool with `npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.3.1'`. It has no automatic permission or storage fixes. It complements the application skills; it does not certify authorization, scopes or transaction safety.
 
-Plugin 0.3.0 adds `valid-policy-expression` to the recommended preset, following 0.2.0's checks for async authorization extractors and Envelop plugins passed to runtime middleware. These three contracts were revalidated against Simfinity 3.8.0 and 3.10.0. Upgrading can introduce diagnostics for malformed policies. See the linting guide for examples and analysis limits.
+Plugin 0.3.1 recognizes `registerView()` without adding rules or changing the preset contract. Plugin 0.3.0 adds `valid-policy-expression` to the recommended preset, following 0.2.0's checks for async authorization extractors and Envelop plugins passed to runtime middleware. These three contracts were revalidated against Simfinity 3.8.0 and 3.10.0. Upgrading can introduce diagnostics for malformed policies. See the linting guide for examples and analysis limits.
 
 ## 🤖 MCP Generation
 

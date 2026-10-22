@@ -52,6 +52,8 @@ Version 3.12.0 adds named views. Every schema, filter, tool and adapter of 3.11.
 
 See [named views](../guide/queries#named-views) and the [`registerView()` reference](../reference/api#registerview).
 
+The development lockfile resolves `ip-address` to 10.7.4 to address [GHSA-rxp7-6hxx-x8q5](https://github.com/advisories/GHSA-rxp7-6hxx-x8q5). This does not rewrite dependency lockfiles in existing applications.
+
 ## Upgrade to 3.11.0
 
 Version 3.11.0 answers `IS_EMPTY` and `IS_NOT_EMPTY` through references and collections on both backends. Filters that are valid in 3.10.0 keep their results, and the bundled adapters compile them to the same MongoDB pipelines and PostgreSQL statements, with two exceptions: middleware that changes, in place, a field filter, term, condition or value array that another field shares through a GraphQL variable, and an adapter or SQL plugin whose `queryFeatures.referenceEmptiness` is not a boolean. Custom adapters and SQL plugins need a declaration before they receive the new conditions, but a copy of `createMongoAdapter()` or of the SQL adapter keeps the bundled declaration, so review copies whose methods compile filters themselves; see [reference emptiness in custom adapters and SQL plugins](#reference-emptiness-in-custom-adapters-and-sql-plugins). Keep all directly installed Simfinity packages at the same version.
