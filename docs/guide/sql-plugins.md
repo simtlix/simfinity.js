@@ -14,8 +14,8 @@ Choose a plugin when constructing a runtime. Its configuration is bound once, an
 Install the SQL core and the PostgreSQL plugin as direct dependencies when importing both:
 
 ```sh
-npm install @simtlix/simfinity-sql@3.11.0 \
-  @simtlix/simfinity-postgres@3.11.0 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-sql@3.12.0 \
+  @simtlix/simfinity-postgres@3.12.0 graphql@^16.11.0 pg@^8.16.3
 ```
 
 ```javascript
@@ -185,4 +185,4 @@ A plugin must declare the `optimisticConcurrency` capability when a protected ty
 
 `compileRecord(description, operation)` receives optional `operation.version: { column: string, expected: number }` on `update` and `deleteById`. A versioned update must atomically match ID and version, increment the version and return the updated row. Its `data` may be empty: still issue an update containing the increment. A versioned delete must atomically match both and return a deleted row, since the driver's portable result is `{ rows }`. For example, PostgreSQL compiles `UPDATE ... SET ..., "version" = "version" + 1 WHERE id = $1::uuid AND "version" = $k::bigint RETURNING *` and `DELETE ... WHERE id = $1::uuid AND "version" = $2::bigint RETURNING id`. Operations without `version` keep their existing contract.
 
-A spread copy of `postgresPlugin()` retains this capability when it overrides `compileRecord`; the override must honor `operation.version` or delegate versioned `update`/`deleteById` to the original. SQL checks returned updates for `expected + 1` and checks that a versioned delete returned a row after its locked read, raising `DATABASE_ERROR` on inconsistent results. These are defensive diagnostics, not proof an arbitrary compiler honored the predicate. Core adds its own observed-advancement check for lifecycle writes; native model handles have no extra pre-read merely to reproduce it. See [optimistic concurrency](./concurrency); published 3.11.0 does not include this capability.
+A spread copy of `postgresPlugin()` retains this capability when it overrides `compileRecord`; the override must honor `operation.version` or delegate versioned `update`/`deleteById` to the original. SQL checks returned updates for `expected + 1` and checks that a versioned delete returned a row after its locked read, raising `DATABASE_ERROR` on inconsistent results. These are defensive diagnostics, not proof an arbitrary compiler honored the predicate. Core adds its own observed-advancement check for lifecycle writes; native model handles have no extra pre-read merely to reproduce it. See [optimistic concurrency](./concurrency); 3.12.0 does not include this capability.

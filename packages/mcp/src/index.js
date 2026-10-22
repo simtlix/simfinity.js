@@ -24,6 +24,8 @@ const FILTER_OPERATORS_TEXT = 'EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE, ILI
 // The value and path rules of the emptiness operators, for the list and aggregate tool descriptions. The tools read
 // only the schema, so the texts say that references and collections depend on the database adapter.
 const EMPTINESS_OPERATORS_TEXT = 'IS_EMPTY and IS_NOT_EMPTY take no value, and a term or group condition without path applies them to the field itself: an embedded object or list, or a reference or collection where the database adapter supports it';
+// What a generated list accepts, for the list tool description and after a named view's own description.
+const LIST_LANGUAGE_TEXT = `Supports per-field filters (operators: ${FILTER_OPERATORS_TEXT}; ${EMPTINESS_OPERATORS_TEXT}), nested AND/OR filter groups, pagination (page/size) and sorting.`;
 
 /** Allowed shape for published MCP tool names (SEP-986). */
 const TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -852,6 +854,9 @@ const isListType = (type) => {
 
 const hasArg = (field, name) => (field.args || []).some((arg) => arg.name === name);
 
+// A named view's root field: core marks it with extensions.simfinityQuery.view (see buildViewField in core's runtime.js).
+const isViewField = (field) => Boolean(field.extensions && field.extensions.simfinityQuery && field.extensions.simfinityQuery.view);
+
 // Operation names core stamps on generated mutation fields
 // (extensions.simfinityMutation.operation; see buildMutation in core's runtime.js).
 const MUTATION_OPERATIONS = Object.assign(Object.create(null), {
@@ -948,6 +953,10 @@ const acceptsAddedItems = (field) => {
 const PLACEHOLDER_DESCRIPTIONS = new Set(['add', 'update', 'delete']);
 
 const buildToolDescription = (op, fieldName, field, entityType) => {
+  // A named view takes the generated list arguments, so its own description is followed by what they accept.
+  if (isViewField(field)) {
+    return `${field.description} ${LIST_LANGUAGE_TEXT}`;
+  }
   if (field.description && !PLACEHOLDER_DESCRIPTIONS.has(field.description)) {
     return field.description;
   }
@@ -958,7 +967,7 @@ const buildToolDescription = (op, fieldName, field, entityType) => {
     case 'single':
       return `Fetch a single ${entity} by id. Returns the matching ${entity} or null.${entityDoc}`;
     case 'list':
-      return `List and search ${entity} records. Supports per-field filters (operators: ${FILTER_OPERATORS_TEXT}; ${EMPTINESS_OPERATORS_TEXT}), nested AND/OR filter groups, pagination (page/size) and sorting. Returns an array of ${entity}.${entityDoc}`;
+      return `List and search ${entity} records. ${LIST_LANGUAGE_TEXT} Returns an array of ${entity}.${entityDoc}`;
     case 'aggregate':
       return `Run grouped aggregations (SUM, COUNT, AVG, MIN, MAX) over ${entity} records. Provide \`aggregation\` with a groupId and facts. Supports per-field filters (operators: ${FILTER_OPERATORS_TEXT}; ${EMPTINESS_OPERATORS_TEXT}), nested AND/OR filter groups, pagination (page/size) and sorting, like the list query. Returns grouped aggregation results (groupId, facts).${entityDoc}`;
     case 'add':
@@ -2675,7 +2684,8 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
       const collections = override.nestedCollections == null
         ? nestedCollections
         : normalizeNestedCollections(override.nestedCollections, `toolOverrides.${toolName}.nestedCollections`);
-      const title = override.title || buildToolTitle(op, fieldName, entityType);
+      // A named view is titled by its name, not as the generated list of its type.
+      const title = override.title || (isViewField(field) ? fieldName : buildToolTitle(op, fieldName, entityType));
       const baseDescription = override.description || buildToolDescription(op, fieldName, field, entityType);
       const description = hasVersionPrecondition(field) ? `${baseDescription} ${VERSION_PRECONDITION_TEXT}` : baseDescription;
       const annotations = { ...buildAnnotations(op, title, field), ...(override.annotations || {}) };

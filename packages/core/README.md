@@ -8,12 +8,13 @@ For relational storage, `@simtlix/simfinity-sql` builds on core and delegates ph
 
 ## Runtime
 
-`createRuntime(adapter)` creates a Simfinity runtime. Each instance owns its registrations, generated input types, middleware, scopes, hooks, custom queries and mutations, and state machines; the GraphQL type objects it builds resolvers for are bound to it, and query and mutation limits are process-wide. It exposes:
+`createRuntime(adapter)` creates a Simfinity runtime. Each instance owns its registrations, generated input types, middleware, scopes, hooks, custom queries and mutations, views, and state machines; the GraphQL type objects it builds resolvers for are bound to it, and query and mutation limits are process-wide. It exposes:
 
 - `connect`, `addNoEndpointType`, and `createSchema` for registration and schema creation;
 - `getModel`, `getType`, `getInputType`, and `getRegistrations` for runtime inspection;
 - `use`, `registerMutation`, and `saveObject` for middleware and write orchestration;
 - `registerCustomQuery` for reads whose results are not stored records, such as previews, other sources or permission evaluations;
+- `registerView` for a named list read of one registered type, with params and a fixed predicate, run through the type's scope;
 - `preventCreatingCollection` to pass validation-only storage setup to an adapter;
 - `configureQueryLimits` and `configureMutationLimits` for the process-wide page-size, reference-frame and nested-operation limits.
 
@@ -47,7 +48,7 @@ The same helpers are available from the `@simtlix/simfinity-core/auth`, `/auth/e
 
 ## Optimistic concurrency (next release)
 
-This source contract is for the next release and is not available in published 3.11.0 packages. `extensions: { concurrency: { mode: 'optimistic' } }` opts an entity into the managed `version: RecordVersion!` field. Core exports `RecordVersion` and `MAX_RECORD_VERSION` (`9007199254740991`); import from the application's facade to share their identity. See the [concurrency guide](https://simtlix.github.io/simfinity.js/guide/concurrency.html).
+This source contract is for the next release and is not available in 3.12.0 packages. `extensions: { concurrency: { mode: 'optimistic' } }` opts an entity into the managed `version: RecordVersion!` field. Core exports `RecordVersion` and `MAX_RECORD_VERSION` (`9007199254740991`); import from the application's facade to share their identity. See the [concurrency guide](https://simtlix.github.io/simfinity.js/guide/concurrency.html).
 
 An adapter advertises `writeFeatures: { optimisticConcurrency: true }`; `createRuntime()` snapshots/freezes this declaration and rejects invalid shapes with `INVALID_WRITE_FEATURES` (500). A protected schema rejects an adapter without support. `update(model, id, changes, session, { expectedVersion })` must atomically match ID/version, apply changes and set `expectedVersion + 1`, returning the updated record; `delete(model, id, session, { expectedVersion })` must atomically match both and return the deleted record. An update at the maximum skips the write. After no match, read the same cast key in the same session: return `null` if absent, report `VERSION_CONFLICT` if stale or `VERSION_EXHAUSTED` for an equal maximum on update, otherwise return `null`. MongoDB missing/null versions count as 1. Without `expectedVersion`, existing writes and call paths remain unchanged.
 

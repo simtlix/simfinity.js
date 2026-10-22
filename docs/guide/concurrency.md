@@ -6,7 +6,7 @@ description: Next-release opt-in record versions for conditional updates, state 
 # Optimistic concurrency
 
 ::: warning Next release
-This page describes the next release's source contract. Optimistic concurrency is not available in the published 3.11.0 packages. See the [upgrade notes](/resources/compatibility#upgrade-notes-for-the-next-release) before enabling it on existing storage.
+This page describes the next release's source contract. Optimistic concurrency is not available in the 3.12.0 packages. See the [upgrade notes](/resources/compatibility#upgrade-notes-for-the-next-release) before enabling it on existing storage.
 :::
 
 ## Declare a protected entity

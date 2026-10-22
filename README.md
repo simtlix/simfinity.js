@@ -71,6 +71,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 - [Advanced Features](#-advanced-features)
   - [Field Extensions](#field-extensions)
   - [Custom Queries](#custom-queries)
+  - [Named Views](#named-views)
   - [Custom Mutations](#custom-mutations)
   - [Working with Existing Mongoose Models](#working-with-existing-mongoose-models)
   - [Programmatic Data Access](#programmatic-data-access)
@@ -110,7 +111,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 ## 📦 Installation
 
 ```bash
-npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.11.0
+npm install mongoose@^8.24.2 graphql@^16.11.0 @simtlix/simfinity-js@3.12.0
 ```
 
 **Prerequisites**: Simfinity.js requires `mongoose` and `graphql` as peer dependencies. Keep them within the ranges above so your application and Simfinity share a single Mongoose and GraphQL instance; npm reports an out-of-range version as a peer conflict. The MCP transports need the optional peer `@modelcontextprotocol/sdk@^1.31.0`, which is not installed automatically, and `graphql-middleware` is not a Simfinity dependency.
@@ -154,7 +155,7 @@ Choose the backend at application setup. The existing package continues to use M
 Both database facades expose the same `auth`, `validators`, `scalars`, and `plugins` helper objects. PostgreSQL keeps MCP optional; install the database-independent integration and its transport SDK only when needed:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.11.0 @modelcontextprotocol/sdk@^1.31.0
+npm install @simtlix/simfinity-mcp@3.12.0 @modelcontextprotocol/sdk@^1.31.0
 ```
 
 Import `generateMCPTools`, `createMCPServer`, or the transport helpers from `@simtlix/simfinity-mcp` and pass the schema returned by `createPostgres().createSchema()`.
@@ -1434,7 +1435,7 @@ The callback receives the classified error and can return a replacement. To hide
 
 ## Optimistic concurrency (next release)
 
-The next release adds opt-in `extensions: { concurrency: { mode: 'optimistic' } }` on entity types before their first schema. Simfinity injects `version: RecordVersion!`, starts creates at 1 and requires the version read by the client in updates, state actions and deletes. Accepted updates advance it atomically, including version-only updates. Re-read and reapply on `VERSION_CONFLICT` or `TRANSACTION_RETRY_EXCEEDED`. This feature is not available in published 3.11.0 packages. See the [concurrency guide](docs/guide/concurrency.md) for authorization, hooks, native writers, supplied sessions and storage migrations.
+The next release adds opt-in `extensions: { concurrency: { mode: 'optimistic' } }` on entity types before their first schema. Simfinity injects `version: RecordVersion!`, starts creates at 1 and requires the version read by the client in updates, state actions and deletes. Accepted updates advance it atomically, including version-only updates. Re-read and reapply on `VERSION_CONFLICT` or `TRANSACTION_RETRY_EXCEEDED`. This feature is not available in 3.12.0 packages. See the [concurrency guide](docs/guide/concurrency.md) for authorization, hooks, native writers, supplied sessions and storage migrations.
 
 Protected children require `version` in nested `updated` entries and `{ id, version }` in `deleted: [RecordVersionRef]`, even when their parent is unprotected. Other collection deletes retain `[ID]`. `RecordVersion` and `MAX_RECORD_VERSION` are exported by core and the database facades.
 
@@ -2384,7 +2385,7 @@ simfinity.use(async (params, next) => {
     context,     // GraphQL context object (includes request info, user data, etc.)
     actionName,  // For state machine actions (only present for state_changed operations)
     actionField, // State machine action details (only present for state_changed operations)
-    entry        // Custom operation name (custom_mutation or custom_query)
+    entry        // Custom operation name (custom_mutation or custom_query), or the view name for a view's find
   } = params;
   
   // Await next() to continue the middleware chain
@@ -2693,6 +2694,84 @@ The field belongs to `RootQueryType`, so clients send it in a `query` document w
 
 See the [custom query guide](docs/guide/queries.md#custom-queries) for selection, transactions and authorization, and the [API reference](docs/reference/api.md#registercustomquery) for the full contract.
 
+### Named Views
+
+Use `registerView(name, { type, description, params, where })` for a frequent list read with typed params and a fixed predicate. A view returns the base type's records through its generated list path and `find` scope. Clients can add filters, sorting and pagination.
+
+This documentation example uses the registered Barber `bookingType` and its scope. Register the view before `createSchema()`. The Barber applications still pin their published runtime version.
+
+```javascript
+import { graphql, GraphQLString } from 'graphql';
+import { simfinity } from './runtime.js';
+
+simfinity.registerView('upcomingBookings', {
+  type: bookingType,
+  description: 'Confirmed bookings from a date on, default today, that the caller may read. For clock order pass sort scheduledDate ASC, startTime ASC.',
+  params: {
+    from: {
+      type: GraphQLString,
+      description: 'First date included, YYYY-MM-DD. Defaults to today (UTC).',
+    },
+  },
+  where: ({ params }) => [{
+    conditions: [
+      { field: 'state', operator: 'EQ', value: 'CONFIRMED' },
+      {
+        field: 'scheduledDate',
+        operator: 'GTE',
+        value: params.from ?? new Date().toISOString().slice(0, 10),
+      },
+    ],
+  }],
+});
+
+const schema = simfinity.createSchema();
+```
+
+Initialize the backend before serving operations, as in [database setup](docs/guide/databases.md). Call the field through GraphQL with the same trusted request context as any generated query:
+
+```javascript
+const result = await graphql({
+  schema,
+  source: `query Upcoming($from: String) {
+    upcomingBookings(
+      from: $from
+      sort: { terms: [
+        { field: "scheduledDate", order: ASC }
+        { field: "startTime", order: ASC }
+      ] }
+      pagination: { page: 1, size: 20, count: true }
+    ) {
+      scheduledDate
+      startTime
+      state
+    }
+  }`,
+  variableValues: { from: '2026-11-01' },
+  contextValue: context,
+});
+```
+
+With one matching booking visible to that caller, an illustrative result is:
+
+```json
+{
+  "data": {
+    "upcomingBookings": [
+      { "scheduledDate": "2026-11-02", "startTime": "09:00", "state": "CONFIRMED" }
+    ]
+  }
+}
+```
+
+The count is available as `context.count`, here `1`. Use the [count plugin](docs/guide/queries.md#pagination-and-total-count) to expose it in the GraphQL response.
+
+The params go only to `where({ params, context })`. Its groups are appended after middleware and inspected as client paths, so references receive joined scopes and hidden records read as missing. Middleware receives `operation: 'find'` and `entry: 'upcomingBookings'`; the scope payload stays unchanged. Authorize the root as `RootQueryType.upcomingBookings`. The paths that `where` names are the author's and are not checked against field read rules or `queryable`.
+
+`@simtlix/simfinity-js-client` 1.1.0 chooses the last list root for `client.find(type)`. Applications using that method should wait for a client fix before registering a view over that type. Call a view with `client.execute(document, variables)`.
+
+See the [named views guide](docs/guide/queries.md#named-views) for params, resolution and limits, and the [`registerView()` reference](docs/reference/api.md#registerview) for the registration contract.
+
 ### Custom Mutations
 
 Register custom mutations beyond the automatic CRUD operations:
@@ -2768,9 +2847,9 @@ const BookInput = simfinity.getInputType(BookType);
 
 For jobs, workers, webhooks and other server code, read [server-side operations](docs/guide/server-side-operations.md): it shows when to use a mutation with nested writes, a controller hook, in-process execution of the generated schema, a custom mutation with `saveObject()` or the native model with the session, and what each of them runs. [Usage anti-patterns](docs/guide/anti-patterns.md) lists the approaches to avoid.
 
-The optional [application ESLint plugin](docs/guide/linting.md) provides eleven rules for specific Simfinity 3.8.0 contracts, including permission-map shapes, rule composition, required role/permission names and malformed authorization expressions. Install the separate development tool with `npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.3.0'`. It has no automatic permission or storage fixes. It complements the application skills; it does not certify authorization, scopes or transaction safety.
+The optional [application ESLint plugin](docs/guide/linting.md) provides eleven rules for specific Simfinity 3.8.0 contracts, including permission-map shapes, rule composition, required role/permission names and malformed authorization expressions. Install the separate development tool with `npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.3.1'`. It has no automatic permission or storage fixes. It complements the application skills; it does not certify authorization, scopes or transaction safety.
 
-Plugin 0.3.0 adds `valid-policy-expression` to the recommended preset, following 0.2.0's checks for async authorization extractors and Envelop plugins passed to runtime middleware. These three contracts were revalidated against Simfinity 3.8.0 and 3.10.0. Upgrading can introduce diagnostics for malformed policies. See the linting guide for examples and analysis limits.
+Plugin 0.3.1 recognizes `registerView()` without adding rules or changing the preset contract. Plugin 0.3.0 adds `valid-policy-expression` to the recommended preset, following 0.2.0's checks for async authorization extractors and Envelop plugins passed to runtime middleware. These three contracts were revalidated against Simfinity 3.8.0 and 3.10.0. Upgrading can introduce diagnostics for malformed policies. See the linting guide for examples and analysis limits.
 
 ## 🤖 MCP Generation
 
@@ -2786,12 +2865,13 @@ Simfinity can automatically expose every generated GraphQL operation as a [Model
 | Delete mutation | `deletebook` |
 | State-machine action | `publish_book` |
 | Custom mutation | _the registered name_ |
+| Named view | _the view name_ |
 | Virtual field with a required argument | `book_readers` (`<byIdQuery>_<field>`) |
 
 Each generated tool follows MCP best practices so an agent can use it without extra context:
 
 - **`description`**: reuses the GraphQL type/field descriptions and adds an actionable summary. List and aggregate tools spell out the available filter operators (`EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE, ILIKE, STARTS_WITH, ISTARTS_WITH, ENDS_WITH, IENDS_WITH, IEQ, IS_EMPTY, IS_NOT_EMPTY`) and that `IS_EMPTY` and `IS_NOT_EMPTY` take no value and apply to the field itself without a path, an embedded object or list, or a reference or collection where the database adapter supports it, `AND`/`OR` groups, pagination and sorting; aggregate tools additionally document the `SUM/COUNT/AVG/MIN/MAX` operations and the `aggregation` argument.
-- **`title`**: a human-readable label (e.g. `List Book`, `Create Book`, `Aggregate Book`). State-machine actions, custom mutations and custom queries are titled by their field name.
+- **`title`**: a human-readable label (e.g. `List Book`, `Create Book`, `Aggregate Book`). State-machine actions, custom mutations, custom queries and named views are titled by their field name.
 - **`inputSchema`**: JSON Schema derived from the GraphQL arguments (scalars, enums, input objects, lists, non-null wrappers, and recursive filter types such as `QLFilterGroup` via `$defs`/`$ref`). Nullable arguments, input fields and list items accept explicit `null`; non-null positions reject it. Nullable references use `anyOf` with a null alternative. GraphQL type and field descriptions are propagated, with curated descriptions for synthetic types. `Date`/`DateTime`/`Time` scalars use the matching JSON Schema `format` as a hint for the value to send (input only; see `outputSchema`). Defaulted arguments are optional; representable defaults appear in the schema and generated GraphQL variables, with enum member names rather than internal values. Omitted opaque scalar defaults that have no GraphQL literal representation use the field's original default. Validated scalars, including chains built on other validated scalars, use the JSON type of their root scalar; a custom scalar's description is published unless the field or argument has its own. The arguments object is closed (`additionalProperties: false`): hosts that validate tool input reject undeclared keys, and `callTool` rejects an undeclared key the caller sent with `MCP_UNKNOWN_ARGUMENT` (see [Tool results and errors](#tool-results-and-errors)). Nested input objects are not closed in the schema; GraphQL already rejects their unknown fields.
 - **`outputSchema`**: JSON Schema describing the returned data (mirroring the auto-generated selection set), with type/field descriptions. Every nullable GraphQL position also accepts `null` (e.g. `type: ['string', 'null']`; enums get `null` appended), so validating MCP clients accept the `null`s GraphQL legitimately returns in `structuredContent` (get-by-id misses, unset optional fields). In the next release `RecordVersion` has integer bounds 1 through `9007199254740991` in inputs and outputs. Otherwise a scalar gets a JSON `type` only when it is a GraphQL spec scalar (`Int`, `Float`, `String`, `Boolean`, `ID`) or a `createValidatedScalar` chain ending at one. Any other scalar serializes with its own `serialize`, so it is published without a `type` or `format`: `Date`, `DateTime` and `Time` (an identity scalar sends an ISO instant, others epoch milliseconds or `YYYY-MM-DD`), custom scalars with a hand-set `baseScalarType` storage hint (such as a `Decimal` hinted as `Float` that sends `'12.30'`) and opaque scalars. Date/time scalars without a description get one saying their JSON form is defined by the server's scalar. Input schemas keep the `format` hints, so an input `Time` argument still advertises `format: 'time'` while outputs carry whatever `serialize` returns; hosts that validate input formats can reject a value copied from an output. Next to the root field, the schema declares the optional keys MCP adds: `totalCount` on list tools with a `pagination` argument, and `truncated` on mutation tools when `limits.maxResultBytes` is set (`__totalCount`/`__truncated` when the root field has that name).
 - **`annotations`**: behavioral hints — every tool has `openWorldHint: false`; queries are `readOnlyHint: true`; generated deletes are `destructiveHint: true` and `idempotentHint: true`; generated updates are `idempotentHint: true` unless their input can carry collection items to insert (an `added` list at any depth, such as a non-embedded one-to-many collection), which every repeat inserts again, so they get `idempotentHint: false`. In the next release protected updates keep `idempotentHint: true` even with `added` items: repeating the same version cannot apply another revision. Creates, state-machine actions and custom mutations get `readOnlyHint: false` only. Idempotency describes the stored data: a repeat runs middleware and controller hooks again, and a repeated delete calls `onDelete` with `null`, so `onDelete` hooks must tolerate `null`. Generated mutations are recognized by the `extensions.simfinityMutation` marker core stamps on them, or, in a schema without it (rebuilt from SDL, or hand-built), by the placeholder description (`'add'`/`'update'`/`'delete'`) together with the matching name prefix — never by name alone — so a custom mutation or state-machine action that happens to be named `updateReport` or `deleteDraft_book` is not published as a CRUD tool. A description-less state-machine action is described as a transition between its states. A query is a list tool only with a `pagination` argument and a get-by-id tool only with an `id` argument (generated list and aggregate queries are recognized by `extensions.simfinityQuery`); any other query is a read-only custom query.
@@ -3752,7 +3832,7 @@ import * as simfinity from '@simtlix/simfinity-js';
 simfinity.configureQueryLimits({ maxPageSize: 500 });
 ```
 
-The default maximum is **1000**. Explicit `page` and `size` must be positive safe integers, `size` must not exceed the maximum, and the computed skip must remain a safe integer. Invalid pagination throws `INVALID_PAGINATION` (400); invalid configuration throws `INVALID_QUERY_LIMITS` (400). With no pagination, a list returns at most `Math.min(100, maxPageSize)` records. Any positive safe-integer maximum is allowed, including values below 100. Call `configureQueryLimits()` to restore the default maximum. Its `maxReferenceFrames` option, 10 by default, caps the distinct scoped joins and frames that the client's `IS_EMPTY` and `IS_NOT_EMPTY` conditions of one list, aggregate or collection-field call read through references and collections; more fail with `FILTER_DEPTH_EXCEEDED` (400), and an option that a call omits takes its default again. This deliberately tightens previously unbounded explicit page sizes; applications needing larger pages can configure an appropriate maximum. Unpaginated aggregate queries retain their existing behavior.
+The default maximum is **1000**. Explicit `page` and `size` must be positive safe integers, `size` must not exceed the maximum, and the computed skip must remain a safe integer. Invalid pagination throws `INVALID_PAGINATION` (400); invalid configuration throws `INVALID_QUERY_LIMITS` (400). With no pagination, a list returns at most `Math.min(100, maxPageSize)` records. Any positive safe-integer maximum is allowed, including values below 100. Call `configureQueryLimits()` to restore the default maximum. Its `maxReferenceFrames` option, 10 by default, caps the distinct scoped joins and frames that one set of `IS_EMPTY` and `IS_NOT_EMPTY` conditions reads through references and collections. The client's arguments of each list, aggregate, collection-field or named view call are one set. A view's `where` is a separate set held to the same limit. More fail with `FILTER_DEPTH_EXCEEDED` (400); middleware and scope conditions are not counted, and an option that a call omits takes its default again. This deliberately tightens previously unbounded explicit page sizes; applications needing larger pages can configure an appropriate maximum. Unpaginated aggregate queries retain their existing behavior.
 
 ```graphql
 query {

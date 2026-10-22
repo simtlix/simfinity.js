@@ -1143,3 +1143,93 @@ type RelationType {
   connectionField: String
   displayField: String
 }`;
+
+
+describe('named views with optimistic concurrency', () => {
+  it.each([true, false])('rejects a managed version param before preparation (included: %s)', (included) => {
+    const adapter = createAdapter();
+    const Producto = productType();
+    const runtime = connectAll(createRuntime(adapter), Producto);
+    runtime.registerView('currentProducts', {
+      type: Producto, description: 'Current products', params: { version: { type: GraphQLInt } }, where: () => [],
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      expectError(thrown(() => runtime.createSchema(included ? undefined : [])), {
+        code: 'INVALID_VIEW',
+        status: 500,
+        message: 'registerView currentProducts param version has the name of a field of Producto',
+      });
+      expect(adapter.prepare).not.toHaveBeenCalled();
+      expect(adapter.createModel).not.toHaveBeenCalled();
+      expect(hasVersionField(Producto)).toBe(false);
+    }
+  });
+
+  it.each(['RecordVersion', 'RecordVersionRef'])('rejects an included view param type named %s before preparation', (name) => {
+    const adapter = createAdapter();
+    const Producto = productType();
+    const runtime = connectAll(createRuntime(adapter), Producto);
+    runtime.registerView('currentProducts', {
+      type: Producto, description: 'Current products',
+      params: { revision: { type: new GraphQLNonNull(new GraphQLScalarType({ name })) } }, where: () => [],
+    });
+    expectError(thrown(() => runtime.createSchema()), reservedName(name));
+    expect(adapter.prepare).not.toHaveBeenCalled();
+    expect(adapter.createModel).not.toHaveBeenCalled();
+    expect(hasVersionField(Producto)).toBe(false);
+  });
+
+  it('does not reserve a param type from an excluded view', () => {
+    const adapter = createAdapter();
+    const Hidden = productType({ name: 'Hidden' });
+    const Visible = productType({ name: 'Visible', extensions: {} });
+    const runtime = connectAll(createRuntime(adapter), Hidden, Visible);
+    runtime.registerView('visibleProducts', {
+      type: Visible, description: 'Visible products',
+      params: { revision: { type: new GraphQLScalarType({ name: 'RecordVersion' }) } }, where: () => [],
+    });
+    const schema = runtime.createSchema([Hidden], []);
+    expect(schema.getQueryType().getFields().visibleProducts).toBeUndefined();
+    expect(hasVersionField(Hidden)).toBe(true);
+  });
+
+  it('does not reserve a view param type when protection is excluded', () => {
+    const adapter = createAdapter();
+    const Hidden = productType({ name: 'Hidden' });
+    const Visible = productType({ name: 'Visible', extensions: {} });
+    const runtime = connectAll(createRuntime(adapter), Hidden, Visible);
+    const AppVersion = new GraphQLScalarType({ name: 'RecordVersion' });
+    runtime.registerView('visibleProducts', {
+      type: Visible, description: 'Visible products', params: { revision: { type: AppVersion } }, where: () => [],
+    });
+    const schema = runtime.createSchema([Visible], []);
+    expect(schema.getType('RecordVersion')).toBe(AppVersion);
+    expect(schema.getType('Hidden')).toBeUndefined();
+  });
+
+  it('keeps version params on unprotected views across repeated schemas', () => {
+    const adapter = createAdapter();
+    const Producto = productType({ extensions: {} });
+    const runtime = connectAll(createRuntime(adapter), Producto);
+    runtime.registerView('currentProducts', {
+      type: Producto, description: 'Current products', params: { version: { type: GraphQLInt } }, where: () => [],
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const schema = runtime.createSchema();
+      expect(schema.getQueryType().getFields().currentProducts.args.find(({ name }) => name === 'version').type).toBe(GraphQLInt);
+      expect(hasVersionField(Producto)).toBe(false);
+    }
+  });
+
+  it('returns the managed version through a named view', async () => {
+    const adapter = createAdapter();
+    adapter.find = async () => [{ _id: '1', name: 'Current', version: 7 }];
+    const Producto = productType();
+    const runtime = connectAll(createRuntime(adapter), Producto);
+    runtime.registerView('currentProducts', { type: Producto, description: 'Current products', where: () => [] });
+    const schema = runtime.createSchema();
+    const result = await graphql({ schema, source: '{ currentProducts { id version } }' });
+    expect(result.errors).toBeUndefined();
+    expect(result.data.currentProducts).toEqual([{ id: '1', version: 7 }]);
+  });
+});

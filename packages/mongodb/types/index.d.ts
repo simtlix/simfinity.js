@@ -19,6 +19,7 @@ import type {
   QueryFeatures,
   RuntimeRegistration,
   SimfinityError,
+  ViewOptions,
 } from '@simtlix/simfinity-core';
 export {
   auth,
@@ -43,6 +44,8 @@ export type {
   EnvelopSchemaPlugin,
   FieldValidations,
   FieldValidator,
+  FilterCondition,
+  FilterGroup,
   ItemValidators,
   MutationLimitsOptions,
   PermissionSchema,
@@ -52,6 +55,9 @@ export type {
   ScopeParams,
   TypePermissions,
   TypeScopes,
+  ViewOptions,
+  ViewParam,
+  ViewParamType,
   VirtualFieldDeclaration,
   VirtualFieldOptions,
 } from '@simtlix/simfinity-core';
@@ -240,6 +246,14 @@ export function registerCustomQuery(
   outputModel: GraphQLOutputType,
   callback: (input: any, context: any) => any,
 ): void;
+
+/**
+ * Register a named view: a root query field that returns the type's list with the generated list
+ * arguments plus the view's params, and appends the groups of `where` after middleware. Throws
+ * `INVALID_VIEW` (500) for an invalid declaration and `QUERY_NAME_CONFLICT` (500) for a name already
+ * registered as a view (see the core `Runtime.registerView`).
+ */
+export function registerView(name: string, options: ViewOptions): void;
 
 /** Operation context for root operations, generated non-embedded relation reads, and nested collection writes. */
 export interface SimfinityMiddlewareContext {

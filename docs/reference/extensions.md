@@ -77,7 +77,7 @@ fields: () => ({
 
 Client filter, sort, `groupId` and fact paths compare stored values, not resolver output. A field with its own `resolve`, such as a masking resolver, a manual relationship resolver or a custom `id` resolver, is therefore non-queryable unless it sets `queryable: true`; only the resolvers Simfinity generates keep a field queryable. Set `queryable: true` when the resolver returns the stored value, and `queryable: false` to make any field non-queryable.
 
-A client path with a non-queryable segment fails with `FORBIDDEN_FILTER_PATH` (403), although the generated filter argument remains in the schema. Paths added by middleware or scope functions are not checked against `queryable`; a path through a [virtual](#virtual) field fails even then. `queryable: true` does not bypass authorization rules or the `find` scopes of related types, and introspection does not expose it. See [path restrictions](/guide/queries#path-restrictions).
+A client path with a non-queryable segment fails with `FORBIDDEN_FILTER_PATH` (403), although the generated filter argument remains in the schema. Paths added by middleware, scope functions or a view's `where` are not checked against `queryable`; a path through a [virtual](#virtual) field fails even then. `queryable: true` does not bypass authorization rules or the `find` scopes of related types, and introspection does not expose it. See [path restrictions](/guide/queries#path-restrictions).
 
 ### virtual
 

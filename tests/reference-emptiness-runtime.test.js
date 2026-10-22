@@ -809,7 +809,7 @@ describe('maxReferenceFrames', () => {
   const over = (count, limit = 10) => ({
     code: 'FILTER_DEPTH_EXCEEDED',
     status: 400,
-    message: `Emptiness conditions through references and collections need ${count} scoped joins and frames in one query field, more than the limit of ${limit} (maxReferenceFrames)`,
+    message: `Emptiness conditions through references and collections need ${count} scoped joins and frames in one set of conditions (the client's arguments of a query field, or a view's where), more than the limit of ${limit} (maxReferenceFrames)`,
   });
   const RESTRICTED = { scopes: { shop: (args) => { args.name = { operator: 'NE', value: 'x' }; }, review: (args) => { args.text = { operator: 'NE', value: 'y' }; } } };
 

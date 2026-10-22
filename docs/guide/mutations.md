@@ -79,7 +79,7 @@ When your schema declares a getter, a virtual other than Mongoose's automatic `i
 
 ### Version preconditions (next release)
 
-For a type declaring `extensions.concurrency: { mode: 'optimistic' }`, send the version you read in `input.version`, alongside `id` and the patch; select the returned `version` for the next edit. Every accepted update advances it once, including `{ id, version }`-only patches. Creates exclude the field and initialize it at 1. A conflict means re-read and reapply, rather than replacing the version blindly. The next-release feature is not in published 3.11.0 packages; see [optimistic concurrency](./concurrency).
+For a type declaring `extensions.concurrency: { mode: 'optimistic' }`, send the version you read in `input.version`, alongside `id` and the patch; select the returned `version` for the next edit. Every accepted update advances it once, including `{ id, version }`-only patches. Creates exclude the field and initialize it at 1. A conflict means re-read and reapply, rather than replacing the version blindly. The next-release feature is not in 3.12.0 packages; see [optimistic concurrency](./concurrency).
 
 ## Delete a record
 
@@ -128,7 +128,7 @@ The setting is process-wide and shared by every runtime. It is unlimited by defa
 
 ## Add a custom mutation
 
-Use `registerMutation()` for a write that does not fit the generated CRUD shape. Do not use it for reads: a custom mutation's callback always runs in a transaction, which may retry it, clients must send it in a `mutation` document, and MCP publishes it as a write. For a read of stored records that generated queries cannot express, add a [virtual field](./queries#virtual-fields) to the type it belongs to; for a read whose result is not a stored record, such as a price preview or data from another service, register a [custom query](./queries#custom-queries). This example creates a serie through the same materialization and lifecycle pipeline while sharing the custom mutation's transaction:
+Use `registerMutation()` for a write that does not fit the generated CRUD shape. Do not use it for reads: a custom mutation's callback always runs in a transaction, which may retry it, clients must send it in a `mutation` document, and MCP publishes it as a write. For a read of stored records that generated queries cannot express, add a [virtual field](./queries#virtual-fields) to the type it belongs to; for a read whose result is not a stored record, such as a price preview or data from another service, register a [custom query](./queries#custom-queries). A named read of stored records with a fixed predicate is a [named view](./queries#named-views). This example creates a serie through the same materialization and lifecycle pipeline while sharing the custom mutation's transaction:
 
 ```javascript
 import {
