@@ -6,7 +6,7 @@ import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
   GraphQLInt, GraphQLEnumType, GraphQLBoolean, GraphQLError, GraphQLInterfaceType, GraphQLUnionType,
-  Kind, getNamedType, isObjectType, isOutputType,
+  Kind, getNamedType, isEnumType, isListType, isNonNullType, isObjectType, isOutputType, isScalarType,
 } from 'graphql';
 
 import SimfinityError from './errors/simfinity.error.js';
@@ -495,6 +495,7 @@ export const createRuntime = (adapter) => {
   const qualifiedSelfCollections = new Map();
   const registeredMutations = {};
   const registeredQueries = {};
+  const registeredViews = {};
   const middlewares = [];
 
   const operations = {
@@ -3385,6 +3386,64 @@ const registerCustomQuery = (name, description, inputModel, outputModel, callbac
   registeredQueries[name] = registration;
 };
 
+const invalidView = (detail) => new SimfinityError(`registerView ${detail}`, 'INVALID_VIEW', 500);
+
+// A view parameter is a value the client sends as a variable or a literal: a scalar, an enum or a list
+// of them, each possibly NonNull. An input object is never one, wherever it is nested.
+const isViewParamType = (type) => {
+  if (isNonNullType(type) || isListType(type)) return isViewParamType(type.ofType);
+  return isScalarType(type) || isEnumType(type);
+};
+
+const isNonNullPlainObject = (value) => value !== null && typeof value === 'object' && isPlainObject(value);
+
+const VIEW_OPTION_KEYS = new Set(['type', 'description', 'params', 'where']);
+const VIEW_PARAM_KEYS = new Set(['type', 'description', 'defaultValue']);
+
+const validateViewParams = (params) => {
+  if (params === undefined) return;
+  if (!isNonNullPlainObject(params)) throw invalidView('params must be an object');
+  for (const [paramName, param] of Object.entries(params)) {
+    if (!isNonNullPlainObject(param)) throw invalidView(`param ${paramName} must be an object`);
+    for (const key of Object.keys(param)) {
+      if (!VIEW_PARAM_KEYS.has(key)) throw invalidView(`param ${paramName} has an unknown key ${key}`);
+    }
+    if (!isViewParamType(param.type)) {
+      throw invalidView(`param ${paramName} type must be a scalar, an enum or a list of them, not an input object`);
+    }
+    if (param.description !== undefined && typeof param.description !== 'string') {
+      throw invalidView(`param ${paramName} description must be a string`);
+    }
+  }
+};
+
+const validateViewRegistration = (name, options) => {
+  if (typeof name !== 'string' || !/^[_A-Za-z][_0-9A-Za-z]*$/.test(name) || name.startsWith('__')) {
+    throw invalidView('requires a valid GraphQL field name that does not start with __');
+  }
+  if (name.endsWith('_aggregate')) {
+    throw invalidView(`name ${name} must not end with _aggregate, which the generated aggregate queries use`);
+  }
+  if (!isNonNullPlainObject(options)) throw invalidView('requires an options object');
+  for (const key of Object.keys(options)) {
+    if (!VIEW_OPTION_KEYS.has(key)) throw invalidView(`has an unknown option ${key}`);
+  }
+  if (!(options.type instanceof GraphQLObjectType)) throw invalidView('type must be a GraphQLObjectType');
+  if (typeof options.description !== 'string' || options.description === '') {
+    throw invalidView('requires a non-empty description');
+  }
+  validateViewParams(options.params);
+  if (typeof options.where !== 'function') throw invalidView('where must be a function');
+};
+
+const registerView = (name, options) => {
+  validateViewRegistration(name, options);
+  if (Object.hasOwn(registeredViews, name)) throw queryNameConflict(name);
+  registeredViews[name] = {
+    name, type: options.type, description: options.description, params: options.params ?? {}, where: options.where,
+  };
+};
+
 // Gives the field a new extensions object as well as the resolver, so a copy made before keeps
 // untagged extensions. It has a null prototype because graphql-js keeps such an object, rather than
 // copying it, when a type is rebuilt from toConfig().
@@ -3622,6 +3681,7 @@ function formatArgs(argsArray) {
     use,
     registerMutation,
     registerCustomQuery,
+    registerView,
     saveObject,
     preventCreatingCollection,
   };
