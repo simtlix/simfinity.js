@@ -1,6 +1,6 @@
 ---
 title: Queries
-description: Retrieve records with scalar filters, related-field conditions, AND/OR groups, pagination, sorting, aggregation, virtual fields for reads that filters cannot express, and custom queries for results that are not stored records.
+description: Retrieve records with scalar filters, related-field conditions, AND/OR groups, pagination, sorting, aggregation, virtual fields for reads that filters cannot express, custom queries for results that are not stored records, and named views.
 ---
 
 # Queries
@@ -266,7 +266,7 @@ The `id` right after a reference, as in `serie.id`, is the identity of the recor
 
 For each list, aggregate or collection-field call, each target type's `find` scope runs once, after middleware and the query's own scope, with empty arguments, `operation: 'find'` and the request context, as [joined scopes](./query-scope#relationship-paths-in-filters-sorts-and-aggregations) run. The sort and pagination it sets are checked for shape and then ignored, and its conditions are checked on its own type, with the codes that its own list query would give. A scope that adds nothing for the caller, such as one that returns early for administrators, hides no record.
 
-One call reads at most 10 distinct scoped joins and frames for the client's emptiness conditions. Each reference that a condition crosses counts as a scoped join, and each reference or collection that a condition ends at or reads as a member counts as a frame, once per path and kind, whether or not its target has a scope. So `serie IS_EMPTY` together with `serie.name IS_EMPTY` counts 2, and `serie.name IS_EMPTY` together with `serie.year IS_EMPTY` counts 1. More fail with `FILTER_DEPTH_EXCEEDED` (400). Set the limit with [`configureQueryLimits({ maxReferenceFrames })`](../reference/api#configurequerylimits). Each list, aggregate or collection-field call counts on its own, never the whole GraphQL operation, and the conditions that middleware and scopes add are not counted.
+One set of conditions reads at most 10 distinct scoped joins and frames for its emptiness conditions. Each reference that a condition crosses counts as a scoped join, and each reference or collection that a condition ends at or reads as a member counts as a frame, once per path and kind, whether or not its target has a scope. So `serie IS_EMPTY` together with `serie.name IS_EMPTY` counts 2, and `serie.name IS_EMPTY` together with `serie.year IS_EMPTY` counts 1. More fail with `FILTER_DEPTH_EXCEEDED` (400). Set the limit with [`configureQueryLimits({ maxReferenceFrames })`](../reference/api#configurequerylimits). The client's arguments of each list, aggregate, collection-field or [named view](#named-views) call are one set. A view's `where` is a separate set held to the same limit. The limit never counts the whole GraphQL operation, and the conditions that middleware and scopes add are not counted.
 
 Conditions that middleware, the query's own scope, joined scopes and other scope functions add are trusted, as their paths are, and read stored data whoever the caller is. A reference is empty when no stored reference resolves to an existing record, a collection when no stored child references the record, and a field through references is read through plain joins, without any target scope. On MongoDB, a reference to a record that no longer exists counts as empty; PostgreSQL's foreign keys keep a reference from pointing to a missing record. A `Season` scope that adds `{ field: 'serie', operator: 'IS_EMPTY' }` therefore selects the seasons that store no existing serie, for every caller. See [client and trusted conditions](./query-scope#client-and-trusted-conditions).
 
@@ -795,7 +795,7 @@ Generated queries, [query scopes](./query-scope), [aggregates](#aggregate-record
 - a permission evaluation, such as what the caller may do on a resource;
 - a result assembled from several sources, such as a federated search, a dashboard or an export.
 
-Register such a read as a **custom query**: a field of `RootQueryType` whose callback is application code. Clients send it in a `query` document, together with other query fields; Simfinity's [middleware](./middleware) and the [authorization plugin](./authorization) see it; `createSchema()` can include or exclude it; and [MCP](./mcp#custom-query-tools) publishes it as a read-only tool. A read of stored records does not belong here: a custom query bypasses the scopes, filters and permission rules of the generated reads, so it would have to repeat them.
+Register such a read as a **custom query**: a field of `RootQueryType` whose callback is application code. Clients send it in a `query` document, together with other query fields; Simfinity's [middleware](./middleware) and the [authorization plugin](./authorization) see it; `createSchema()` can include or exclude it; and [MCP](./mcp#custom-query-tools) publishes it as a read-only tool. A read of stored records does not belong here: a custom query bypasses the scopes, filters and permission rules of the generated reads, so it would have to repeat them. A named read of stored records with a fixed predicate is a [named view](#named-views).
 
 This example estimates a duration from a catalog defined in code. `simfinity` is the runtime your application already set up; register the query before the `createSchema()` call that should expose it.
 
@@ -910,5 +910,153 @@ PostgreSQL's [`withTransaction()`](./postgresql#native-model-and-session-apis) u
 With the [authorization plugin](./authorization), the rule for `RootQueryType.<name>` authorizes the field before middleware and the callback run, such as `RootQueryType: { estimateServiceDuration: requireAuth() }`. Without a rule, the default policy applies, so under `defaultPolicy: 'DENY'` the field is denied. The fields of its output type are authorized by their own rules. The fields inside its `input` are not checked as field paths.
 
 The callback authorizes its own reads with the trusted request context: query scopes, controllers, generated filters and pagination do not run for it. Generated relationship fields selected on its result still run their middleware and scopes, after the callback has returned.
+
+## Named views
+
+A named view gives a frequent list read one name, typed params and a fixed predicate. Web clients, MCP agents and in-process callers use the same root field. It returns the base type's records with the generated filters, `AND`/`OR`, `sort` and `pagination` arguments available alongside its params.
+
+Visibility belongs in the type's [scope](./query-scope). A view always runs that scope and never returns a row that the generated list would hide from the same caller. Its `where` adds the read's predicate without repeating tenant or other visibility rules.
+
+### Declare a view
+
+This example uses Barber's registered `bookingType`, whose GraphQL name is `booking`. The application has already connected it to the selected runtime and configured its scope. Register the view before building the schema:
+
+```javascript
+import { graphql, GraphQLString } from 'graphql';
+import { simfinity } from './runtime.js';
+
+simfinity.registerView('upcomingBookings', {
+  type: bookingType,
+  description: 'Confirmed bookings from a date on, default today, that the caller may read. For clock order pass sort scheduledDate ASC, startTime ASC.',
+  params: {
+    from: {
+      type: GraphQLString,
+      description: 'First date included, YYYY-MM-DD. Defaults to today (UTC).',
+    },
+  },
+  where: ({ params }) => [{
+    conditions: [
+      { field: 'state', operator: 'EQ', value: 'CONFIRMED' },
+      {
+        field: 'scheduledDate',
+        operator: 'GTE',
+        value: params.from ?? new Date().toISOString().slice(0, 10),
+      },
+    ],
+  }],
+});
+
+const schema = simfinity.createSchema();
+```
+
+Initialize the backend before serving operations, as in [database setup](./databases). Call the field through GraphQL with the same trusted request context as any generated query:
+
+```javascript
+const result = await graphql({
+  schema,
+  source: `query Upcoming($from: String) {
+    upcomingBookings(
+      from: $from
+      sort: { terms: [
+        { field: "scheduledDate", order: ASC }
+        { field: "startTime", order: ASC }
+      ] }
+      pagination: { page: 1, size: 20, count: true }
+    ) {
+      scheduledDate
+      startTime
+      state
+    }
+  }`,
+  variableValues: { from: '2026-11-01' },
+  contextValue: context,
+});
+```
+
+With one matching booking visible to that caller, an illustrative result is:
+
+```json
+{
+  "data": {
+    "upcomingBookings": [
+      { "scheduledDate": "2026-11-02", "startTime": "09:00", "state": "CONFIRMED" }
+    ]
+  }
+}
+```
+
+The count is available as `context.count`, here `1`. Use the [count plugin](#pagination-and-total-count) to expose it in the GraphQL response.
+
+The view is included exactly when its base type is in `createSchema()`'s `includedQueryTypes`. There is no separate `includedViews` option. See [`registerView()`](/reference/api#registerview) for the registration contract.
+
+### Params
+
+Each param declares `{ type, description?, defaultValue? }`. Its type is a GraphQL scalar, enum or list of those, with `GraphQLNonNull` wrappers allowed. Input objects are not accepted. GraphQL coerces the values before the resolver runs. A `NonNull` param without a default is required.
+
+Param names must be valid GraphQL names without the `__` prefix. A param cannot share a name with any base-type field, including a reference, collection or virtual field, or with `AND`, `OR`, `sort` or `pagination`. Use `barbershopId` for a param that identifies the `barbershop` reference:
+
+```javascript
+import { GraphQLID, GraphQLNonNull, GraphQLString } from 'graphql';
+import { SimfinityError } from '@simtlix/simfinity-core';
+
+simfinity.registerView('barbershopDay', {
+  type: bookingType,
+  description: 'Confirmed bookings of one barbershop on one date that the caller may read. For clock order pass sort startTime ASC.',
+  params: {
+    barbershopId: { type: new GraphQLNonNull(GraphQLID), description: 'The barbershop.' },
+    date: { type: new GraphQLNonNull(GraphQLString), description: 'The day, YYYY-MM-DD, in the shop timezone.' },
+  },
+  where: ({ params }) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(params.date)) {
+      throw new SimfinityError('date must be YYYY-MM-DD', 'INVALID_INPUT', 400);
+    }
+    return [{
+      conditions: [
+        { field: 'barbershop', path: 'id', operator: 'EQ', value: params.barbershopId },
+        { field: 'scheduledDate', operator: 'EQ', value: params.date },
+        { field: 'state', operator: 'EQ', value: 'CONFIRMED' },
+      ],
+    }];
+  },
+});
+```
+
+Register this view before `createSchema()` too. Only `where` receives the params. Their descriptions and defaults also appear in the MCP input schema. These examples illustrate the API; the Barber applications still pin their published runtime version.
+
+### How a view resolves
+
+After GraphQL coercion, the resolver removes the params from the client's arguments. No param reaches path inspection, middleware, the scope or the adapter as a filter path. The client's remaining arguments receive the same path and condition checks as a generated list.
+
+Middleware runs with `{ type, args, operation: 'find', entry: <view name>, context }`. It sees only the client's list arguments. Then `where({ params, context })` returns an array of `AND` groups or a promise of that array. Keep it free of database reads and do not write to `context`. Returning `[]` adds no conditions.
+
+The returned groups are copied, checked and appended to the top-level `AND` after middleware. Replacing `params.args` in middleware cannot drop them. Their paths and emptiness conditions are inspected as a client's constructs, so references receive joined scopes and hidden records read as missing. For example, `barbershopDay` returns `[]` for a shop the caller cannot see. Collection paths have the same behavior and restrictions as the equivalent client filter.
+
+The base type's `find` scope then runs with its usual payload. It receives no view params or view metadata. The scoped list and count use the same predicate. `pagination.count: true` reports the total through the generated list's [count mechanism](#pagination-and-total-count).
+
+### Errors
+
+`INVALID_VIEW` (500) identifies a declaration or `where` bug. `registerView()` rejects an invalid name, the reserved `_aggregate` suffix, unknown options, an empty description, invalid param definitions or a `where` that is not a function. `createSchema()` rejects an unregistered base type, an invalid param name or a param name collision.
+
+At request time, `INVALID_VIEW` rejects a `where` result that is not an array of groups. Groups and conditions must be plain objects, and each condition must name a `field`. Groups accept only `conditions`, `AND` and `OR`; conditions accept only `field`, `operator`, `value` and `path`. Unknown structural keys and cyclic groups fail with `INVALID_VIEW`. Empty groups and sharing a group between separate branches are allowed, and the contents of `value` are opaque to this structural check. Unknown fields, including below references, paths past scalars, virtual fields and the reserved `__scope` condition key also fail with this code.
+
+An application error thrown by `where` keeps its code and status, as `INVALID_INPUT` does above. Other filter errors follow the generated list: unsupported operators give `UNSUPPORTED_QUERY`, and invalid filter values use the backend's existing codes. The view does not validate IDs itself. A duplicate view name gives `QUERY_NAME_CONFLICT` at registration; conflicts with included generated roots or custom queries give it at schema creation.
+
+### Limits
+
+`where` uses the generated filter language over stored fields with the adapter's supported operators. Its groups count toward the same five-level nesting limit as a client's groups. Put alternatives inside an `OR` group. [`maxReferenceFrames`](../reference/api#configurequerylimits) applies separately to the client's arguments and the `where` groups, as two sets of emptiness conditions.
+
+A view fixes no order or page size. Callers send `sort` and `pagination`; MCP also applies its `defaultPagination`. The generated list's query limits and count behavior apply. A view creates no aggregate root, projection, by-ID read, write or database object. A per-parent read belongs in a [virtual field](#virtual-fields).
+
+`@simtlix/simfinity-js-client` 1.1.0 chooses the last list root for `client.find(type)`. Registering a view over that type can therefore change which root it calls. Applications using that method should wait for a client fix before registering a view over the type. Call a view with `client.execute(document, variables)`.
+
+### Views in MCP
+
+MCP publishes each view as a read-only list tool with its params and the generated list arguments. It keeps the view's name and description and reports `totalCount` for counted pages. See [named view tools](./mcp#named-view-tools) for invocation and selectors.
+
+### Authorization
+
+Authorize the root as `RootQueryType.<view name>`, such as `RootQueryType: { upcomingBookings: requireAuth() }`. Under `defaultPolicy: 'DENY'`, an unruled view fails with `FORBIDDEN`. Returned rows keep the base type's field and virtual-field rules.
+
+The paths a view's `where` names are the author's, like paths added by middleware and scopes. The authorization plugin's field read rules do not check them, and `queryable` does not restrict them. Virtual fields still fail. The type's scope remains the visibility boundary; the view's predicate only narrows its result.
 
 To constrain which records a caller may query, continue with [query scope](./query-scope).

@@ -22,6 +22,8 @@ export type {
   EnvelopSchemaPlugin,
   FieldValidations,
   FieldValidator,
+  FilterCondition,
+  FilterGroup,
   ItemValidators,
   MiddlewareContext,
   MutationLimitsOptions,
@@ -33,6 +35,9 @@ export type {
   StateMachine,
   TypePermissions,
   TypeScopes,
+  ViewOptions,
+  ViewParam,
+  ViewParamType,
   VirtualFieldDeclaration,
   VirtualFieldOptions,
 } from '@simtlix/simfinity-core';

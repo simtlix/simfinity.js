@@ -6,7 +6,7 @@ import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
   GraphQLInt, GraphQLEnumType, GraphQLBoolean, GraphQLError, GraphQLInterfaceType, GraphQLUnionType,
-  Kind, getNamedType, isObjectType, isOutputType,
+  Kind, getNamedType, isEnumType, isListType, isNonNullType, isObjectType, isOutputType, isScalarType,
 } from 'graphql';
 
 import SimfinityError from './errors/simfinity.error.js';
@@ -495,6 +495,7 @@ export const createRuntime = (adapter) => {
   const qualifiedSelfCollections = new Map();
   const registeredMutations = {};
   const registeredQueries = {};
+  const registeredViews = {};
   const middlewares = [];
 
   const operations = {
@@ -1813,7 +1814,9 @@ const copyClientFilters = (args, operation) => {
 // scope. When the adapter compiles reference emptiness (#108 part 2b), a client's emptiness term or
 // condition reads its references and collections through scoped joins and frames instead, so it
 // enters no joined scope either; every other entry, beside it or on the same path, records its own.
-const inspectClientPaths = (gqltype, args, operation) => {
+// Without `checkQueryable`, for a view's `where`, whose paths are the author's as a scope's are, a
+// non-queryable field is not rejected; a virtual one still is.
+const inspectClientPaths = (gqltype, args, operation, { checkQueryable = true } = {}) => {
   copyClientFilters(args, operation);
   const joinedScopes = new Map();
   const entries = collectQueryPathEntries(args, operation, { gqltype, expandMembers: true });
@@ -1827,7 +1830,7 @@ const inspectClientPaths = (gqltype, args, operation) => {
         throw forbiddenPath(`Query path ${path} uses the virtual field ${type.name}.${fieldName}, which is not stored`);
       }
       const queryable = field.extensions?.queryable;
-      if (queryable === false || (queryable !== true && hasApplicationResolver(type, fieldName))) {
+      if (checkQueryable && (queryable === false || (queryable !== true && hasApplicationResolver(type, fieldName)))) {
         throw forbiddenPath(`Query path ${path} uses the non-queryable field ${type.name}.${fieldName}`);
       }
       if (!joins) return;
@@ -2069,31 +2072,34 @@ const hasScopeMarker = (construct) => construct != null && Object.hasOwn(constru
 
 // Marks the client's constructs that read references or collections, from the gate's conditions on the
 // client's arguments, then applies maxReferenceFrames to the distinct (kind, path) pairs of their
-// scoped joins and frames in this call, so every 2a code comes first. Returns the issued markers, as
-// id -> the client's operator and path, or null when the adapter does not compile reference
-// emptiness. Ids are ordinals in the order of the conditions, so identical arguments get identical
-// markers and sibling collection reads keep one batch key.
-const markClientConstructs = (checked) => {
+// scoped joins and frames in these conditions, so every 2a code comes first. Returns the issued
+// markers, as id -> the client's operator and path, or null when the adapter does not compile
+// reference emptiness. Ids are ordinals in the order of the conditions, so identical arguments get
+// identical markers and sibling collection reads keep one batch key. With `issued`, the markers of
+// the call so far, the ids continue on that map, so that a view's `where`, marked after the client's
+// arguments, shares them; the limit still applies to each set of conditions on its own.
+const markClientConstructs = (checked, issued) => {
   if (!supportsReferenceEmptiness) return null;
-  const issued = new Map();
+  const markers = issued ?? new Map();
   const pairs = new Set();
   for (const { entry, shape } of checked) {
     const { construct } = entry;
     if (!shape || !construct || hasScopeMarker(construct)) continue;
     const { joins, frames } = emptinessScopePaths(shape, entry.segments);
     if (!joins.length && !frames.length) continue;
-    const id = issued.size;
+    const id = markers.size;
     construct[SCOPE_MARKER] = { id };
-    issued.set(id, { operator: entry.operator, path: entry.path });
+    markers.set(id, { operator: entry.operator, path: entry.path });
     for (const path of joins) pairs.add(`join ${path}`);
     for (const path of frames) pairs.add(`frame ${path}`);
   }
   const limit = getQueryMaxReferenceFrames();
   if (pairs.size > limit) {
     throw new SimfinityError(`Emptiness conditions through references and collections need ${pairs.size} scoped joins and `
-      + `frames in one query field, more than the limit of ${limit} (maxReferenceFrames)`, 'FILTER_DEPTH_EXCEEDED', 400);
+      + 'frames in one set of conditions (the client\'s arguments of a query field, or a view\'s where), more than the limit '
+      + `of ${limit} (maxReferenceFrames)`, 'FILTER_DEPTH_EXCEEDED', 400);
   }
-  return issued;
+  return markers;
 };
 
 // The detach check: every marker issued in this call sits, well formed (an object whose only own key
@@ -2805,6 +2811,170 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
   return new GraphQLObjectType(rootQueryArgs);
 };
 
+// The prefix every generated read shares, for the list and aggregate roots, the collection fields and
+// the views: the client's paths and conditions are inspected and marked, middleware runs, with `entry`
+// when one is given, `extend` adds the caller's own constructs and returns their joined scopes, the
+// type's scope runs, the client's joined scopes and then the extension's are applied, and the final
+// arguments are settled. Returns the params, whose args the adapter reads. An empty map of the
+// client's joined scopes is not awaited, so that, with the caller's await of this function, a read
+// without one still reaches the adapter after as many promise jobs as before it was shared.
+const prepareRead = async (type, args, context, operation, { entry, extend } = {}) => {
+  const joinedScopes = inspectClientPaths(type.gqltype, args, operation);
+  const issued = markClientConstructs(assertQueryConditions(type.gqltype, args, operation));
+  const params = entry === undefined
+    ? { type, args, operation, context }
+    : { type, args, operation, entry, context };
+  await executeMiddleware(params);
+  const extended = extend ? await extend(params, issued) : null;
+  await executeScope(params);
+  if (joinedScopes.size) await applyJoinedScopes(joinedScopes, params);
+  if (extended) await applyJoinedScopes(extended, params);
+  const filling = settleClientArgs(type.gqltype, params, operation, issued);
+  if (filling) await filling;
+  return params;
+};
+
+// The tail of a list read, shared by the generated list root and the views: the rows and, when the
+// client asks for pagination.count and something can receive it, the count, reported through the sink.
+const readList = async (type, params, parent, info, context) => {
+  const queryArgs = params.args;
+  const wantsCount = !!(queryArgs.pagination && queryArgs.pagination.count)
+    && canReportCount(parent, info, context);
+
+  const dataPromise = adapter.find(type.model, type.gqltype, queryArgs, null);
+  const countPromise = wantsCount
+    ? adapter.count(type.model, type.gqltype, queryArgs, null)
+    : null;
+
+  const [result, resultCount] = await Promise.all([dataPromise, countPromise]);
+  if (wantsCount && !reportCount(parent, info, context, resultCount)) {
+    warnOnce(runtimeIdentity, 'count-context', 'Configuration issue: the GraphQL context does not accept '
+      + 'a count property (it is frozen, sealed or has a read-only count), so pagination counts are not '
+      + 'reported; pass a fresh mutable context object for each request.');
+  }
+  return result;
+};
+
+// Separates a view's params, named by `paramNames`, from the rest of its arguments, which are exactly
+// a generated list's.
+const splitViewArgs = (paramNames, args) => {
+  const params = {};
+  const rest = {};
+  for (const [name, value] of Object.entries(args)) {
+    if (paramNames.has(name)) params[name] = value;
+    else rest[name] = value;
+  }
+  return { params, args: rest };
+};
+
+const invalidWhere = (view, detail) => new SimfinityError(`View ${view.name} where ${detail}`, 'INVALID_VIEW', 500);
+
+// The groups a view's `where` returned are plain objects whose `conditions`, `AND` and `OR`, when set,
+// are arrays: of plain objects with a field name, and of groups like these. collectQueryPathEntries
+// skips anything else silently, so this comes before their paths are read. Only the GraphQL input
+// fields are structural keys; condition values stay opaque. A condition never carries a client scope
+// marker key: only the runtime writes one. Active ancestors reject cycles without rejecting reuse.
+const assertViewGroupShapes = (view, groups, ancestors = new Set()) => {
+  const groupFields = QLFilterGroup.getFields();
+  const conditionFields = QLFilterCondition.getFields();
+  for (const group of groups) {
+    if (!isNonNullPlainObject(group)) throw invalidWhere(view, 'returned a group that is not a plain object');
+    if (ancestors.has(group)) throw invalidWhere(view, 'returned a cyclic group');
+    for (const key of Object.keys(group)) {
+      if (!Object.hasOwn(groupFields, key)) throw invalidWhere(view, `returned a group with unknown key ${key}`);
+    }
+    for (const key of Object.keys(groupFields)) {
+      if (group[key] != null && !Array.isArray(group[key])) throw invalidWhere(view, `returned a group whose ${key} is not an array`);
+    }
+    for (const condition of group.conditions ?? []) {
+      if (!isNonNullPlainObject(condition) || typeof condition.field !== 'string' || condition.field === '') {
+        throw invalidWhere(view, 'returned a condition that is not a plain object with a field name');
+      }
+      if (hasScopeMarker(condition)) {
+        throw invalidWhere(view, `condition on ${condition.field} carries a ${SCOPE_MARKER} key, which Simfinity reserves`);
+      }
+      for (const key of Object.keys(condition)) {
+        if (!Object.hasOwn(conditionFields, key)) throw invalidWhere(view, `condition on ${condition.field} has unknown key ${key}`);
+      }
+    }
+    ancestors.add(group);
+    assertViewGroupShapes(view, [...(group.AND ?? []), ...(group.OR ?? [])], ancestors);
+    ancestors.delete(group);
+  }
+};
+
+// A `where` that does not return an array of groups, or names a field its type does not have, a path
+// past a field without fields, or a virtual field, is the author's bug: INVALID_VIEW (500), never the
+// FORBIDDEN_FILTER_PATH (403) that inspectClientPaths gives a client for a virtual field. Each path is
+// walked here, since walkQueryPath stops silently at an unknown segment.
+const assertViewGroups = (view, groups) => {
+  if (!Array.isArray(groups)) throw invalidWhere(view, 'must return an array of AND groups');
+  assertViewGroupShapes(view, groups);
+  for (const { segments } of collectQueryPathEntries({ AND: groups }, 'find', { gqltype: view.type })) {
+    let type = view.type;
+    let parent = null;
+    for (const [index, segment] of segments.entries()) {
+      const names = (detail) => invalidWhere(view, `names ${segments.slice(0, index + 1).join('.')}, which is ${detail}`);
+      if (typeof type.getFields !== 'function') throw names(`past ${parent}, whose type ${type.name} has no fields`);
+      const fields = type.getFields();
+      if (!Object.hasOwn(fields, segment)) throw names(`not a field of ${type.name}`);
+      if (isVirtualField(fields[segment])) throw names(`the virtual field ${type.name}.${segment}`);
+      parent = `${type.name}.${segment}`;
+      type = unwrapListAndNonNull(fields[segment].type);
+    }
+  }
+};
+
+// The `extend` of a view's read (see prepareRead). After middleware, the groups of `where` are read as
+// the client's constructs on a probe, whose AND holds copies of them (inspectClientPaths), so the
+// author's objects are never touched: their paths are inspected, their conditions checked and marked,
+// with ids that continue the client's, then the copies are appended to the top-level AND, where no
+// middleware can drop them. Returns their joined scopes, which attach to the appended copies. Their
+// paths are the author's, as a scope's are, so a non-queryable field is not rejected.
+const viewExtension = (view, viewParams) => async (params, issued) => {
+  const groups = await view.where({ params: viewParams, context: params.context });
+  assertViewGroups(view, groups);
+  const probe = { AND: groups };
+  const scopes = inspectClientPaths(view.type, probe, 'find', { checkQueryable: false });
+  const checked = assertQueryConditions(view.type, probe, 'find');
+  markClientConstructs(checked, issued);
+  appendAndGroups(params.args, probe.AND);
+  return scopes;
+};
+
+// A view's root field: the generated list of its type, with the view's params before the generated
+// arguments. Each call reads the type's registration, whose model createSchema prepares, strips the
+// params, by the names the field was built with, before the list pipeline runs, and has the pipeline
+// append the view's `where` after middleware (viewExtension).
+const buildViewField = (view) => {
+  const paramArgs = {};
+  for (const [paramName, param] of Object.entries(view.params)) {
+    const arg = { type: param.type };
+    if (Object.hasOwn(param, 'description')) arg.description = param.description;
+    if (Object.hasOwn(param, 'defaultValue')) arg.defaultValue = param.defaultValue;
+    paramArgs[paramName] = arg;
+  }
+  const paramNames = new Set(Object.keys(paramArgs));
+  return {
+    type: new GraphQLList(view.type),
+    description: view.description,
+    args: { ...paramArgs, ...createArgsForQuery(view.type) },
+    extensions: {
+      simfinityQuery: {
+        typeName: view.type.name, operation: 'find', countSink: true, view: { name: view.name },
+      },
+    },
+    async resolve(parent, args, context, info) {
+      const registration = typesDict.types[view.type.name];
+      const split = splitViewArgs(paramNames, args);
+      const params = await prepareRead(registration, split.args, context, 'find', {
+        entry: view.name, extend: viewExtension(view, split.params),
+      });
+      return readList(registration, params, parent, info, context);
+    },
+  };
+};
+
 const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggregationResult, includedCustomQueries = null) => {
   const rootQueryArgs = {};
   rootQueryArgs.name = name;
@@ -2831,35 +3001,8 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
           // that supplies a root-value sink can pass its context unchanged.
           extensions: { simfinityQuery: { typeName: type.gqltype.name, operation: 'find', countSink: true } },
           async resolve(parent, args, context, info) {
-            const joinedScopes = inspectClientPaths(type.gqltype, args, 'find');
-            const issued = markClientConstructs(assertQueryConditions(type.gqltype, args, 'find'));
-            const params = {
-              type,
-              args,
-              operation: 'find',
-              context,
-            };
-            await executeMiddleware(params);
-            await executeScope(params);
-            await applyJoinedScopes(joinedScopes, params);
-            const filling = settleClientArgs(type.gqltype, params, 'find', issued);
-            if (filling) await filling;
-            const queryArgs = params.args;
-            const wantsCount = !!(queryArgs.pagination && queryArgs.pagination.count)
-              && canReportCount(parent, info, context);
-
-            const dataPromise = adapter.find(type.model, type.gqltype, queryArgs, null);
-            const countPromise = wantsCount
-              ? adapter.count(type.model, type.gqltype, queryArgs, null)
-              : null;
-
-            const [result, resultCount] = await Promise.all([dataPromise, countPromise]);
-            if (wantsCount && !reportCount(parent, info, context, resultCount)) {
-              warnOnce(runtimeIdentity, 'count-context', 'Configuration issue: the GraphQL context does not accept '
-                + 'a count property (it is frozen, sealed or has a read-only count), so pagination counts are not '
-                + 'reported; pass a fresh mutable context object for each request.');
-            }
-            return result;
+            const params = await prepareRead(type, args, context, 'find');
+            return readList(type, params, parent, info, context);
           },
         };
 
@@ -2879,19 +3022,7 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
           args: aggregateArgsObject,
           extensions: { simfinityQuery: { typeName: type.gqltype.name, operation: 'aggregate' } },
           async resolve(parent, args, context) {
-            const joinedScopes = inspectClientPaths(type.gqltype, args, 'aggregate');
-            const issued = markClientConstructs(assertQueryConditions(type.gqltype, args, 'aggregate'));
-            const params = {
-              type,
-              args,
-              operation: 'aggregate',
-              context,
-            };
-            await executeMiddleware(params);
-            await executeScope(params);
-            await applyJoinedScopes(joinedScopes, params);
-            const filling = settleClientArgs(type.gqltype, params, 'aggregate', issued);
-            if (filling) await filling;
+            const params = await prepareRead(type, args, context, 'aggregate');
             return adapter.aggregate(type.model, type.gqltype, params.args, null);
           },
         };
@@ -2903,6 +3034,13 @@ const buildRootQuery = (name, includedTypes, aggregationResultType = QLTypeAggre
     if (!shouldNotBeIncludedInSchema(includedCustomQueries, entry)) {
       rootQueryArgs.fields[entry] = buildRegisteredOperationField(entry, registeredQuery,
         operations.CUSTOM_QUERY);
+    }
+  }
+
+  // A view is in the schema exactly when its type is; assertViewsAvailable has checked its name.
+  for (const view of Object.values(registeredViews)) {
+    if (!shouldNotBeIncludedInSchema(includedTypes, view.type)) {
+      rootQueryArgs.fields[view.name] = buildViewField(view);
     }
   }
 
@@ -3202,13 +3340,50 @@ const queryNameConflict = (name) => new SimfinityError(
   'QUERY_NAME_CONFLICT', 500,
 );
 
+// The root names of the generated queries of the endpoint types a schema includes.
+const generatedQueryNames = (includedQueryTypes) => Object.values(typesDict.types)
+  .filter((type) => type.simpleEntityEndpointName && !shouldNotBeIncludedInSchema(includedQueryTypes, type.gqltype))
+  .flatMap((type) => [type.simpleEntityEndpointName, type.listEntitiesEndpointName, `${type.listEntitiesEndpointName}_aggregate`]);
+
+const isIncludedCustomQuery = (name, includedCustomQueries) => Object.hasOwn(registeredQueries, name)
+  && !shouldNotBeIncludedInSchema(includedCustomQueries, name);
+
 const assertQueryNamesAvailable = (includedQueryTypes, includedCustomQueries) => {
-  for (const type of Object.values(typesDict.types)) {
-    if (!type.simpleEntityEndpointName || shouldNotBeIncludedInSchema(includedQueryTypes, type.gqltype)) continue;
-    for (const name of [type.simpleEntityEndpointName, type.listEntitiesEndpointName, `${type.listEntitiesEndpointName}_aggregate`]) {
-      if (Object.hasOwn(registeredQueries, name) && !shouldNotBeIncludedInSchema(includedCustomQueries, name)) {
-        throw queryNameConflict(name);
+  for (const name of generatedQueryNames(includedQueryTypes)) {
+    if (isIncludedCustomQuery(name, includedCustomQueries)) throw queryNameConflict(name);
+  }
+};
+
+// Every registered view, whether or not the schema includes it: its type is an endpoint type of this
+// runtime, and its params are valid argument names that are neither fields of the type, which covers
+// stored, reference, collection and virtual fields, nor the generated list arguments. A view that the
+// schema includes, because it includes the view's type, also needs a name that no included generated
+// query or custom query takes.
+const assertViewsAvailable = (includedQueryTypes, includedCustomQueries) => {
+  const views = Object.values(registeredViews);
+  if (!views.length) return;
+  const generatedNames = new Set(generatedQueryNames(includedQueryTypes));
+  for (const { name, type, params } of views) {
+    const registration = typesDict.types[type.name];
+    if (!registration || registration.gqltype !== type || registration.endpoint !== true
+      || !registration.simpleEntityEndpointName) {
+      throw invalidView(`${name} needs a type registered with connect() in this runtime`);
+    }
+    const fields = type.getFields();
+    for (const paramName of Object.keys(params)) {
+      if (!/^[_A-Za-z][_0-9A-Za-z]*$/.test(paramName) || paramName.startsWith('__')) {
+        throw invalidView(`${name} param ${paramName} requires a valid GraphQL name that does not start with __`);
       }
+      if (Object.hasOwn(fields, paramName)) {
+        throw invalidView(`${name} param ${paramName} has the name of a field of ${type.name}`);
+      }
+      if (LIST_QUERY_ARGS.includes(paramName)) {
+        throw invalidView(`${name} param ${paramName} has the name of a generated list query argument`);
+      }
+    }
+    if (!shouldNotBeIncludedInSchema(includedQueryTypes, type)
+      && (generatedNames.has(name) || isIncludedCustomQuery(name, includedCustomQueries))) {
+      throw queryNameConflict(name);
     }
   }
 };
@@ -3241,6 +3416,7 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
   // Reject before models, resolvers or roots are built, so a rejected schema changes nothing.
   const { includedCustomQueries } = readSchemaOptions(options);
   assertQueryNamesAvailable(includedQueryTypes, includedCustomQueries);
+  assertViewsAvailable(includedQueryTypes, includedCustomQueries);
   Object.values(typesDict.types).forEach(({ gqltype }) => validateScope(gqltype));
   const schemaTypes = collectSchemaOutputTypes();
   schemaTypes.forEach(assertNotBoundElsewhere);
@@ -3385,6 +3561,64 @@ const registerCustomQuery = (name, description, inputModel, outputModel, callbac
   registeredQueries[name] = registration;
 };
 
+const invalidView = (detail) => new SimfinityError(`registerView ${detail}`, 'INVALID_VIEW', 500);
+
+// A view parameter is a value the client sends as a variable or a literal: a scalar, an enum or a list
+// of them, each possibly NonNull. An input object is never one, wherever it is nested.
+const isViewParamType = (type) => {
+  if (isNonNullType(type) || isListType(type)) return isViewParamType(type.ofType);
+  return isScalarType(type) || isEnumType(type);
+};
+
+const isNonNullPlainObject = (value) => value !== null && typeof value === 'object' && isPlainObject(value);
+
+const VIEW_OPTION_KEYS = new Set(['type', 'description', 'params', 'where']);
+const VIEW_PARAM_KEYS = new Set(['type', 'description', 'defaultValue']);
+
+const validateViewParams = (params) => {
+  if (params === undefined) return;
+  if (!isNonNullPlainObject(params)) throw invalidView('params must be an object');
+  for (const [paramName, param] of Object.entries(params)) {
+    if (!isNonNullPlainObject(param)) throw invalidView(`param ${paramName} must be an object`);
+    for (const key of Object.keys(param)) {
+      if (!VIEW_PARAM_KEYS.has(key)) throw invalidView(`param ${paramName} has an unknown key ${key}`);
+    }
+    if (!isViewParamType(param.type)) {
+      throw invalidView(`param ${paramName} type must be a scalar, an enum or a list of them, not an input object`);
+    }
+    if (param.description !== undefined && typeof param.description !== 'string') {
+      throw invalidView(`param ${paramName} description must be a string`);
+    }
+  }
+};
+
+const validateViewRegistration = (name, options) => {
+  if (typeof name !== 'string' || !/^[_A-Za-z][_0-9A-Za-z]*$/.test(name) || name.startsWith('__')) {
+    throw invalidView('requires a valid GraphQL field name that does not start with __');
+  }
+  if (name.endsWith('_aggregate')) {
+    throw invalidView(`name ${name} must not end with _aggregate, which the generated aggregate queries use`);
+  }
+  if (!isNonNullPlainObject(options)) throw invalidView('requires an options object');
+  for (const key of Object.keys(options)) {
+    if (!VIEW_OPTION_KEYS.has(key)) throw invalidView(`has an unknown option ${key}`);
+  }
+  if (!(options.type instanceof GraphQLObjectType)) throw invalidView('type must be a GraphQLObjectType');
+  if (typeof options.description !== 'string' || options.description === '') {
+    throw invalidView('requires a non-empty description');
+  }
+  validateViewParams(options.params);
+  if (typeof options.where !== 'function') throw invalidView('where must be a function');
+};
+
+const registerView = (name, options) => {
+  validateViewRegistration(name, options);
+  if (Object.hasOwn(registeredViews, name)) throw queryNameConflict(name);
+  registeredViews[name] = {
+    name, type: options.type, description: options.description, params: options.params ?? {}, where: options.where,
+  };
+};
+
 // Gives the field a new extensions object as well as the resolver, so a copy made before keeps
 // untagged extensions. It has a null prototype because graphql-js keeps such an object, rather than
 // copying it, when a type is rebuilt from toConfig().
@@ -3429,14 +3663,7 @@ const autoGenerateResolvers = (gqltype) => {
         if (!relatedTypeInfo || !relatedTypeInfo.model) {
           throw new Error(`Related type ${relatedType.name} not found or not connected. Make sure it's connected with simfinity.connect() or simfinity.addNoEndpointType().`);
         }
-        const joinedScopes = inspectClientPaths(relatedType, args, 'find');
-        const issued = markClientConstructs(assertQueryConditions(relatedType, args, 'find'));
-        const params = { type: relatedTypeInfo, args, operation: 'find', context };
-        await executeMiddleware(params);
-        await executeScope(params);
-        await applyJoinedScopes(joinedScopes, params);
-        const filling = settleClientArgs(relatedType, params, 'find', issued);
-        if (filling) await filling;
+        const params = await prepareRead(relatedTypeInfo, args, context, 'find');
         return loadChildren(relatedTypeInfo, connection, parent._id ?? parent.id, params.args, context);
       }, { simfinityQuery: { typeName: relatedType.name, operation: 'find' } });
       runtimeBoundTypes.set(gqltype, runtimeIdentity);
@@ -3622,6 +3849,7 @@ function formatArgs(argsArray) {
     use,
     registerMutation,
     registerCustomQuery,
+    registerView,
     saveObject,
     preventCreatingCollection,
   };
