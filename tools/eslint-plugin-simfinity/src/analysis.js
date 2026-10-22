@@ -15,7 +15,7 @@ export const factories = new Set([
 const runtimeMembers = new Set(['createSchema', 'connect', 'addNoEndpointType', 'configureQueryLimits']);
 const otherRuntimeMembers = new Set([
   'configureMutationLimits', 'getModel', 'getType', 'getInputType', 'getRegistrations',
-  'use', 'registerMutation', 'registerCustomQuery', 'saveObject', 'preventCreatingCollection',
+  'use', 'registerMutation', 'registerCustomQuery', 'registerView', 'saveObject', 'preventCreatingCollection',
 ]);
 const sqlMembers = new Set(['configure', 'initializeDatabase', 'describeDatabase', 'compileDatabaseSchema', 'withTransaction']);
 const wrappers = new Set(['TSAsExpression', 'TSTypeAssertion', 'TSNonNullExpression', 'TSSatisfiesExpression', 'ChainExpression']);
@@ -104,6 +104,16 @@ export const analyze = context => {
     }
   };
 
+  // registerView(name, { type }) only reads the type to publish a root query field.
+  const isViewType = property => {
+    const options = property.parent;
+    const call = options?.parent;
+    if (property.type !== 'Property' || keyName(property) !== 'type'
+      || call?.type !== 'CallExpression' || call.arguments[1] !== options) return false;
+    const callee = origin(call.callee, new Set(), false);
+    return callee?.kind === 'runtime-function' && callee.name === 'registerView';
+  };
+
   const inspectStable = (variable, seen) => {
     const [definition] = variable.defs;
     const rawOrigin = definition?.type === 'ImportBinding'
@@ -142,12 +152,13 @@ export const analyze = context => {
       const exposesContainer = expression === ref.identifier ? container
         : ['module', 'auth', 'runtime'].includes(origin(expression, new Set(), false)?.kind);
       if (exposesContainer && (parent?.type === 'Property' || parent?.type === 'ArrayExpression')) {
-        // A type in a local GraphQL field declaration is a known read. Other
-        // containers may expose this object to arbitrary mutation through aliases.
+        // A type in a local GraphQL field declaration, or as the `type` of
+        // registerView's options, is a known read. Other containers may expose
+        // this object to arbitrary mutation through aliases.
         let constructor = parent;
         while (constructor && !['NewExpression', 'Program'].includes(constructor.type)) constructor = constructor.parent;
-        if (keyName(parent) !== 'type' || constructor?.type !== 'NewExpression'
-          || origin(constructor.callee, new Set(), false)?.kind !== 'graphql') return false;
+        if (!isViewType(parent) && (keyName(parent) !== 'type' || constructor?.type !== 'NewExpression'
+          || origin(constructor.callee, new Set(), false)?.kind !== 'graphql')) return false;
       }
     }
     return true;

@@ -132,6 +132,8 @@ tester.run('valid-connection-field', plugin.rules['valid-connection-field'], {
     invalid(pg + gql + `const Book = ${relation('"author.id"')}; sf.connect(null, Book, "book", "books");`),
     invalid(mongo + gql + `const Book = ${relation('"author.id"')}; sf.addNoEndpointType(Book);`),
     invalid(pg + gql + `const Book = ${relation('"author.id"')}; sf.registerCustomQuery("pick", "", null, Book, () => null); sf.connect(null, Book, "book", "books");`),
+    invalid(pg + gql + `const Book = ${relation('"author.id"')}; sf.registerView("upcoming", { type: Book, description: "d", where: () => [] }); sf.connect(null, Book, "book", "books");`),
+    invalid(mongo + gql + `const Book = ${relation('"author.id"')}; sf.registerView("upcoming", { type: Book, description: "d", where: () => [] }); sf.connect(null, Book, "book", "books");`),
     invalid(mongo + gql + 'const Address = new ObjectType({ name: "Address", fields: () => ({ country: { type: Country, extensions: { relation: { connectionField: "country.id" } } } }) }); const Book = new ObjectType({ name: "Book", fields: () => ({ address: { type: new NonNull(new List(Address)), extensions: { relation: { embedded: true } } } }) }); sf.connect(model, Book);'),
     invalid(mongo + gql + 'const Book = new ObjectType({ name: "Book", fields: () => { return { author: { type: Author, extensions: { relation: { connectionField: "author.id" } } } }; } }); sf.connect(model, Book);'),
     invalid(mongo + 'import * as graphql from "graphql"; const { GraphQLObjectType: ObjectType } = graphql;' + `const Book = ${relation('"author.id"')}; sf.connect(model, Book);`),
