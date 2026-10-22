@@ -59,7 +59,8 @@ const A_CASES = [
   ['emptiness', { AND: [{ conditions: [{ field: 'shop', operator: 'IS_NOT_EMPTY' }] }] }],
   ['sorted counted page', { sort: { terms: [{ field: 'stock', order: 'DESC' }] }, pagination: { page: 1, size: 2, count: true } }],
 ];
-const P_CASES = [['default', {}], ['minStock 3', { minStock: 3 }]];
+// With stocks 5, 0, 3 and 9, minStock 1 and 3 select the same items; minStock 4 leaves C out.
+const P_CASES = [['default', {}], ['minStock 3', { minStock: 3 }], ['minStock 4', { minStock: 4 }]];
 
 for (const [backend, uri] of [
   ['mongo', process.env.SIMFINITY_MONGODB_URI],
@@ -68,6 +69,8 @@ for (const [backend, uri] of [
   describe.skipIf(!uri)(`${backend} named views`, () => {
     const namespace = `named_views_${randomUUID().replaceAll('-', '')}`;
     let pool; let runtime; let schema; let whereRef; let ids;
+    // What middleware receives on each call: the payload's type is the registration, named by its GraphQL type.
+    const payloads = [];
     let storageReady = false;
 
     // Runs an operation with a copy of the context, and returns its result with the count the runtime reported in it.
@@ -106,6 +109,9 @@ for (const [backend, uri] of [
       runtime = backend === 'mongo' ? createRuntime(createMongoAdapter()) : createPostgres({ pool, schema: namespace });
       if (backend === 'mongo') runtime.preventCreatingCollection(true);
       runtime.use((params, next) => {
+        payloads.push({
+          entry: params.entry, operation: params.operation, type: params.type?.gqltype?.name, args: structuredClone(params.args),
+        });
         if (params.context?.deny) throw new SimfinityError('Operation denied', 'FORBIDDEN', 403);
         return next();
       });
@@ -211,13 +217,35 @@ for (const [backend, uri] of [
       }
     });
 
+    it('gives middleware the view name as entry and the client arguments, without the params and before the where', async () => {
+      const filter = { name: { operator: 'ILIKE', value: 'item' } };
+      // The shop field's get_by_id reads call middleware too; only the find payloads are compared.
+      const finds = () => payloads.filter((payload) => payload.operation === 'find');
+
+      payloads.length = 0;
+      expect(await rows(viewSource('openItems', { minStock: 2 }, filter), { tenant: 'a' })).toEqual({ keys: ['A'], count: undefined });
+      // Exactly the client's arguments: no minStock, and no AND group with the where's stock condition.
+      expect(finds()).toEqual([{
+        entry: 'openItems', operation: 'find', type: 'NvItem', args: { ...filter, sort: BY_KEY },
+      }]);
+
+      // The generated list sends no entry, and its client AND groups reach middleware.
+      payloads.length = 0;
+      expect(await rows(listSource(filter, [stockGroup(2)]), { tenant: 'a' })).toEqual({ keys: ['A'], count: undefined });
+      expect(finds()).toEqual([{
+        entry: undefined, operation: 'find', type: 'NvItem', args: { ...filter, AND: [stockGroup(2)], sort: BY_KEY },
+      }]);
+    });
+
     it('serves the same rows and count to GraphQL, MCP and in-process execute, and moves together when where changes', async () => {
       const plugin = auth.createAuthPlugin({
         RootQueryType: { openItems: auth.allow(), nvItems: auth.allow() },
         NvItem: { '*': auth.allow() },
         NvShop: { '*': auth.allow() },
       }, { defaultPolicy: 'DENY' });
-      // A schema of its own, so that the plugin leaves the schema of the other tests unwrapped.
+      // A second schema keeps the DENY root rules off the shared schema's root. The NvItem and NvShop field objects are
+      // shared, and the plugin wraps their resolvers in place, so their allow() wrappers also reach the shared schema:
+      // that is why this test is declared last.
       const authorized = runtime.createSchema();
       plugin.onSchemaChange({ schema: authorized });
       const { callTool } = generateMCPTools(authorized, { schemaPlugins: [plugin], context: (extra) => extra });
