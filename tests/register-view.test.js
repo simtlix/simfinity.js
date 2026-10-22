@@ -500,6 +500,14 @@ test.each([
   ['a nested group that is not an object', () => [{ AND: [null] }], 'returned a group that is not a plain object'],
   ['nested groups that are not an array', () => [{ OR: {} }], 'returned a group whose OR is not an array'],
   ['conditions that are not an array', () => [{ conditions: {} }], 'returned a group whose conditions is not an array'],
+  ['a misspelled group key', () => [{ condition: [{ field: 'stock', operator: 'GT', value: 0 }] }],
+    'returned a group with unknown key condition'],
+  ['a misspelled nested group key', () => [{ AND: [{ OR: [{ conditons: [stock(1)] }] }] }],
+    'returned a group with unknown key conditons'],
+  ['an unknown condition key', () => [{ conditions: [{ field: 'stock', operator: 'GTE', value: 1, extra: true }] }],
+    'condition on stock has unknown key extra'],
+  ['terms on a condition', () => [{ conditions: [{ field: 'stock', operator: 'GTE', value: 1, terms: [] }] }],
+    'condition on stock has unknown key terms'],
   ['a condition that is not an object', () => [{ conditions: [null] }], 'returned a condition that is not a plain object with a field name'],
   ['a condition without a field', () => [{ conditions: [{ operator: 'EQ', value: 1 }] }],
     'returned a condition that is not a plain object with a field name'],
@@ -513,10 +521,58 @@ test.each([
     'condition on stock carries a __scope key, which Simfinity reserves'],
 ])('fails with INVALID_VIEW when where returns %s', async (label, where, message) => {
   const { schema, calls } = build({ where });
-  const result = await run(schema, '{ openItems { id } }');
+  const result = await run(schema, '{ openItems(pagination: { page: 1, size: 10, count: true }) { id } }');
+  expect(result.errors).toHaveLength(1);
   expect(result.errors[0].message).toBe(`View openItems where ${message}`);
   expect(result.errors[0].extensions).toMatchObject({ code: 'INVALID_VIEW', status: 500 });
   expect(calls).toEqual([]);
+});
+
+test.each(['AND', 'OR'])('rejects an ancestor cycle through %s with INVALID_VIEW before find or count', async (key) => {
+  const group = {};
+  group[key] = [{ AND: [group] }];
+  const { schema, calls } = build({ where: () => [group] });
+  const result = await run(schema, '{ openItems(pagination: { page: 1, size: 10, count: true }) { id } }');
+  expect(result.errors).toHaveLength(1);
+  expect(result.errors[0]).toMatchObject({
+    message: expect.stringContaining('cyclic group'),
+    extensions: { code: 'INVALID_VIEW', status: 500 },
+  });
+  expect(result.data.openItems).toBeNull();
+  expect(calls).toEqual([]);
+});
+
+test('accepts empty groups and a group shared between separate branches', async () => {
+  const shared = stock(1);
+  const groups = [{}, { conditions: [], AND: [], OR: [] }, { AND: [shared], OR: [shared] }, shared];
+  const { schema, calls } = build({ where: () => groups });
+  const context = { user: { tenant: 'A' } };
+  const result = await run(schema, '{ openItems(pagination: { page: 1, size: 10, count: true }) { id } }', context);
+  expect(result.errors).toBeUndefined();
+  expect(ids(result.data.openItems)).toEqual(['i1']);
+  expect(context.count).toBe(1);
+  expect(calls.map((call) => call.method)).toEqual(['find', 'count']);
+  for (const call of calls) expect(call.args.AND).toEqual([...groups, tenant('A')]);
+});
+
+test('keeps condition values opaque, including structural and reserved marker keys', async () => {
+  const value = { condition: { field: 'unknown' }, terms: [], __scope: { id: 123 }, AND: 'data' };
+  const calls = [];
+  const runtime = createRuntime(createRecordingAdapter(calls, [{ _id: 'd1' }]));
+  const Data = new GraphQLScalarType({ name: 'NvOpaqueData', serialize: (data) => data });
+  const Doc = new GraphQLObjectType({ name: 'NvOpaqueDoc', fields: { id: { type: GraphQLID }, data: { type: Data } } });
+  runtime.connect(null, Doc, 'nvOpaqueDoc', 'nvOpaqueDocs');
+  runtime.registerView('opaqueDocs', {
+    type: Doc, description: 'Match opaque data',
+    where: () => [{ conditions: [{ field: 'data', operator: 'EQ', value }] }],
+  });
+  const context = {};
+  const result = await run(runtime.createSchema(), '{ opaqueDocs(pagination: { page: 1, size: 10, count: true }) { id } }', context);
+  expect(result.errors).toBeUndefined();
+  expect(result.data.opaqueDocs).toEqual([{ id: 'd1' }]);
+  expect(context.count).toBe(1);
+  expect(calls.map((call) => call.method)).toEqual(['find', 'count']);
+  for (const call of calls) expect(call.args.AND[0].conditions[0].value).toEqual(value);
 });
 
 // A param may not take the name of a field of the base type, so the shop's ID is shopId.

@@ -2871,12 +2871,19 @@ const invalidWhere = (view, detail) => new SimfinityError(`View ${view.name} whe
 
 // The groups a view's `where` returned are plain objects whose `conditions`, `AND` and `OR`, when set,
 // are arrays: of plain objects with a field name, and of groups like these. collectQueryPathEntries
-// skips anything else silently, so this comes before their paths are read. A condition never carries
-// a client scope marker key: only the runtime writes one.
-const assertViewGroupShapes = (view, groups) => {
+// skips anything else silently, so this comes before their paths are read. Only the GraphQL input
+// fields are structural keys; condition values stay opaque. A condition never carries a client scope
+// marker key: only the runtime writes one. Active ancestors reject cycles without rejecting reuse.
+const assertViewGroupShapes = (view, groups, ancestors = new Set()) => {
+  const groupFields = QLFilterGroup.getFields();
+  const conditionFields = QLFilterCondition.getFields();
   for (const group of groups) {
     if (!isNonNullPlainObject(group)) throw invalidWhere(view, 'returned a group that is not a plain object');
-    for (const key of ['conditions', 'AND', 'OR']) {
+    if (ancestors.has(group)) throw invalidWhere(view, 'returned a cyclic group');
+    for (const key of Object.keys(group)) {
+      if (!Object.hasOwn(groupFields, key)) throw invalidWhere(view, `returned a group with unknown key ${key}`);
+    }
+    for (const key of Object.keys(groupFields)) {
       if (group[key] != null && !Array.isArray(group[key])) throw invalidWhere(view, `returned a group whose ${key} is not an array`);
     }
     for (const condition of group.conditions ?? []) {
@@ -2886,8 +2893,13 @@ const assertViewGroupShapes = (view, groups) => {
       if (hasScopeMarker(condition)) {
         throw invalidWhere(view, `condition on ${condition.field} carries a ${SCOPE_MARKER} key, which Simfinity reserves`);
       }
+      for (const key of Object.keys(condition)) {
+        if (!Object.hasOwn(conditionFields, key)) throw invalidWhere(view, `condition on ${condition.field} has unknown key ${key}`);
+      }
     }
-    assertViewGroupShapes(view, [...(group.AND ?? []), ...(group.OR ?? [])]);
+    ancestors.add(group);
+    assertViewGroupShapes(view, [...(group.AND ?? []), ...(group.OR ?? [])], ancestors);
+    ancestors.delete(group);
   }
 };
 

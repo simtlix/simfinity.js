@@ -182,6 +182,28 @@ for (const [backend, uri] of [
       });
     });
 
+    it('rejects a misspelled where group key with INVALID_VIEW', async () => {
+      await withWhere('openItems', () => [{ condition: [{ field: 'stock', operator: 'GT', value: 0 }] }], async () => {
+        const result = await run(viewSource('openItems', {}, { pagination: PAGE }), { tenant: 'a' });
+        expect(result.errors).toHaveLength(1);
+        expect(result.errors[0].extensions).toMatchObject({ code: 'INVALID_VIEW', status: 500 });
+        expect(result.data.openItems).toBeNull();
+        expect(result.count).toBeUndefined();
+      });
+    });
+
+    it('rejects cyclic where groups with INVALID_VIEW', async () => {
+      const group = {};
+      group.AND = [group];
+      await withWhere('openItems', () => [group], async () => {
+        const result = await run(viewSource('openItems', {}, { pagination: PAGE }), { tenant: 'a' });
+        expect(result.errors).toHaveLength(1);
+        expect(result.errors[0].extensions).toMatchObject({ code: 'INVALID_VIEW', status: 500 });
+        expect(result.data.openItems).toBeNull();
+        expect(result.count).toBeUndefined();
+      });
+    });
+
     it('reads a hidden reference as missing', async () => {
       const page = { pagination: PAGE };
       expect(await rows(viewSource('shopItems', { shopId: ids.S2 }, page), { tenant: 'a' })).toEqual({ keys: ['B'], count: 1 });
