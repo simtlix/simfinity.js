@@ -52,6 +52,7 @@
       "default": "./src/auth/rules.js"
     },
     "./internal/object-id": "./src/auth/object-id.js",
+    "./internal/transaction-callbacks": "./src/transaction-callbacks.js",
     "./internal/query-operators": "./src/query-operators.js",
     "./internal/record-version": "./src/record-version.js",
     "./internal/relation-storage": "./src/relation-storage.js",

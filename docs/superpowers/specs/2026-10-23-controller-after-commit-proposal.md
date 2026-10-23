@@ -1,6 +1,6 @@
 # Controller callbacks after commit — proposal for #143
 
-Status: proposed, not approved or implemented. All new API names below are recommendations, not an accepted public contract. This document is the local decision checkpoint requested for this session.
+Status: the user approved the six recommended decisions in this session on 2026-10-23. Implementation and verification proceed locally on the task branch; this approval is not a merge or publication authorization.
 
 ## Source and scope
 
@@ -134,4 +134,4 @@ Proposal verification on 2026-10-23: an independent read-only builder review fou
 
 ## Decision to resume this session
 
-Approve or revise the six recommendations in the decision table, especially the four names, external-session skip policy, error reporter, and separate transition callback. After approval, write the implementation plan and implement/test in this branch. The existing hooks and public middleware compatibility are not part of that decision and remain preserved.
+The user approved the six recommendations. Continue with the implementation plan in this branch. The existing hooks and public middleware compatibility remain preserved.
