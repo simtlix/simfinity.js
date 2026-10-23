@@ -39,7 +39,7 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 
 ### Collection frames
 
-The bundled adapters change the following behaviours for inputs accepted by 3.11.0. This is a minor-release upgrade; review collection filters, aggregate cardinality and middleware before upgrading.
+The bundled adapters change the following behaviours for inputs accepted by 3.11.0 and 3.12.0. This is a minor-release upgrade; review collection filters, aggregate cardinality and middleware before upgrading.
 
 1. Lists, counted lists and pages return a parent once even when several children match, instead of repeating it.
 2. Client filters into scoped collections, and paths into types whose `find` scopes filter through collections, return rows using correlated scopes instead of `FORBIDDEN_FILTER_PATH`. Prefixes through embedded lists retain their restrictions; the updated-runtime example is an owner filtering `users` by `barbershops`.
@@ -48,7 +48,7 @@ The bundled adapters change the following behaviours for inputs accepted by 3.11
 5. Outside aggregate joined prefixes J, `EQ null`, `NE` and `NIN` through a collection no longer match a parent without visible children. Trusted conditions use stored children, so the same change in a `get_by_id` scope changes record admission and required-ID/reference reads. Use collection `IS_EMPTY` or `NONE` for absence.
 6. Inside a client frame, references read through scoped joins; a hidden referenced record reads as missing, which can change `NE`, `NIN` and `EQ null` matches.
 7. Aggregate filter-only collection paths stop multiplying facts. Collection prefixes used by `groupId` or facts keep joins; a remainder beyond those prefixes is a frame anchored on the joined record.
-8. `maxFrameNesting` defaults to 3 along a client or trusted frame chain. `maxReferenceFrames` remains 10 per resolver call but counts compiled client frames and scoped joins more finely, including shorthand per group/prefix, and has a new message. Excess gives `FILTER_DEPTH_EXCEEDED`.
+8. `maxFrameNesting` defaults to 3 along a client or trusted frame chain. `maxReferenceFrames` remains 10 per resolver call but counts compiled client frames and scoped joins more finely, including shorthand per group/prefix, and has a new message. Named views preserve separate client-argument and `where` budgets, each measured in compiled units. Excess gives `FILTER_DEPTH_EXCEEDED`.
 9. Middleware that rebuilds a marked collection condition on a scoped chain now gives `DETACHED_CLIENT_FILTER`. Keep marked descendants in marked client frames, copy client objects and append restrictions; do not wrap them in trusted explicit groups or park them in ignored terms.
 10. MongoDB joins on aggregate J reached through references or embedded objects no longer match null-connected children when the local key is missing. Direct `buildQuery` calls also receive collection frames and collection-sort rejection.
 11. MCP input schemas change for every application: they gain `QLQuantifier`, `QLQuantifiedGroup`, the `ANY`/`ALL`/`NONE` lists and relation-filter `quantifier`.
@@ -68,6 +68,28 @@ Invalid-input validation also happens earlier. Raw joined scopes are validated o
 - **MCP.** Regenerate cached input schemas; every runtime exposes the new inputs even if its adapter rejects them at request time. Tools pass quantifiers unchanged, retain scalar `QLValue` rules and return structured query errors.
 
 The generated reference field uses `get_by_id`, while client frames use the target's `find` scope. Review both when their admission rules must agree. Barber's checked-in backends still install exact 3.8.0 registry packages, so their existing scoped-collection rejection remains until an explicit dependency upgrade; their append-based `intersectScopeFilter` is compatible.
+
+
+Named views released in 3.12.0 accept these collection frames in both client arguments and `where`. Their copied `where` groups retain client scope provenance, including nested quantifiers; invalid nested shapes or reserved markers remain `INVALID_VIEW`. View MCP descriptions include the quantified language.
+
+## Upgrade to 3.12.0
+
+Version 3.12.0 adds named views. Every schema, filter, tool and adapter of 3.11.0 keeps its behavior; a view is a new root field only where an application registers one.
+
+### Named views
+
+- **Schema**: `registerView(name, { type, description, params, where })` adds one root field returning the registered base type's list. It takes the generated list arguments plus typed params. A param cannot share a name with any base-type field or a control argument; use `barbershopId` for a `barbershop` reference. The `_aggregate` suffix is reserved in view names. A view is included exactly when its base type is in `includedQueryTypes`.
+- **Errors**: `INVALID_VIEW` (500) identifies an invalid declaration or malformed `where` result, including unknown or virtual fields, paths past scalars and the reserved `__scope` key. `QUERY_NAME_CONFLICT` (500) now also covers duplicate view names and conflicts with included generated roots or custom queries.
+- **Resolution**: params go only to `where({ params, context })`. Its groups are copied and appended after middleware as client constructs, so references receive joined scopes and hidden records read as missing. The base type's `find` scope and count behavior stay unchanged. Middleware receives `operation: 'find'` and `entry: <view name>`; the scope payload is unchanged. `maxReferenceFrames` applies separately to the client's arguments and the `where` groups.
+- **Authorization**: authorize `RootQueryType.<view name>` explicitly under `defaultPolicy: 'DENY'`. Rows keep the base type's field rules. The paths that `where` names are the author's; field read rules and `queryable` do not check them. The type's scope remains the visibility boundary.
+- **MCP**: views are read-only list tools titled by their field name. Their descriptions append the generated filter sentence. Params appear beside the generated arguments, and counted pages report `totalCount`. Explicit title and description overrides keep precedence.
+- **TypeScript**: `registerView`, `ViewOptions`, `ViewParam`, `ViewParamType`, `FilterGroup` and `FilterCondition` are declared in core and re-exported by the MongoDB, PostgreSQL and SQL packages.
+- **Linting**: the application ESLint plugin tracks `registerView` as a runtime member and keeps the type passed in its `type` option tracked.
+- **Clients**: `@simtlix/simfinity-js-client` 1.1.0 resolves `client.find(type)` to the last root field returning a list of that type. Applications using that method should wait for a client fix before registering a view over that type. Call views with `client.execute(document, variables)`.
+
+See [named views](../guide/queries#named-views) and the [`registerView()` reference](../reference/api#registerview).
+
+The development lockfile resolves `ip-address` to 10.7.4 to address [GHSA-rxp7-6hxx-x8q5](https://github.com/advisories/GHSA-rxp7-6hxx-x8q5). This does not rewrite dependency lockfiles in existing applications.
 
 ## Upgrade to 3.11.0
 

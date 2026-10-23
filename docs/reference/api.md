@@ -22,6 +22,7 @@ Shared examples can import the selected instance from [your application’s runt
 | Register a domain type | [connect](#connect) | Type registration; no return value |
 | Build the executable API | [createSchema](#createschema) | `GraphQLSchema` |
 | Register a read whose result is not a stored record | [registerCustomQuery](#registercustomquery) | Custom query registration |
+| Name a list read with params and a fixed predicate | [registerView](#registerview) | Named view registration |
 | Register an application operation | [registerMutation](#registermutation) | Custom mutation registration |
 | Retrieve a registered type | [getType](#gettype) | Type, `undefined`, or `null` as described below |
 | Work with its model | [getModel](#getmodel) | Registered backend-native Model |
@@ -53,7 +54,7 @@ simfinity.configureQueryLimits({ maxPageSize: 500, maxReferenceFrames: 10, maxFr
 Sets the process-wide query limits. Configure them once at startup; every runtime and facade shares them. `configureQueryLimits(options?: QueryLimitsOptions): void` takes three options, each a positive safe integer:
 
 - `maxPageSize`, default 1000, the maximum for explicit list and aggregate page sizes. Unpaged lists use `Math.min(100, maxPageSize)` and unpaged aggregate queries remain unbounded. See [pagination](/guide/queries#pagination-and-total-count) for request validation and compatibility details.
-- `maxReferenceFrames`, default 10, the compiled client frames and scoped joins per resolver call. Shorthand frames count per group and absolute prefix, explicit frames separately, scoped joins per containing frame/path/scope chain, and emptiness frames per path and shape, independent of markers. More fail with `FILTER_DEPTH_EXCEEDED` before middleware, after all client 400 checks. Trusted constructs do not count toward this total.
+- `maxReferenceFrames`, default 10, the compiled client frames and scoped joins per resolver call. Shorthand frames count per group and absolute prefix, explicit frames separately, scoped joins per containing frame/path/scope chain, and emptiness frames per path and shape, independent of markers. More fail with `FILTER_DEPTH_EXCEEDED` before middleware, after all client 400 checks. Trusted constructs do not count toward this total. A named view checks its `where` groups against a separate budget of the same size after middleware, using the same compiled units.
 - `maxFrameNesting`, default 3, the collection and reference frames nested along any one chain, including shorthand and trusted constructs. More fail with `FILTER_DEPTH_EXCEEDED`; explicit quantified groups also count toward the existing five-level Boolean-group depth, while implicit shorthand groups add no Boolean level.
 
 The call checks every option before it sets any: an invalid one throws `INVALID_QUERY_LIMITS` (400) and keeps all limits. An option that a call omits takes its default again, so `configureQueryLimits({ maxPageSize: 500 })` also restores the default `maxReferenceFrames` and `maxFrameNesting`, and calling without arguments restores all defaults. The TypeScript type of the options is `QueryLimitsOptions`.
@@ -148,7 +149,7 @@ const schema = simfinity.createSchema(
 
 An executable schema needs at least one query field. Allowlists control exposed fields, not whether registered models are initialized; excluding every query still prepares storage, but leaves a query root that GraphQL rejects for execution.
 
-An included custom query cannot take the name of an included generated single-record, list or aggregate query: `createSchema()` throws `QUERY_NAME_CONFLICT` (500) before model preparation. Exclude one of the conflicting fields with the allowlists, or choose another name.
+An included custom query cannot take the name of an included generated single-record, list or aggregate query or an included view: `createSchema()` throws `QUERY_NAME_CONFLICT` (500) before model preparation. An included view cannot take an included generated query's name either. Exclude one of the conflicting fields with the allowlists, or choose another name.
 
 ```javascript
 // Generated queries of SerieType only, no mutations, and one custom query.
@@ -180,6 +181,31 @@ The callback receives a typed copy of the input after middleware. GraphQL input 
 Middleware runs before the callback with `operation: 'custom_query'`, `entry: name`, `args` and `context`, without an entity `type`. Modify `args.input` on the existing arguments object; replacing `params.args` does not replace the callback's input. With the authorization plugin, the rule for `RootQueryType.<name>` authorizes the field before middleware runs, and the default policy applies without one; its output type's fields are authorized by their own rules. The callback authorizes its own reads: registration applies no query scopes, controllers, filters or pagination to them.
 
 Custom query input and output types follow the [runtime ownership rules](/guide/schema#types-belong-to-one-runtime) and participate in schema name validation. Invalid registration arguments throw `INVALID_QUERY_REGISTRATION` (500), and a name already registered throws `QUERY_NAME_CONFLICT` (500); the entry is not registered or replaced. See [createSchema](#createschema) for `includedCustomQueries` and conflicts with generated queries.
+
+## registerView
+
+```javascript
+simfinity.registerView(name, { type, description, params, where });
+```
+
+Registers a [named view](/guide/queries#named-views) over one connected type and returns `undefined`. Register it before `createSchema()`. It is available on core runtimes, SQL instances (`createSQL()`, `createPostgres()`), the MongoDB package and the PostgreSQL default instance.
+
+`name` is a valid GraphQL field name without the `__` prefix or the reserved `_aggregate` suffix. It must be unique among the runtime's views and the other included root query fields.
+
+| Option | Contract |
+| --- | --- |
+| `type` | Required `GraphQLObjectType`, registered with `connect()` in the same runtime. The view returns a list of this type with its generated list arguments. It is included exactly when this type is in `includedQueryTypes`. |
+| `description` | Required non-empty string. Describes the root field. MCP appends its generated filter sentence to this description. |
+| `params` | Optional object of `{ name: { type, description?, defaultValue? } }`. Each type is a GraphQL scalar, enum or list of those, with nullability wrappers allowed; input objects are rejected. A `NonNull` param without a default is required. Param names must be GraphQL names without the `__` prefix and cannot match any base-type field or `AND`, `OR`, `sort` or `pagination`. |
+| `where` | Required function `({ params, context }) => groupsOrPromise`. Returns an array of `AND` groups in the generated filter language over stored fields. `[]` adds nothing. It receives no client list arguments. Keep it free of database reads and do not write to `context`. |
+
+GraphQL coerces the params, then the resolver removes them from the list arguments. Middleware runs with `{ type, args, operation: 'find', entry: name, context }` before `where` runs. The returned groups are copied and appended after middleware, so replacing `params.args` cannot drop them. They are inspected as client paths and conditions: references receive joined scopes and hidden records read as missing. Their paths are the author's, so authorization field rules and `queryable` do not restrict them. Virtual fields still fail. The type's `find` scope runs with its usual payload. `pagination.count: true` uses the generated list's count sink.
+
+There is no separate `includedViews` option. A view fixes no order or page size and creates no aggregate root. Clients can add generated filters, sorting and pagination to its predicate. The five-level group limit applies, and `maxReferenceFrames` holds the client's arguments and the `where` groups to the limit separately. The authorization plugin checks `RootQueryType.<name>` and the base type's returned fields as usual.
+
+`INVALID_VIEW` (500) is raised synchronously at `registerView()` for an invalid declaration, including unknown options. At `createSchema()`, it rejects a type not registered with `connect()` in this runtime, an invalid param name or a param name collision. At request time, it rejects a `where` that does not return an array of groups, a group or condition that is not a plain object, an unknown structural key, a cyclic group, a condition without `field`, an unknown field, a path past a scalar, a virtual field or the reserved `__scope` key on conditions or quantified groups. Groups accept only `conditions`, `AND`, `OR`, `ANY`, `ALL` and `NONE`; quantified group members also require a non-empty `path` relative to their containing frame. Conditions accept only `field`, `operator`, `value` and `path`. Empty groups and shared acyclic groups are valid, and this structural check does not inspect the contents of `value`. Application errors thrown by `where` keep their code and status. Other condition and value errors follow the generated list.
+
+`QUERY_NAME_CONFLICT` (500) rejects a duplicate view name at registration and keeps the first declaration. At `createSchema()`, it rejects a view named like an included generated root or custom query before any model is prepared.
 
 ## registerMutation
 

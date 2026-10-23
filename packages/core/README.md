@@ -8,12 +8,13 @@ For relational storage, `@simtlix/simfinity-sql` builds on core and delegates ph
 
 ## Runtime
 
-`createRuntime(adapter)` creates a Simfinity runtime. Each instance owns its registrations, generated input types, middleware, scopes, hooks, custom queries and mutations, and state machines; the GraphQL type objects it builds resolvers for are bound to it, and query and mutation limits are process-wide. It exposes:
+`createRuntime(adapter)` creates a Simfinity runtime. Each instance owns its registrations, generated input types, middleware, scopes, hooks, custom queries and mutations, views, and state machines; the GraphQL type objects it builds resolvers for are bound to it, and query and mutation limits are process-wide. It exposes:
 
 - `connect`, `addNoEndpointType`, and `createSchema` for registration and schema creation;
 - `getModel`, `getType`, `getInputType`, and `getRegistrations` for runtime inspection;
 - `use`, `registerMutation`, and `saveObject` for middleware and write orchestration;
 - `registerCustomQuery` for reads whose results are not stored records, such as previews, other sources or permission evaluations;
+- `registerView` for a named list read of one registered type, with params and a fixed predicate, run through the type's scope;
 - `preventCreatingCollection` to pass validation-only storage setup to an adapter;
 - `configureQueryLimits` and `configureMutationLimits` for the process-wide page-size, compiled-frame, frame-nesting and nested-operation limits.
 
@@ -25,7 +26,7 @@ An adapter declares the filter operators it compiles as `queryFeatures: { operat
 
 An adapter opts into collection frames with `queryFeatures.quantifiers: true` and `referenceEmptiness: true`; omission/null means false and invalid combinations give `INVALID_QUERY_FEATURES`. Every generated schema exposes `QLQuantifier`, `QLQuantifiedGroup`, group `ANY`/`ALL`/`NONE` lists and relation `quantifier`, with request-time capability gates. Collection shorthand becomes correlated `ANY`, with one child per group/prefix and no duplicated roots; explicit `ALL`/`NONE` use the same element-relative frame. Client scope keys are relative to their containing frame and apply `find` visibility before quantification; server conditions range over stored elements. `get_by_id` scopes are trusted, so `NE`, `NIN` and `EQ null` collection terms no longer admit childless records.
 
-`createQueryPlan()` enables quantifiers by default without `operators`; with `operators`, declare capabilities explicitly. Its `QueryPredicate` includes `quantified`, element `scope`/`where`, scoped-reference `joins` and aggregate `anchor`. Compilers must honour these members and fail closed on incomplete metadata. `configureQueryLimits` adds `maxFrameNesting` (default 3), while `maxReferenceFrames` (10) counts compiled client units, even when unmarked, after all client 400 checks. Every adapter rejects list sorts through collections, including count mode. See the [plugin contract](https://simtlix.github.io/simfinity.js/guide/sql-plugins.html#query-features) and [upgrade notes](https://simtlix.github.io/simfinity.js/resources/compatibility.html#collection-frames).
+`createQueryPlan()` enables quantifiers by default without `operators`; with `operators`, declare capabilities explicitly. Its `QueryPredicate` includes `quantified`, element `scope`/`where`, scoped-reference `joins` and aggregate `anchor`. Compilers must honour these members and fail closed on incomplete metadata. `configureQueryLimits` adds `maxFrameNesting` (default 3), while `maxReferenceFrames` (10) counts compiled client units, even when unmarked, after all client 400 checks. Named views preserve separate client-argument and `where` budgets of that size. Every adapter rejects list sorts through collections, including count mode. See the [plugin contract](https://simtlix.github.io/simfinity.js/guide/sql-plugins.html#query-features) and [upgrade notes](https://simtlix.github.io/simfinity.js/resources/compatibility.html#collection-frames).
 
 Entity types, those registered with `connect()` and the targets of non-embedded relations, resolve `id` to `_id`, falling back to `id`, whatever the `createSchema()` allowlists include; types used only as embedded values keep their declared `id`. Embedded copies of an entity type resolve the same way, so they return their declared `id` unless the adapter stores an `_id` for them, as MongoDB does for embedded list items. The resolver is set on the type object, so it applies in every runtime that shares the type. `createSchema()` marks these registrations with `storedIdentity: true` before calling `adapter.prepare()`.
 

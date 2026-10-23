@@ -243,7 +243,7 @@ query ShopDay($id: ID!, $date: String!) {
 }
 ```
 
-Its resolver still runs once per returned record, so batch its reads when lists select it, as that section shows. Keep custom mutations for writes. For a read whose result is not a stored record, such as a price preview, data from another service or a permission evaluation, register a [custom query](./queries#custom-queries): clients send it in a `query` document, and MCP publishes it as a read-only tool.
+Its resolver still runs once per returned record, so batch its reads when lists select it, as that section shows. Keep custom mutations for writes. For a read whose result is not a stored record, such as a price preview, data from another service or a permission evaluation, register a [custom query](./queries#custom-queries): clients send it in a `query` document, and MCP publishes it as a read-only tool. A named read of stored records with a fixed predicate is a [named view](./queries#named-views).
 
 ## Raising the query limit for internal reads
 

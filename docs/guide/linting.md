@@ -6,12 +6,14 @@
 with specific editor/CI diagnostics. It does not evaluate business authorization,
 scopes, state machines or transaction correctness.
 
-The plugin is an independently versioned development tool (`0.3.0`), outside the
+The plugin is an independently versioned development tool (`0.3.1`), outside the
 five runtime packages. Install it from npm in your application:
 
 ```sh
-npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.3.0'
+npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.3.1'
 ```
+
+Version 0.3.1 recognizes Simfinity 3.12.0 `registerView()` calls and preserves type tracking through TypeScript-wrapped options. It adds no rule and does not change the `recommended-3.8` preset contract.
 
 Version 0.3.0 adds `valid-policy-expression` (AUTH-11) to `recommended-3.8`.
 Upgrading can report malformed policies that earlier plugin versions did not diagnose.

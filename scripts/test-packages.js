@@ -228,10 +228,14 @@ const coreSource = `import assert from 'node:assert/strict';
     assert.equal(args.length, 2);
     return args[1].marker;
   });
+  runtime.registerView('smokeView', { type, description: 'Core view', where: () => [{ conditions: [{ field: 'title', value: 'a' }] }] });
   const schema = runtime.createSchema(null, null, null, { includedCustomQueries: ['coreRead'] });
   const custom = await graphql({ schema, source: '{ coreRead }', contextValue: { marker: 'core' } });
   assert.equal(custom.errors, undefined);
   assert.equal(custom.data.coreRead, 'core');
+  const view = await graphql({ schema, source: '{ smokeView { id } }' });
+  assert.equal(view.errors, undefined);
+  assert.deepEqual(view.data.smokeView, []);
   const introspection = graphqlSync({
     schema,
     source: '{ __type(name: "__Field") { fields { name } } }',
@@ -444,6 +448,7 @@ const sqlSource = `import assert from 'node:assert/strict';
     assert.equal(args.length, 2);
     return 'sql';
   });
+  api.registerView('smokeView', { type: book, description: 'SQL view', where: () => [{ conditions: [{ field: 'title', value: 'a' }] }] });
   const schema = api.createSchema(null, null, null, { includedCustomQueries: ['sqlRead'] });
   await api.initializeDatabase();
   const result = await graphql({ schema, source: '{ sqlBooks { id title } sqlRead }' });
@@ -451,6 +456,10 @@ const sqlSource = `import assert from 'node:assert/strict';
   assert.deepEqual(result.data.sqlBooks, []);
   assert.equal(result.data.sqlRead, 'sql');
   assert.deepEqual(calls, ['find']);
+  const view = await graphql({ schema, source: '{ smokeView { id } }' });
+  assert.equal(view.errors, undefined);
+  assert.deepEqual(view.data.smokeView, []);
+  assert.deepEqual(calls, ['find', 'find']);
   // A plugin without queryFeatures compiles the operators of 3.7.0; plans reject the others before compileQuery,
   // also in reads that do not go through the runtime.
   const unsupported = await graphql({ schema, source: '{ sqlBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
@@ -461,7 +470,7 @@ const sqlSource = `import assert from 'node:assert/strict';
     assert.equal(rejected.errors[0].extensions.code, 'UNSUPPORTED_QUERY', operator);
     await assert.rejects(() => api.getModel(book).find({ title: { operator } }), (error) => error.getCode() === 'UNSUPPORTED_QUERY');
   }
-  assert.deepEqual(calls, ['find']);
+  assert.deepEqual(calls, ['find', 'find']);
   assert.throws(() => createSQL({ plugin: { ...plugin, queryFeatures: { operators: [1] } } }), (error) => error.getCode() === 'INVALID_SQL_PLUGIN');
   const textApi = createSQL({ plugin: { ...plugin, queryFeatures: { operators: ${JSON.stringify(QUERY_OPERATORS)} } } });
   const textBook = new GraphQLObjectType({ name: 'SQLTextBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
@@ -469,9 +478,9 @@ const sqlSource = `import assert from 'node:assert/strict';
   const textSchema = textApi.createSchema();
   await textApi.initializeDatabase();
   assert.equal((await graphql({ schema: textSchema, source: '{ sqlTextBooks(title: { operator: ILIKE, value: "a" }) { id } }' })).errors, undefined);
-  assert.deepEqual(calls, ['find', 'find']);
-  assert.equal((await graphql({ schema: textSchema, source: '{ sqlTextBooks(title: { operator: IS_EMPTY }) { id } }' })).errors, undefined);
   assert.deepEqual(calls, ['find', 'find', 'find']);
+  assert.equal((await graphql({ schema: textSchema, source: '{ sqlTextBooks(title: { operator: IS_EMPTY }) { id } }' })).errors, undefined);
+  assert.deepEqual(calls, ['find', 'find', 'find', 'find']);
   // Reference and collection emptiness: a plugin that declares referenceEmptiness receives the client's scopes in its
   // plans; one that declares only the operators keeps UNSUPPORTED_QUERY, also in reads outside the runtime; and the
   // declaration must be a boolean.
@@ -527,6 +536,7 @@ const postgresSource = `import assert from 'node:assert/strict';
     initializeDatabase,
     postgresPlugin,
     registerCustomQuery,
+    registerView,
     plugins,
     scalars,
     validators,
@@ -635,6 +645,7 @@ const postgresSource = `import assert from 'node:assert/strict';
     assert.equal(args.length, 2);
     return 'postgres';
   });
+  registerView('smokeView', { type: defaultType, description: 'PostgreSQL view', where: () => [{ conditions: [{ field: 'title', value: 'a' }] }] });
   const defaultSchema = createSchema(null, null, null, { includedCustomQueries: ['postgresRead'] });
   const custom = await graphql({ schema: defaultSchema, source: '{ postgresRead }' });
   assert.equal(custom.errors, undefined);
@@ -644,6 +655,8 @@ const postgresSource = `import assert from 'node:assert/strict';
     source: '{ defaultPostgresBooks { id } }',
   });
   assert.equal(defaultBeforeReady.errors[0].extensions.code, 'DATABASE_NOT_INITIALIZED');
+  const view = await graphql({ schema: defaultSchema, source: '{ smokeView { id } }' });
+  assert.equal(view.errors[0].extensions.code, 'DATABASE_NOT_INITIALIZED');
 
   ${adapterSource}
   const coreType = new GraphQLObjectType({
@@ -683,6 +696,7 @@ const mongoSource = `import assert from 'node:assert/strict';
   ${adapterSource}
   assert.equal(legacyEntry.connect, simfinity.connect);
   assert.equal(legacyEntry.registerCustomQuery, simfinity.registerCustomQuery);
+  assert.equal(legacyEntry.registerView, simfinity.registerView);
   assert.equal(simfinity.registerQuery, undefined);
   assert.equal(legacyAuth, auth);
   assert.equal(legacyIsOwner, auth.isOwner);
@@ -709,6 +723,8 @@ const mongoSource = `import assert from 'node:assert/strict';
     assert.equal(args.length, 2);
     return 'mongo';
   });
+  // The default runtime connects no type here, so an invalid declaration checks its registerView.
+  assert.throws(() => simfinity.registerView('smokeView', {}), (error) => error.getCode() === 'INVALID_VIEW');
   const defaultSchema = simfinity.createSchema([], [], [], { includedCustomQueries: ['mongoRead'] });
   const custom = await graphql({ schema: defaultSchema, source: '{ mongoRead }' });
   assert.equal(custom.errors, undefined);
@@ -719,7 +735,11 @@ const mongoSource = `import assert from 'node:assert/strict';
     fields: { id: { type: GraphQLID }, title: { type: GraphQLString } },
   });
   runtime.connect(null, type, 'rootRuntimeBook', 'rootRuntimeBooks');
+  runtime.registerView('smokeView', { type, description: 'MongoDB view', where: () => [{ conditions: [{ field: 'title', value: 'a' }] }] });
   const schema = runtime.createSchema();
+  const view = await graphql({ schema, source: '{ smokeView { id } }' });
+  assert.equal(view.errors, undefined);
+  assert.deepEqual(view.data.smokeView, []);
   const introspection = graphqlSync({
     schema,
     source: '{ __type(name: "__Field") { fields { name } } }',
@@ -2061,6 +2081,49 @@ ${singleton ? `const defaultSchema: GraphQLSchema = createSchema([], [], [], { i
 void [defaultSchema, registerQuery];` : ''}
 void [schema, sameOptions, exactOptions, exactCallback];`;
 
+// registerView and the option types every package re-exports from core: params are scalars, enums or lists of them,
+// possibly non-null, and where returns the groups or a promise of them.
+const viewTypes = (name, runtimeType, singleton = false) => `import type { FilterCondition, FilterGroup, ViewOptions, ViewParam, ViewParamType } from '${name}';
+import type { ViewOptions as CoreViewOptions } from '@simtlix/simfinity-core';
+import { GraphQLEnumType, GraphQLInputObjectType, GraphQLInt, GraphQLList, GraphQLNonNull, GraphQLObjectType, GraphQLString } from 'graphql';
+${singleton ? `import { registerView } from '${name}';` : ''}
+declare const api: ${runtimeType};
+const register = ${singleton ? 'registerView' : 'api.registerView'};
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+const sameOptions: Equals<ViewOptions, CoreViewOptions> = true;
+const exactRegister: Equals<typeof register, (name: string, options: ViewOptions) => void> = true;
+${singleton ? 'const sameMember: Equals<typeof api.registerView, typeof register> = true;' : ''}
+const type = new GraphQLObjectType({ name: 'ViewItem', fields: { name: { type: GraphQLString } } });
+const status = new GraphQLEnumType({ name: 'ViewStatus', values: { OPEN: {} } });
+const input = new GraphQLInputObjectType({ name: 'ViewInput', fields: { text: { type: GraphQLString } } });
+register('openItems', { type, description: 'd', params: { from: { type: GraphQLString, defaultValue: 'x' } }, where: () => [{ conditions: [{ field: 'name', operator: 'EQ', value: 'a' }] }] });
+register('asyncItems', {
+  type,
+  description: 'd',
+  params: { statuses: { type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(status))), description: 'd' }, limit: { type: GraphQLInt } },
+  where: async ({ params, context }) => [{ OR: [{ conditions: [{ field: 'status', operator: 'IN', value: params.statuses }] }], AND: [{ conditions: [{ field: 'owner', path: 'id', value: context.user }] }] }],
+});
+const paramType: ViewParamType = new GraphQLList(new GraphQLList(GraphQLString));
+const param: ViewParam = { type: paramType };
+const condition: FilterCondition = { field: 'name', operator: 'IS_EMPTY' };
+const group: FilterGroup = { AND: [{ conditions: [condition] }], ANY: [{ path: 'reviews', ALL: [{ path: 'author', conditions: [{ field: 'name', operator: 'NE', value: 'hidden' }] }] }], NONE: [{ path: 'reviews', conditions: [{ field: 'rating', operator: 'LT', value: 1 }] }] };
+// @ts-expect-error A quantified view group requires its element path.
+const invalidFrame: FilterGroup = { ANY: [{ conditions: [] }] };
+void invalidFrame;
+const options: ViewOptions = { type, description: 'd', params: { param }, where: () => [group] };
+register('typedItems', options);
+// @ts-expect-error A param is a scalar, an enum or a list of them, not an input object.
+register('inputParam', { type, description: 'd', params: { filter: { type: input } }, where: () => [] });
+// @ts-expect-error Not inside a list either.
+register('inputListParam', { type, description: 'd', params: { filter: { type: new GraphQLList(input) } }, where: () => [] });
+// @ts-expect-error A view needs a description.
+register('noDescription', { type, where: () => [] });
+// @ts-expect-error where returns an array of groups, not one group.
+register('objectWhere', { type, description: 'd', where: () => ({ conditions: [] }) });
+// @ts-expect-error A view has no other options.
+register('unknownOption', { type, description: 'd', where: () => [], transactional: true });
+void [sameOptions, exactRegister${singleton ? ', sameMember' : ''}];`;
+
 const cases = [
   {
     name: 'core',
@@ -2074,6 +2137,7 @@ const cases = [
       'auth-plugins.ts': coreAuthPluginsTypes,
       'schema-plugins.ts': coreSchemaPluginTypes,
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
+      'views.ts': viewTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
     },
     // NodeNext, Node16 and Bundler read the subpath declarations from the exports map; Node10, which
     // ignores exports, reads them from typesVersions.
@@ -2089,6 +2153,7 @@ const cases = [
     extraTypes: {
       'barrel.ts': databaseBarrelTypes('@simtlix/simfinity-sql'),
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
+      'views.ts': viewTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
     },
     forbiddenPackages: ['pg', 'mongoose', 'mongodb', '@simtlix/simfinity-postgres', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
   },
@@ -2101,6 +2166,7 @@ const cases = [
     extraTypes: {
       'barrel.ts': databaseBarrelTypes('@simtlix/simfinity-postgres'),
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', true),
+      'views.ts': viewTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', true),
     },
     typeDependencies: ['@types/pg@8'],
     forbiddenPackages: ['mongoose', 'mongodb', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
@@ -2141,6 +2207,8 @@ const cases = [
       'legacy-mcp-workaround.ts': mongoLegacyMcpWorkaroundTypes,
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
       'legacy-custom-queries.ts': customQueryTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
+      'views.ts': viewTypes('@simtlix/simfinity-js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
+      'legacy-views.ts': viewTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
     },
     // The legacy deep-import declarations sit next to the shims: NodeNext, Node16 and Bundler find
     // them through the exports map, Node10 by path, and their core subpath imports through core's

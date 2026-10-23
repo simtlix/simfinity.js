@@ -22,6 +22,8 @@ export type {
   EnvelopSchemaPlugin,
   FieldValidations,
   FieldValidator,
+  FilterCondition,
+  FilterGroup,
   ItemValidators,
   MiddlewareContext,
   MutationLimitsOptions,
@@ -33,6 +35,9 @@ export type {
   StateMachine,
   TypePermissions,
   TypeScopes,
+  ViewOptions,
+  ViewParam,
+  ViewParamType,
   VirtualFieldDeclaration,
   VirtualFieldOptions,
 } from '@simtlix/simfinity-core';
@@ -301,6 +306,7 @@ export const getRegistrations: PostgresRuntime['getRegistrations'];
 export const use: PostgresRuntime['use'];
 export const registerMutation: PostgresRuntime['registerMutation'];
 export const registerCustomQuery: PostgresRuntime['registerCustomQuery'];
+export const registerView: PostgresRuntime['registerView'];
 export const saveObject: PostgresRuntime['saveObject'];
 export const preventCreatingCollection: PostgresRuntime['preventCreatingCollection'];
 export const withTransaction: PostgresRuntime['withTransaction'];

@@ -23,6 +23,7 @@ export const getRegistrations = runtime.getRegistrations;
 export const use = runtime.use;
 export const registerMutation = runtime.registerMutation;
 export const registerCustomQuery = runtime.registerCustomQuery;
+export const registerView = runtime.registerView;
 export const saveObject = runtime.saveObject;
 export const preventCreatingCollection = runtime.preventCreatingCollection;
 

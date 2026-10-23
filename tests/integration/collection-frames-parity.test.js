@@ -5,6 +5,7 @@ import { graphql, GraphQLList } from 'graphql';
 import mongoose from 'mongoose';
 import pg from 'pg';
 import { createRuntime } from '../../packages/core/src/index.js';
+import { generateMCPTools } from '../../packages/mcp/src/index.js';
 import { createMongoAdapter } from '../../packages/mongodb/src/mongo/adapter.js';
 import { postgresPlugin } from '../../packages/postgres/src/index.js';
 import { createSQLAdapter } from '../../packages/sql/src/adapter.js';
@@ -68,6 +69,10 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL collection frame 
         else backend.api.addNoEndpointType(registration.gqltype);
       }
       backend.api.use(async (params, next) => { await params.context?.middleware?.(params); await next(); });
+      backend.api.registerView('framedProducts', {
+        type: backend.types.Product, description: 'Products matching visible reviews',
+        where: ({ context }) => context.viewGroups,
+      });
       backend.schema = backend.api.createSchema();
       if (backend.adapter.initialize) await backend.adapter.initialize();
       else for (const { model } of backend.api.getRegistrations()) if (model) { await model.createCollection(); await model.init(); }
@@ -121,6 +126,37 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL collection frame 
       }
       if (values.length) { expect(values[1]).toEqual(values[0]); expect(values[0]).toEqual(item.rowsByShape[shape]); }
     }
+  });
+  it.each([
+    ['shorthand', ['E', 'Ka']], ['ANY', ['E', 'Ka']],
+    ['ALL', ['C', 'E', 'F', 'c']], ['NONE', ['C', 'D', 'F', 'c']],
+  ])('named view %s scopes frames and counts each parent once through GraphQL and MCP', async (kind, expected) => {
+    const viewGroups = [kind === 'shorthand'
+      ? { conditions: [condition('reviews.rating', 4, 'GTE')] }
+      : { [kind]: [{ path: 'reviews', conditions: [condition('rating', 4, 'GTE')] }] }];
+    const snapshot = structuredClone(viewGroups);
+    for (const backend of backends) {
+      const context = {
+        viewGroups,
+        scope: { review: { find: ({ args }) => { args.author = { operator: 'NE', value: 'hidden' }; } } },
+      };
+      const result = await graphql({
+        schema: backend.schema,
+        source: '{framedProducts(sort:{terms:[{field:"key",order:ASC}]},pagination:{page:1,size:1,count:true}){key}}',
+        contextValue: context,
+      });
+      expect(result.errors, JSON.stringify(result.errors)).toBeUndefined();
+      expect(result.data.framedProducts.map((row) => row.key)).toEqual(expected.slice(0, 1));
+      expect(context.count).toBe(expected.length);
+      const { callTool } = generateMCPTools(backend.schema, { context });
+      const response = await callTool('framedProducts', {
+        sort: { terms: [{ field: 'key', order: 'ASC' }] }, pagination: { page: 1, size: 1, count: true },
+      });
+      expect(response.isError, JSON.stringify(response)).not.toBe(true);
+      expect(response.structuredContent.framedProducts.map((row) => row.key)).toEqual(expected.slice(0, 1));
+      expect(response.structuredContent.totalCount).toBe(expected.length);
+    }
+    expect(viewGroups).toEqual(snapshot);
   });
   it('anchors later collections after J and references using the extended seed', async () => {
     for (const [key, field, value] of [['reviewsPerProduct', 'products.reviews.rating', 1], ['referenceChain', 'products.pro.shop.products.name', 'Ka']]) for (const shape of shapes) {

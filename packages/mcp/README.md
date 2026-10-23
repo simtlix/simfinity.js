@@ -4,6 +4,8 @@ Database-independent MCP tool generation and transports for Simfinity GraphQL sc
 
 All Simfinity packages are released together. Install from npm and keep their versions aligned. Source: [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js).
 
+Named views are read-only list tools titled by their name.
+
 Tool generation and execution use only GraphQL:
 
 ```javascript
@@ -16,7 +18,7 @@ const result = await callTool(tools[0].name, {});
 Install the optional MCP SDK when constructing a server or transport:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.11.0 @modelcontextprotocol/sdk@^1.31.0
+npm install @simtlix/simfinity-mcp@3.12.0 @modelcontextprotocol/sdk@^1.31.0
 ```
 
 ```javascript

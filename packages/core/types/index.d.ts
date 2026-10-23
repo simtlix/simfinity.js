@@ -2,6 +2,8 @@ import type {
   GraphQLEnumType,
   GraphQLError,
   GraphQLInputObjectType,
+  GraphQLList,
+  GraphQLNonNull,
   GraphQLObjectType,
   GraphQLOutputType,
   GraphQLScalarType,
@@ -80,6 +82,29 @@ export interface QLTypeFilterExpression {
     value?: any;
     path?: string | null;
   } | null> | null;
+}
+
+/**
+ * A condition of a {@link FilterGroup}, as the `QLFilterCondition` input takes it: the field it
+ * tests, its {@link QueryOperator} (`EQ` when omitted) and its value. On an object field, `path`
+ * names the member it tests; `IS_EMPTY` and `IS_NOT_EMPTY` take no value and may omit `path` to test
+ * the field itself.
+ */
+export interface FilterCondition {
+  field: string;
+  operator?: QueryOperator | (string & {});
+  value?: any;
+  path?: string;
+}
+
+/** A `QLFilterGroup` value: flat conditions, Boolean groups and element-relative quantified groups. */
+export interface FilterGroup {
+  ANY?: QLQuantifiedGroup[];
+  ALL?: QLQuantifiedGroup[];
+  NONE?: QLQuantifiedGroup[];
+  AND?: FilterGroup[];
+  OR?: FilterGroup[];
+  conditions?: FilterCondition[];
 }
 
 /**
@@ -374,11 +399,48 @@ export interface QueryLimitsOptions {
    * `FILTER_DEPTH_EXCEEDED` (400), after every client 400 check and before middleware. Units count
    * independently of markers: shorthand per group/prefix, explicit frames separately, scoped joins
    * per containing frame/path/scope chain and emptiness frames per path/shape. Trusted units do
-   * not count toward this total.
+   * not count toward this total. Named views check client arguments and their `where` groups
+   * against separate budgets of the same size; the `where` budget runs after middleware.
    */
   maxReferenceFrames?: number;
   /** Positive safe integer; defaults to 3. Maximum client/trusted collection or reference frames on one chain. */
   maxFrameNesting?: number;
+}
+
+/**
+ * The type of a view parameter: a value the client sends as a variable or a literal, so a scalar,
+ * an enum or a list of them, each possibly non-null, never an input object.
+ */
+export type ViewParamType =
+  | GraphQLScalarType
+  | GraphQLEnumType
+  | GraphQLList<ViewParamType>
+  | GraphQLNonNull<GraphQLScalarType | GraphQLEnumType | GraphQLList<ViewParamType>>;
+
+/** A view parameter: an argument of the view's root field that only its `where` reads. */
+export interface ViewParam {
+  type: ViewParamType;
+  description?: string;
+  defaultValue?: unknown;
+}
+
+/** The declaration of a named view (see {@link Runtime.registerView}). */
+export interface ViewOptions {
+  /** The connected endpoint type whose list the view returns. */
+  type: GraphQLObjectType;
+  /** Non-empty; the root field's description. */
+  description: string;
+  /**
+   * Arguments of the root field besides the generated list arguments, named unlike them and unlike
+   * the fields of `type`. They never reach the adapter: only `where` receives them.
+   */
+  params?: Record<string, ViewParam>;
+  /**
+   * Called on every read with the param values and the request context. The groups it returns are
+   * appended to the client's filters after middleware, so neither the client nor middleware can drop
+   * them; their paths may name fields that are not queryable.
+   */
+  where: (input: { params: Record<string, any>; context: any }) => FilterGroup[] | Promise<FilterGroup[]>;
 }
 
 export interface Runtime<Model = any, Session = any> {
@@ -464,6 +526,17 @@ export interface Runtime<Model = any, Session = any> {
    * (500) for a name already registered.
    */
   registerCustomQuery(name: string, description: string, input: GraphQLInputObjectType | null | undefined, output: GraphQLOutputType, callback: (input: any, context: any) => any): void;
+  /**
+   * Register a named view: a root query field that returns the list of `options.type` with the
+   * generated list arguments plus `options.params`, and appends the groups of `options.where` after
+   * middleware. A schema includes the view exactly when it includes the type. Throws `INVALID_VIEW`
+   * (500) for an invalid declaration and `QUERY_NAME_CONFLICT` (500) for a name already registered as
+   * a view, keeping the first registration. `createSchema` throws `INVALID_VIEW` when the type is not
+   * connected in this runtime or a param is named like one of its fields or a generated list
+   * argument, and `QUERY_NAME_CONFLICT` when an included view is named like an included generated or
+   * custom query.
+   */
+  registerView(name: string, options: ViewOptions): void;
   /** Owns the full workflow transaction unless an active caller session is supplied. */
   saveObject(typeName: string, args: Record<string, any>, session?: Session, context?: any): Promise<any>;
   preventCreatingCollection(prevent: boolean): void;
@@ -683,7 +756,7 @@ export function resolveModelPath(models: ModelDescription, entityName: string, p
 /**
  * Process-wide. `maxPageSize` (default 1000) caps page sizes. `maxReferenceFrames` (default 10) caps,
  * per list, aggregate or collection-field call, the compiled frames and scoped joins a client's
- * conditions need. `maxFrameNesting` (default 3) caps nested frames along one chain in client and
+ * conditions need. Named views check client arguments and `where` groups separately. `maxFrameNesting` (default 3) caps nested frames along one chain in client and
  * trusted constructs. Exceeding either frame limit fails with `FILTER_DEPTH_EXCEEDED` (400). Each
  * option must be a positive safe integer, or the call throws `INVALID_QUERY_LIMITS` (400) and keeps
  * every current limit; an omitted option takes its default again.
