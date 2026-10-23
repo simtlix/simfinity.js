@@ -189,7 +189,7 @@ Scopes decide what each caller sees:
 - Clients see their own bookings. Owners see their shops' bookings plus the bookings they made as clients. Anonymous callers see no bookings.
 - Platform admins see everything.
 
-Owners, like clients and anonymous callers, get `FORBIDDEN_FILTER_PATH` for relation filters through `user.barbershops`. A favorite, or a booking the owner made as a client, whose shop the caller cannot see resolves `barbershop: null`. A shop's `rejectionReason` is visible to its owner while the shop is `REJECTED`; resubmitting or approving the shop clears it. Shops that earlier versions approved keep a stale reason until it is cleared with `updatebarbershop` or the shop is resubmitted or approved again.
+These backends install exact 3.8.0 registry packages, where owners, like clients and anonymous callers, get `FORBIDDEN_FILTER_PATH` for relation filters through `user.barbershops`. On the runtime with collection frames, such a filter uses the `Barbershop.find` frame scope and returns only visible witnesses instead; this runbook does not upgrade the example dependencies. Keep `intersectScopeFilter` append-based and preserve client objects and markers; never wrap a marked condition in a trusted quantified group. A favorite, or a booking the owner made as a client, whose shop the caller cannot see resolves `barbershop: null`. A shop's `rejectionReason` is visible to its owner while the shop is `REJECTED`; resubmitting or approving the shop clears it. Shops that earlier versions approved keep a stale reason until it is cleared with `updatebarbershop` or the shop is resubmitted or approved again.
 
 ### Request limits
 

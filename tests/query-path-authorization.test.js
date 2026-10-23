@@ -6,7 +6,7 @@ import {
 } from 'graphql';
 
 import {
-  createRuntime, createQueryPlan, describeModels, SimfinityError,
+  createRuntime, createQueryPlan, describeModels, QLOperator, SimfinityError,
 } from '../packages/core/src/index.js';
 import * as auth from '../packages/core/src/auth/index.js';
 import { createMembershipScopeFixture, createQueryPathFixture } from './fixtures/query-path-authorization.js';
@@ -19,7 +19,9 @@ const rows = {
 };
 const rowsFor = (Model) => rows[Object.keys(rows).find((key) => Model.name.endsWith(key))] || [];
 
-const createAdapter = (calls) => ({
+const QUANTIFIED = { operators: QLOperator.getValues().map(({ value }) => value), referenceEmptiness: true, quantifiers: true };
+const createAdapter = (calls, queryFeatures) => ({
+  ...(queryFeatures ? { queryFeatures } : {}),
   bind() {},
   prepare() {},
   createModel: (gqltype) => ({ name: gqltype.name }),
@@ -47,9 +49,9 @@ const createAdapter = (calls) => ({
 });
 
 let counter = 0;
-const build = ({ permissions, defaultPolicy = 'DENY', middleware } = {}) => {
+const build = ({ permissions, defaultPolicy = 'DENY', middleware, queryFeatures } = {}) => {
   const calls = [];
-  const runtime = createRuntime(createAdapter(calls));
+  const runtime = createRuntime(createAdapter(calls, queryFeatures));
   const prefix = `Qp${String.fromCharCode(97 + (counter++ % 26))}${counter}`;
   const fixture = createQueryPathFixture(runtime, prefix);
   const membership = createMembershipScopeFixture(runtime, prefix);
@@ -105,11 +107,11 @@ describe('client query paths: queryability', () => {
     expect(calls).toHaveLength(1);
   });
 
-  test('leaves unknown paths to the backend', async () => {
+  test('rejects unknown paths before the backend', async () => {
     const { run, calls, names } = build();
     const result = await run(`{${names.posts}(author: {terms: [{path: "missing", value: 1}]}) {id}}`);
-    expect(result.errors).toBeUndefined();
-    expect(calls[0].args.author).toEqual({ terms: [{ path: 'missing', value: 1 }] });
+    expect(result.errors?.[0]?.extensions).toMatchObject({ code: 'INVALID_FILTER_FIELD', status: 400 });
+    expect(calls).toEqual([]);
   });
 
   test('trusts paths added by middleware and scopes', async () => {
@@ -317,6 +319,28 @@ describe('client query paths: joined type scopes', () => {
     expect(result.errors[0].message).toBe(`Query path member enters ${prefix}Member, `
       + `whose find scope filters through the collection ${prefix}Member.memberships`);
     expect(calls).toEqual([]);
+  });
+
+  test.each([
+    ['sort', (n) => `${n.notes}(sort: {terms: [{field: "member.name", order: ASC}]}) {id}`],
+    ['filter', (n) => `${n.notes}(member: {terms: [{path: "name", value: "bob"}]}) {id}`],
+    ['groupId', (n) => `${n.notes}_aggregate(aggregation: {groupId: "member.name", facts: [{operation: COUNT, factName: "n", path: "id"}]}) {groupId}`],
+  ])('quantified twin: lifts a joined collection scope reached by %s', async (_name, query) => {
+    const { run, calls, names, runtime, prefix } = build({ queryFeatures: QUANTIFIED });
+    expect((await run(`{${query(names)}}`)).errors).toBeUndefined();
+    const plan = createQueryPlan(describeModels(runtime.getRegistrations()), `${prefix}Note`, calls[0].args, { mode: _name === 'groupId' ? 'aggregate' : 'find' });
+    expect(JSON.stringify(plan.where)).toContain('"kind":"quantified"');
+  });
+
+  test.each([
+    ['filter', (n) => `${n.teams}(members: {terms: [{path: "name", value: "ann"}]}) {id}`],
+    ['condition', (n) => `${n.teams}(AND: [{conditions: [{field: "members.id", value: "u1"}]}]) {id}`],
+  ])('quantified twin: fills the scoped collection %s', async (_name, query) => {
+    const { run, calls, names, runtime, prefix } = build({ queryFeatures: QUANTIFIED });
+    expect((await run(`{${query(names)}}`)).errors).toBeUndefined();
+    const plan = createQueryPlan(describeModels(runtime.getRegistrations()), `${prefix}Team`, calls[0].args);
+    const frame = plan.where.kind === 'quantified' ? plan.where : plan.where.terms.find((node) => node.kind === 'quantified');
+    expect(frame.scope).not.toBeNull();
   });
 
   test('allows those paths when the collection scope adds nothing for the caller', async () => {
@@ -574,9 +598,9 @@ describe('client query paths: joined scopes through embedded lists', () => {
 });
 
 describe('joined scope rewriting', () => {
-  const buildHost = () => {
+  const buildHost = (queryFeatures) => {
     const calls = [];
-    const runtime = createRuntime(createAdapter(calls));
+    const runtime = createRuntime(createAdapter(calls, queryFeatures));
     const scope = vi.fn(async ({ args, context }) => context.scope?.(args));
     const Owner = new GraphQLObjectType({
       name: 'RwOwner',
@@ -669,6 +693,13 @@ describe('joined scope rewriting', () => {
       'Query path target enters RwTarget, whose find scope filters through the collection RwOwner.hosts',
     );
     expect(calls).toEqual([]);
+  });
+
+  test('quantified twin: lifts nested joined-scope collection groups', async () => {
+    const { run, calls } = buildHost(QUANTIFIED);
+    const result = await run((args) => { args.AND = [{ OR: [{ conditions: [{ field: 'owner', path: 'hosts.name', value: 'h' }] }] }]; });
+    expect(result.errors).toBeUndefined();
+    expect(calls[0].args.AND[0].OR[0].conditions[0].field).toBe('target.owner.hosts.name');
   });
 
   test('restricts relation paths in generated collection fields', async () => {
@@ -839,9 +870,9 @@ describe('auth plugin query path rules', () => {
 });
 
 describe('client query paths: fields named aggregation', () => {
-  const buildAggregationFields = (permissions) => {
+  const buildAggregationFields = (permissions, queryFeatures) => {
     const calls = [];
-    const runtime = createRuntime(createAdapter(calls));
+    const runtime = createRuntime(createAdapter(calls, queryFeatures));
     const secretScope = async ({ args, context }) => {
       if (context.user?.role !== 'ADMIN') args.tenant = { operator: 'EQ', value: context.user?.tenant ?? '__none__' };
     };
@@ -969,6 +1000,12 @@ describe('client query paths: fields named aggregation', () => {
     expect(calls[2].args.AND).toEqual([
       { conditions: [{ field: 'aggregation.tenant', operator: 'EQ', value: 'A' }] },
     ]);
+  });
+
+  test('quantified twin: frames a scoped collection named aggregation on a list endpoint', async () => {
+    const { run, calls } = buildAggregationFields(undefined, QUANTIFIED);
+    expect((await run('{agvaults(aggregation: {terms: [{path: "key", value: "k"}]}) {id}}')).errors).toBeUndefined();
+    expect(calls[0].args.aggregation.terms[0].__scope.scopes).toHaveProperty('aggregation');
   });
 
   test('rejects a filter on a scoped collection named aggregation', async () => {

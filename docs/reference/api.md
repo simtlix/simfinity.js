@@ -47,15 +47,16 @@ await adapter.initialize();
 ## configureQueryLimits
 
 ```javascript
-simfinity.configureQueryLimits({ maxPageSize: 500, maxReferenceFrames: 10 });
+simfinity.configureQueryLimits({ maxPageSize: 500, maxReferenceFrames: 10, maxFrameNesting: 3 });
 ```
 
-Sets the process-wide query limits. Configure them once at startup; every runtime and facade shares them. `configureQueryLimits(options?: QueryLimitsOptions): void` takes two options, each a positive safe integer:
+Sets the process-wide query limits. Configure them once at startup; every runtime and facade shares them. `configureQueryLimits(options?: QueryLimitsOptions): void` takes three options, each a positive safe integer:
 
 - `maxPageSize`, default 1000, the maximum for explicit list and aggregate page sizes. Unpaged lists use `Math.min(100, maxPageSize)` and unpaged aggregate queries remain unbounded. See [pagination](/guide/queries#pagination-and-total-count) for request validation and compatibility details.
-- `maxReferenceFrames`, default 10, the most distinct scoped joins and frames that the client's `IS_EMPTY` and `IS_NOT_EMPTY` conditions of one list, aggregate or collection-field call may read through; more fail with `FILTER_DEPTH_EXCEEDED` (400) before middleware runs. Each reference that a condition crosses counts as a scoped join and each reference or collection that it ends at or reads as a member as a frame, once per path and kind; conditions that middleware and scopes add are not counted. See [references and collections](/guide/queries#references-and-collections).
+- `maxReferenceFrames`, default 10, the compiled client frames and scoped joins per resolver call. Shorthand frames count per group and absolute prefix, explicit frames separately, scoped joins per containing frame/path/scope chain, and emptiness frames per path and shape, independent of markers. More fail with `FILTER_DEPTH_EXCEEDED` before middleware, after all client 400 checks. Trusted constructs do not count toward this total.
+- `maxFrameNesting`, default 3, the collection and reference frames nested along any one chain, including shorthand and trusted constructs. More fail with `FILTER_DEPTH_EXCEEDED`; explicit quantified groups also count toward the existing five-level Boolean-group depth, while implicit shorthand groups add no Boolean level.
 
-The call checks every option before it sets any: an invalid one throws `INVALID_QUERY_LIMITS` (400) and keeps both limits. An option that a call omits takes its default again, so `configureQueryLimits({ maxPageSize: 500 })` also restores the default `maxReferenceFrames`, and calling without arguments restores both defaults. The TypeScript type of the options is `QueryLimitsOptions`.
+The call checks every option before it sets any: an invalid one throws `INVALID_QUERY_LIMITS` (400) and keeps all limits. An option that a call omits takes its default again, so `configureQueryLimits({ maxPageSize: 500 })` also restores the default `maxReferenceFrames` and `maxFrameNesting`, and calling without arguments restores all defaults. The TypeScript type of the options is `QueryLimitsOptions`.
 
 ## configureMutationLimits
 
@@ -257,8 +258,8 @@ MongoDB-owned transactions retry transient failures up to five times after the f
 | `preventCreatingCollection(prevent)` | MongoDB toggles explicit collection creation. On PostgreSQL, call it before `createSchema()` to force read-only storage validation during initialization. |
 | `createValidatedScalar(name, description, baseScalarType, validate)` | Create a [validated scalar](/reference/scalars#createvalidatedscalar). |
 | `buildErrorFormatter(callback)` | Create an [error formatter](/reference/errors#builderrorformatter) for your GraphQL server. The formatter returns a `GraphQLError` whose `originalError` is the classified Simfinity error. |
-| `buildQuery(input, gqltype, isCount = false)` | Build a MongoDB aggregation pipeline from list-query arguments. Does not execute scopes or middleware. Relation lookups use reserved `__sf_lN` aliases, removed by a trailing `$unset` stage. `input.aggregation` is a filter on a field named `aggregation`, and fails with `INVALID_FILTER_FIELD` when the type has none; `buildQuery` never builds the aggregate stage. Embedded `.id` paths use the [embedded `id` rule](/guide/queries#ids-in-paths). |
-| `buildFilterGroupMatch(group, gqltype, clauses, included, depth = 0)` | Low-level recursive filter compiler; mutates the supplied lookup accumulators. Use one `included` object per `clauses` array; callers must `$unset` the reserved `__sf_lN` aliases it adds. |
+| `buildQuery(input, gqltype, isCount = false)` | Build a MongoDB aggregation pipeline without executing scopes or middleware. Collection filter paths emit `__sf_qN` frames; marked client constructs can emit `__sf_jN` scoped joins, beside legacy `__sf_lN` lookups. Its trailing `$unset` removes every key in its `included` accumulator. Sorts through collections are rejected, also in count mode. `input.aggregation` filters a field named `aggregation`; this helper never builds the aggregate stage. Embedded IDs follow the [embedded ID rule](/guide/queries#ids-in-paths). |
+| `buildFilterGroupMatch(group, gqltype, clauses, included, depth = 0)` | Low-level filter compiler; mutates lookup accumulators. Use one `included` per `clauses` array and `$unset` every reserved alias it adds, using `Object.keys(included)`, as `buildQuery` does. `__scope`, `__implicit` and `__anchor` are reserved internal rewrite metadata, never application input. |
 
 The `auth`, `validators`, `scalars`, and `plugins` helper objects are shared by both database facades. The MongoDB facade retains its `mcp` compatibility namespace. PostgreSQL applications import MCP factories from the opt-in `@simtlix/simfinity-mcp` package; see the [MCP API](/reference/mcp).
 

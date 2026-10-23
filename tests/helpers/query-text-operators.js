@@ -183,9 +183,9 @@ export const ITEM_CASES = [
   // A reference and its String list.
   ['shop.name', 'ILIKE', 'open', ['A', 'C']], ['shop.name', 'ISTARTS_WITH', 'closed', ['B']], ['shop.name', 'ENDS_WITH', 'Market', ['A']],
   ['shop.tags', 'IEQ', 'FRESH', ['A']], ['shop.tags', 'ILIKE', 'UL', ['B']],
-  // A collection: each matching child repeats its record, as for every other operator.
+  // A collection: matching children return each parent record once.
   ['reviews.author', 'ISTARTS_WITH', 'ana', ['A', 'B']], ['reviews.author', 'IEQ', 'ana', ['A']], ['reviews.author', 'ILIKE', 'O', ['A']],
-  ['reviews.author', 'ILIKE', '', ['A', 'A', 'B']],
+  ['reviews.author', 'ILIKE', '', ['A', 'B']],
 ].map(([path, operator, value, keys]) => ({ name: `${path} ${operator} ${JSON.stringify(value)}`, args: filter(path, operator, value), keys }));
 ITEM_CASES.push(
   { name: 'OR of IEQ and ENDS_WITH', args: { OR: [{ conditions: [{ field: 'name', operator: 'IEQ', value: 'palermo soho' }] }, { conditions: [{ field: 'tags', operator: 'ENDS_WITH', value: '%' }] }] }, keys: ['A', 'C'] },

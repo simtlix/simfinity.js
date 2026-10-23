@@ -116,7 +116,7 @@ const CLIENT_REJECTIONS = [
   // Rule 3: a value inside a list or a collection.
   [{ lines: { terms: [{ path: 'qty', ...IS_EMPTY }] } }, 'INVALID_FILTER_PATH', 400, IN_LIST],
   [{ olines: { terms: [{ path: 'qty', operator: 'IS_NOT_EMPTY' }] } }, 'INVALID_FILTER_PATH', 400, IN_LIST],
-  [condition('reviews', 'text'), 'INVALID_FILTER_PATH', 400, IN_LIST],
+  [condition('reviews', 'text'), 'INVALID_FILTER_PATH', 400, 'The shorthand excludes them; use an explicit group'],
   [condition('lines.qty', undefined, { value: 1 }), 'INVALID_FILTER_PATH', 400, IN_LIST],
   // Rule 5: a value, before rule 6.
   [{ note: { ...IS_EMPTY, value: '' } }, 'INVALID_FILTER_VALUE', 400], [{ tags: { operator: 'IS_NOT_EMPTY', value: [] } }, 'INVALID_FILTER_VALUE', 400],
@@ -536,11 +536,9 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL emptiness parity'
     const scoped = (scope) => () => ({ scopes: { shop: (args) => { Object.assign(args, structuredClone(scope)); } } });
     expect(await keys('item', client, scoped({ name: IS_EMPTY }))).toEqual(alike(inS1));
     expect(await keys('item', client, scoped({ name: { operator: 'IS_NOT_EMPTY' } }))).toEqual(alike([]));
-    // A legacy join keeps its 403 for a scope that reads a collection, emptiness or not.
+    // A joined target scope may test its own collection with a trusted frame.
     for (const operator of OPERATORS) {
-      expect(await keys('item', client, scoped({ items: { terms: [{ operator }] } })), operator).toEqual(alike(expect.objectContaining({
-        code: 'FORBIDDEN_FILTER_PATH', status: 403, message: 'Query path shop enters QyShop, whose find scope filters through the collection QyShop.items',
-      })));
+      expect(await keys('item', client, scoped({ items: { terms: [{ operator }] } })), operator).toEqual(alike(operator === 'IS_EMPTY' ? [] : inS1));
     }
   });
 

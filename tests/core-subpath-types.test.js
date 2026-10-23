@@ -128,6 +128,25 @@ const explicitRootValues = (text) => [...new Set(
 )].sort();
 
 describe('core root declarations', () => {
+  it('exports the quantifier enum as the same value the core runtime uses', async () => {
+    const core = await import('@simtlix/simfinity-core');
+    expect(core.QLQuantifier?.name).toBe('QLQuantifier');
+    const modulePath = '../packages/core/src/const/QLQuantifier.js';
+    expect(core.QLQuantifier).toBe((await import(/* @vite-ignore */ modulePath)).default);
+    expect(rootDeclarations).toMatch(/^export const QLQuantifier: GraphQLEnumType;$/m);
+  });
+
+  it('declares the collection frame options, recursive inputs and plan nodes', () => {
+    for (const name of ['QueryQuantifier', 'QueryJoins', 'QLFilterCondition', 'QLFilterGroup', 'QLQuantifiedGroup', 'QLTypeFilterExpression']) {
+      expect(rootDeclarations, name).toMatch(new RegExp(`^export (?:type|interface) ${name}\\b`, 'm'));
+    }
+    expect(rootDeclarations).toMatch(/quantifiers\?: boolean \| null \| undefined;/);
+    expect(rootDeclarations).toMatch(/maxFrameNesting\?: number;/);
+    expect(rootDeclarations).toMatch(/kind: 'quantified';/);
+    expect(rootDeclarations).toMatch(/joins\?: QueryJoins/);
+    expect(rootDeclarations).toMatch(/export function createQueryPlan\([^\n]*quantifiers\?: boolean/);
+  });
+
   it('exports the root error classes its declarations declare, as the auth namespace classes', async () => {
     const core = await import('@simtlix/simfinity-core');
     const errors = await load['./auth/errors']();

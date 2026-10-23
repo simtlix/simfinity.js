@@ -23,7 +23,9 @@ import { virtualFieldOptions } from '@simtlix/simfinity-core/internal/relation-s
 const FILTER_OPERATORS_TEXT = 'EQ, NE, LT, LTE, GT, GTE, IN, NIN, BTW, LIKE, ILIKE, STARTS_WITH, ISTARTS_WITH, ENDS_WITH, IENDS_WITH, IEQ, IS_EMPTY, IS_NOT_EMPTY';
 // The value and path rules of the emptiness operators, for the list and aggregate tool descriptions. The tools read
 // only the schema, so the texts say that references and collections depend on the database adapter.
+// Collection-element emptiness belongs inside an explicit quantified group; the shorthand below tests the field itself.
 const EMPTINESS_OPERATORS_TEXT = 'IS_EMPTY and IS_NOT_EMPTY take no value, and a term or group condition without path applies them to the field itself: an embedded object or list, or a reference or collection where the database adapter supports it';
+const COLLECTION_FILTERS_TEXT = 'When the database adapter declares queryFeatures.quantifiers: true, a collection filter path returns each record once, and conditions on the same collection prefix in one group must match the same element. ANY, ALL and NONE require that declaration; otherwise they fail with UNSUPPORTED_QUERY.';
 
 /** Allowed shape for published MCP tool names (SEP-986). */
 const TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -36,13 +38,23 @@ const TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/;
  * either a type name (`QLFilter`) or a `TypeName.fieldName` pair.
  */
 const SIMFINITY_FILTER_DOCS = Object.assign(Object.create(null), {
-  QLOperator: 'Comparison operator: EQ (equals), NE (not equals), LT, LTE, GT, GTE, IN (value in list), NIN (value not in list), BTW (between, value is [min, max]), LIKE (substring), ILIKE (substring, ignoring case), STARTS_WITH (prefix), ISTARTS_WITH (prefix, ignoring case), ENDS_WITH (suffix), IENDS_WITH (suffix, ignoring case), IEQ (equals, ignoring case), IS_EMPTY (holds no value) and IS_NOT_EMPTY (holds a value). The text operators, LIKE to IEQ, take a string value and apply to String fields and String lists. They match the value literally, so % and _ are ordinary characters, and LIKE, STARTS_WITH and ENDS_WITH respect case. IS_EMPTY and IS_NOT_EMPTY take no value (omit it or pass null), and every record matches exactly one of them: a String is empty when missing, null or "" (" " is not), any other scalar or enum when missing or null, a list when missing, null or [] ([null] is not), and an embedded object when missing, null or when every member it stores is empty. On a list, EQ, NE, IN and NIN compare its elements, so EQ null also matches [null] and never []. For IS_EMPTY and IS_NOT_EMPTY, a path that continues inside an embedded list or a collection fails with INVALID_FILTER_PATH. Where the database adapter supports it, they also test references and collections, and read a record the caller may not see as a missing one: a reference is empty when it points to no record the caller may see, a collection when it has no child the caller may see, and a field reached through references when it is empty by its own rule or a reference on the way is empty; other adapters reject these conditions with UNSUPPORTED_QUERY.',
+  QLOperator: 'Comparison operator: EQ (equals), NE (not equals), LT, LTE, GT, GTE, IN (value in list), NIN (value not in list), BTW (between, value is [min, max]), LIKE (substring), ILIKE (substring, ignoring case), STARTS_WITH (prefix), ISTARTS_WITH (prefix, ignoring case), ENDS_WITH (suffix), IENDS_WITH (suffix, ignoring case), IEQ (equals, ignoring case), IS_EMPTY (holds no value) and IS_NOT_EMPTY (holds a value). The text operators, LIKE to IEQ, take a string value and apply to String fields and String lists. They match the value literally, so % and _ are ordinary characters, and LIKE, STARTS_WITH and ENDS_WITH respect case. IS_EMPTY and IS_NOT_EMPTY take no value (omit it or pass null), and every record matches exactly one of them: a String is empty when missing, null or "" (" " is not), any other scalar or enum when missing or null, a list when missing, null or [] ([null] is not), and an embedded object when missing, null or when every member it stores is empty. On a list, EQ, NE, IN and NIN compare its elements, so EQ null also matches [null] and never []. For IS_EMPTY and IS_NOT_EMPTY, a path that continues inside an embedded list or a collection fails with INVALID_FILTER_PATH: this shorthand does not quantify elements. Use ANY, ALL or NONE with a relative inner condition to test a collection element. Where the database adapter supports it, they also test references and collections, and read a record the caller may not see as a missing one: a reference is empty when it points to no record the caller may see, a collection when it has no child the caller may see, and a field reached through references when it is empty by its own rule or a reference on the way is empty; other adapters reject these conditions with UNSUPPORTED_QUERY.',
   QLValue: 'Filter value. Accepts a scalar, or an array for the IN, NIN and BTW operators. Omit it, or pass null, for IS_EMPTY and IS_NOT_EMPTY.',
   QLFilter: 'Single-field filter: a comparison operator plus the value to compare against, which IS_EMPTY and IS_NOT_EMPTY do not take.',
-  QLTypeFilter: 'Filter applied to a related-entity or embedded field, addressed by a dot-separated path. With IS_EMPTY or IS_NOT_EMPTY, omit the path to test the embedded object or embedded list itself. Where the database adapter supports it, a reference or collection can be tested itself the same way.',
-  QLTypeFilterExpression: 'Filter on a related entity or an embedded value: a list of path-based terms. A term with IS_EMPTY or IS_NOT_EMPTY and no path tests an embedded object or embedded list itself. Where the database adapter supports it, such a term also tests a reference or collection itself.',
+  QLTypeFilter: 'Filter applied to a related-entity or embedded field, addressed by a dot-separated path. A collection path means ANY by default on an adapter that declares quantifiers; terms on the same collection prefix in one group must match the same element. With IS_EMPTY or IS_NOT_EMPTY, omit the path to test the embedded object or embedded list itself. Where the database adapter supports it, a reference or collection can be tested itself the same way.',
+  QLTypeFilterExpression: 'Filter on a related entity or an embedded value: a list of path-based terms. A term with IS_EMPTY or IS_NOT_EMPTY and no path tests an embedded object or embedded list itself. Where the database adapter supports it, such a term also tests a reference or collection itself. On an adapter that declares quantifiers, collection paths use ANY by default and terms on the same collection prefix match the same element. Set quantifier to ANY, ALL or NONE to quantify the related elements explicitly; each term then needs a path relative to the element, and terms may be empty.',
   QLFilterCondition: 'A single filter condition: field, operator, value and an optional nested path. IS_EMPTY and IS_NOT_EMPTY take no value, and test an embedded object or embedded list field itself when the path is omitted, and a reference or collection field itself where the database adapter supports it.',
-  QLFilterGroup: 'Recursive logical group of filter conditions combined with AND/OR.',
+  QLQuantifier: 'ANY requires some visible element to match, ALL requires every visible element to match, and NONE requires no visible element to match. ALL and NONE hold when there are no visible elements. A group with no conditions matches every element. Requires the database adapter to declare queryFeatures.quantifiers: true; otherwise UNSUPPORTED_QUERY.',
+  QLQuantifiedGroup: 'Quantified group over a collection or single reference. Conditions are ANDed on the same element; inner paths and nested groups are relative to that element. The target find scope determines the elements visible to the caller, separately from the conditions. Requires the database adapter to declare queryFeatures.quantifiers: true.',
+  'QLQuantifiedGroup.path': 'Relation path relative to the containing element (the queried record at the top level). May cross single references and embedded objects, and must end at a collection or single reference. It cannot cross a collection or embedded list. Nest quantified groups for successive collections; embedded-list frames are unsupported.',
+  'QLTypeFilterExpression.quantifier': 'Explicit ANY, ALL or NONE over a collection or single reference; terms are ANDed on the same element and each requires a relative path. Empty terms are allowed. Requires the database adapter to declare queryFeatures.quantifiers: true.',
+  QLFilterGroup: 'Recursive logical group of filter conditions combined with AND/OR, with ANY/ALL/NONE groups over related elements. Conditions on the same collection prefix in one group match the same element; separate groups may match different elements.',
+  'QLFilterGroup.ANY': 'ANY groups: each group requires some visible element at its path to match its relative conditions.',
+  'QLFilterGroup.ALL': 'ALL groups: each group requires every visible element at its path to match; true with no visible elements.',
+  'QLFilterGroup.NONE': 'NONE groups: each group requires no visible element at its path to match; true with no visible elements.',
+  'QLQuantifiedGroup.ANY': 'Nested ANY groups relative to this element: each requires some visible element to match.',
+  'QLQuantifiedGroup.ALL': 'Nested ALL groups relative to this element: each requires every visible element to match; true with no visible elements.',
+  'QLQuantifiedGroup.NONE': 'Nested NONE groups relative to this element: each requires no visible element to match; true with no visible elements.',
   QLPagination: 'Pagination control: page (1-based), size (page size) and an optional count flag to include the total.',
   'QLPagination.page': '1-based page number.',
   'QLPagination.size': 'Number of records per page.',
@@ -66,8 +78,8 @@ const SIMFINITY_ARG_DOCS = Object.assign(Object.create(null), {
   id: 'Unique identifier (id) of the record.',
   pagination: 'Pagination: page (1-based), size, and an optional count flag (on list queries, the total number of matching records is returned as `totalCount` next to the results).',
   sort: 'Sort results by one or more fields (terms of { field, order: ASC | DESC }).',
-  AND: 'Logical AND group(s): every nested condition or group must match.',
-  OR: 'Logical OR group(s): at least one nested condition or group must match.',
+  AND: 'Logical AND group(s): every nested condition or group must match, including ANY/ALL/NONE groups with paths relative to their elements.',
+  OR: 'Logical OR group(s): at least one nested condition or group must match, including ANY/ALL/NONE groups with paths relative to their elements.',
   aggregation: 'Aggregation spec: groupId to group by and facts [{ operation: SUM | COUNT | AVG | MIN | MAX, factName, path }].',
 });
 
@@ -348,7 +360,9 @@ const resolveArgDescription = (arg) => {
   }
   if (named.name === 'QLTypeFilterExpression') {
     return `Filter on the related entity or embedded value \`${arg.name}\` using { terms: [{ path, operator, value }] }; `
-      + 'a term { operator: IS_EMPTY } or { operator: IS_NOT_EMPTY } without path tests the field itself, on a reference or collection only where the database adapter supports it.';
+      + 'a term { operator: IS_EMPTY } or { operator: IS_NOT_EMPTY } without path tests the field itself, on a reference or collection only where the database adapter supports it. '
+      + 'For a collection or single reference, use { quantifier: ANY | ALL | NONE, terms: [{ path, operator, value }] } for explicit quantification; '
+      + 'terms have paths relative to the element and are ANDed on the same element. Requires queryFeatures.quantifiers: true.';
   }
   return SIMFINITY_ARG_DOCS[arg.name];
 };
@@ -939,9 +953,9 @@ const buildToolDescription = (op, fieldName, field, entityType) => {
     case 'single':
       return `Fetch a single ${entity} by id. Returns the matching ${entity} or null.${entityDoc}`;
     case 'list':
-      return `List and search ${entity} records. Supports per-field filters (operators: ${FILTER_OPERATORS_TEXT}; ${EMPTINESS_OPERATORS_TEXT}), nested AND/OR filter groups, pagination (page/size) and sorting. Returns an array of ${entity}.${entityDoc}`;
+      return `List and search ${entity} records. Supports per-field filters (operators: ${FILTER_OPERATORS_TEXT}; ${EMPTINESS_OPERATORS_TEXT}), nested AND/OR and ANY/ALL/NONE filter groups, pagination (page/size) and sorting. ${COLLECTION_FILTERS_TEXT} Returns an array of ${entity}.${entityDoc}`;
     case 'aggregate':
-      return `Run grouped aggregations (SUM, COUNT, AVG, MIN, MAX) over ${entity} records. Provide \`aggregation\` with a groupId and facts. Supports per-field filters (operators: ${FILTER_OPERATORS_TEXT}; ${EMPTINESS_OPERATORS_TEXT}), nested AND/OR filter groups, pagination (page/size) and sorting, like the list query. Returns grouped aggregation results (groupId, facts).${entityDoc}`;
+      return `Run grouped aggregations (SUM, COUNT, AVG, MIN, MAX) over ${entity} records. Provide \`aggregation\` with a groupId and facts. Supports per-field filters (operators: ${FILTER_OPERATORS_TEXT}; ${EMPTINESS_OPERATORS_TEXT}), nested AND/OR and ANY/ALL/NONE filter groups, pagination (page/size) and sorting, like the list query. ${COLLECTION_FILTERS_TEXT} Collection paths used by groupId or facts still expand rows; shorthand filters sharing those prefixes select joined rows, while explicit quantified groups keep per-record meaning. Returns grouped aggregation results (groupId, facts).${entityDoc}`;
     case 'add':
       return `Create a new ${entity}. Provide \`input\` with the fields to set. Returns the created ${entity}.${entityDoc}`;
     case 'update':

@@ -11,6 +11,7 @@ import {
 } from '../packages/mongodb/src/index.js';
 import { markStoredIdentity } from '@simtlix/simfinity-core/internal/relation-storage';
 import { createMongoQueries } from '../packages/mongodb/src/mongo/queries.js';
+import { createQueryPlan, describeModels } from '../packages/core/src/index.js';
 
 const idField = { type: GraphQLID };
 const AddressType = new GraphQLObjectType({
@@ -84,9 +85,9 @@ const queries = createMongoQueries({
 const lookups = (pipeline) => pipeline.filter((stage) => stage.$lookup).map((stage) => stage.$lookup);
 const PAGE = [{ $skip: 0 }, { $limit: 100 }];
 // A frame of reference and collection emptiness (#108 part 2b) without a scope, as trusted constructs read it.
-const frame = (from, localField, foreignField, alias) => ({
+const frame = (from, localField, foreignField, alias, stages = []) => ({
   $lookup: {
-    from, localField, foreignField, pipeline: [{ $limit: 1 }, { $project: { _id: 1 } }], as: alias,
+    from, localField, foreignField, pipeline: [...stages, { $limit: 1 }, { $project: { _id: 1 } }], as: alias,
   },
 });
 const none = (alias) => ({ [`${alias}.0`]: { $exists: false } });
@@ -518,10 +519,6 @@ describe('MongoDB filters on NonNull object fields', () => {
     { $lookup: { from: 'authors', foreignField: '_id', localField: 'author', as: '__sf_l0' } },
     { $unwind: { path: '$__sf_l0', preserveNullAndEmptyArrays: true } },
   ];
-  const reviewsLookup = [
-    { $lookup: { from: 'reviews', foreignField: 'bookKey', localField: '_id', as: '__sf_l1' } },
-    { $unwind: { path: '$__sf_l1', preserveNullAndEmptyArrays: true } },
-  ];
 
   test('rejects a NonNull object condition without a path and a path on a NonNull scalar condition', async () => {
     for (const field of ['author', 'meta', 'reviews']) {
@@ -542,9 +539,9 @@ describe('MongoDB filters on NonNull object fields', () => {
         { field: 'reviews.stars', operator: 'GTE', value: 4 },
       ],
     }, NnBookType, clauses, included);
-    expect(match).toEqual({ $and: [{ '__sf_l0.name': 'Ann' }, { 'meta.label': 'x' }, { '__sf_l1.stars': { $gte: 4 } }] });
-    expect(clauses).toEqual([...authorLookup, ...reviewsLookup]);
-    expect(included).toEqual({ __sf_l0: true, __sf_l1: true });
+    expect(match).toEqual({ $and: [{ '__sf_l0.name': 'Ann' }, { 'meta.label': 'x' }, { '__sf_q0.0': { $exists: true } }] });
+    expect(clauses).toEqual([...authorLookup, frame('reviews', '_id', 'bookKey', '__sf_q0', [{ $match: { stars: { $gte: 4 } } }])]);
+    expect(included).toEqual({ __sf_l0: true, __sf_q0: true });
   });
 
   test('tests NonNull fields themselves with the emptiness operators, and their references and collections through frames', async () => {
@@ -580,8 +577,8 @@ describe('MongoDB filters on NonNull object fields', () => {
       meta: { terms: [{ path: 'label', value: 'x' }] },
       reviews: { terms: [{ path: 'stars', operator: 'GTE', value: 4 }] },
     }, NnBookType);
-    expect(lookups(pipeline)).toEqual([authorLookup[0].$lookup, reviewsLookup[0].$lookup]);
-    expect(matchOf(pipeline)).toEqual({ '__sf_l0.name': 'Ann', 'meta.label': 'x', '__sf_l1.stars': { $gte: 4 } });
+    expect(lookups(pipeline)).toEqual([authorLookup[0].$lookup, frame('reviews', '_id', 'bookKey', '__sf_q0', [{ $match: { stars: { $gte: 4 } } }]).$lookup]);
+    expect(matchOf(pipeline)).toEqual({ $and: [{ '__sf_l0.name': 'Ann', 'meta.label': 'x' }, { '__sf_q0.0': { $exists: true } }] });
   });
 });
 
@@ -659,6 +656,28 @@ describe('MongoDB emptiness paths', () => {
     }
     // Other operators keep reading the filter as a value.
     expect(await outcome({ terms: [{ path: 'label', value: 'x' }] })).toEqual(['INVALID_FILTER_VALUE', `Expected a scalar value for ${field}`]);
+  });
+
+  test.each(['shape', 'shapes', 'either'])('pin: compiles the actual ordinary abstract %s carrier and ignores ordinary terms', async (field) => {
+    for (const [filter, expected] of [
+      [{ value: null }, null],
+      [{ value: null, terms: [] }, null],
+      [{ value: null, terms: [{ path: 'label', value: 'ignored' }] }, null],
+      [{ operator: 'NE', value: null, terms: [{ path: 'missing.path', operator: 'UNKNOWN' }] }, { $ne: null }],
+      [{ operator: 'IN', value: [], terms: [] }, { $in: [] }],
+    ]) expect(await holderQueries.buildQuery({ [field]: filter }, HolderType)).toEqual([{ $match: { [field]: expected } }, ...PAGE]);
+    for (const [filter, message] of [
+      [{ terms: [] }, `Expected a scalar value for ${field}`],
+      [{ terms: [{ path: 'label', value: 'ignored' }] }, `Expected a scalar value for ${field}`],
+      [{ value: 'x', terms: [] }, `Invalid value for ${field}`],
+    ]) {
+      const error = await holderQueries.buildQuery({ [field]: filter }, HolderType).then(() => null, (caught) => caught);
+      expect(error?.extensions).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
+      expect(error?.message).toBe(message);
+    }
+    // Ignored ordinary terms never hide an emptiness term, even when the actual carrier has no value.
+    const error = await holderQueries.buildQuery({ [field]: { terms: [{ path: 'ignored', value: 1 }, { operator: 'IS_EMPTY' }] } }, HolderType).then(() => null, (caught) => caught);
+    expect(error?.message).toBe(`IS_EMPTY cannot test ${field}: ${field} is an interface or union field, whose emptiness is not defined`);
   });
 
   // Paths that other operators already reject with the same code.
@@ -1064,5 +1083,136 @@ describe.skipIf(!mongoUri)('MongoDB relation queries against a database', () => 
       expect(filtered.errors).toBeUndefined();
       expect(filtered.data.queryPathFallbackOwners).toEqual([{ label: 'a' }]);
     });
+  });
+});
+
+
+describe('phase3 shared gate compatibility', () => {
+  test.each([
+    ['price', 'GT', 1], ['owner.name', 'EQ', 'Ann'], ['owner.address.name', 'NE', 'Office'],
+  ])('pin: retains the ordinary root marker diagnostic for %s', async (field, operator, value) => {
+    const message = `${operator} on ${field} carries a client scope marker, but is not an emptiness condition; only the runtime writes and fills client scope markers (docs/guide/middleware.md)`;
+    for (const marker of [null, { id: 0 }, { id: 0, scopes: {} }, { scopes: { owner: null } }]) {
+      const error = await queries.buildQuery({ AND: [{ conditions: [{ field, operator, value, __scope: marker }] }] }, NoteType).then(() => null, (caught) => caught);
+      expect(error?.extensions).toMatchObject({ code: 'DETACHED_CLIENT_FILTER', status: 500 });
+      expect(error?.message).toBe(message);
+    }
+  });
+  test('pin: retains full virtual paths for group and object-filter diagnostics', async () => {
+    const Inner = new GraphQLObjectType({ name: 'GateVirtualInner', fields: {
+      w: { type: GraphQLInt }, ghost: { type: GraphQLString, resolve: () => 'v', extensions: { virtual: true } },
+    } });
+    const Root = new GraphQLObjectType({ name: 'GateVirtualRoot', fields: {
+      id: idField, dims: { type: Inner, extensions: { relation: { embedded: true } } },
+      vobj: { type: Inner, resolve: () => null, extensions: { virtual: true } },
+    } });
+    const compiler = createMongoQueries({ getModel: () => modelFor('virtuals'), getRegistrations: () => [] });
+    for (const [input, path, owner, field] of [
+      [{ AND: [{ conditions: [{ field: 'vobj.w', operator: 'IS_EMPTY' }] }] }, 'vobj.w', Root.name, 'vobj'],
+      [{ AND: [{ conditions: [{ field: 'dims.ghost', operator: 'IS_EMPTY' }] }] }, 'dims.ghost', Inner.name, 'ghost'],
+      [{ vobj: { terms: [{ path: 'w', operator: 'IS_EMPTY' }] } }, 'vobj.w', Root.name, 'vobj'],
+      [{ vobj: { terms: [{ path: 'w', value: 1 }] } }, 'vobj.w', Root.name, 'vobj'],
+      [{ vobj: { operator: 'IS_EMPTY', terms: [{ path: 'w', operator: 'IS_EMPTY' }] } }, 'vobj', Root.name, 'vobj'],
+    ]) {
+      const error = await compiler.buildQuery(input, Root).then(() => null, (caught) => caught);
+      expect(error?.extensions).toMatchObject({ code: 'INVALID_FILTER_FIELD', status: 400 });
+      expect(error?.message).toBe(`Query path ${path} uses the virtual field ${owner}.${field}, which is not stored`);
+    }
+  });
+});
+
+describe('phase3 round2 native value validation', () => {
+  const fixture = ({ cast = false } = {}) => {
+    const counts = { coerce: 0, reject: 0, validated: 0, cast: 0 };
+    const parsed = { parsed: true };
+    const stored = { stored: true };
+    const Coerce = new GraphQLScalarType({ name: 'GateCoerce', serialize: (value) => value, parseValue: () => { counts.coerce++; return parsed; } });
+    const Reject = new GraphQLScalarType({ name: 'GateReject', serialize: (value) => value, parseValue: () => { counts.reject++; throw new Error('Custom value rejected'); } });
+    const Validated = new GraphQLScalarType({ name: 'GateValidated', serialize: (value) => value, parseValue: () => { counts.validated++; throw new Error('Custom validation must not run'); } });
+    Validated.baseScalarType = GraphQLString;
+    const Shop = new GraphQLObjectType({ name: 'GateValueShop', fields: {
+      id: idField, name: { type: GraphQLString }, coerce: { type: Coerce }, reject: { type: Reject }, validated: { type: Validated },
+    } });
+    const Product = new GraphQLObjectType({ name: 'GateValueProduct', fields: {
+      id: idField, shop: { type: Shop, extensions: { relation: { embedded: false } } },
+    } });
+    const model = { ...modelFor('shops'), ...(cast ? { schema: { path: (path) => path === 'coerce' ? {
+      instance: 'Mixed', cast: (value) => { counts.cast++; expect(value).toBe(parsed); return stored; },
+    } : undefined } } : {}) };
+    const compiler = createMongoQueries({ getModel: (type) => type === Shop ? model : modelFor('products'), getRegistrations: () => [] });
+    const run = (field, value, marked = false, operator = 'EQ') => compiler.buildFilterGroupMatch({ conditions: [{
+      field: 'shop', path: field, operator, value, ...(marked ? { __scope: { id: 0 } } : {}),
+    }] }, Product, [], {});
+    const runConditions = (conditions) => compiler.buildFilterGroupMatch({ conditions }, Product, [], {});
+    return { counts, parsed, stored, run, runConditions };
+  };
+  const failure = (promise) => promise.then(() => null, (error) => error);
+  test.each([true, false])('pin: preserves GraphQL and model text diagnostics with quantifiers=%s', async (quantifiers) => {
+    const f = fixture();
+    const error = await failure(f.run('name', null, false, 'ILIKE'));
+    expect(error?.extensions).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
+    expect(error?.message).toBe('ILIKE requires a non-null string value on shop.name');
+    const Shop = new GraphQLObjectType({ name: 'GateTextShop', fields: { name: { type: GraphQLString } } });
+    const Product = new GraphQLObjectType({ name: 'GateTextProduct', fields: { shop: { type: Shop, extensions: { relation: { embedded: false } } } } });
+    const metadata = describeModels([{ gqltype: Product }, { gqltype: Shop }]);
+    expect(() => createQueryPlan(metadata, Product.name, { shop: { terms: [{ path: 'name', operator: 'ILIKE', value: null }] } }, { quantifiers, referenceEmptiness: true }))
+      .toThrow('Expected a scalar filter value');
+  });
+  test('pin: rejects native String values before ordinary root markers', async () => {
+    const error = await failure(fixture().run('name', 5, true));
+    expect(error?.extensions).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
+    expect(error?.message).toBe('Invalid value for __sf_l0.name');
+  });
+  test('pin: runs a rejecting custom scalar once before an ordinary root marker', async () => {
+    const f = fixture();
+    const error = await failure(f.run('reject', 5, true));
+    expect(error?.extensions).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
+    expect(error?.message).toBe('Invalid value for __sf_l0.reject');
+    expect(f.counts).toEqual({ coerce: 0, reject: 1, validated: 0, cast: 0 });
+  });
+  test('pin: parses a coercing custom scalar once on a doomed marked query', async () => {
+    const f = fixture();
+    const error = await failure(f.run('coerce', 5, true));
+    expect(error?.extensions).toMatchObject({ code: 'DETACHED_CLIENT_FILTER', status: 500 });
+    expect(error?.message).toContain('EQ on shop.coerce carries a client scope marker, but is not an emptiness condition');
+    expect(f.counts).toEqual({ coerce: 1, reject: 0, validated: 0, cast: 0 });
+  });
+  test.each([false, true])('pin: preserves native failure ordering beside a root marker, markerFirst=%s', async (markerFirst) => {
+    const conditions = [
+      { field: 'shop', path: 'name', value: 5 },
+      { field: 'shop', path: 'name', value: 'x', __scope: { id: 0 } },
+    ];
+    if (markerFirst) conditions.reverse();
+    const error = await failure(fixture().runConditions(conditions));
+    expect(error?.extensions).toMatchObject(markerFirst
+      ? { code: 'DETACHED_CLIENT_FILTER', status: 500 }
+      : { code: 'INVALID_FILTER_VALUE', status: 400 });
+    if (!markerFirst) expect(error?.message).toBe('Invalid value for __sf_l0.name');
+  });
+  test('pin: parses preceding custom conditions once before rejecting an ordinary root marker', async () => {
+    const f = fixture({ cast: true });
+    const error = await failure(f.runConditions([
+      { field: 'shop', path: 'coerce', value: 5 },
+      { field: 'shop', path: 'name', value: 'x', __scope: { id: 0 } },
+    ]));
+    expect(error?.extensions).toMatchObject({ code: 'DETACHED_CLIENT_FILTER', status: 500 });
+    expect(f.counts).toEqual({ coerce: 1, reject: 0, validated: 0, cast: 1 });
+  });
+  test('pin: preserves accepted custom coercion identity with exactly one parse', async () => {
+    const f = fixture();
+    expect((await f.run('coerce', 5))['__sf_l0.coerce']).toBe(f.parsed);
+    expect(f.counts).toEqual({ coerce: 1, reject: 0, validated: 0, cast: 0 });
+  });
+  test('pin: keeps validated base scalar filters free of custom validation', async () => {
+    const f = fixture();
+    expect(await f.run('validated', 'x')).toEqual({ '__sf_l0.validated': 'x' });
+    expect(await f.run('validated', 'x', false, 'IEQ')).toEqual({ '__sf_l0.validated': { $regex: '^x\\z', $options: 'i' } });
+    expect(f.counts).toEqual({ coerce: 0, reject: 0, validated: 0, cast: 0 });
+  });
+  test.each([false, true])('pin: casts a custom scalar exactly once, preserving native identity, marked=%s', async (marked) => {
+    const f = fixture({ cast: true });
+    if (marked) expect((await failure(f.run('coerce', 5, true)))?.extensions).toMatchObject({ code: 'DETACHED_CLIENT_FILTER', status: 500 });
+    else expect((await f.run('coerce', 5))['__sf_l0.coerce']).toBe(f.stored);
+    expect(f.counts).toEqual({ coerce: 1, reject: 0, validated: 0, cast: 1 });
   });
 });
