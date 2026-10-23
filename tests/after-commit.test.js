@@ -124,6 +124,8 @@ describe('controller after-commit callbacks', () => {
     const opaque = new Scalar();
     f.parent.onSaved = (record, args) => {
       record.payload = { date: new Date('2020-01-01'), nested: ['captured'], opaque };
+      record.payload.sparse = ['first'];
+      record.payload.sparse.length = 3;
       record.payload.self = record.payload;
       args.extra = { value: 'captured' };
     };
@@ -138,6 +140,9 @@ describe('controller after-commit callbacks', () => {
     });
     expect(received[0].record.name).toBe('first');
     expect(received[0].record.payload.nested).toEqual(['captured']);
+    expect(received[0].record.payload.sparse).toHaveLength(3);
+    expect(1 in received[0].record.payload.sparse).toBe(false);
+    expect(2 in received[0].record.payload.sparse).toBe(false);
     expect(received[0].record.payload.date.getUTCFullYear()).toBe(2020);
     expect(received[0].record.payload.self).toBe(received[0].record.payload);
     expect(received[0].record.payload.opaque).toBe(opaque);
