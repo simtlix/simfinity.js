@@ -253,7 +253,27 @@ export class InternalServerError extends SimfinityError {
  */
 export function buildErrorFormatter(callback?: (error: SimfinityError) => Error | void): (error: unknown) => GraphQLError;
 
-export interface EntityController<Session = any> {
+export interface AfterCommitErrorDetails {
+  committed: true;
+  typeName: string;
+  operation: 'save' | 'update' | 'delete' | 'state_changed';
+  callbackName: 'onSaveCommitted' | 'onUpdateCommitted' | 'onDeleteCommitted' | 'onTransitionCommitted';
+  context: any;
+}
+export interface AfterCommitOptions {
+  /** Operational reporting only. Rejections are caught and never fail the committed write. */
+  onError?: (error: unknown, details: AfterCommitErrorDetails) => void | Promise<void>;
+}
+export interface CommittedControllerCallbacks {
+  /** After the owning transaction commits; a detached result and the successful attempt's input. */
+  onSaveCommitted?(record: any, args: any, context: any): void | Promise<void>;
+  onUpdateCommitted?(record: any, context: any): void | Promise<void>;
+  /** Called only when a record was actually deleted. */
+  onDeleteCommitted?(record: any, context: any): void | Promise<void>;
+  /** Exclusive notification for a state action; action is its registered name. */
+  onTransitionCommitted?(record: any, action: string, context: any): void | Promise<void>;
+}
+export interface EntityController<Session = any> extends CommittedControllerCallbacks {
   onSaving?(record: any, args: any, session: Session | undefined, context: any): void | Promise<void>;
   onSaved?(record: any, args: any, session: Session | undefined, context: any): void | Promise<void>;
   onUpdating?(id: any, update: any, session: Session | undefined, context: any): void | Promise<void>;
@@ -386,6 +406,8 @@ export interface ViewOptions {
 }
 
 export interface Runtime<Model = any, Session = any> {
+  /** Per runtime. No arguments resets to safe default logging; invalid options leave it unchanged. */
+  configureAfterCommit(options?: AfterCommitOptions): void;
   /** The same process-wide setting as the root `configureQueryLimits`. */
   configureQueryLimits(options?: QueryLimitsOptions): void;
   /**
@@ -524,6 +546,15 @@ export interface DatabaseAdapter<Model = any, Session = any> {
   castId(value: any): any;
   stateValue?(state: { name: string; value: any }): any;
   withTransaction<T>(session: Session | null | undefined, callback: (session: Session) => Promise<T> | T, model?: Model): Promise<T>;
+  /**
+   * Optional capability for controller callbacks. Accept only into an active attempt owned by this
+   * adapter; false means the supplied session has no owned attempt. A new queue is required per
+   * retry, including retries on the same native session. Seal before commit, discard on abort or
+   * unresolved uncertainty, and drain once, serially, after confirmed commit and cleanup attempt.
+   * Callback failures must never enter transaction retry/rollback paths or fail a committed write.
+   * Borrowed operations join the owning attempt; this method does not observe external commits.
+   */
+  enqueueAfterCommit?(session: Session, run: () => void | Promise<void>): boolean;
   newRecord(model: Model, data: any, session?: Session): any;
   saveRecord(model: Model, record: any, session?: Session): any;
   toObject(record: any): any;

@@ -106,6 +106,8 @@ Multiple root mutation fields in a GraphQL request are not one shared transactio
 
 Controllers, validators, state actions and the middleware of nested collection children can run again on a retry. Keep their database work on the supplied session and design external side effects separately from the transaction. See [controllers](./controllers#transactions-and-side-effects).
 
+The optional [committed controller callbacks](./controllers#after-commit-callbacks) run only after a confirmed commit, once for each completed lifecycle operation in the successful attempt, serially and before returning. Their failures are reported independently and do not fail the write. A cleanup failure after commit retains its existing rejection behavior while the confirmed callbacks still run. Calls that borrow an application-owned native transaction do not dispatch these callbacks automatically; registered mutations and SQL's public `withTransaction()` are observed owners.
+
 ## Limit nested collection operations
 
 Each nested `added`, `updated` or `deleted` entry runs its own middleware, hooks and database writes inside the parent's transaction. A large nested input can therefore hold a long transaction. Entries run one at a time: an `updated` or `deleted` entry first reads its child (locking the row on PostgreSQL), then writes it, and a retried transaction runs every entry again. Cap them once at startup, especially on servers exposed to MCP clients or other untrusted callers:

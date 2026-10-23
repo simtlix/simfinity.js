@@ -13,6 +13,8 @@ import type {
   GraphQLOutputType,
 } from 'graphql';
 import type {
+  AfterCommitOptions,
+  CommittedControllerCallbacks,
   CreateSchemaOptions,
   DatabaseAdapter,
   MutationLimitsOptions,
@@ -33,6 +35,9 @@ export {
   validators,
 } from '@simtlix/simfinity-core';
 export type {
+  AfterCommitErrorDetails,
+  AfterCommitOptions,
+  CommittedControllerCallbacks,
   AuthPluginOptions,
   AuthRule,
   AuthRuleFunction,
@@ -134,8 +139,8 @@ export function getRegistrations(): RuntimeRegistration[];
  * Core schema-building API (src/index.js)
  * ========================================================================== */
 
-/** Lifecycle hooks run before commit and may repeat on a transient transaction retry. */
-export interface EntityController {
+/** Legacy hooks run before commit; the inherited committed callbacks run after confirmed commit. */
+export interface EntityController extends CommittedControllerCallbacks {
   onSaving?(doc: any, args: any, session: any, context: any): void | Promise<void>;
   onSaved?(result: any, args: any, session: any, context: any): void | Promise<void>;
   onUpdating?(id: any, args: any, session: any, context: any): void | Promise<void>;
@@ -287,6 +292,9 @@ export interface QueryLimitsOptions {
  * limits; an omitted option takes its default again.
  */
 export function configureQueryLimits(options?: QueryLimitsOptions): void;
+
+/** Configure the singleton runtime's best-effort reporting of after-commit callback failures. */
+export function configureAfterCommit(options?: AfterCommitOptions): void;
 
 /**
  * Process-wide limit on nested added/updated/deleted entries per generated add, update or

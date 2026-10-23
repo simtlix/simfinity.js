@@ -169,6 +169,8 @@ The callback runs after the source-state check and before the managed state is a
 
 The lookup above uses the MongoDB Model API. With PostgreSQL, use `await simfinity.getModel(SeasonType).findById(input.id, { session })`; it returns a plain record and joins the same transaction.
 
+After the owning transaction commits, an optional controller `onTransitionCommitted(record, action, context)` receives the returned record and the registered action name, such as `activate`. It is the transition's only committed notification; `onUpdateCommitted` is not also called. Legacy update hooks stay transactional. Failed/retried attempts do not dispatch notifications. See [after-commit callbacks](./controllers#after-commit-callbacks) for reporting, ownership and delivery limits.
+
 ## Failure behavior
 
 | Condition | Result |

@@ -1,4 +1,5 @@
 import { SimfinityError } from '@simtlix/simfinity-core';
+import { createTransactionCallbacks } from '@simtlix/simfinity-core/internal/transaction-callbacks';
 import { callDriver, isDriverFailure, isRetryableFailure, normalizeFailure } from './errors.js';
 
 // Full-jitter exponential backoff before each retry, as for MongoDB: a uniform wait below
@@ -9,6 +10,7 @@ const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 export const createTransactions = (getConfiguration, assertReady, plugin) => {
   const { driver } = plugin;
+  const callbacks = createTransactionCallbacks();
   const sessions = new WeakSet();
   const requireSession = (session) => {
     if (!sessions.has(session) || !session.inTransaction()) throw new SimfinityError(`Session is not an active transaction of this ${plugin.displayName} instance`, 'INVALID_SESSION', 400);
@@ -31,14 +33,17 @@ export const createTransactions = (getConfiguration, assertReady, plugin) => {
       // Invalidate before COMMIT/ROLLBACK is queued so late session work cannot run outside the transaction.
       const close = () => { active = false; sessions.delete(handle); };
       sessions.add(handle);
+      const effects = callbacks.begin(handle);
       let rollbackError;
       try {
         await callDriver(() => driver.begin(client));
         let result;
-        try { result = await body(handle); } finally { close(); }
+        try { result = await body(handle); } finally { close(); effects.seal(); }
         await callDriver(() => driver.commit(client));
+        effects.confirm();
         return result;
       } catch (error) {
+        effects.discard();
         close();
         let rolledBack = true;
         try { await driver.rollback(client); } catch (failure) { rolledBack = false; rollbackError = failure ?? new Error('ROLLBACK failed'); }
@@ -47,7 +52,10 @@ export const createTransactions = (getConfiguration, assertReady, plugin) => {
         // The plugin maps its engine's errors; a failed driver call it leaves unchanged is masked, and
         // any other error the body threw propagates unchanged.
         throw normalizeFailure(driver, error);
-      } finally { close(); await driver.release(client, rollbackError); }
+      } finally {
+        close();
+        try { await driver.release(client, rollbackError); } finally { await effects.drain(); }
+      }
     }
   };
   // A read that one statement answers needs no transaction when the plugin advertises
@@ -85,5 +93,5 @@ export const createTransactions = (getConfiguration, assertReady, plugin) => {
   };
   // Record statements run on a transaction session or on the connection of a single-statement read.
   const clientOf = (session) => (connections.has(session) ? session.client : requireSession(session));
-  return { withTransaction, withConnection, clientOf, requireSession };
+  return { withTransaction, withConnection, clientOf, requireSession, enqueueAfterCommit: callbacks.enqueue };
 };

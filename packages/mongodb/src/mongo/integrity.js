@@ -29,7 +29,7 @@ const valuesAt = (value, path) => {
 // createMongoAdapter's options: the adapter reads the collection batching ones.
 const ADAPTER_OPTIONS = ['referentialIntegrity', 'batchedCollections', 'collectionBatchSize'];
 
-export const createMongoIntegrity = (options = {}) => {
+export const createMongoIntegrity = (options = {}, callbacks) => {
   if (!options || typeof options !== 'object' || Array.isArray(options)
     || Object.keys(options).some((key) => !ADAPTER_OPTIONS.includes(key))) {
     throw invalid('Expected Mongo adapter options among referentialIntegrity, batchedCollections and collectionBatchSize');
@@ -285,7 +285,7 @@ export const createMongoIntegrity = (options = {}) => {
     withTransaction(session, body, Model) {
       assertReady();
       if (session) assertSession(session);
-      return withMongoTransaction(session, body, Model || models.values().next().value, transactionOptions);
+      return withMongoTransaction(session, body, Model || models.values().next().value, transactionOptions, callbacks);
     },
     async saveRecord(Model, record, session) {
       assertWrite(Model, session);
