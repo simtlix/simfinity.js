@@ -307,6 +307,9 @@ export interface QueryLimitsOptions {
  */
 export function configureQueryLimits(options?: QueryLimitsOptions): void;
 
+/** Configure the singleton runtime's best-effort reporting of after-commit callback failures. */
+export function configureAfterCommit(options?: AfterCommitOptions): void;
+
 /**
  * Process-wide limit on nested added/updated/deleted entries per generated add, update or
  * state-action mutation; unlimited by default, restored by calling it without options.
@@ -314,7 +317,6 @@ export function configureQueryLimits(options?: QueryLimitsOptions): void;
  * INVALID_MUTATION_LIMITS (400) and keeps the current limit; a mutation over the limit
  * fails with NESTED_OPERATIONS_EXCEEDED (400) before its transaction starts.
  */
-export function configureAfterCommit(options?: AfterCommitOptions): void;
 export function configureMutationLimits(options?: MutationLimitsOptions): void;
 
 /**

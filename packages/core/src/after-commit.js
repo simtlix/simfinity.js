@@ -12,7 +12,7 @@ const snapshot = (value, copies = new Map()) => {
   if (value instanceof Date) return new Date(value.getTime());
   const prototype = Object.getPrototypeOf(value);
   if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return value;
-  const copy = Array.isArray(value) ? [] : Object.create(prototype);
+  const copy = Array.isArray(value) ? new Array(value.length) : Object.create(prototype);
   copies.set(value, copy);
   for (const [key, entry] of Object.entries(value)) {
     Object.defineProperty(copy, key, { value: snapshot(entry, copies), writable: true, enumerable: true, configurable: true });
