@@ -111,3 +111,7 @@ or changes their version. See the contributor guide for the one-time trust setup
 - Extend existing patterns rather than introducing parallel abstractions.
 - For GraphQL types in examples/tests: use `extensions.relation` on relationship fields; use `extensions.readOnly` where appropriate; use `extensions.virtual` (not `readOnly` plus a resolver) for a field that its resolver computes and nothing stores. Code that walks `gqltype.getFields()` for storage, inputs or query arguments must skip virtual fields with `isVirtualField`, a public root export of `@simtlix/simfinity-core` (bundled packages import it from `@simtlix/simfinity-core/internal/relation-storage`); `describeModels()` already leaves them out.
 - Keep the root free of backup READMEs and local `.tgz`/`.zip` output. Generate temporary archives outside the repository. Archives under `docs/public/` are intentional website downloads; check links and checksums before changing them.
+
+### Schema-owned client metadata
+
+`buildClientDescriptor(schema)` describes exact `createSchema()` results; it is independent of storage `describeModels()` and never transfers ownership to cloned/composed schemas. Core `/http` serves an explicitly authorized descriptor endpoint. The 3.x introspection default remains on; `/introspection` permits only an opt-out before runtime import and never deletes installed metadata. Preserve legacy clients by default and test fresh-process import ordering, both adapters and per-schema isolation. See `docs/reference/client-descriptor.md`.

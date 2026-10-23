@@ -81,3 +81,9 @@ For tooling that locates the package, use `require.resolve('@simtlix/simfinity-j
 - [MCP integration](https://simtlix.github.io/simfinity.js/guide/mcp.html)
 - [Complete library documentation](https://github.com/simtlix/simfinity.js#readme)
 - [Aggregation examples](./AGGREGATION_EXAMPLE.md)
+
+## Client metadata
+
+`buildClientDescriptor(schema)` describes the exact schema returned by `createSchema()` as immutable JSON, with actual endpoints, inputs and relation hints. The HTTP handler requires an explicit `authorize: 'public'` or access function; import `createClientDescriptorHandler` from `@simtlix/simfinity-core/http` or either database facade. Mount it explicitly, for example at `/graphql-metadata`.
+
+Legacy introspection remains enabled by default in 3.x. Opt out through `configureIntrospection({ fieldExtensions: false })` from `@simtlix/simfinity-core/introspection` **before importing the runtime/facades**, using a separate bootstrap module. It rejects late configuration without deleting metadata. Existing clients selecting `__Field.extensions` must migrate first. See the [descriptor reference](https://simtlix.github.io/simfinity.js/reference/client-descriptor.html) for the format, ordering and limits; arbitrary schema transforms and dynamic permission filtering are not supported by the descriptor.

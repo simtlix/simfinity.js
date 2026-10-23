@@ -51,3 +51,6 @@ export {
   startStdioMCPServer,
   createHTTPMCPHandler,
 } from './mcp.js';
+
+export { buildClientDescriptor } from '@simtlix/simfinity-core';
+export { createClientDescriptorHandler } from '@simtlix/simfinity-core/http';

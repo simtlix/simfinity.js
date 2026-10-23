@@ -1,3 +1,4 @@
+export { buildClientDescriptor } from './client-descriptor.js';
 export { describeModels } from './metadata.js';
 export { isVirtualField, virtualFieldOptions } from './relation-storage.js';
 export { default as SimfinityError } from './errors/simfinity.error.js';

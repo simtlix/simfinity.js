@@ -420,3 +420,8 @@ export function buildFilterGroupMatch(
   aggregationsIncluded: Record<string, any>,
   depth?: number,
 ): Promise<any>;
+
+export { buildClientDescriptor } from '@simtlix/simfinity-core';
+export type { ClientDescriptor, ClientDescriptorType, ClientDescriptorField, ClientDescriptorInputValue, ClientDescriptorOperation } from '@simtlix/simfinity-core';
+export { createClientDescriptorHandler } from '@simtlix/simfinity-core/http';
+export type { ClientDescriptorHandlerOptions } from '@simtlix/simfinity-core/http';

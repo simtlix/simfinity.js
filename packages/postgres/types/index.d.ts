@@ -310,3 +310,8 @@ export const configureQueryLimits: Runtime['configureQueryLimits'];
  * options throw INVALID_MUTATION_LIMITS (400) and keep the current limit.
  */
 export const configureMutationLimits: Runtime['configureMutationLimits'];
+
+export { buildClientDescriptor } from '@simtlix/simfinity-core';
+export type { ClientDescriptor, ClientDescriptorType, ClientDescriptorField, ClientDescriptorInputValue, ClientDescriptorOperation } from '@simtlix/simfinity-core';
+export { createClientDescriptorHandler } from '@simtlix/simfinity-core/http';
+export type { ClientDescriptorHandlerOptions } from '@simtlix/simfinity-core/http';

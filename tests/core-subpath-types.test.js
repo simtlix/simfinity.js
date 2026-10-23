@@ -12,6 +12,8 @@ const rootDeclarations = readFileSync(join(root, 'types/index.d.ts'), 'utf8');
 
 // Each public subpath: its runtime module, its declaration file and the root types it re-exports.
 const publicSubpaths = {
+  './introspection': { target: './src/introspection-config.js', types: './types/introspection.d.ts', rootTypes: ['IntrospectionOptions'] },
+  './http': { target: './src/http.js', types: './types/http.d.ts', rootTypes: [] },
   './auth': {
     target: './src/auth/index.js',
     types: './types/auth/index.d.ts',
@@ -41,6 +43,8 @@ const publicSubpaths = {
 };
 // Static imports, so the bundler resolves each subpath through the export map.
 const load = {
+  './introspection': () => import('@simtlix/simfinity-core/introspection'),
+  './http': () => import('@simtlix/simfinity-core/http'),
   './auth': () => import('@simtlix/simfinity-core/auth'),
   './auth/errors': () => import('@simtlix/simfinity-core/auth/errors'),
   './auth/expressions': () => import('@simtlix/simfinity-core/auth/expressions'),
@@ -54,7 +58,7 @@ const declarationOf = (subpath) => readFileSync(join(root, publicSubpaths[subpat
 // Value exports a declaration file declares: `export const`, `export default`, and the names of
 // `export { ... } from` lists. Type-only `export type { ... }` lists are skipped.
 const declaredValues = (text) => {
-  const names = new Set([...text.matchAll(/^export const (\w+)/gm)].map((match) => match[1]));
+  const names = new Set([...text.matchAll(/^export (?:const|function) (\w+)/gm)].map((match) => match[1]));
   for (const [, list] of text.matchAll(/^export \{([^}]*)\}/gm)) {
     for (const name of list.split(',').map((item) => item.trim()).filter(Boolean)) names.add(name);
   }
