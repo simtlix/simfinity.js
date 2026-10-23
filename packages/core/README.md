@@ -34,6 +34,8 @@ Generated and custom mutations run through `adapter.withTransaction`. Retried at
 
 Importing the runtime installs Simfinity's `__Field.extensions` introspection field once per GraphQL module instance; its `readOnly` flag reads `true` for virtual fields. Multiple runtimes and driver packages can be imported together without cloning schemas or duplicating introspection types.
 
+Controller `onSaveCommitted`, `onUpdateCommitted`, `onDeleteCommitted` and `onTransitionCommitted` callbacks use the optional `DatabaseAdapter.enqueueAfterCommit(session, run)` capability. It accepts jobs only for an active owned attempt, discards aborted/retried queues, and drains a confirmed queue serially after cleanup is attempted. Core preserves existing transactional hooks and exposes per-runtime `configureAfterCommit({ onError })` for operational reporting. Unsupported adapters reject configured committed callbacks with `UNSUPPORTED_AFTER_COMMIT`. External commit ownership is not inferred. See [callback guarantees and limits](https://simtlix.github.io/simfinity.js/guide/controllers.html#after-commit-callbacks).
+
 ## Shared metadata and helpers
 
 `describeModels([{ gqltype, endpoint }])` discovers the persistent entity graph from `GraphQLObjectType` definitions and `extensions.relation`, leaving virtual fields out and describing no type that only virtual fields reach. Types registered with `endpoint: false` are still included when referenced. Reciprocal one-to-many definitions resolve to one child reference; explicit linking entities represent many-to-many relationships.

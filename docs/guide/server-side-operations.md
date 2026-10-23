@@ -411,6 +411,8 @@ Simfinity adds nothing to a native call. GraphQL input coercion, global middlewa
 
 Inside a hook or a custom mutation, pass the session you received. A call without it runs outside the transaction: it commits even when the operation later rolls back. A single native statement from a job needs no transaction; to make several native writes atomic, open one with `simfinity.withTransaction(null, callback)` on PostgreSQL, or with Mongoose's `connection.transaction(callback)` on MongoDB, or put them in a custom mutation.
 
+Lifecycle writes inside a registered mutation or SQL's `withTransaction(null, callback)` join the outer owner's [after-commit notification queue](./controllers#after-commit-callbacks). Sessionless `saveObject()` owns its own queue. An external native MongoDB session does not provide observable commit ownership: new callbacks are skipped, while existing hooks keep their session semantics. There is no public arbitrary-closure enqueue or manual-flush API. Keep durable delivery intents in the transaction's outbox and process them with a worker.
+
 ## What Simfinity does not provide
 
 - No generated mutation updates or deletes several unrelated records in one transaction. Each root mutation field runs in its own transaction, and nested writes only reach the children of one parent. Write a custom mutation instead: `saveObject()` for new records and the native model with the session for changes, with your own checks. A generated mutation that runs a list of operations in one transaction is proposed in [#100](https://github.com/simtlix/simfinity.js/issues/100). Simfinity provides record-level [optimistic concurrency](./concurrency); it does not add operation-list transactions.

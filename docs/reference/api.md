@@ -30,6 +30,7 @@ Shared examples can import the selected instance from [your application’s runt
 | Create in an owned or existing transaction | [saveObject](#saveobject) | Saved object |
 | Set the maximum query page size and reference frames | [configureQueryLimits](#configurequerylimits) | Process-wide configuration |
 | Cap nested collection operations | [configureMutationLimits](#configuremutationlimits) | Process-wide configuration |
+| Report failures of committed controller callbacks | [configureAfterCommit](#configureaftercommit) | Per-runtime configuration |
 | Index a PostgreSQL column for case-insensitive filters | [caseFoldExpression](#casefoldexpression) | SQL expression text |
 
 ## createMongoAdapter
@@ -69,6 +70,17 @@ Caps the nested collection operations of one generated mutation. Configure it on
 `maxNestedOperations` is a non-negative safe integer, or `null` for no limit, which is the default. `0` forbids nested operations while plain creates and updates still work. Calling the function without arguments, with `{}` or with `{ maxNestedOperations: null }` restores the default. Options that are not a plain object, any option other than `maxNestedOperations` (such as the misspelled `maxNestedOperation`), or an invalid value throw `INVALID_MUTATION_LIMITS` (400) and keep the current limit.
 
 The limit applies to generated add, update and state-action mutations. Simfinity counts the `added`, `updated` and `deleted` entries of non-embedded collection fields at every nesting level, including `null` entries. It counts after root middleware and before the transaction starts, and a mutation over the limit fails with `NESTED_OPERATIONS_EXCEEDED` (400) without writing anything. Root deletes, `saveObject()`, custom mutations and embedded lists are not counted. See [limit nested collection operations](/guide/mutations#limit-nested-collection-operations).
+
+## configureAfterCommit
+
+```javascript
+simfinity.configureAfterCommit({ onError: async (error, details) => { /* report operational failure */ } });
+simfinity.configureAfterCommit(); // Restore safe default logging on this runtime.
+```
+
+Available on `createRuntime()`/`createSQL()`/`createPostgres()` instances and the MongoDB/PostgreSQL facades. It accepts only the optional `onError` function. Invalid or unknown options throw `INVALID_AFTER_COMMIT_OPTIONS` (400) without changing the previous configuration. `AfterCommitOptions`, `AfterCommitErrorDetails` and `CommittedControllerCallbacks` are shared types exported by core and the database packages.
+
+The reporter receives the original thrown value and `{ committed: true, typeName, operation, callbackName, context }`. Operations are `save`, `update`, `delete`, and `state_changed`. Callback/reporting failures do not fail the committed write or run transaction retries. Default/fallback logging includes static metadata only. See [after-commit callbacks](/guide/controllers#after-commit-callbacks) for the four controller signatures, ordering, snapshots, external-session limits and outbox requirements.
 
 ## connect
 
