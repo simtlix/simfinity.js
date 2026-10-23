@@ -255,7 +255,8 @@ describe('PostgreSQL emptiness statements', () => {
         expect(code(direct), label).toBe(expected);
         // Without GraphQL types the field descriptions give the same answer.
         expect(failure(caught(() => compileQuery(bare, database, hand(path, operator)))), label).toEqual(failure(direct));
-        expect(failure(caught(() => createQueryPlan(models, 'QpItem', condition(path, operator)))), label).toEqual(failure(direct));
+        if (path[0] === 'reviews') expect(failure(caught(() => createQueryPlan(models, 'QpItem', condition(path, operator)))), label).toEqual({ code: 'INVALID_FILTER_PATH', message: 'The shorthand excludes them; use an explicit group' });
+        else expect(failure(caught(() => createQueryPlan(models, 'QpItem', condition(path, operator)))), label).toEqual(failure(direct));
       }
     }
     // The value is checked after the path rules, and before the reference rule.
@@ -590,10 +591,15 @@ describe.skipIf(!uri)('PostgreSQL emptiness rows', () => {
     const EQUIVALENT = [
       [{ shop: { terms: [{ operator: 'IS_EMPTY' }] } }, { shop: { terms: [{ path: 'id', operator: 'EQ', value: null }] } }],
       [{ AND: [{ conditions: [condition('shop', 'name', 'IS_EMPTY')] }] }, { OR: [{ conditions: [condition('shop', 'name', 'EQ', null)] }, { conditions: [condition('shop', 'name', 'EQ', '')] }] }],
-      [{ reviews: { terms: [{ operator: 'IS_EMPTY' }] } }, { reviews: { terms: [{ path: 'id', operator: 'EQ', value: null }] } }],
       [{ odim: { terms: [{ operator: 'IS_EMPTY' }] } }, { AND: [{ conditions: [condition('odim', 'w', 'IS_EMPTY'), condition('odim', 'tags', 'IS_EMPTY'), condition('odim', 'shop.id', 'EQ', null)] }] }],
     ];
+    // A child frame has no null joined row for a parent without children. Collection emptiness
+    // still returns those parents; ANY reviews: id EQ null cannot match a persisted child identity.
+    expect(await keys(batched, 'item', { reviews: { terms: [{ path: 'id', operator: 'EQ', value: null }] } })).toEqual([]);
+    const reviewedKeys = await keys(batched, 'item', { reviews: { terms: [{ operator: 'IS_NOT_EMPTY' }] } });
+    expect(reviewedKeys).toEqual(['native values']);
     const all = await keys(batched, 'item', {});
+    expect(await keys(batched, 'item', { reviews: { terms: [{ operator: 'IS_EMPTY' }] } })).toEqual(all.filter((key) => !reviewedKeys.includes(key)));
     const flip = (args) => JSON.parse(JSON.stringify(args).replace('"IS_EMPTY"', '"IS_NOT_EMPTY"'));
     for (const [args, same] of EQUIVALENT) {
       const label = JSON.stringify(args);

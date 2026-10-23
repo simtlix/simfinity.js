@@ -56,7 +56,7 @@ const createController = (type, hookEvents) => ({
   },
 });
 
-export const createContractModelFixtures = ({ hookEvents = [] } = {}) => {
+export const createContractModelFixtures = ({ hookEvents = [], scopes = {} } = {}) => {
   const ContractLabel = new GraphQLObjectType({
     name: 'ContractLabel',
     fields: () => ({
@@ -232,6 +232,17 @@ export const createContractModelFixtures = ({ hookEvents = [] } = {}) => {
     ContractAssignment,
     ContractNote,
   };
+
+  // Optional scopes use the existing GraphQL type names; retain each built-in scope.
+  for (const [name, find] of Object.entries(scopes)) {
+    const type = types[name];
+    if (!type || typeof find !== 'function') throw new TypeError(`Invalid contract find scope for ${name}`);
+    const previous = type.extensions.scope?.find;
+    type.extensions.scope = {
+      ...type.extensions.scope,
+      find: async (params) => { await previous?.(params); await find(params); },
+    };
+  }
 
   const registrations = [
     { gqltype: ContractLabel, endpoint: false },

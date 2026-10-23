@@ -54,7 +54,7 @@ describe.skipIf(!uri)('PostgreSQL GraphQL runtime contract', () => {
     expect(fixture.hookEvents).toContainEqual(expect.objectContaining({ hook: 'onUpdated', title: 'Updated', context, inTransaction: true }));
   });
 
-  it('enforces scopes outside OR and retains relation multiplicity and pre-pagination count', async () => {
+  it('enforces scopes outside OR and returns each matching parent once and pre-pagination count', async () => {
     const first = await add({ tenant: 'a', title: 'Alpha', seasons: { added: [{ number: 1, year: 2030 }, { number: 2, year: 2030 }] } });
     expect(first.errors).toBeUndefined();
     expect((await add({ tenant: 'b', title: 'Alpha' })).errors).toBeUndefined();
@@ -62,7 +62,7 @@ describe.skipIf(!uri)('PostgreSQL GraphQL runtime contract', () => {
     const result = await execute('{contractseries(OR:[{conditions:[{field:"title",value:"Alpha"}]},{conditions:[{field:"title",value:"Beta"}]}],seasons:{terms:[{path:"year",value:2030}]},pagination:{page:1,size:1,count:true}){id tenant}}', undefined, context);
     expect(result.errors).toBeUndefined();
     expect(result.data.contractseries).toEqual([{ id: first.data.addcontractserie.id, tenant: 'a' }]);
-    expect(context.count).toBe(2);
+    expect(context.count).toBe(1);
     const excluded = await execute('query($id:ID){contractserie(id:$id){id}}', { id: first.data.addcontractserie.id }, { tenant: 'b' });
     expect(excluded.errors).toBeUndefined();
     expect(excluded.data.contractserie).toBeNull();

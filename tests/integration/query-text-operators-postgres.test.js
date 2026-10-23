@@ -165,7 +165,7 @@ describe('PostgreSQL text operator statements', () => {
     expect(like('parts.sku')).toBe(`SELECT t0.* FROM "app"."QtItem" t0  WHERE (EXISTS (SELECT 1 FROM unnest((ARRAY(SELECT t1."sku" FROM LATERAL (SELECT ${storedRow} FROM "app"."QtItem__parts" t2 WHERE t2."__owner_id" = t0."id" AND t0."__parts_state" = 'present' AND t2."__item_present" UNION ALL SELECT ${nullRow} WHERE t0."__parts_state" IS DISTINCT FROM 'present') t1 WHERE TRUE)) COLLATE "pg_catalog"."C") v(value) WHERE strpos(v.value, $1::text) > 0)) ${page}`);
     expect(like('box.label')).toBe(`SELECT t0.* FROM "app"."QtItem" t0 LEFT JOIN "app"."QtItem__box" t1 ON t1."__owner_id" = t0."id" AND t0."__box_state" = 'present' WHERE (strpos((t1."label") COLLATE "pg_catalog"."C", $1::text) > 0) ${page}`);
     expect(like('shop.name')).toBe(`SELECT t0.* FROM "app"."QtItem" t0 LEFT JOIN "app"."QtShop" t1 ON t1."id" = t0."shop" WHERE (strpos((t1."name") COLLATE "pg_catalog"."C", $1::text) > 0) ${page}`);
-    expect(like('reviews.author')).toBe(`SELECT t0.* FROM "app"."QtItem" t0 LEFT JOIN "app"."QtReview" t1 ON t1."item" = t0."id" WHERE (strpos((t1."author") COLLATE "pg_catalog"."C", $1::text) > 0) ${page}`);
+    expect(like('reviews.author')).toBe(`SELECT t0.* FROM "app"."QtItem" t0  WHERE (EXISTS (SELECT 1 FROM "app"."QtReview" t1 WHERE t1."item" = t0."id" AND (strpos((t1."author") COLLATE "pg_catalog"."C", $1::text) > 0))) ${page}`);
     expect(like('name', 'count')).toBe('SELECT count(*) AS size FROM "app"."QtItem" t0  WHERE (strpos((t0."name") COLLATE "pg_catalog"."C", $1::text) > 0)');
     expect(like('name', 'aggregate')).toBe('SELECT * FROM (SELECT t0."rank" AS "groupId", count(*) AS "fact_0" FROM "app"."QtItem" t0  WHERE (strpos((t0."name") COLLATE "pg_catalog"."C", $1::text) > 0) GROUP BY t0."rank") aggregated ORDER BY "groupId" ASC NULLS FIRST');
   });
@@ -225,9 +225,9 @@ describe('SQL plugin queryFeatures', () => {
     const bound = bindPlugin(plugin);
     plugin.queryFeatures.operators.push('LATER');
     // The plugin also declares reference emptiness (#108 part 2b), which bindPlugin copies with the operators.
-    expect(bound.queryFeatures).toEqual({ operators: postgresPlugin().queryFeatures.operators, referenceEmptiness: true });
+    expect(bound.queryFeatures).toEqual({ operators: postgresPlugin().queryFeatures.operators, referenceEmptiness: true, quantifiers: true });
     expect(Object.isFrozen(bound.queryFeatures) && Object.isFrozen(bound.queryFeatures.operators)).toBe(true);
-    expect(createSQLAdapter(postgresPlugin()).queryFeatures).toEqual({ operators: postgresPlugin().queryFeatures.operators, referenceEmptiness: true });
+    expect(createSQLAdapter(postgresPlugin()).queryFeatures).toEqual({ operators: postgresPlugin().queryFeatures.operators, referenceEmptiness: true, quantifiers: true });
   });
 
   it('gives a version 1 plugin without queryFeatures the operators of 3.7.0', () => {
@@ -437,7 +437,7 @@ describe.skipIf(!uri)('PostgreSQL text operators', () => {
     const counted = {};
     const repeated = await execute(listOperation('qtItems', reviews, 'key', 'pagination:{page:1,size:10,count:true}').source, reviews, counted);
     expect(repeated.errors).toBeUndefined();
-    expect(counted.count).toBe(3);
+    expect(counted.count).toBe(2);
   });
 
   it('filters batched collection fields with text conditions', async () => {

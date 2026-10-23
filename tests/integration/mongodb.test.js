@@ -291,7 +291,7 @@ describeWithMongoDB('MongoDB GraphQL compatibility contract', () => {
     ]);
   });
 
-  test('preserves duplicate roots and duplicate-preserving counts for collection filters', async () => {
+  test('returns each root once and counts roots for collection filters', async () => {
     const added = await execute(
       schema,
       `
@@ -330,12 +330,11 @@ describeWithMongoDB('MongoDB GraphQL compatibility contract', () => {
     );
 
     expect(result.errors).toBeUndefined();
-    expect(result.data.contractseries).toHaveLength(2);
+    expect(result.data.contractseries).toHaveLength(1);
     expect(result.data.contractseries.map((serie) => serie.id)).toEqual([
       added.data.addcontractserie.id,
-      added.data.addcontractserie.id,
     ]);
-    expect(context.count).toBe(2);
+    expect(context.count).toBe(1);
   });
 
   test('returns real aggregate groups and facts', async () => {

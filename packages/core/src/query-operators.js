@@ -10,6 +10,9 @@ export {
   EMPTINESS_QUERY_OPERATORS, describeEmptiness, describeModelEmptiness, emptinessMemberPaths, emptinessScopePaths,
   emptinessScopeTargets, isEmptinessOperator, validateEmptinessValue,
 } from './query-emptiness.js';
+export {
+  ANCHOR_KEY, GROUP_KEYS, IMPLICIT_KEY, aggregateJoinPrefixes, crossingKeys, frameCollectionPaths, frameUnits, validateQuantifiedGroups,
+} from './query-frames.js';
 export { effectiveScalarName } from './metadata.js';
 
 /** Every `QLOperator` value, in declaration order. QLOperator is the only list of operators. */
@@ -68,25 +71,36 @@ const invalidFeatures = (message) => {
 };
 
 /**
- * Reads an adapter's `queryFeatures` declaration into `{ operators, referenceEmptiness }`: the set of
- * operators it compiles, and whether it compiles emptiness through references and collections (#108
- * part 2b). Without a declaration (undefined or null) the adapter supports {@link
- * LEGACY_QUERY_OPERATORS} and no reference emptiness. A declaration is an object whose `operators`
+ * Reads an adapter's `queryFeatures` declaration into `{ operators, referenceEmptiness, quantifiers }`:
+ * the operators it compiles and whether it compiles reference emptiness and collection frames.
+ * Without a declaration (undefined or null) the adapter supports {@link LEGACY_QUERY_OPERATORS}
+ * and neither feature. A declaration is an object whose `operators`
  * is an array of operator names, whose names this version does not know are ignored, and whose
- * optional `referenceEmptiness` is a boolean, undefined or null (false); other members are left for
- * later features. Anything else throws `INVALID_QUERY_FEATURES` (500).
+ * optional `referenceEmptiness` and `quantifiers` are booleans, undefined or null (false).
+ * Quantifiers require reference emptiness for scoped joins. Other members are left for later
+ * features. Anything else throws `INVALID_QUERY_FEATURES` (500).
  */
 export const resolveQueryFeatures = (queryFeatures) => {
-  if (queryFeatures == null) return { operators: new Set(LEGACY_QUERY_OPERATORS), referenceEmptiness: false };
+  if (queryFeatures == null) return { operators: new Set(LEGACY_QUERY_OPERATORS), referenceEmptiness: false, quantifiers: false };
   if (typeof queryFeatures !== 'object' || Array.isArray(queryFeatures)) {
     invalidFeatures('must be an object with an operators array');
   }
-  const { operators, referenceEmptiness } = queryFeatures;
+  const { operators, referenceEmptiness, quantifiers } = queryFeatures;
   if (!Array.isArray(operators) || operators.some((operator) => typeof operator !== 'string')) {
     invalidFeatures('operators must be an array of operator names');
   }
   if (referenceEmptiness != null && typeof referenceEmptiness !== 'boolean') {
     invalidFeatures('referenceEmptiness must be a boolean');
   }
-  return { operators: new Set(operators.filter(isQueryOperator)), referenceEmptiness: referenceEmptiness === true };
+  if (quantifiers != null && typeof quantifiers !== 'boolean') {
+    invalidFeatures('quantifiers must be a boolean');
+  }
+  if (quantifiers === true && referenceEmptiness !== true) {
+    invalidFeatures('quantifiers require referenceEmptiness: true');
+  }
+  return {
+    operators: new Set(operators.filter(isQueryOperator)),
+    referenceEmptiness: referenceEmptiness === true,
+    quantifiers: quantifiers === true,
+  };
 };

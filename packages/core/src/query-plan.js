@@ -1,7 +1,9 @@
+import { GROUP_KEYS, QUANTIFIED_LISTS } from './const/QLQuantifier.js';
+import { aggregateJoinPrefixes, crossingKeys, frameCollectionPaths, validateQuantifiedGroups } from './query-frames.js';
 import { paginationStages } from './query-limits.js';
 import SimfinityError from './errors/simfinity.error.js';
 import {
-  QUERY_OPERATORS, describeEmptiness, describeModelEmptiness, emptinessMemberPaths, emptinessScopeTargets, isEmptinessOperator,
+  describeEmptiness, describeModelEmptiness, emptinessMemberPaths, emptinessScopeTargets, isEmptinessOperator, isQueryOperator,
   textQueryOperator, validateTextFilterValue,
 } from './query-operators.js';
 
@@ -11,7 +13,6 @@ const fail = (message, code = 'INVALID_FILTER_VALUE') => { throw new SimfinityEr
 const detached = (message) => {
   throw new SimfinityError(`${message}; only the runtime writes and fills client scope markers (docs/guide/middleware.md)`, 'DETACHED_CLIENT_FILTER', 500);
 };
-const operators = new Set(QUERY_OPERATORS);
 const reserved = new Set(['AND', 'OR', 'sort', 'pagination', 'aggregation']);
 // `aggregation` is a generated argument only on aggregate endpoints; on find and count a field of
 // that name is filtered like any other.
@@ -23,161 +24,195 @@ const nestedGroups = (group) => [...listOf(group.AND), ...listOf(group.OR)];
 const isPathless = (path) => path == null || path === '';
 const hasTermPath = (term) => typeof term?.path === 'string' && term.path !== '';
 
-/**
- * Internal: the model paths named by generated query arguments, as `{ segments, group, operator,
- * construct }` entries. Covers filter keys and relation terms, AND/OR conditions, list sort terms,
- * and aggregation groupId and fact paths; aggregate sort terms name result keys. Outside aggregate
- * mode a key named `aggregation` is a field filter like any other. `group` is the AND/OR group
- * object whose `conditions` hold the path, or null for the other forms. `operator` is the operator
- * that reads the path, an omitted one read as `EQ`, or null for sort, groupId and fact paths.
- * `construct` is the term or group condition object that names the path, or null for a field
- * filter's own operator and for sort, groupId and fact paths. Malformed entries are left to the
- * backends. An emptiness term without a path (omitted, null or "") names its field, also next to
- * sibling terms that have paths.
- *
- * With `expandMembers` and the queried `gqltype`, the path of each emptiness condition is followed by
- * the stored member paths that condition reads (emptinessMemberPaths), as entries with the same
- * group, operator and construct and `member: true`, so that the checks of client paths apply to them.
- * Only client arguments are expanded.
- */
-export const collectQueryPathEntries = (args, operation = 'find', { gqltype, expandMembers = false } = {}) => {
+/** Internal: rejects group keys the query walker cannot inspect. Shape checks belong to the validator. */
+export const validateQueryGroupKeys = (group, { quantified = false } = {}) => {
+  for (const key of Object.keys(group)) {
+    if (!GROUP_KEYS.has(key) || (key === 'path' && !quantified)) fail(`Unknown filter group key: ${key}`);
+  }
+};
+
+const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const pathSegments = (path) => (typeof path === 'string' && path ? path.split('.') : []);
+const conditionPath = (field, path) => (isPathless(path) ? field : `${field}.${path}`);
+
+// One graph walk for both collectors. Records are emitted after visiting so a group shared at
+// several depths reports its deepest occurrence in that frame. Each quantified record owns a
+// distinct child frame; the parent frame, construct and quantifier distinguish aliased positions.
+const walkQueryEntries = (args, operation, { paths = false, gqltype, expandMembers = false } = {}) => {
   const entries = [];
-  const add = (path, group = null, operator = null, construct = null) => {
-    if (typeof path === 'string' && path) entries.push({ segments: path.split('.'), group, operator, construct });
-  };
-  const addEmptiness = (path, group, operator, construct) => {
-    add(path, group, operator, construct);
-    if (!expandMembers || typeof path !== 'string' || !path) return;
-    for (const segments of emptinessMemberPaths(gqltype, path.split('.'))) {
-      entries.push({
-        segments, group, operator, construct, member: true,
-      });
-    }
-  };
   if (!args || typeof args !== 'object') return entries;
-  const operatorOf = (item) => item?.operator ?? 'EQ';
-  const visit = (group) => {
-    if (!group || typeof group !== 'object') return;
-    for (const condition of listOf(group.conditions)) {
-      if (typeof condition?.field !== 'string') continue;
-      const path = isPathless(condition.path) ? condition.field : `${condition.field}.${condition.path}`;
-      if (isEmptinessOperator(condition.operator)) addEmptiness(path, group, condition.operator, condition);
-      else add(path, group, operatorOf(condition), condition);
+  const root = { base: [], frames: [], groups: new Map() };
+  const records = [];
+  const open = new Set();
+  const childFrame = (parent, path, quantifier, construct, anchor = []) => ({
+    base: [...parent.base, ...anchor, ...pathSegments(path)],
+    frames: [...parent.frames, { path, type: quantifier, construct }],
+    groups: new Map(),
+  });
+  const visit = (group, frame, parentDepth, quantifier = null) => {
+    // Object cycles are cut even when a quantified edge would otherwise create another frame.
+    if (!isObject(group) || open.has(group)) return;
+    validateQueryGroupKeys(group, { quantified: quantifier !== null });
+    const depth = parentDepth + (group.__implicit === true ? 0 : 1);
+    let positions = frame.groups.get(group);
+    if (!positions) {
+      positions = new Map();
+      frame.groups.set(group, positions);
     }
-    for (const item of nestedGroups(group)) visit(item);
+    let record = positions.get(quantifier);
+    if (record && record.depth >= depth) return;
+    if (!record) {
+      const anchor = group.__implicit === true && Array.isArray(group.__anchor) ? group.__anchor : [];
+      record = {
+        group, frame, quantifier, depth, anchor,
+        inner: quantifier === null ? frame : childFrame(frame, group.path, quantifier, group, anchor),
+      };
+      positions.set(quantifier, record);
+      records.push(record);
+    } else record.depth = depth;
+    open.add(group);
+    for (const item of nestedGroups(group)) visit(item, record.inner, depth);
+    for (const type of QUANTIFIED_LISTS) {
+      for (const item of listOf(group[type])) visit(item, record.inner, depth, type);
+    }
+    open.delete(group);
   };
   const controls = controlArgs(operation);
   for (const [name, value] of Object.entries(args)) {
-    if (controls.has(name) || value == null) continue;
-    const terms = listOf(value.terms);
-    const pathless = (term) => isEmptinessOperator(term?.operator) && isPathless(term.path);
-    if (!terms.some(hasTermPath)) {
-      const term = terms.find(pathless);
-      if (term) addEmptiness(name, null, term.operator, term);
-      else if (isEmptinessOperator(value.operator)) addEmptiness(name, null, value.operator, null);
-      else add(name, null, operatorOf(value));
-      continue;
-    }
-    let field = false;
-    for (const term of terms) {
-      if (hasTermPath(term)) {
-        if (isEmptinessOperator(term.operator)) addEmptiness(`${name}.${term.path}`, null, term.operator, term);
-        else add(`${name}.${term.path}`, null, operatorOf(term), term);
-      } else if (!field && pathless(term)) {
-        addEmptiness(name, null, term.operator, term);
-        field = true;
-      }
-    }
-    // An emptiness operator beside terms is rejected later; until then it reads the field too.
-    if (!field && isEmptinessOperator(value.operator)) addEmptiness(name, null, value.operator, null);
+    if (!controls.has(name) && value != null) records.push({ name, value });
   }
-  for (const item of nestedGroups(args)) visit(item);
-  if (operation === 'aggregate') {
-    add(args.aggregation?.groupId);
-    for (const fact of listOf(args.aggregation?.facts)) add(fact?.path);
-  } else for (const term of listOf(args.sort?.terms)) add(term?.field);
-  return entries;
-};
+  for (const group of nestedGroups(args)) visit(group, root, -1);
 
-/**
- * Internal: every condition the arguments hold, as `{ operator, path, segments, form, field, rawPath,
- * value, hasValue, ambiguous, depth, construct, emptiness }` entries: field filters, relation terms
- * and AND/OR group conditions at any depth, with an omitted operator read as `EQ`.
- * - `form` is 'filter' (an argument's own operator, without a terms array), 'beside-terms' (an
- *   operator written next to a terms array, which the compilers read only to reject an emptiness
- *   operator), 'term' or 'condition'.
- * - `field` is the argument or condition field as written (a condition's may be dotted) and `rawPath`
- *   the term or condition path as written. `path`, for messages, and `segments` join them; a path that
- *   is omitted, null or "" names the field itself.
- * - `value` is the condition's value, and `hasValue` whether it has an own `value` key.
- * - `ambiguous` marks a condition with both a dotted field and a non-empty path.
- * - `depth` is 0 for argument filters and for the groups listed in args.AND and args.OR, and one more
- *   for each nested group; a group reached at several depths reports the deepest.
- * - `construct` is the term or group condition object itself, or null for a field filter's own
- *   operator ('filter' and 'beside-terms'). These objects are the only ones that carry a client scope
- *   marker, `__scope` (#108 part 2b).
- * - `emptiness` tells whether the operator is IS_EMPTY or IS_NOT_EMPTY.
- * Sort, pagination and aggregation hold no operators. Malformed entries are skipped and left to the
- * backends; a group reached twice is read once.
- */
-export const collectQueryOperators = (args, operation = 'find') => {
-  const entries = [];
-  if (!args || typeof args !== 'object') return entries;
-  const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
-  const add = (item, form, field, rawPath, depth, ambiguous = false) => {
+  const metadata = (relative, frame, container, use = 'filter') => ({
+    segments: [...frame.base, ...relative], relative, frames: frame.frames, container, use,
+  });
+  const addPath = (path, frame, container, group = null, operator = null, construct = null, extra = {}) => {
+    if (typeof path !== 'string' || !path) return;
+    const relative = path.split('.');
+    const entry = { ...metadata(relative, frame, container), group, operator, construct, ...extra };
+    entries.push(entry);
+    if (!expandMembers || !isEmptinessOperator(operator)) return;
+    for (const segments of emptinessMemberPaths(gqltype, entry.segments)) {
+      entries.push({ ...entry, segments, relative: segments.slice(frame.base.length), member: true });
+    }
+  };
+  const addOperator = (item, form, field, rawPath, depth, frame, container, relativePath, quantifier) => {
     if (!isObject(item)) return;
-    const path = isPathless(rawPath) ? field : `${field}.${rawPath}`;
-    const operator = item.operator ?? 'EQ';
+    const quantified = form === 'quantified';
+    const relative = pathSegments(relativePath);
+    const meta = metadata(relative, frame, container);
+    const operator = quantified ? null : item.operator ?? 'EQ';
+    const path = typeof relativePath === 'string' ? meta.segments.join('.') : relativePath;
     entries.push({
+      ...meta,
       operator,
       path,
-      segments: typeof path === 'string' && path ? path.split('.') : [],
       form,
       field,
       rawPath,
       value: item.value,
       hasValue: Object.hasOwn(item, 'value'),
-      ambiguous,
+      ambiguous: form === 'condition' && typeof field === 'string' && field.includes('.') && !isPathless(rawPath),
       depth,
-      construct: form === 'term' || form === 'condition' ? item : null,
+      construct: quantified || form === 'term' || form === 'condition' ? item : null,
       emptiness: isEmptinessOperator(operator),
+      ...(quantified ? { quantifier } : {}),
     });
   };
-  // The deepest level of each group, as the backends' depth limit counts it; a group inside itself is
-  // not entered again.
-  const depths = new Map();
-  const open = new Set();
-  const measure = (group, depth) => {
-    if (!isObject(group) || open.has(group) || depths.get(group) >= depth) return;
-    depths.set(group, depth);
-    open.add(group);
-    for (const item of nestedGroups(group)) measure(item, depth + 1);
-    open.delete(group);
+  const addQuantified = (construct, path, quantifier, frame, container, depth) => {
+    if (paths) addPath(path, frame, container, null, null, construct, { quantifier });
+    else addOperator(construct, 'quantified', path, undefined, depth, frame, container, path, quantifier);
   };
-  const visited = new Set();
-  const visit = (group) => {
-    if (!isObject(group) || visited.has(group)) return;
-    visited.add(group);
-    for (const condition of listOf(group.conditions)) {
-      const field = condition?.field;
-      const rawPath = condition?.path;
-      add(condition, 'condition', field, rawPath, depths.get(group), typeof field === 'string' && field.includes('.') && !isPathless(rawPath));
+  for (const record of records) {
+    if (Object.hasOwn(record, 'group')) {
+      const { group, frame, inner, quantifier, depth, anchor } = record;
+      if (quantifier !== null) {
+        const path = anchor.length && typeof group.path === 'string' ? [...anchor, group.path].join('.') : group.path;
+        addQuantified(group, path, quantifier, frame, group, depth);
+      }
+      for (const condition of listOf(group.conditions)) {
+        const field = condition?.field;
+        const path = conditionPath(field, condition?.path);
+        if (paths) {
+          if (typeof field === 'string') addPath(path, inner, group, group, condition.operator ?? 'EQ', condition);
+        } else addOperator(condition, 'condition', field, condition?.path, depth, inner, group, path);
+      }
+      continue;
     }
-    for (const item of nestedGroups(group)) visit(item);
-  };
-  const controls = controlArgs(operation);
-  for (const [name, value] of Object.entries(args)) {
-    if (controls.has(name) || !isObject(value)) continue;
-    // A relation filter's operators are in its terms; an operator beside them is read too, since a
-    // backend that reads the field as a scalar would compile it.
-    const terms = Array.isArray(value.terms);
-    if (!terms || value.operator !== undefined) add(value, terms ? 'beside-terms' : 'filter', name, undefined, 0);
-    if (terms) for (const term of value.terms) add(term, 'term', name, term?.path, 0);
+    const { name, value } = record;
+    const terms = listOf(value.terms);
+    if (value.quantifier != null) {
+      addQuantified(value, name, value.quantifier, root, value, 0);
+      const frame = childFrame(root, name, value.quantifier, value);
+      for (const term of terms) {
+        if (!isObject(term)) continue;
+        if (paths) {
+          // Invalid path-less terms still name the field, as before; validation rejects them
+          // before authorization marking. Their relative path names nothing in the child.
+          if (hasTermPath(term)) addPath(term.path, frame, value, null, term.operator ?? 'EQ', term);
+          else if (isPathless(term.path)) {
+            entries.push({ ...metadata([], frame, value), group: null, operator: term.operator ?? 'EQ', construct: term });
+          }
+        } else addOperator(term, 'term', name, term.path, 0, frame, value, isPathless(term.path) ? '' : term.path);
+      }
+      continue;
+    }
+    if (!paths) {
+      const hasTerms = Array.isArray(value.terms);
+      if (!hasTerms || value.operator !== undefined) addOperator(value, hasTerms ? 'beside-terms' : 'filter', name, undefined, 0, root, value, name);
+      if (hasTerms) for (const term of terms) addOperator(term, 'term', name, term?.path, 0, root, value, conditionPath(name, term?.path));
+      continue;
+    }
+    const pathless = (term) => isEmptinessOperator(term?.operator) && isPathless(term.path);
+    if (!terms.some(hasTermPath)) {
+      const term = terms.find(pathless);
+      if (term) addPath(name, root, value, null, term.operator, term);
+      else addPath(name, root, value, null, value.operator ?? 'EQ');
+      continue;
+    }
+    let field = false;
+    for (const term of terms) {
+      if (hasTermPath(term)) addPath(`${name}.${term.path}`, root, value, null, term.operator ?? 'EQ', term);
+      else if (!field && pathless(term)) {
+        addPath(name, root, value, null, term.operator, term);
+        field = true;
+      }
+    }
+    // An emptiness operator beside terms is rejected later; until then it reads the field too.
+    if (!field && isEmptinessOperator(value.operator)) addPath(name, root, value, null, value.operator);
   }
-  for (const item of nestedGroups(args)) measure(item, 0);
-  for (const item of nestedGroups(args)) visit(item);
+  if (paths) {
+    const addUse = (path, use) => addPath(path, root, null, null, null, null, { use });
+    if (operation === 'aggregate') {
+      addUse(args.aggregation?.groupId, 'groupId');
+      for (const fact of listOf(args.aggregation?.facts)) addUse(fact?.path, 'fact');
+    } else for (const term of listOf(args.sort?.terms)) addUse(term?.field, 'sort');
+  }
   return entries;
 };
+
+/**
+ * Internal: model paths named by filter keys, terms, logical/quantified groups, sort, groupId and
+ * facts. Each entry carries `use`, the correlation `container`, enclosing `frames` (relative path,
+ * quantifier `type`, marker `construct`), `relative` segments in its frame and absolute `segments`.
+ * A quantified carrier names its path in the containing frame, with `quantifier` and its own
+ * construct; children enter its frame. The legacy `group` remains the conditions owner, otherwise
+ * null; operator and construct retain their old meanings except that quantifier filters now carry
+ * their own construct. An omitted filter operator is EQ; non-filter reads and quantified carriers
+ * have no operator. `expandMembers` appends stored emptiness member paths, preserving metadata.
+ */
+export const collectQueryPathEntries = (args, operation = 'find', options = {}) => (
+  walkQueryEntries(args, operation, { ...options, paths: true })
+);
+
+/**
+ * Internal: filter constructs only, with the same frame metadata as the path collector. Preserves
+ * form, field, rawPath, value, hasValue, ambiguous, deepest depth and emptiness. Quantified carriers
+ * have form `quantified`, operator null and their own construct; ordinary own filter operators keep
+ * construct null. Explicit groups add a depth level, implicit ones none. Invalid entries are left
+ * to the validator; unknown group keys and path on a plain group fail closed here.
+ */
+export const collectQueryOperators = (args, operation = 'find') => walkQueryEntries(args, operation);
 
 /** Internal: the segment arrays of {@link collectQueryPathEntries}. */
 export const collectQueryPaths = (args, operation = 'find') => (
@@ -242,11 +277,15 @@ export const resolveModelPath = (models, entityName, path) => {
  * that path's target find scope arguments, planned on the target type in its own frame, or null when
  * the scope added nothing. A `__scope` without filled `scopes`, without one of those keys, or on a
  * construct that reads no reference or collection fails with DETACHED_CLIENT_FILTER (500) after the
- * checks above; a `__scope` anywhere else is never read.
+ * checks above. With `quantifiers`, collection scalar paths become correlated ANY frames,
+ * explicit ANY/ALL/NONE and quantifier filters retain their quantifier, and scoped reference
+ * crossings inside a frame lift into `joins`. Aggregate collection joins remain legacy; later
+ * frames carry their legacy chain in `anchor`. Sorts through collections fail even in count mode.
  */
-export const createQueryPlan = (models, entityName, input = {}, {
-  mode = 'find', operators: supported, referenceEmptiness = supported == null,
+export const createQueryPlan = (models, entityName, source = {}, {
+  mode = 'find', operators: supported, referenceEmptiness = supported == null, quantifiers = supported == null,
 } = {}) => {
+  let input = source;
   const allowed = supported == null ? null : new Set(supported);
   const references = referenceEmptiness === true;
   const combine = (kind, terms) => {
@@ -256,9 +295,8 @@ export const createQueryPlan = (models, entityName, input = {}, {
   // The client scope marker of a construct, lifted into the predicate's `scopes`: each target scope's
   // arguments are planned on the target type, as trusted find arguments in their own frame, whatever
   // the query's mode, with the operator names already read (`operators` may be a one-time iterable).
-  const liftScopes = (marker, shape, segments, operator) => {
+  const liftScopes = (marker, targets, segments, operator) => {
     const label = `${operator} on ${segments.join('.')}`;
-    const targets = emptinessScopeTargets(shape, segments);
     const paths = Object.keys(targets);
     if (!paths.length) detached(`${label} carries a client scope marker, but reads no reference or collection`);
     const scopes = marker?.scopes;
@@ -266,39 +304,40 @@ export const createQueryPlan = (models, entityName, input = {}, {
     const lifted = {};
     for (const path of paths) {
       if (!Object.hasOwn(scopes, path) || scopes[path] === undefined) detached(`${label} carries a client scope marker without the scope of ${path}`);
+      if (scopes[path] !== null && (!isObject(scopes[path]) || ![Object.prototype, null].includes(Object.getPrototypeOf(scopes[path])))) detached(`${label} carries a malformed scope of ${path}`);
       lifted[path] = scopes[path] === null
         ? null
-        : createQueryPlan(models, targets[path], scopes[path], { mode: 'find', operators: allowed ?? undefined, referenceEmptiness: references }).where;
+        : createQueryPlan(models, targets[path], scopes[path], { mode: 'find', operators: allowed ?? undefined, referenceEmptiness: references, quantifiers }).where;
     }
     return lifted;
   };
   const hasMarker = (construct) => construct != null && typeof construct === 'object' && Object.hasOwn(construct, '__scope');
   // Rule 1 has resolved the path; rule 2 is the compiler's operators, rules 3 to 6 describeEmptiness's.
-  const emptiness = (path, steps, operator, value, construct) => {
+  const emptiness = (path, steps, operator, value, construct, frameEntity) => {
     if (allowed && !allowed.has(operator)) fail(`The ${operator} filter operator is not supported by this query compiler`, 'UNSUPPORTED_QUERY');
     const segments = Array.isArray(path) ? path : path.split('.');
     const options = {
       operator, value, path: segments.join('.'), referenceEmptiness: references,
     };
-    const gqltype = models.entities.find((item) => item.name === entityName)?.gqltype;
+    const gqltype = models.entities.find((item) => item.name === frameEntity)?.gqltype;
     const shape = gqltype ? describeEmptiness(gqltype, segments, options) : describeModelEmptiness(steps, options);
     const node = {
       kind: 'predicate', path: segments, operator, value: null,
     };
-    if (hasMarker(construct)) node.scopes = liftScopes(construct.__scope, shape, segments, operator);
+    if (hasMarker(construct)) node.scopes = liftScopes(construct.__scope, emptinessScopeTargets(shape, segments), segments, operator);
     return node;
   };
   // `construct` is the term or group condition that holds the predicate, the only objects whose
   // `__scope` is read; null for a field filter's own operator.
-  const predicate = (path, operator, value, construct = null) => {
-    const steps = resolveModelPath(models, entityName, path);
+  const predicate = (path, operator, value, construct = null, frameEntity = entityName, inFrame = false) => {
+    const steps = resolveModelPath(models, frameEntity, path);
     const op = operator ?? 'EQ';
-    if (isEmptinessOperator(op)) return emptiness(path, steps, op, value, construct);
+    if (isEmptinessOperator(op)) return emptiness(path, steps, op, value, construct, frameEntity);
     const field = steps.at(-1);
     if (field.kind !== 'scalar' && !field.inferred) {
       fail(`Filter on object field ${path} requires a scalar path`, steps.length > 1 ? 'INVALID_FILTER_PATH' : 'MISSING_FILTER_PATH');
     }
-    if (!operators.has(op)) fail(`Unknown filter operator: ${op}`, 'INVALID_FILTER_OPERATOR');
+    if (!isQueryOperator(op)) fail(`Unknown filter operator: ${op}`, 'INVALID_FILTER_OPERATOR');
     if (allowed && !allowed.has(op)) fail(`The ${op} filter operator is not supported by this query compiler`, 'UNSUPPORTED_QUERY');
     const collection = ['IN', 'NIN', 'BTW'].includes(op);
     if (value === undefined || (!collection && Array.isArray(value)) || (value === null && !['EQ', 'NE'].includes(op))) fail('Expected a scalar filter value');
@@ -306,28 +345,61 @@ export const createQueryPlan = (models, entityName, input = {}, {
     if (['IN', 'NIN', 'BTW'].includes(op) && !Array.isArray(value)) fail(`${op} requires an array value`);
     if (op === 'BTW' && value.length !== 2) fail('BTW requires two values');
     if (textQueryOperator(op)) validateTextFilterValue(op, value, field.scalar, path);
-    if (hasMarker(construct)) detached(`${op} on ${Array.isArray(path) ? path.join('.') : path} carries a client scope marker, but is not an emptiness condition`);
-    return { kind: 'predicate', path: Array.isArray(path) ? path : path.split('.'), operator: op, value: value === undefined ? null : value };
+    const node = { kind: 'predicate', path: Array.isArray(path) ? path : path.split('.'), operator: op, value: value === undefined ? null : value };
+    if (hasMarker(construct)) {
+      if (!inFrame) detached(`${op} on ${node.path.join('.')} carries a client scope marker, but is not an emptiness condition`);
+      const targets = Object.fromEntries(crossingKeys(node.path, { models, entity: frameEntity }).map((key) => [key, resolveModelPath(models, frameEntity, key).at(-1).target]));
+      node.joins = liftScopes(construct.__scope, targets, node.path, op);
+    }
+    return node;
   };
   const validateGroup = (value, keys = ['conditions', 'AND', 'OR']) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) fail('Expected a filter group object');
     for (const key of keys) if (value[key] != null && !Array.isArray(value[key])) fail(`${key} requires an array`);
   };
-  const group = (value, depth = 0) => {
+  const group = (value, depth = -1, frameEntity = entityName, inFrame = false) => {
     validateGroup(value);
-    if (depth > 5) fail('Filter nesting too deep', 'FILTER_DEPTH_EXCEEDED');
+    const level = depth + (value.__implicit === true ? 0 : 1);
+    if (level > 5) fail('Filter nesting too deep', 'FILTER_DEPTH_EXCEEDED');
     const terms = [];
     for (const condition of value.conditions || []) {
       if (!condition || typeof condition.field !== 'string') fail('Invalid filter path', 'INVALID_FILTER_PATH');
       if (condition.field.includes('.') && condition.path) fail('Filter condition cannot use both dotted field syntax and a separate path', 'AMBIGUOUS_FILTER_FIELD');
-      terms.push(predicate(condition.path ? `${condition.field}.${condition.path}` : condition.field, condition.operator, condition.value, condition));
+      terms.push(predicate(condition.path ? `${condition.field}.${condition.path}` : condition.field, condition.operator, condition.value, condition, frameEntity, inFrame));
     }
-    for (const item of value.AND || []) terms.push(group(item, depth + 1));
-    terms.push(combine('or', (value.OR || []).map((item) => group(item, depth + 1))));
+    for (const quantifier of QUANTIFIED_LISTS) for (const item of value[quantifier] || []) {
+      const anchor = item.__implicit === true ? item.__anchor : undefined;
+      const path = item.path.split('.');
+      const target = resolveModelPath(models, frameEntity, [...(anchor ?? []), ...path]).at(-1).target;
+      const node = { kind: 'quantified', quantifier, path, where: group(item, level, target, true), scope: null };
+      if (anchor?.length) node.anchor = anchor;
+      if (hasMarker(item)) {
+        const fullPath = [...(anchor ?? []), ...path];
+        const key = fullPath.join('.');
+        const crossings = anchor?.length ? [] : crossingKeys(path, { models, entity: frameEntity });
+        const targets = Object.fromEntries(crossings.map((prefix) => [prefix, resolveModelPath(models, frameEntity, prefix).at(-1).target]));
+        targets[key] = target;
+        const scopes = liftScopes(item.__scope, targets, fullPath, quantifier);
+        node.scope = scopes[key];
+        if (anchor?.length) {
+          for (const prefix of J) if (key.startsWith(`${prefix}.`)) {
+            if (!Object.hasOwn(item.__scope.scopes, prefix) || item.__scope.scopes[prefix] !== null) detached(`${quantifier} on ${key} requires a null aggregate anchor scope for ${prefix}`);
+          }
+        } else if (crossings.length) node.joins = Object.fromEntries(crossings.map((prefix) => [prefix, scopes[prefix]]));
+      }
+      terms.push(node);
+    }
+    for (const item of value.AND || []) terms.push(group(item, level, frameEntity, inFrame));
+    terms.push(combine('or', (value.OR || []).map((item) => group(item, level, frameEntity, inFrame))));
     return combine('and', terms);
   };
-  // Top-level arguments are field filters plus AND/OR; `conditions` only lists conditions inside groups.
+  // Validate received arguments in filled-marker mode before the pure, frame-producing rewrite.
   validateGroup(input, ['AND', 'OR']);
+  const context = { models, entity: entityName, operation: mode, operators: allowed, referenceEmptiness: references, quantifiers };
+  const J = mode === 'aggregate' ? aggregateJoinPrefixes(input.aggregation, context) : new Set();
+  context.J = J;
+  validateQuantifiedGroups(input, context);
+  input = frameCollectionPaths(input, context);
   const controls = controlArgs(mode);
   const terms = [];
   for (const [name, value] of Object.entries(input)) {
@@ -371,16 +443,22 @@ export const createQueryPlan = (models, entityName, input = {}, {
     plan.aggregation = { groupId: aggregation.groupId.split('.'), facts: aggregation.facts.map((fact) => ({ ...fact, path: fact.path.split('.') })) };
   }
   if (input.sort && (!Array.isArray(input.sort.terms) || !input.sort.terms.length)) fail('Sort requires non-empty terms', 'INVALID_SORT');
-  if (mode !== 'count') for (const sort of input.sort?.terms || []) {
+  for (const sort of input.sort?.terms || []) {
     if (!sort || (sort.order !== 'ASC' && sort.order !== 'DESC')) fail('Invalid sort order', 'INVALID_SORT');
     if (typeof sort.field !== 'string' || sort.field.split('.').some((part) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(part))) {
       fail('Invalid sort path', 'INVALID_FILTER_PATH');
     }
     if (mode !== 'aggregate') {
-      const field = resolveModelPath(models, entityName, sort.field).at(-1);
+      const steps = resolveModelPath(models, entityName, sort.field);
+      let owner = entityName;
+      for (const step of steps) {
+        if (step.kind === 'collection') fail(`Sort path ${sort.field} crosses the collection ${owner}.${step.name}; a record has no single value there`, 'INVALID_FILTER_PATH');
+        if (step.target && !step.inferred) owner = step.target;
+      }
+      const field = steps.at(-1);
       if (field.kind !== 'scalar' && !field.inferred) fail('Sort path must end in a scalar field', 'INVALID_FILTER_PATH');
     }
-    plan.sort.push({ path: sort.field.split('.'), order: sort.order });
+    if (mode !== 'count') plan.sort.push({ path: sort.field.split('.'), order: sort.order });
   }
   return plan;
 };

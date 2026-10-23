@@ -206,7 +206,7 @@ for (const backend of backends) {
         [{ AND: [{ conditions: [{ field: 'tags', operator: 'IS_EMPTY', value: [] }] }] }, 'INVALID_FILTER_VALUE', 'IS_EMPTY takes no value on tags: omit it or pass null'],
         // A path that continues inside an embedded list or a collection.
         [{ lines: { terms: [{ path: 'qty', operator: 'IS_EMPTY' }] } }, 'INVALID_FILTER_PATH', IN_LIST],
-        [{ reviews: { terms: [{ path: 'text', operator: 'IS_NOT_EMPTY' }] } }, 'INVALID_FILTER_PATH', IN_LIST],
+        [{ reviews: { terms: [{ path: 'text', operator: 'IS_NOT_EMPTY' }] } }, 'INVALID_FILTER_PATH', 'The shorthand excludes them; use an explicit group'],
       ];
       reads.length = 0;
       for (const [args, code, wording] of REJECTED) {

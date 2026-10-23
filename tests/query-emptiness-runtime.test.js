@@ -27,6 +27,7 @@ const LEGACY = ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE'
 const NOT_SUPPORTED = 'the database adapter does not support emptiness through references and collections';
 // Every operator, and reference emptiness.
 const DECLARED = { operators: OPERATORS, referenceEmptiness: true };
+const QUANTIFIED = { ...DECLARED, quantifiers: true };
 const embedded = { relation: { embedded: true } };
 const reference = (connectionField) => ({ relation: { embedded: false, ...(connectionField ? { connectionField } : {}) } });
 
@@ -50,7 +51,8 @@ const nested = (condition, depth) => {
 };
 const predicatesOf = (node) => {
   if (!node) return [];
-  return node.kind === 'predicate' ? [node] : node.terms.flatMap(predicatesOf);
+  if (node.kind === 'quantified') return [node.where, node.scope, ...Object.values(node.joins ?? {})].flatMap(predicatesOf);
+  return node.kind === 'predicate' ? [node, ...Object.values(node.joins ?? {}).flatMap(predicatesOf)] : node.terms.flatMap(predicatesOf);
 };
 const predicate = (path, operator, value = null) => ({ kind: 'predicate', path: path.split('.'), operator, value });
 
@@ -68,6 +70,7 @@ const createAdapter = ({
     if (plan) {
       calls.at(-1).plan = createQueryPlan(described, Model.name, args, {
         mode, operators: queryFeatures?.operators ?? LEGACY, referenceEmptiness: queryFeatures?.referenceEmptiness === true,
+        quantifiers: queryFeatures?.quantifiers === true,
       });
     }
     return mode === 'aggregate' ? [] : rows[Model.name] ?? [];
@@ -555,8 +558,8 @@ describe('the runtime gate and createQueryPlan', () => {
   const TABLE = [...ACCEPTED, ...RULE_1, ...LATER_RULES, ...RULE_6];
   // [label, queryFeatures, the matching direct createQueryPlan options].
   const ADAPTERS = [
-    ['an adapter that does not declare reference emptiness', { operators: OPERATORS }, { referenceEmptiness: false }],
-    ['an adapter that declares it, which plans the rule-6 rows', DECLARED, {}],
+    ['an adapter that does not declare reference emptiness', { operators: OPERATORS }, { referenceEmptiness: false, quantifiers: false }],
+    ['an adapter that declares it, which plans the rule-6 rows', DECLARED, { quantifiers: false }],
   ];
   const codeFor = (features, input, code) => (features.referenceEmptiness && RULE_6.some(([row]) => row === input) ? null : code);
 
@@ -587,7 +590,7 @@ describe('the runtime gate and createQueryPlan', () => {
     }
   });
 
-  it('gives a group condition without a string field createQueryPlan\'s rule-1 error when the adapter does not declare the operator, and leaves it to a declaring adapter\'s compiler', async () => {
+  it('rejects a group condition without a string field before any adapter runs', async () => {
     const undeclared = setup(undefined);
     const declared = setup({ operators: OPERATORS });
     const invalidPath = { code: 'INVALID_FILTER_PATH', status: 400, message: 'Invalid filter path' };
@@ -597,7 +600,7 @@ describe('the runtime gate and createQueryPlan', () => {
       expect(codeOf(() => createQueryPlan(undeclared.models, 'QgItem', input, { operators: LEGACY })), label).toBe('INVALID_FILTER_PATH');
       expect(await undeclared.send(input, { trusted: true }), label).toEqual({ error: invalidPath, calls: 0 });
       // Here the compiler is createQueryPlan; MongoDB's buildQuery rejects the condition with its own code.
-      expect(await declared.send(input, { trusted: true }), label).toEqual({ error: invalidPath, calls: 1 });
+      expect(await declared.send(input, { trusted: true }), label).toEqual({ error: invalidPath, calls: 0 });
     }
   });
 
@@ -634,11 +637,11 @@ describe('the runtime gate and createQueryPlan', () => {
     }
   });
 
-  it('leaves a term of a scalar field to the compiler, which reads the filter\'s own operator (regression pin, passes on 3.9.0)', async () => {
+  it('ignores a scalar field term and validates the scalar carrier before the adapter', async () => {
     const { send, models } = setup({ operators: OPERATORS });
     const input = { note: { terms: [{ path: 'x', ...IS }] } };
     expect(await send(input, { trusted: true })).toEqual({
-      error: { code: 'INVALID_FILTER_VALUE', status: 400, message: 'Expected a scalar filter value' }, calls: 1,
+      error: { code: 'INVALID_FILTER_VALUE', status: 400, message: 'Expected a scalar filter value' }, calls: 0,
     });
     expect(codeOf(() => createQueryPlan(models, 'QgItem', input))).toBe('INVALID_FILTER_VALUE');
   });
@@ -689,7 +692,8 @@ describe('joined scopes', () => {
       [(args) => { args.OR = [{ conditions: [{ field: 'lines', operator: 'IS_EMPTY' }] }]; }, 'shop.lines'],
       // A scope that crosses a reference on its own endpoint gets the same rejection.
       [(args) => { args.owner = { terms: [{ path: 'name', operator: 'IS_EMPTY' }] }; }, 'shop.owner.name'],
-    ]) expect(failure(await run(legacy, withShopScope(scope))), path).toEqual(decision3(path, operator));
+    ]) expect(failure(await run(legacy, withShopScope(scope))), path).toEqual(path === 'shop.owner.name'
+      ? unsupported('IS_EMPTY on owner.name crosses the reference owner') : decision3(path, operator));
     expect(calls).toEqual([]);
     // The same scope applies on its own endpoint, and without a client path into Shop.
     const own = await run('{ qrShops { id } }', withShopScope((args) => { args.dims = { terms: [{ operator: 'IS_EMPTY' }] }; }));
@@ -720,7 +724,7 @@ describe('joined scopes', () => {
     }
   });
 
-  it('keeps the 403 of a restricted caller\'s legacy path into a scoped collection, or into a target whose scope crosses a collection (regression pin, passes on 3.9.0)', async () => {
+  it('keeps legacy collection 403s for raw-valid scopes and gates an invalid raw scope first', async () => {
     const { run, calls } = build();
     const collection = await run('{ qrItems(reviews: {terms: [{path: "text", value: "x"}]}) { id } }', {
       scopes: { review: (args) => { args.deletedAt = { operator: 'IS_EMPTY' }; } },
@@ -731,7 +735,9 @@ describe('joined scopes', () => {
       args.name = { operator: 'IS_EMPTY' };
       args.items = { terms: [{ path: 'note', value: 'x' }] };
     })))).toEqual(crossing);
-    expect(failure(await run(legacy, withShopScope((args) => { args.items = { terms: [{ path: 'note', operator: 'IS_EMPTY' }] }; })))).toEqual(crossing);
+    expect(failure(await run(legacy, withShopScope((args) => { args.items = { terms: [{ path: 'note', operator: 'IS_EMPTY' }] }; })))).toEqual({
+      code: 'INVALID_FILTER_PATH', status: 400, message: 'IS_EMPTY cannot test items.note: emptiness of a value inside a list is not defined, and items is a collection',
+    });
     expect(calls).toEqual([]);
   });
 
@@ -804,6 +810,7 @@ describe('joined scopes', () => {
   describe.each([
     ['undeclared', { operators: OPERATORS }],
     ['declared', DECLARED],
+    ['quantifiers', QUANTIFIED],
   ])('below a prefix that continues inside an embedded list or a collection, with reference emptiness %s', (declaration, queryFeatures) => {
     // An item's embedded order lines reference a scoped shop, and its reviews, an unscoped collection, reference
     // the scoped item again, so the joined scopes of olines.shop and reviews.item sit below a list. Their codes are
@@ -847,13 +854,22 @@ describe('joined scopes', () => {
       message: `${operator} cannot test ${path}: emptiness of a value inside a list is not defined, and ${list} is ${kind}`,
     });
     const lines = insideList('olines.shop.note', 'olines', 'an embedded list');
-    const reviews = insideList('reviews.item.note', 'reviews', 'a collection');
+    const reviews = queryFeatures.quantifiers
+      ? { code: 'INVALID_FILTER_PATH', status: 400, message: 'The shorthand excludes them; use an explicit group' }
+      : insideList('reviews.item.note', 'reviews', 'a collection');
 
-    it('gives the target scope\'s emptiness condition the permanent INVALID_FILTER_PATH of its prefixed condition, not the decision-3 rejection (regression pin, passes on 3.10.0)', async () => {
+    it(queryFeatures.quantifiers ? 'reads target scope emptiness inside collection frames and keeps embedded-list rejection'
+      : 'pin: gives target scope emptiness the permanent INVALID_FILTER_PATH of its prefixed condition', async () => {
       const { run, calls } = buildListPrefixes();
       const note = (args) => { args.note = { operator: 'IS_EMPTY' }; };
       expect(failure(await run(throughLines, { shop: note }))).toEqual(lines);
-      expect(failure(await run(throughReviews, { item: note }))).toEqual(reviews);
+      const reviewResult = await run(throughReviews, { item: note });
+      if (queryFeatures.quantifiers) {
+        expect(reviewResult.errors).toBeUndefined();
+        expect(JSON.stringify(calls.at(-1).plan.where)).toContain('"kind":"quantified"');
+        expect(predicatesOf(calls.at(-1).plan.where).find((node) => node.joins?.item)?.joins.item).toEqual(predicate('note', 'IS_EMPTY'));
+        calls.length = 0;
+      } else expect(failure(reviewResult)).toEqual(reviews);
       // Every form of the scope's condition, as on its own endpoint.
       for (const [scope, operator] of [
         [(args) => { args.note = { operator: 'IS_NOT_EMPTY' }; }, 'IS_NOT_EMPTY'],
@@ -861,12 +877,17 @@ describe('joined scopes', () => {
         [(args) => { args.OR = [{ conditions: [{ field: 'note', operator: 'IS_NOT_EMPTY' }] }]; }, 'IS_NOT_EMPTY'],
       ]) {
         expect(failure(await run(throughLines, { shop: scope })), operator).toEqual(insideList('olines.shop.note', 'olines', 'an embedded list', operator));
-        expect(failure(await run(throughReviews, { item: scope })), operator).toEqual(insideList('reviews.item.note', 'reviews', 'a collection', operator));
+        const result = await run(throughReviews, { item: scope });
+        if (queryFeatures.quantifiers) {
+          expect(result.errors).toBeUndefined();
+          expect(predicatesOf(calls.at(-1).plan.where).find((node) => node.joins?.item)?.joins.item).toEqual(predicate('note', operator));
+          calls.length = 0;
+        } else expect(failure(result), operator).toEqual(insideList('reviews.item.note', 'reviews', 'a collection', operator));
       }
       expect(calls).toEqual([]);
     });
 
-    it('matches the code of the same prefixed condition written by the client or by a scope (regression pin, passes on 3.10.0)', async () => {
+    it(`${queryFeatures.quantifiers ? '' : 'pin: '}matches the code of the same prefixed condition written by the client or by a scope`, async () => {
       const { run, calls } = buildListPrefixes();
       expect(failure(await run('{ qjItems(olines: {terms: [{path: "shop.note", operator: IS_EMPTY}]}) { id } }'))).toEqual(lines);
       expect(failure(await run('{ qjItems(reviews: {terms: [{path: "item.note", operator: IS_EMPTY}]}) { id } }'))).toEqual(reviews);
@@ -876,10 +897,10 @@ describe('joined scopes', () => {
       expect(calls).toEqual([]);
     });
 
-    it('applies rule 3 of the prefix before the target scope\'s value check, as the final gate does (regression pin, passes on 3.10.0)', async () => {
+    it('validates the raw target scope before prefix checks', async () => {
       const { run, calls } = buildListPrefixes();
       const valued = (args) => { args.note = { operator: 'IS_EMPTY', value: 'x' }; };
-      expect(failure(await run(throughLines, { shop: valued }))).toEqual(lines);
+      expect(failure(await run(throughLines, { shop: valued }))).toEqual({ code: 'INVALID_FILTER_VALUE', status: 400, message: 'IS_EMPTY takes no value on note: omit it or pass null' });
       expect(failure(await run('{ qjItems(olines: {terms: [{path: "shop.note", operator: IS_EMPTY, value: "x"}]}) { id } }'))).toEqual(lines);
       // A prefix through a reference alone adds rule 6 only, so the scope keeps its own endpoint's code.
       const own = { code: 'INVALID_FILTER_VALUE', status: 400, message: 'IS_EMPTY takes no value on note: omit it or pass null' };
@@ -891,7 +912,7 @@ describe('joined scopes', () => {
     it('keeps the decision-3 rejection for a prefix through a reference alone only when undeclared, and applies EQ null scopes below list prefixes', async () => {
       const { run, calls } = buildListPrefixes();
       const throughShop = await run('{ qjItems(shop: {terms: [{path: "name", value: "x"}]}) { id } }', { shop: (args) => { args.note = { operator: 'IS_EMPTY' }; } });
-      if (declaration === 'declared') {
+      if (declaration !== 'undeclared') {
         expect(throughShop.errors).toBeUndefined();
         expect(predicatesOf(calls.at(-1).plan.where)).toEqual([predicate('shop.name', 'EQ', 'x'), predicate('shop.note', 'IS_EMPTY')]);
         calls.length = 0;
@@ -908,16 +929,17 @@ describe('joined scopes', () => {
       expect((await run(throughLines, { shop: eqNull })).errors).toBeUndefined();
       expect(predicatesOf(calls.at(-1).plan.where)).toContainEqual(predicate('olines.shop.note', 'EQ'));
       expect((await run(throughReviews, { item: eqNull })).errors).toBeUndefined();
-      expect(predicatesOf(calls.at(-1).plan.where)).toContainEqual(predicate('reviews.item.note', 'EQ'));
+      if (queryFeatures.quantifiers) expect(predicatesOf(calls.at(-1).plan.where).find((node) => node.joins?.item)?.joins.item).toEqual(predicate('note', 'EQ'));
+      else expect(predicatesOf(calls.at(-1).plan.where)).toContainEqual(predicate('reviews.item.note', 'EQ'));
     });
   });
 
-  it('keeps today\'s codes for a path-less term of another operator in a joined target scope (regression pin, passes on 3.9.0)', async () => {
+  it('validates path-less terms in raw joined scopes before prefixing', async () => {
     const { run } = build();
     for (const [scope, code, message] of [
-      [(args) => { args.dims = { terms: [{ operator: 'EQ', value: 1 }] }; }, 'INVALID_FILTER_FIELD', 'Unknown field shop.dims.undefined'],
-      [(args) => { args.dims = { terms: [{ path: '', operator: 'EQ', value: 1 }] }; }, 'INVALID_FILTER_PATH', 'Invalid filter path'],
-      [(args) => { args.tags = { terms: [{ operator: 'EQ', value: 'x' }] }; }, 'INVALID_FILTER_PATH', 'Field tags cannot be traversed'],
+      [(args) => { args.dims = { terms: [{ operator: 'EQ', value: 1 }] }; }, 'INVALID_FILTER_PATH', 'Relationship terms require a path'],
+      [(args) => { args.dims = { terms: [{ path: '', operator: 'EQ', value: 1 }] }; }, 'INVALID_FILTER_PATH', 'Relationship terms require a path'],
+      [(args) => { args.tags = { terms: [{ operator: 'EQ', value: 'x' }] }; }, 'INVALID_FILTER_VALUE', 'Expected a scalar filter value'],
     ]) expect(failure(await run(legacy, withShopScope(scope))), message).toEqual({ code, status: 400, message });
   });
 });
@@ -1186,5 +1208,23 @@ describe('MCP list and aggregate tools', () => {
       ['find', scoped('shop.name', 'IS_EMPTY', { shop: null })],
       ['aggregate', scoped('reviews', 'IS_NOT_EMPTY', { reviews: null })],
     ]);
+  });
+});
+
+describe('quantified twins of collection scope reads', () => {
+  it('lifts scoped collection filters into frames on find, count, aggregate and children', async () => {
+    const { run, calls } = build({ queryFeatures: QUANTIFIED });
+    const scopes = { review: (args) => { args.deletedAt = { operator: 'EQ', value: null }; } };
+    for (const source of [
+      '{qrItems(reviews:{terms:[{path:"text",value:"x"}]},pagination:{page:1,size:10,count:true}){id}}',
+      '{qrItems_aggregate(reviews:{terms:[{path:"text",value:"x"}]},aggregation:{groupId:"note",facts:[{operation:COUNT,factName:"n",path:"id"}]}){groupId}}',
+      '{qrShops{items(reviews:{terms:[{path:"text",value:"x"}]}){id}}}',
+    ]) {
+      const result = await run(source, { scopes });
+      expect(result.errors).toBeUndefined();
+    }
+    const items = calls.filter(({ type }) => type === 'QrItem');
+    expect(items.map(({ method }) => method)).toEqual(['find', 'count', 'aggregate', 'findChildren', 'findChildren']);
+    for (const { plan } of items) expect(plan.where).toEqual({ kind: 'quantified', quantifier: 'ANY', path: ['reviews'], where: predicate('text', 'EQ', 'x'), scope: deletedNull });
   });
 });

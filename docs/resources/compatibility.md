@@ -35,6 +35,43 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22.12.0 or newer |
 
+## Upgrade notes for the next release
+
+### Collection frames
+
+The bundled adapters change the following behaviours for inputs accepted by 3.11.0 and 3.12.0. This is a minor-release upgrade; review collection filters, aggregate cardinality and middleware before upgrading.
+
+1. Lists, counted lists and pages return a parent once even when several children match, instead of repeating it.
+2. Client filters into scoped collections, and paths into types whose `find` scopes filter through collections, return rows using correlated scopes instead of `FORBIDDEN_FILTER_PATH`. Prefixes through embedded lists retain their restrictions; the updated-runtime example is an owner filtering `users` by `barbershops`.
+3. One collection prefix shares a child within one group. Separate groups can match different children, including a server restriction appended as its own group.
+4. A list sort through a collection gives `INVALID_FILTER_PATH` before middleware or any scope, including count mode and adapters/plugins without the new capability.
+5. Outside aggregate joined prefixes J, `EQ null`, `NE` and `NIN` through a collection no longer match a parent without visible children. Trusted conditions use stored children, so the same change in a `get_by_id` scope changes record admission and required-ID/reference reads. Use collection `IS_EMPTY` or `NONE` for absence.
+6. Inside a client frame, references read through scoped joins; a hidden referenced record reads as missing, which can change `NE`, `NIN` and `EQ null` matches.
+7. Aggregate filter-only collection paths stop multiplying facts. Collection prefixes used by `groupId` or facts keep joins; a remainder beyond those prefixes is a frame anchored on the joined record.
+8. `maxFrameNesting` defaults to 3 along a client or trusted frame chain. `maxReferenceFrames` remains 10 per resolver call but counts compiled client frames and scoped joins more finely, including shorthand per group/prefix, and has a new message. Named views preserve separate client-argument and `where` budgets, each measured in compiled units. Excess gives `FILTER_DEPTH_EXCEEDED`.
+9. Middleware that rebuilds a marked collection condition on a scoped chain now gives `DETACHED_CLIENT_FILTER`. Keep marked descendants in marked client frames, copy client objects and append restrictions; do not wrap them in trusted explicit groups or park them in ignored terms.
+10. MongoDB joins on aggregate J reached through references or embedded objects no longer match null-connected children when the local key is missing. Direct `buildQuery` calls also receive collection frames and collection-sort rejection.
+11. MCP input schemas change for every application: they gain `QLQuantifier`, `QLQuantifiedGroup`, the `ANY`/`ALL`/`NONE` lists and relation-filter `quantifier`.
+12. `createRuntime()` rejects malformed `quantifiers`, or `quantifiers: true` without `referenceEmptiness: true`, with `INVALID_QUERY_FEATURES`. `createQueryPlan()` without options now emits `quantified` nodes for collection filters.
+13. Emptiness client markers are issued only when a relation on the absolute chain has a registered `find` scope. Results stay the same; unscoped constructs need no marker.
+14. A client collection filter whose inner reference target has an emptiness scope now uses a scoped join inside the frame instead of the previously described permanent `INVALID_FILTER_PATH`. The rejection remains for embedded-list prefixes, legacy aggregate J paths and adapters without `quantifiers`; this supersedes the collection case in the last sentence of the 3.11.0 reference-emptiness bullet below.
+15. A client path crossing a reference inside an embedded list before or inside a collection frame gives `FORBIDDEN_FILTER_PATH` when that reference target's scope adds conditions. Empty scopes and trusted paths keep plain vector joins.
+16. Middleware/direct-call filter groups with unknown own keys now fail with `INVALID_FILTER_VALUE`; allowed keys are `conditions`, `AND`, `OR`, `ANY`, `ALL`, `NONE`, quantified `path`, and the reserved internal rewrite keys. Unused reserved keys retain their prior ignored behaviour.
+17. Server-written `quantifier` filters and `ANY`/`ALL`/`NONE` lists, previously ignored or flattened, are honoured by declaring adapters and rejected with `UNSUPPORTED_QUERY` by others, including final arguments, frame scopes, raw joined scopes and `get_by_id` scopes.
+
+Invalid-input validation also happens earlier. Raw joined scopes are validated on the target before prefixing and prefix restrictions; invalid client fields and values reject before frame-count limits and middleware. For example, a pathless ordinary relation term now gives `INVALID_FILTER_PATH` (`Relationship terms require a path`) on its raw target rather than `Unknown field shop.dims.undefined`, and a raw `note IS_EMPTY` scope with a non-null value gives `INVALID_FILTER_VALUE` before an embedded-list prefix rejection. Direct MongoDB compiler calls also use `Relationship terms require a path` for a pathless ordinary relation term, replacing `Filter path must be a non-empty string` while retaining `INVALID_FILTER_PATH` and status 400. An invalid actual scalar filter rejects before the adapter while its ignored `terms` remain inspection-only. A `BTW` list containing an omitted-variable null still reports `Filter lists require non-null scalar elements`, now before middleware/adapter. Established ordinary list-value and sort messages are preserved. These are diagnostic/timing differences for already-invalid inputs, in addition to the seventeen semantic/result changes above.
+
+- **MongoDB.** Collection filters use correlated `$lookup` existence probes with reserved `__sf_qN` aliases; marked reference crossings can use `__sf_jN` scoped joins. All aliases are removed by `buildQuery`; low-level callers remove every key in `included`. Connection indexes and local-key null guards matter on replica sets and standalone servers alike.
+- **PostgreSQL.** Frames use `EXISTS`/`NOT EXISTS`, with `ALL` checking two-valued violations (`IS NOT TRUE`) so null leaves behave like MongoDB. Scopes stay outside negation, parameters remain bound, and no storage/DDL migration is needed.
+- **Adapters and SQL plugins.** Opt in with `queryFeatures.quantifiers: true` together with `referenceEmptiness: true`. Omission/null means false. Invalid flags fail runtime construction (`INVALID_QUERY_FEATURES`, 500) or SQL binding (`INVALID_SQL_PLUGIN`, 400). SQL binds under compiler identity. Undeclared adapters retain 3.11.0 collection joins and scope restrictions, except universal collection-sort rejection, mandatory invalid-input gates, and quantified raw target scopes now rejected instead of dropped. Declaring compilers must honour `quantified`, `scope`, element-relative `joins` and aggregate `anchor`, and fail closed on incomplete metadata; this supersedes the historical “no new node kind” text.
+- **TypeScript.** Core exports `QueryQuantifier`, `QLFilterCondition`, `QLFilterGroup`, `QLQuantifiedGroup`, `QLTypeFilterExpression` and `QueryJoins`; `QueryFeatures`/planner options gain `quantifiers`, `QueryPredicate` gains the quantified variant and join metadata, and `QueryLimitsOptions` gains `maxFrameNesting`. Facade declarations mirror the public inputs and options.
+- **MCP.** Regenerate cached input schemas; every runtime exposes the new inputs even if its adapter rejects them at request time. Tools pass quantifiers unchanged, retain scalar `QLValue` rules and return structured query errors.
+
+The generated reference field uses `get_by_id`, while client frames use the target's `find` scope. Review both when their admission rules must agree. Barber's checked-in backends still install exact 3.8.0 registry packages, so their existing scoped-collection rejection remains until an explicit dependency upgrade; their append-based `intersectScopeFilter` is compatible.
+
+
+Named views released in 3.12.0 accept these collection frames in both client arguments and `where`. Their copied `where` groups retain client scope provenance, including nested quantifiers; invalid nested shapes or reserved markers remain `INVALID_VIEW`. View MCP descriptions include the quantified language.
+
 ## Upgrade to 3.12.0
 
 Version 3.12.0 adds named views. Every schema, filter, tool and adapter of 3.11.0 keeps its behavior; a view is a new root field only where an application registers one.
