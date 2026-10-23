@@ -193,7 +193,9 @@ describe('controller after-commit callbacks', () => {
     const f = setup(); const g = setup();
     const errors = [];
     f.api.configureAfterCommit({ onError: (error) => errors.push(error) });
-    for (const options of [{ onError: 1 }, { handler: () => {} }, null, []]) {
+    for (const options of [{ onError: 1 }, { handler: () => {} }, null, [], new Date(),
+      Object.create({ onError: () => {} }), { [Symbol('typo')]: true },
+      Object.defineProperty({}, 'onEror', { value: () => {} })]) {
       expect(() => f.api.configureAfterCommit(options)).toThrow();
     }
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});

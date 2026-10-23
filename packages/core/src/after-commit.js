@@ -30,7 +30,8 @@ export const createAfterCommit = (adapter) => {
   const warned = new Set();
   const configure = (options = {}) => {
     if (!options || typeof options !== 'object' || Array.isArray(options)
-      || Object.keys(options).some((key) => key !== 'onError')
+      || ![Object.prototype, null].includes(Object.getPrototypeOf(options))
+      || Reflect.ownKeys(options).some((key) => key !== 'onError')
       || (options.onError !== undefined && typeof options.onError !== 'function')) {
       throw new SimfinityError('Invalid after-commit configuration', 'INVALID_AFTER_COMMIT_OPTIONS', 400);
     }
