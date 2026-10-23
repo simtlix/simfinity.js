@@ -34,6 +34,16 @@ const committedFixture = () => {
 const sha256 = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
 
 describe('workspace release preparation', () => {
+  it('keeps the descriptor generator version aligned and rejects drift', () => {
+    const root = fixture();
+    const info = join(root, 'packages/core/src/package-info.js');
+    copyFileSync(new URL('../packages/core/src/package-info.js', import.meta.url), info);
+    setReleaseVersion(root, '3.2.0');
+    expect(readFileSync(info, 'utf8')).toContain('version: \'3.2.0\'');
+    writeFileSync(info, readFileSync(info, 'utf8').replace('3.2.0', '3.1.0'));
+    expect(() => readRelease(root)).toThrow(/descriptor generator/);
+  });
+
   it('updates every internal package and v2 lock dependency together without changing external resolutions', () => {
     const root = fixture();
     setReleaseVersion(root, '3.2.0');

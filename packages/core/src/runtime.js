@@ -10,6 +10,7 @@ import {
 } from 'graphql';
 
 import SimfinityError from './errors/simfinity.error.js';
+import { captureClientDescriptor } from './client-descriptor.js';
 import InternalServerError from './errors/internal-server.error.js';
 import { ForbiddenError } from './auth/errors.js';
 import QLOperator from './const/QLOperator.js';
@@ -3493,6 +3494,15 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
   }
 
   const schema = constructSchema(query, mutation);
+  captureClientDescriptor(schema, Object.values(typesDict.types).map((entry) => ({
+    gqltype: entry.gqltype, endpoint: entry.endpoint,
+    // Only associate roots generated for this schema. Excluded endpoint names can be custom queries.
+    simpleEntityEndpointName: shouldNotBeIncludedInSchema(includedQueryTypes, entry.gqltype)
+      ? null : entry.simpleEntityEndpointName,
+    inputType: entry.inputType, updateInputType: typesDictForUpdate.types[entry.gqltype.name]?.inputType,
+    stateMachine: entry.stateMachine,
+  })), (type, field) => field.extensions?.queryable !== false
+    && (field.extensions?.queryable === true || !hasApplicationResolver(type, field.name)));
   // Reserve reachable types whose relation fields still have no resolver, such as an unregistered
   // custom operation result, so another runtime cannot later generate resolvers this schema executes.
   schemaTypes.forEach((type) => {

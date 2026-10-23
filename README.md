@@ -248,6 +248,16 @@ const schema = simfinity.createSchema(
 );
 ```
 
+`buildClientDescriptor(schema)` now provides immutable JSON metadata for the exact schema returned by `createSchema()`, including actual operation names, inputs, relations, virtual fields and state transitions. Import it from core or either database facade. Mount `createClientDescriptorHandler(schema, { authorize: 'public' })` explicitly to serve it; the core handler lives at `@simtlix/simfinity-core/http`. For example:
+
+```javascript
+const descriptor = simfinity.buildClientDescriptor(schema);
+console.log(descriptor.operations.query);
+app.all('/graphql-metadata', simfinity.createClientDescriptorHandler(schema, { authorize: 'public' }));
+```
+
+The 3.x introspection default stays enabled. A new public `@simtlix/simfinity-core/introspection` subpath exports `configureIntrospection({ fieldExtensions: false })`, which must execute **before importing the runtime or facades** and never removes installed metadata. Current legacy metadata clients need migration before using the opt-out. See the [client descriptor reference](docs/reference/client-descriptor.md) for bootstrap ordering, protected HTTP access, format and composition limits.
+
 Importing Simfinity initializes its global `__Field.extensions` introspection field safely whether GraphQL's fields have already been materialized or a schema already exists. Repeated module evaluation with the same GraphQL peer reuses the existing extension field and metadata types. Application field metadata is preserved.
 
 The extension remains shared by every schema using that GraphQL peer; Simfinity's type and middleware registries belong to each runtime instance. A `GraphQLObjectType` belongs to the first runtime whose schema generates its relation resolvers, or reaches it while one of its non-embedded relation fields has no resolver, such as an unregistered custom mutation result. Registering it in another runtime, reaching it from another runtime's schema, or copying its relation fields with `toConfig()` after that runtime generated them, throws `TYPE_BOUND_TO_OTHER_RUNTIME`. Give each runtime its own type objects, for example from a factory function. Types without non-embedded relation fields, and types whose relations all have your own resolvers, can be shared; see [types belong to one runtime](docs/guide/schema.md#types-belong-to-one-runtime). Schemas constructed after import include `FieldExtensionsType` and `RelationType` in their type maps, or their fallback names `SimfinityFieldExtensionsType` and `SimfinityRelationType` once an application type with one of those names was in the process's first Simfinity schema; see [what gets generated](docs/guide/schema.md#what-gets-generated). Earlier schemas keep their original type maps: ordinary operations and direct metadata selections work, but named fragments on the new metadata types require a schema constructed after import.

@@ -94,6 +94,8 @@ const adapterSource = `const adapter = {
 // TypeScript fixture both read this list, so a declaration that drifts from its module fails one
 // of them. A new subpath export needs its declaration and an entry here.
 const coreSubpaths = {
+  introspection: { values: ['configureIntrospection'], types: ['IntrospectionOptions'], standalone: true },
+  http: { values: ['createClientDescriptorHandler'], types: [], standalone: true },
   auth: {
     namespace: 'auth',
     values: [
@@ -166,7 +168,7 @@ const quotedUnion = (names) => names.map((name) => `'${name}'`).join(' | ');
 // explicit `export` in types/index.d.ts and an entry here.
 const coreRootValues = [
   'ForbiddenError', 'InternalServerError', 'QLOperator', 'QLSort', 'QLValue', 'SimfinityError',
-  'UnauthenticatedError', 'auth', 'buildErrorFormatter', 'configureMutationLimits', 'configureQueryLimits',
+  'UnauthenticatedError', 'auth', 'buildClientDescriptor', 'buildErrorFormatter', 'configureMutationLimits', 'configureQueryLimits',
   'createQueryPlan', 'createRuntime', 'createValidatedScalar', 'describeModels', 'isVirtualField',
   'paginationStages', 'plugins', 'resolveModelPath', 'scalars', 'validators', 'virtualFieldOptions',
 ];
@@ -1051,6 +1053,11 @@ type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B
 ${Object.entries(coreSubpaths).map(([subpath, config]) => {
     const binding = subpathBinding(subpath);
     const { namespace, values, types, errorClasses = [] } = config;
+    if (config.standalone) return [
+      `const ${binding}Keys: Record<keyof typeof ${binding}, true> = { ${values.map((name) => `${name}: true`).join(', ')} };`,
+      `const ${binding}Values = ${binding};`,
+      `const ${binding}Types: { ${types.map((name) => `${name}: Equals<${binding}.${name}, Core.${name}>`).join('; ')} } = { ${types.map((name) => `${name}: true`).join(', ')} };`,
+    ].join('\n');
     const members = values.filter((name) => name !== 'default');
     return [
       `const ${binding}Keys: Record<keyof typeof ${binding}, true> = { ${values.map((name) => `${name}: true`).join(', ')} };`,
@@ -1064,6 +1071,20 @@ ${Object.entries(coreSubpaths).map(([subpath, config]) => {
       `} = { ${[...types, ...errorClasses].map((name) => `${name}: true`).join(', ')} };`,
     ].join('\n');
   }).join('\n')}
+declare const descriptorSchema: import('graphql').GraphQLSchema;
+const descriptor = (null as unknown as typeof import('@simtlix/simfinity-core').buildClientDescriptor)(descriptorSchema);
+const descriptorVersion: 1 = descriptor.formatVersion;
+// @ts-expect-error Descriptors are immutable.
+descriptor.types.Book = {};
+introspectionSubpath.configureIntrospection({ fieldExtensions: false });
+// @ts-expect-error Only opt-out is accepted in 3.x.
+introspectionSubpath.configureIntrospection({ fieldExtensions: true });
+const descriptorHandler = httpSubpath.createClientDescriptorHandler<{ user: string }>(descriptorSchema, {
+  context: async () => ({ user: 'reader' }), authorize: (_req, ctx) => ctx.user === 'reader',
+});
+// @ts-expect-error Access must be explicit.
+httpSubpath.createClientDescriptorHandler(descriptorSchema, {});
+void [descriptorVersion, descriptorHandler];
 const sameAuth: typeof auth = authDefault;
 const samePlugins: typeof plugins = pluginsDefault;
 const sameScalars: typeof scalars = scalarsDefault;
@@ -2150,6 +2171,32 @@ try {
       }
     }
     run(process.execPath, ['--input-type=module', '--eval', testCase.source], cwd);
+    if (['core', 'mongo', 'postgres'].includes(testCase.name)) {
+      const facade = testCase.name === 'mongo' ? '@simtlix/simfinity-js' : testCase.name === 'postgres' ? '@simtlix/simfinity-postgres' : '@simtlix/simfinity-core';
+      run(process.execPath, ['--input-type=module', '--eval', `
+        import assert from 'node:assert/strict';
+        import { readFileSync } from 'node:fs';
+        import { __Field, GraphQLObjectType, GraphQLString, buildClientSchema, introspectionFromSchema } from 'graphql';
+        import { configureIntrospection } from '@simtlix/simfinity-core/introspection';
+        configureIntrospection({ fieldExtensions: false });
+        assert.equal(__Field.getFields().extensions, undefined);
+        const core = await import('@simtlix/simfinity-core');
+        const facade = await import('${facade}');
+        const http = await import('@simtlix/simfinity-core/http');
+        assert.equal(facade.buildClientDescriptor, core.buildClientDescriptor);
+        if ('${facade}' !== '@simtlix/simfinity-core') assert.equal(facade.createClientDescriptorHandler, http.createClientDescriptorHandler);
+        const api = core.createRuntime({ createModel: () => ({}) });
+        api.connect(null, new GraphQLObjectType({ name: 'PackedBook', fields: { title: { type: GraphQLString } } }), 'book', 'books');
+        const schema = api.createSchema();
+        const metadata = core.buildClientDescriptor(schema);
+        assert.equal(metadata.formatVersion, 1);
+        assert.equal(metadata.generator.version, JSON.parse(readFileSync('./node_modules/@simtlix/simfinity-core/package.json', 'utf8')).version);
+        assert.equal(metadata.types.PackedBook.endpoints.add, 'addbook');
+        assert.equal(typeof http.createClientDescriptorHandler(schema, { authorize: 'public' }), 'function');
+        buildClientSchema(introspectionFromSchema(schema));
+      `], cwd);
+    }
+
     if (testCase.name === 'mongo') {
       run(process.execPath, [join(root, 'tests/fixtures/mongodb-package-resolution.js')], cwd);
     }
@@ -2173,6 +2220,18 @@ try {
         error.message = `${testCase.name} (moduleResolution ${moduleResolution}): ${error.message}`;
         throw error;
       }
+    }
+    if (testCase.name === 'core') {
+      writeFileSync(join(cwd, 'tsconfig.core-only.json'), JSON.stringify({
+        compilerOptions: {
+          strict: true, target: 'ES2022', lib: ['ES2022'], types: [],
+          module: 'NodeNext', moduleResolution: 'NodeNext', noEmit: true, skipLibCheck: false,
+        },
+        include: ['root.ts'],
+      }));
+      const files = run(process.execPath, ['node_modules/typescript/bin/tsc', '--project', 'tsconfig.core-only.json', '--listFiles'], cwd);
+      assert(!files.includes('/@types/node/'), 'Core main-entry declarations must not load Node types');
+      assert(!files.includes('/types/http.d.ts'), 'Core main-entry declarations must not load HTTP types');
     }
     if (testCase.exactOptionalTypes) {
       for (const [file, source] of Object.entries(testCase.exactOptionalTypes)) writeFileSync(join(cwd, file), source);

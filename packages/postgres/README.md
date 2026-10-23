@@ -110,3 +110,9 @@ await initializeDatabase(pool, description, { mode: 'validate' });
 ```
 
 Low-level `describeDatabase(registrations, { schema, refreshTriggers, ownerIndexes })` uses the `public` schema when `schema` is omitted, not the schema of a configured runtime; pass the schema given to `configure()` or `createPostgres()`, or call `describeDatabase()` and `compileDatabaseSchema()` without arguments for the default instance. `compileDatabaseSchema` returns reviewable SQL. Low-level `initializeDatabase(pool, description, { mode })` creates or validates storage transactionally and never closes the pool. Create mode adds missing objects and rejects incompatible definitions; validate mode performs no DDL. Neither mode performs destructive schema synchronization or data migration.
+
+## Client metadata
+
+`buildClientDescriptor(schema)` describes the exact schema returned by `createSchema()` as immutable JSON, with actual endpoints, inputs and relation hints. The HTTP handler requires an explicit `authorize: 'public'` or access function; import `createClientDescriptorHandler` from `@simtlix/simfinity-core/http` or either database facade. Mount it explicitly, for example at `/graphql-metadata`.
+
+Legacy introspection remains enabled by default in 3.x. Opt out through `configureIntrospection({ fieldExtensions: false })` from `@simtlix/simfinity-core/introspection` **before importing the runtime/facades**, using a separate bootstrap module. It rejects late configuration without deleting metadata. Existing clients selecting `__Field.extensions` must migrate first. See the [descriptor reference](https://simtlix.github.io/simfinity.js/reference/client-descriptor.html) for the format, ordering and limits; arbitrary schema transforms and dynamic permission filtering are not supported by the descriptor.
