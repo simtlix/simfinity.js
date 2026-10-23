@@ -2,6 +2,7 @@ import {
   configureQueryLimits, getQueryMaxPageSize, getQueryMaxReferenceFrames, paginationStages,
 } from './query-limits.js';
 import { configureMutationLimits, getMaxNestedOperations } from './mutation-limits.js';
+import { createAfterCommit } from './after-commit.js';
 import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
@@ -468,6 +469,7 @@ const attemptInputs = (input, type) => {
 };
 
 export const createRuntime = (adapter) => {
+  const afterCommit = createAfterCommit(adapter);
   if (!adapter) {
     throw new SimfinityError('A database adapter is required', 'ADAPTER_REQUIRED', 500);
   }
@@ -1343,6 +1345,7 @@ const readByIdIsInert = (Model) => typeof adapter.readByIdIsInert === 'function'
 // record itself. Without a hook, the read is skipped when it is inert. A nested delete passes the
 // child it has already read as `current`.
 const onDelete = async (Model, controller, id, session, context, current) => {
+  afterCommit.validate(controller);
   const hasHook = !!(controller && controller.onDelete);
   let currentObject = current;
   if (currentObject === undefined && (hasHook || !readByIdIsInert(Model))) {
@@ -1444,6 +1447,7 @@ const readsStoredEmbedded = (Model, controller, materializedModel, embeddedField
 
 const onUpdateSubject = async (Model, gqltype, controller, args, session, linkToParent, context,
   recordChecked = false) => {
+  afterCommit.validate(controller);
   const materializedModel = await materializeModel(args, gqltype, linkToParent, 'UPDATE', session);
   const objectId = args.id;
   const argTypes = gqltype.getFields();
@@ -1514,6 +1518,7 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
 };
 
 const onStateChanged = async (Model, gqltype, controller, args, session, actionField, context) => {
+  afterCommit.validate(controller);
   const storedModel = await adapter.getById(Model, args.id, session, { lock: true });
   if (!storedModel) {
     throw new SimfinityError(`${gqltype.name} ${args.id} is not valid`, 'NOT_VALID_ID', 404);
@@ -1533,6 +1538,7 @@ const onStateChanged = async (Model, gqltype, controller, args, session, actionF
 };
 
 const onSaveObject = async (Model, gqltype, controller, args, session, linkToParent, context) => {
+  afterCommit.validate(controller);
   const materializedModel = await materializeModel(args, gqltype, linkToParent, 'CREATE', session);
   if (typesDict.types[gqltype.name].stateMachine) {
     materializedModel.modelArgs.state = stateValue(
@@ -1567,9 +1573,13 @@ const saveObject = async (typeName, args, session, context) => {
   const type = typesDict.types[typeName];
   assertCollectionWrites(type.gqltype, args);
   const snapshot = cloneInput(args, type.inputType);
-  return adapter.withTransaction(session, (transaction) => onSaveObject(
-    type.model, type.gqltype, type.controller, cloneInput(snapshot, type.inputType), transaction, null, context,
-  ), type.model);
+  return adapter.withTransaction(session, async (transaction) => {
+    const attemptArgs = cloneInput(snapshot, type.inputType);
+    const record = await onSaveObject(type.model, type.gqltype, type.controller, attemptArgs, transaction, null, context);
+    afterCommit.queue({ typeName, controller: type.controller, operation: operations.SAVE,
+      record, args: attemptArgs, context, session: transaction });
+    return record;
+  }, type.model);
 };
 
 // Counts the added, updated and deleted entries of referenced collections, at every nesting level that
@@ -1636,7 +1646,7 @@ const assertCollectionWrites = (gqltype, input) => {
 };
 
 const executeOperation = (Model, gqltype, controller, args, operation, actionField,
-  session, context, inputType) => {
+  session, context, inputType, actionName) => {
   const limit = getMaxNestedOperations();
   if (limit !== null && operation !== operations.DELETE) assertNestedOperations(gqltype, args, limit);
   if (operation !== operations.DELETE) assertCollectionWrites(gqltype, args);
@@ -1645,19 +1655,27 @@ const executeOperation = (Model, gqltype, controller, args, operation, actionFie
     session,
     async (mySession) => {
       const attemptArgs = nextInput();
+      let record;
       switch (operation) {
         case operations.SAVE:
-          return onSaveObject(Model, gqltype, controller, attemptArgs, mySession, null, context);
+          record = await onSaveObject(Model, gqltype, controller, attemptArgs, mySession, null, context);
+          break;
         case operations.UPDATE:
-          return onUpdateSubject(Model, gqltype, controller, attemptArgs, mySession, null, context);
+          record = await onUpdateSubject(Model, gqltype, controller, attemptArgs, mySession, null, context);
+          break;
         case operations.DELETE:
-          return onDelete(Model, controller, attemptArgs, mySession, context);
+          record = await onDelete(Model, controller, attemptArgs, mySession, context);
+          break;
         case operations.STATE_CHANGED:
-          return onStateChanged(Model, gqltype, controller,
+          record = await onStateChanged(Model, gqltype, controller,
             attemptArgs, mySession, actionField, context);
+          break;
         default:
           return null;
       }
+      afterCommit.queue({ typeName: gqltype.name, controller, operation, record, args: attemptArgs,
+        context, session: mySession, action: actionName });
+      return record;
     },
     Model,
   );
@@ -1703,18 +1721,21 @@ const executeItemFunction = async (gqltype, collectionField, parentKey, session,
       }
     }
 
+    let record;
     switch (operationType) {
       case operations.SAVE:
-        await onSaveObject(type.model, collectionGQLType, type.controller,
+        record = await onSaveObject(type.model, collectionGQLType, type.controller,
           args.input, session, linkToParent, context);
         break;
       case operations.UPDATE:
-        await onUpdateSubject(type.model, collectionGQLType, type.controller,
+        record = await onUpdateSubject(type.model, collectionGQLType, type.controller,
           args.input, session, linkToParent, context, true);
         break;
       case operations.DELETE:
-        await onDelete(type.model, type.controller, args.id, session, context, child);
+        record = await onDelete(type.model, type.controller, args.id, session, context, child);
     }
+    afterCommit.queue({ typeName: collectionGQLType.name, controller: type.controller,
+      operation: operationType, record, args: args.input, context, session });
   }
 };
 
@@ -2791,7 +2812,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
                   await executeMiddleware(params);
                   return executeOperation(type.model, type.gqltype, type.controller,
                     args.input, operations.STATE_CHANGED, actionField,
-                    null, context, type.inputType);
+                    null, context, type.inputType, actionName);
                 },
               };
             }
@@ -3413,6 +3434,7 @@ const readSchemaOptions = (options) => {
 };
 
 const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomMutations, options) => {
+  Object.values(typesDict.types).forEach(({ controller }) => afterCommit.validate(controller));
   // Reject before models, resolvers or roots are built, so a rejected schema changes nothing.
   const { includedCustomQueries } = readSchemaOptions(options);
   assertQueryNamesAvailable(includedQueryTypes, includedCustomQueries);
@@ -3839,6 +3861,7 @@ function formatArgs(argsArray) {
   return {
     configureQueryLimits,
     configureMutationLimits,
+    configureAfterCommit: afterCommit.configure,
     connect,
     addNoEndpointType,
     createSchema,

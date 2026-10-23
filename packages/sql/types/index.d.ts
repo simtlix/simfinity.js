@@ -13,6 +13,9 @@ export {
   validators,
 } from '@simtlix/simfinity-core';
 export type {
+  AfterCommitErrorDetails,
+  AfterCommitOptions,
+  CommittedControllerCallbacks,
   AuthPluginOptions,
   AuthRule,
   AuthRuleFunction,

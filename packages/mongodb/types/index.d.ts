@@ -13,6 +13,8 @@ import type {
   GraphQLOutputType,
 } from 'graphql';
 import type {
+  AfterCommitOptions,
+  CommittedControllerCallbacks,
   CreateSchemaOptions,
   DatabaseAdapter,
   MutationLimitsOptions,
@@ -33,6 +35,9 @@ export {
   validators,
 } from '@simtlix/simfinity-core';
 export type {
+  AfterCommitErrorDetails,
+  AfterCommitOptions,
+  CommittedControllerCallbacks,
   AuthPluginOptions,
   AuthRule,
   AuthRuleFunction,
@@ -134,8 +139,8 @@ export function getRegistrations(): RuntimeRegistration[];
  * Core schema-building API (src/index.js)
  * ========================================================================== */
 
-/** Lifecycle hooks run before commit and may repeat on a transient transaction retry. */
-export interface EntityController {
+/** Legacy hooks run before commit; the inherited committed callbacks run after confirmed commit. */
+export interface EntityController extends CommittedControllerCallbacks {
   onSaving?(doc: any, args: any, session: any, context: any): void | Promise<void>;
   onSaved?(result: any, args: any, session: any, context: any): void | Promise<void>;
   onUpdating?(id: any, args: any, session: any, context: any): void | Promise<void>;
@@ -295,6 +300,7 @@ export function configureQueryLimits(options?: QueryLimitsOptions): void;
  * INVALID_MUTATION_LIMITS (400) and keeps the current limit; a mutation over the limit
  * fails with NESTED_OPERATIONS_EXCEEDED (400) before its transaction starts.
  */
+export function configureAfterCommit(options?: AfterCommitOptions): void;
 export function configureMutationLimits(options?: MutationLimitsOptions): void;
 
 /**

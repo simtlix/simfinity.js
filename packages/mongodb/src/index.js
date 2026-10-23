@@ -13,6 +13,7 @@ const runtime = createRuntime(mongoAdapter);
 
 export const configureQueryLimits = runtime.configureQueryLimits;
 export const configureMutationLimits = runtime.configureMutationLimits;
+export const configureAfterCommit = runtime.configureAfterCommit;
 export const connect = runtime.connect;
 export const addNoEndpointType = runtime.addNoEndpointType;
 export const createSchema = runtime.createSchema;
