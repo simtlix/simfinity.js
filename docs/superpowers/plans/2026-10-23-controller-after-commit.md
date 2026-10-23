@@ -1,6 +1,6 @@
 # Controller After-Commit Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Deliver the approved controller callbacks after confirmed commits, without changing existing transactional hooks.
 
@@ -32,11 +32,11 @@
 
 **Interfaces:** `createTransactionCallbacks()` returns `begin(session)` with `seal()`, `confirm()`, `discard()`, `drain()`; `enqueue(session, run): boolean`. Adapter exposes `enqueueAfterCommit(session, run)`.
 
-- [ ] Write failing queue tests: distinct attempts on same session; only confirmed queue drains, FIFO once; sealed/foreign sessions reject enqueue; discard releases jobs; reentrant independent queue.
-- [ ] Run `npx vitest run tests/transaction-callbacks.test.js` and observe missing feature failure.
-- [ ] Implement the helper and wire owned attempts in both runners. Seal before commit, discard on failure, confirm before cleanup, drain in cleanup's finally outside retry catches. Mongo integrity and default mode share the adapter's collector.
-- [ ] Test actual runner behavior with driver stubs: retries discard preceding work; uncertain commit retries retain once; exhausted uncertainty sends nothing; cleanup rejection still dispatches; SQL releases before effects.
-- [ ] Run focused transaction suites, inspect failures, then commit the task.
+- [x] Write failing queue tests: distinct attempts on same session; only confirmed queue drains, FIFO once; sealed/foreign sessions reject enqueue; discard releases jobs; reentrant independent queue.
+- [x] Run `npx vitest run tests/transaction-callbacks.test.js` and observe missing feature failure.
+- [x] Implement the helper and wire owned attempts in both runners. Seal before commit, discard on failure, confirm before cleanup, drain in cleanup's finally outside retry catches. Mongo integrity and default mode share the adapter's collector.
+- [x] Test actual runner behavior with driver stubs: retries discard preceding work; uncertain commit retries retain once; exhausted uncertainty sends nothing; cleanup rejection still dispatches; SQL releases before effects.
+- [x] Run focused transaction suites, inspect failures, then commit the task.
 
 ### Task 2: Controller API, payloads and declarations
 
@@ -44,25 +44,27 @@
 
 **Interfaces:** approved four callbacks and `runtime.configureAfterCommit({ onError })`; optional `DatabaseAdapter.enqueueAfterCommit`. Runtime helper owns configuration, validation, snapshots, per-runtime warning/reporting and guarded registration.
 
-- [ ] Write failing public-runtime tests for four operations, child-before-parent ordering, state callback exclusivity, supplied context, no-op delete, rollback/retry, callback/reporting failure isolation, external-session skip warning, mutable controller validation and snapshot isolation.
-- [ ] Run `npx vitest run tests/after-commit.test.js` and confirm failures are missing notifications/configuration.
-- [ ] Implement helpers, use existing lifecycle completion sites, pass action name without occupying OCC's precondition parameters; preserve opaque scalar instances and cycle-safe ordinary copies.
-- [ ] Define shared `AfterCommitOptions`, `AfterCommitErrorDetails`, callback signatures and adapter contract. Expose configuration on Mongo/Postgres facades and SQL runtime; extend packed consumer compile coverage.
-- [ ] Run focused suites and core subpath declaration checks; commit.
+- [x] Write failing public-runtime tests for four operations, child-before-parent ordering, state callback exclusivity, supplied context, no-op delete, rollback/retry, callback/reporting failure isolation, external-session skip warning, mutable controller validation and snapshot isolation.
+- [x] Run `npx vitest run tests/after-commit.test.js` and confirm failures are missing notifications/configuration.
+- [x] Implement helpers, use existing lifecycle completion sites, pass action name without occupying OCC's precondition parameters; preserve opaque scalar instances and cycle-safe ordinary copies.
+- [x] Define shared `AfterCommitOptions`, `AfterCommitErrorDetails`, callback signatures and adapter contract. Expose configuration on Mongo/Postgres facades and SQL runtime; extend packed consumer compile coverage.
+- [x] Run focused suites and core subpath declaration checks; commit.
 
 ### Task 3: Real database contracts and documentation
 
 **Files:** create `tests/integration/after-commit.test.js`; update README and controllers/mutations/state-machines/server-side-operations/API/adapter-author guides, matching architecture/core/testing rules.
 
-- [ ] Add real MongoDB (off/transactional integrity) and PostgreSQL tests for independent-read visibility, nested writes, legacy hook rollback, retries, callback failure, transitions, external Mongo sessions, SQL public transaction wrapper and one-client pool reentrancy.
-- [ ] Provision only disposable task-owned Mongo replica-set and PostgreSQL containers, with synthetic data and unique ports/names. Record URIs without reading consumer credentials.
-- [ ] Run focused database contracts and full `npm test` with all relevant disposable URI variables; run `npm run lint`, `npm run test:packages`, `npm run docs:install`, `npm run docs:build`. Record skips and failures exactly.
-- [ ] Document public contract, limitations and examples for both backends; commit.
+- [x] Add real MongoDB (off/transactional integrity) and PostgreSQL tests for independent-read visibility, nested writes, legacy hook rollback, retries, callback failure, transitions, external Mongo sessions, SQL public transaction wrapper and one-client pool reentrancy.
+- [x] Provision only disposable task-owned Mongo replica-set and PostgreSQL containers, with synthetic data and unique ports/names. Record URIs without reading consumer credentials.
+- [x] Run focused database contracts and full `npm test` with all relevant disposable URI variables; run `npm run lint`, `npm run test:packages`, `npm run docs:install`, `npm run docs:build`. Record skips and failures exactly.
+- [x] Document public contract, limitations and examples for both backends; commit.
 
 ### Task 4: OCC integration check and final review
 
 **Interfaces:** #147's version checks/preconditions remain intact; #142/#100 reuse existing lifecycle helpers and the same owner queue.
 
-- [ ] Refresh PR #147 status/head without changing other worktrees. In this worktree only, apply a temporary combined checkout or patch on a temporary local branch, resolve only demonstrated shared lifecycle integration, and run after-commit plus OCC/database contracts. Return to the task branch; retain separate evidence, not unrelated PR changes.
-- [ ] Run one independent whole-branch review as required by executing-plans; resolve important findings with regression tests.
-- [ ] Verify final diff, tests and clean task branch; record evidence in a local repository report. Leave all work local and report exact blockers, if any.
+- [x] Refresh PR #147 status/head without changing other worktrees. In this worktree only, apply a temporary combined checkout or patch on a temporary local branch, resolve only demonstrated shared lifecycle integration, and run after-commit plus OCC/database contracts. Return to the task branch; retain separate evidence, not unrelated PR changes.
+- [x] Run one independent whole-branch review as required by executing-plans; resolve important findings with regression tests.
+- [x] Verify final diff, tests and clean task branch; record evidence in a local repository report. Leave all work local and report exact blockers, if any.
+
+Final evidence: [local verification report](../reports/2026-10-23-controller-after-commit-verification.md). The task branch and worktree remain local; the separate OCC evidence branch is not merged.
