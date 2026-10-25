@@ -34,13 +34,13 @@ describe.each(modes)('after-commit on %s', (mode) => {
         children: { type: new GraphQLList(Child), extensions: { relation: { embedded: false, connectionField: 'parentId' } } },
       }) });
       Child = new GraphQLObjectType({ name: 'CommitDBChild', fields: () => ({
-        id: { type: GraphQLID }, name: { type: GraphQLString },
+        id: { type: GraphQLID }, name: { type: GraphQLString, extensions: { unique: true } },
         parent: { type: Parent, extensions: { relation: { embedded: false, connectionField: 'parentId' } } },
       }) });
       if (isMongo) {
         connection = await mongoose.createConnection(mongoURI, { dbName: namespace, autoCreate: false, autoIndex: false }).asPromise();
         parentModel = connection.model(Parent.name, new mongoose.Schema({ name: String, state: String }));
-        childModel = connection.model(Child.name, new mongoose.Schema({ name: String, parentId: mongoose.Schema.Types.ObjectId }));
+        childModel = connection.model(Child.name, new mongoose.Schema({ name: { type: String, unique: true }, parentId: mongoose.Schema.Types.ObjectId }));
         adapter = createMongoAdapter({ referentialIntegrity: mode === 'mongo-off' ? 'off' : 'transactional' });
         api = createRuntime(adapter);
       } else {
@@ -52,11 +52,21 @@ describe.each(modes)('after-commit on %s', (mode) => {
         initialState: State.getValue('DRAFT'), actions: { publish: { from: State.getValue('DRAFT'), to: State.getValue('LIVE') } },
       });
       api.connect(childModel || null, Child, 'child', 'children', child);
-      api.registerMutation('custom', '', new GraphQLInputObjectType({ name: 'CommitDBCustom', fields: { name: { type: GraphQLString } } }), Parent,
-        (args, session, ctx) => api.saveObject(Parent.name, args, session, ctx));
+      const CustomInput = new GraphQLInputObjectType({ name: 'CommitDBCustom', fields: { name: { type: GraphQLString } } });
+      api.registerMutation('custom', '', CustomInput, Parent, async (args, session, ctx) => {
+        const record = await api.saveObject(Parent.name, args, session, ctx);
+        expect(notices).toEqual([]);
+        return record;
+      });
+      api.registerMutation('rejectedCustom', '', CustomInput, Parent, async (args, session, ctx) => {
+        await api.saveObject(Parent.name, args, session, ctx);
+        expect(notices).toEqual([]);
+        throw new Error('reject registered mutation after save');
+      });
       schema = api.createSchema();
       if (isMongo) {
         await parentModel.createCollection(); await childModel.createCollection();
+        await childModel.createIndexes();
         await parentModel.init(); await childModel.init(); await adapter.initialize();
       } else await api.initializeDatabase();
     });
@@ -92,7 +102,7 @@ describe.each(modes)('after-commit on %s', (mode) => {
       expect(notices).toEqual(['one', 'two', 'parent']);
     });
 
-    it('discards nested notifications and database writes when a legacy parent hook rejects', async () => {
+    it('discards nested notifications and database writes when a parent lifecycle hook rejects', async () => {
       child.onSaveCommitted = () => notices.push('child');
       parent.onSaveCommitted = () => notices.push('parent');
       parent.onSaved = () => { throw new Error('stop before commit'); };
@@ -100,6 +110,45 @@ describe.each(modes)('after-commit on %s', (mode) => {
       expect(notices).toEqual([]);
       const rows = isMongo ? await parentModel.find().lean() : await api.getModel(Parent).find({});
       expect(rows).toEqual([]);
+    });
+
+    it('discards an earlier added child when a later nested update targets a missing record', async () => {
+      const created = await add({ name: 'original' });
+      expect(created.errors).toBeUndefined();
+      const saved = [];
+      child.onSaved = (record) => saved.push(record.name);
+      child.onSaveCommitted = () => notices.push('child');
+      parent.onUpdateCommitted = () => notices.push('parent');
+      const missingId = isMongo ? String(new mongoose.Types.ObjectId()) : randomUUID();
+      const result = await run('mutation($input:CommitDBParentInputForUpdate!){updateparent(input:$input){name}}', {
+        input: { id: created.data.addparent.id, name: 'rejected', children: {
+          added: [{ name: 'earlier' }], updated: [{ id: missingId, name: 'missing' }],
+        } },
+      });
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].extensions.code).toBe('NOT_VALID_ID');
+      expect(saved).toEqual(['earlier']);
+      expect(notices).toEqual([]);
+      expect((await readParent(created.data.addparent.id)).name).toBe('original');
+      const rows = isMongo ? await childModel.find().lean() : await api.getModel(Child).find({});
+      expect(rows).toEqual([]);
+    });
+
+    it('discards an earlier child notification when the database rejects the second child', async () => {
+      const saved = [];
+      child.onSaved = (record) => saved.push(record.name);
+      child.onSaveCommitted = () => notices.push('child');
+      parent.onSaveCommitted = () => notices.push('parent');
+      const result = await add({ name: 'rejected', children: { added: [{ name: 'duplicate' }, { name: 'duplicate' }] } });
+      expect(result.errors).toHaveLength(1);
+      if (isMongo) expect(result.errors[0].originalError.code).toBe(11000);
+      else expect(result.errors[0].extensions.code).toBe('DUPLICATE_KEY');
+      expect(saved).toEqual(['duplicate']);
+      expect(notices).toEqual([]);
+      const parents = isMongo ? await parentModel.find().lean() : await api.getModel(Parent).find({});
+      const children = isMongo ? await childModel.find().lean() : await api.getModel(Child).find({});
+      expect(parents).toEqual([]);
+      expect(children).toEqual([]);
     });
 
     it('retries the transaction but dispatches only the successful attempt', async () => {
@@ -144,6 +193,29 @@ describe.each(modes)('after-commit on %s', (mode) => {
       expect(JSON.stringify(logger.mock.calls)).not.toContain('private callback');
     });
 
+    it('keeps child add/update/delete notifications when the parent transitions', async () => {
+      const created = await run('mutation {addparent(input:{name:"parent",children:{added:[{name:"keep"},{name:"remove"}]}}){id children{id name}}}');
+      expect(created.errors).toBeUndefined();
+      const { id, children } = created.data.addparent;
+      child.onSaveCommitted = () => notices.push('child-add');
+      child.onUpdateCommitted = () => notices.push('child-update');
+      child.onDeleteCommitted = () => notices.push('child-delete');
+      parent.onUpdateCommitted = () => notices.push('parent-update');
+      parent.onTransitionCommitted = (record, action, ctx) => {
+        expect(record.state).toBe(20); expect(action).toBe('publish'); expect(ctx).toBe(context);
+        notices.push('transition');
+      };
+      const result = await run('mutation($input:CommitDBParentInputForUpdate!){publish_parent(input:$input){state children{name}}}', {
+        input: { id, children: { added: [{ name: 'new' }],
+          updated: [{ id: children.find((record) => record.name === 'keep').id, name: 'kept' }],
+          deleted: [children.find((record) => record.name === 'remove').id] } },
+      });
+      expect(result.errors).toBeUndefined();
+      expect(result.data.publish_parent.state).toBe('LIVE');
+      expect(result.data.publish_parent.children.map((record) => record.name).sort()).toEqual(['kept', 'new']);
+      expect(notices).toEqual(['child-add', 'child-update', 'child-delete', 'transition']);
+    });
+
     it('joins registered writes and lets a callback start another transaction', async () => {
       parent.onSaveCommitted = async (record, args, ctx) => {
         expect(ctx).toBe(context);
@@ -154,6 +226,19 @@ describe.each(modes)('after-commit on %s', (mode) => {
       const result = await run('mutation { custom(input:{name:"registered"}) { id name } }');
       expect(result.errors).toBeUndefined();
       expect(notices).toEqual(['followup', 'parent']);
+    });
+
+    it('rolls back a registered mutation that rejects after its joined lifecycle write', async () => {
+      parent.onSaveCommitted = () => notices.push('parent');
+      const saved = [];
+      parent.onSaved = (record) => saved.push(record.name);
+      const result = await run('mutation { rejectedCustom(input:{name:"rejected"}) { id } }');
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toBe('reject registered mutation after save');
+      expect(saved).toEqual(['rejected']);
+      expect(notices).toEqual([]);
+      const rows = isMongo ? await parentModel.find().lean() : await api.getModel(Parent).find({});
+      expect(rows).toEqual([]);
     });
 
     it.skipIf(isMongo)('joins SQL public transaction ownership without an early dispatch', async () => {

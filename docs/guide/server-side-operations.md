@@ -13,6 +13,7 @@ Examples use the selected runtime from [database setup](./databases#runtime-setu
 
 - A record and the child records that change with it, such as an order and its lines: one [generated mutation with nested collection writes](#write-a-parent-and-its-children-together).
 - Writes that must accompany an entity change, such as audit rows, outbox events, counters or derived totals: [controller hooks](#work-inside-the-transaction-with-controllers) that use the session they receive.
+- Best-effort external notifications after an entity commits: [after-commit callbacks](./controllers#after-commit-callbacks). Keep a transactional outbox and worker when delivery must survive a process failure.
 - A job, worker or webhook that reads data or runs an existing generated operation: [execute the generated schema in-process](#execute-the-generated-schema-in-process).
 - A read that generated filters, scopes and aggregates cannot express, for clients and server code alike: a [virtual field](./queries#virtual-fields) on the type it belongs to, read through the generated queries.
 - A frequent list read with a fixed predicate and typed params, shared by web, MCP and in-process callers: a [named view](./queries#named-views).

@@ -153,7 +153,7 @@ export function getRegistrations(): RuntimeRegistration[];
  * Core schema-building API (src/index.js)
  * ========================================================================== */
 
-/** Legacy hooks run before commit; the inherited committed callbacks run after confirmed commit. */
+/** Lifecycle hooks run before commit; the inherited committed callbacks run after confirmed commit. */
 export interface EntityController extends CommittedControllerCallbacks {
   onSaving?(doc: any, args: any, session: any, context: any): void | Promise<void>;
   onSaved?(result: any, args: any, session: any, context: any): void | Promise<void>;

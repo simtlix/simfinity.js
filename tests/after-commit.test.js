@@ -109,7 +109,24 @@ describe('controller after-commit callbacks', () => {
     expect(f.events).toEqual(['commit', 'release', 'child-add', 'child-update', 'child-delete', 'parent-update']);
   });
 
-  it('discards child notifications if the parent legacy hook fails', async () => {
+  it('keeps child notifications when a transition replaces the parent update notification', async () => {
+    const f = setup();
+    const record = await f.run('addparent', { children: { added: [{ name: 'keep' }, { name: 'remove' }] } });
+    f.child.onSaveCommitted = () => f.events.push('child-add');
+    f.child.onUpdateCommitted = () => f.events.push('child-update');
+    f.child.onDeleteCommitted = () => f.events.push('child-delete');
+    f.parent.onUpdateCommitted = () => f.events.push('parent-update');
+    f.parent.onTransitionCommitted = (result, action) => {
+      expect(result.state).toBe(20);
+      expect(action).toBe('publish');
+      f.events.push('transition');
+    };
+    f.events.length = 0;
+    await f.run('publish_parent', { id: record._id, children: { added: [{ name: 'new' }], updated: [{ id: '2', name: 'kept' }], deleted: ['3'] } });
+    expect(f.events).toEqual(['commit', 'release', 'child-add', 'child-update', 'child-delete', 'transition']);
+  });
+
+  it('discards child notifications if the parent lifecycle hook fails', async () => {
     const f = setup();
     f.child.onSaveCommitted = () => f.events.push('child-effect');
     f.parent.onSaved = () => { throw new Error('legacy'); };
@@ -156,15 +173,21 @@ describe('controller after-commit callbacks', () => {
     const f = setup();
     const failure = Object.assign(new Error('secret'), { retryable: true });
     const reports = [];
+    const notices = [];
+    const context = Object.freeze({ request: 'r' });
     f.api.configureAfterCommit({ onError: (error, details) => { reports.push({ error, details }); throw null; } });
     const log = vi.spyOn(console, 'error').mockImplementation(() => { throw new Error('logger'); });
-    f.parent.onSaveCommitted = () => { throw failure; };
-    const result = await graphql({ schema: f.schema, source: 'mutation { addparent(input:{name:"ok"}) { name } }' });
+    f.child.onSaveCommitted = () => { throw failure; };
+    f.parent.onSaveCommitted = () => notices.push('parent');
+    const result = await graphql({ schema: f.schema, contextValue: context,
+      source: 'mutation { addparent(input:{name:"ok",children:{added:[{name:"child"}]}}) { name } }' });
     expect(result.errors).toBeUndefined();
     expect(result.data.addparent.name).toBe('ok');
     expect(reports).toHaveLength(1);
     expect(reports[0].error).toBe(failure);
-    expect(reports[0].details).toMatchObject({ committed: true, typeName: 'CommitParent', operation: 'save', callbackName: 'onSaveCommitted' });
+    expect(reports[0].details).toMatchObject({ committed: true, typeName: 'CommitChild', operation: 'save', callbackName: 'onSaveCommitted' });
+    expect(reports[0].details.context).toBe(context);
+    expect(notices).toEqual(['parent']);
     expect(f.driver.commit).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(log.mock.calls)).not.toContain('secret');
   });
@@ -192,6 +215,19 @@ describe('controller after-commit callbacks', () => {
     let failure;
     try { g.api.createSchema(); } catch (error) { failure = error; }
     expect(failure).toMatchObject({ extensions: { code: 'UNSUPPORTED_AFTER_COMMIT' } });
+  });
+
+  it('rejects non-function callbacks during schema creation and before writing with a changed controller', async () => {
+    const f = setup({ parent: { onUpdateCommitted: 'notify' }, build: false });
+    let failure;
+    try { f.api.createSchema(); } catch (error) { failure = error; }
+    expect(failure).toMatchObject({ extensions: { code: 'INVALID_CONTROLLER', status: 400 } });
+    expect(f.records.size).toBe(0);
+    const g = setup();
+    g.parent.onSaveCommitted = 42;
+    await expect(g.run('addparent', { name: 'rejected' })).rejects.toMatchObject({ extensions: { code: 'INVALID_CONTROLLER', status: 400 } });
+    expect(g.records.size).toBe(0);
+    expect(g.driver.commit).not.toHaveBeenCalled();
   });
 
   it('validates configuration without changing the previous handler and isolates runtimes', async () => {

@@ -171,7 +171,7 @@ The lookup above uses the MongoDB Model API. With PostgreSQL, use `await simfini
 
 Actions on a protected entity take its generated update input with required `input.version`; successful actions return the incremented version, and the precondition is captured before `action` can mutate its input. Re-read and reapply after `VERSION_CONFLICT` or `TRANSACTION_RETRY_EXCEEDED`. Driver retries can repeat an action; use an outbox for external effects. Protection applies to the action's record, not its whole relationship graph. See [optimistic concurrency](./concurrency).
 
-After the owning transaction commits, an optional controller `onTransitionCommitted(record, action, context)` receives the returned record and the registered action name, such as `activate`. It is the transition's only committed notification; `onUpdateCommitted` is not also called. Legacy update hooks stay transactional. Failed/retried attempts do not dispatch notifications. See [after-commit callbacks](./controllers#after-commit-callbacks) for reporting, ownership and delivery limits.
+After the owning transaction commits, an optional controller `onTransitionCommitted(record, action, context)` receives the returned record and the registered action name, such as `activate`. It is the transition's only committed notification; `onUpdateCommitted` is not also called. Lifecycle update hooks stay transactional. Failed/retried attempts do not dispatch notifications. See [after-commit callbacks](./controllers#after-commit-callbacks) for reporting, ownership and delivery limits.
 
 ## Failure behavior
 
@@ -187,4 +187,4 @@ After the owning transaction commits, an optional controller `onTransitionCommit
 
 Each action has one `from` state and one `to` state. Define separate actions for distinct transitions. State machines govern transition validity; they do not decide which users may invoke an action. Add explicit authorization for action fields such as `activate_season`.
 
-Keep external side effects outside the transaction callback or use an outbox pattern, as described in [controllers](./controllers#transactions-and-side-effects).
+Use an [after-commit callback](./controllers#after-commit-callbacks) for best-effort external effects. Use an outbox and a worker when delivery must survive a process failure, as described in [controllers](./controllers#transactions-and-side-effects).

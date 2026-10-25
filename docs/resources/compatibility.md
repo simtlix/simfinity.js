@@ -35,6 +35,20 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22.12.0 or newer |
 
+## Upgrade notes for the next release
+
+Controller callbacks after commit are additive. Applications that declare none keep their existing behavior; lifecycle hooks such as `onSaved` and `onUpdated` remain supported and run inside the transaction, including retries.
+
+- **Callbacks**: controllers may declare `onSaveCommitted(record, args, context)`, `onUpdateCommitted(record, context)`, `onDeleteCommitted(record, context)` and `onTransitionCommitted(record, action, context)`. A state action emits only the transition notification for its own record; its nested children keep their notifications. Callback records and creation arguments are snapshots of ordinary values; opaque scalar instances retain their identity. Context is the original reference. No session is passed.
+- **Completion**: an owning mutation, sessionless `saveObject()` or SQL `withTransaction(null, callback)` resolves after its callbacks have been awaited serially. Nested lifecycle writes join the owner's queue in completion order, children before their parent. A failed or retried attempt discards its queue; an uncertain MongoDB commit dispatches only after confirmation. Cleanup is attempted before dispatch. A confirmed commit still dispatches if cleanup fails, but the existing cleanup error can reject the operation.
+- **Failure reporting**: callback and reporter failures do not roll back, retry or fail the confirmed write. Runtime-local `configureAfterCommit({ onError })` receives the thrown value and static operation details with the original context. The guarded default logs only static metadata, without arbitrary error messages, stacks, record, arguments or context; configure an explicit reporter for application diagnostics. Delivery is best effort, not durable or exactly once. Use an outbox and workers when delivery must survive a process failure.
+- **Sessions**: externally owned native MongoDB sessions skip notifications and warn once per runtime/type; Simfinity does not observe their commit. SQL lifecycle calls using a session from their owning runtime join its queue. SQL continues to reject foreign sessions with `INVALID_SESSION` before any write.
+- **Adapters and errors**: custom adapters need the optional `enqueueAfterCommit(session, run)` capability only when controllers declare these callbacks; otherwise `createSchema()` or operation entry rejects with `UNSUPPORTED_AFTER_COMMIT` (500). Non-function callbacks other than `null`/`undefined` produce `INVALID_CONTROLLER` (400). Invalid reporter options produce `INVALID_AFTER_COMMIT_OPTIONS` (400) and preserve the previous configuration.
+- **Exports and types**: core's `Runtime` exposes `configureAfterCommit`; core exports `AfterCommitOptions`, `AfterCommitErrorDetails` and `CommittedControllerCallbacks`. MongoDB, SQL and PostgreSQL re-export these types and expose the method on created runtimes. MongoDB (including its compatible `src/` entry) and PostgreSQL also export their singleton configuration function. Each runtime owns its reporter configuration. `EntityController` declares the four callbacks and `DatabaseAdapter` the optional queue capability.
+- **Linting**: the optional application ESLint plugin recognizes `configureAfterCommit` as a runtime member, preserving subsequent schema and relation checks.
+
+See [controllers](../guide/controllers#after-commit-callbacks), the [API reference](../reference/api#configureaftercommit) and the [compatibility ledger](../compatibility#next-release-controller-callbacks-after-commit).
+
 ## Upgrade to 3.13.0
 
 ### Optimistic concurrency

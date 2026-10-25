@@ -28,7 +28,7 @@
 
 ### Task 1: Queue and owned transaction integration
 
-**Files:** create `packages/core/src/transaction-callbacks.js`, `tests/transaction-callbacks.test.js`; modify core package exports, MongoDB `mongo/{transactions,adapter,integrity}.js`, SQL `{transactions,adapter}.js`, `tests/mutation-transactions.test.js`, `tests/sql-transactions.test.js`.
+**Files:** create `packages/core/src/transaction-callbacks.js`, `tests/transaction-callbacks.test.js`, `tests/after-commit-transactions.test.js`; modify core package exports, MongoDB `mongo/{transactions,adapter,integrity}.js`, SQL `{transactions,adapter}.js`. Run `tests/mutation-transactions.test.js` and `tests/sql-transactions.test.js` unchanged as regression coverage.
 
 **Interfaces:** `createTransactionCallbacks()` returns `begin(session)` with `seal()`, `confirm()`, `discard()`, `drain()`; `enqueue(session, run): boolean`. Adapter exposes `enqueueAfterCommit(session, run)`.
 
@@ -67,4 +67,13 @@
 - [x] Run one independent whole-branch review as required by executing-plans; resolve important findings with regression tests.
 - [x] Verify final diff, tests and clean task branch; record evidence in a local repository report. Leave all work local and report exact blockers, if any.
 
-Final evidence: [local verification report](../reports/2026-10-23-controller-after-commit-verification.md). The task branch and worktree remain local; the separate OCC evidence branch is not merged.
+Initial evidence: [local verification report](../reports/2026-10-23-controller-after-commit-verification.md). The user subsequently authorized publishing [PR #150](https://github.com/simtlix/simfinity.js/pull/150) and correcting its review; the separate OCC evidence branch remains local and unmerged.
+
+### Review follow-up (2026-10-25)
+
+- [x] Reproduce and fix ESLint provenance loss after `configureAfterCommit`, keeping the plugin's existing analysis boundaries.
+- [x] Pin facade runtime exports, reporter context identity, invalid controllers, continued dispatch, registered mutation ownership/rollback and transitions with children.
+- [x] Add real database rollback cases after an earlier child write for missing IDs and unique constraint violations.
+- [x] Correct SQL session guidance and lifecycle terminology; add error codes, callback/outbox cross-links, upgrade notes and a compatibility ledger. Keep the approved static-only default logging contract.
+- [ ] Check the public runtime tests against the actual 3.12.0 base, then restore this branch and verify the final changes with disposable databases, packed consumers, docs and the independent ESLint plugin checks.
+- [ ] Record fresh evidence and update the authorized PR without merging or publishing a release.
