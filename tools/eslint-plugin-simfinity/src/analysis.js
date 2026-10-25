@@ -14,7 +14,7 @@ export const factories = new Set([
 ]);
 const runtimeMembers = new Set(['createSchema', 'connect', 'addNoEndpointType', 'configureQueryLimits']);
 const otherRuntimeMembers = new Set([
-  'configureMutationLimits', 'getModel', 'getType', 'getInputType', 'getRegistrations',
+  'configureMutationLimits', 'configureAfterCommit', 'getModel', 'getType', 'getInputType', 'getRegistrations',
   'use', 'registerMutation', 'registerCustomQuery', 'registerView', 'saveObject', 'preventCreatingCollection',
 ]);
 const sqlMembers = new Set(['configure', 'initializeDatabase', 'describeDatabase', 'compileDatabaseSchema', 'withTransaction']);

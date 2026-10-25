@@ -2,6 +2,7 @@ import {
   configureQueryLimits, getQueryMaxPageSize, getQueryMaxReferenceFrames, paginationStages,
 } from './query-limits.js';
 import { configureMutationLimits, getMaxNestedOperations } from './mutation-limits.js';
+import { createAfterCommit } from './after-commit.js';
 import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
@@ -544,6 +545,7 @@ const attemptInputs = (input, type) => {
 };
 
 export const createRuntime = (adapter) => {
+  const afterCommit = createAfterCommit(adapter);
   if (!adapter) {
     throw new SimfinityError('A database adapter is required', 'ADAPTER_REQUIRED', 500);
   }
@@ -1507,6 +1509,7 @@ const assertRecordVersion = async (gqltype, id, record, expectedVersion, advance
 // deletes it only at that version, and a record it deleted at another one, which an adapter wrapper
 // that drops the options would delete, fails with DATABASE_ERROR and rolls back with the transaction.
 const onDelete = async (Model, controller, id, session, context, current, precondition = null) => {
+  afterCommit.validate(controller);
   const hasHook = !!(controller && controller.onDelete);
   let currentObject = current;
   if (currentObject === undefined && (hasHook || !readByIdIsInert(Model))) {
@@ -1625,6 +1628,7 @@ const setsVersion = (update) => [update, ...Object.entries(update)
 // cannot set the version, and a result that did not advance it fails with DATABASE_ERROR.
 const onUpdateSubject = async (Model, gqltype, controller, args, session, linkToParent, context,
   recordChecked = false, { expectedVersion, observedVersion, record } = {}) => {
+  afterCommit.validate(controller);
   const versioned = isProtected(gqltype);
   const materializedModel = await materializeModel(args, gqltype, linkToParent, 'UPDATE', session);
   const objectId = args.id;
@@ -1712,6 +1716,7 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
 // A protected type's version is captured before the action can change `args`, and checked on the
 // plain pre-read record before the from-state check, which reads `state` from that record (#98).
 const onStateChanged = async (Model, gqltype, controller, args, session, actionField, context) => {
+  afterCommit.validate(controller);
   const versioned = isProtected(gqltype);
   const expectedVersion = versioned ? assertVersionInput(args.version) : undefined;
   const storedModel = versioned
@@ -1738,6 +1743,7 @@ const onStateChanged = async (Model, gqltype, controller, args, session, actionF
 };
 
 const onSaveObject = async (Model, gqltype, controller, args, session, linkToParent, context) => {
+  afterCommit.validate(controller);
   const materializedModel = await materializeModel(args, gqltype, linkToParent, 'CREATE', session);
   if (typesDict.types[gqltype.name].stateMachine) {
     materializedModel.modelArgs.state = stateValue(
@@ -1776,9 +1782,13 @@ const saveObject = async (typeName, args, session, context) => {
   const type = typesDict.types[typeName];
   assertCollectionWrites(type.gqltype, args);
   const snapshot = cloneInput(args, type.inputType);
-  return adapter.withTransaction(session, (transaction) => onSaveObject(
-    type.model, type.gqltype, type.controller, cloneInput(snapshot, type.inputType), transaction, null, context,
-  ), type.model);
+  return adapter.withTransaction(session, async (transaction) => {
+    const attemptArgs = cloneInput(snapshot, type.inputType);
+    const record = await onSaveObject(type.model, type.gqltype, type.controller, attemptArgs, transaction, null, context);
+    afterCommit.queue({ typeName, controller: type.controller, operation: operations.SAVE,
+      record, args: attemptArgs, context, session: transaction });
+    return record;
+  }, type.model);
 };
 
 // Counts the added, updated and deleted entries of referenced collections, at every nesting level that
@@ -1860,7 +1870,7 @@ const preReadTopLevel = async (Model, gqltype, { id, version }, advances, contex
 // other operation passes its input, which attemptInputs copies. Either way, a retry checks the version
 // the request sent.
 const executeOperation = (Model, gqltype, controller, args, operation, actionField,
-  session, context, inputType) => {
+  session, context, inputType, actionName) => {
   const limit = getMaxNestedOperations();
   if (limit !== null && operation !== operations.DELETE) assertNestedOperations(gqltype, args, limit);
   if (operation !== operations.DELETE) assertCollectionWrites(gqltype, args);
@@ -1872,26 +1882,36 @@ const executeOperation = (Model, gqltype, controller, args, operation, actionFie
     session,
     async (mySession) => {
       const attemptArgs = nextInput();
+      let record;
       switch (operation) {
         case operations.SAVE:
-          return onSaveObject(Model, gqltype, controller, attemptArgs, mySession, null, context);
+          record = await onSaveObject(Model, gqltype, controller, attemptArgs, mySession, null, context);
+          break;
         case operations.UPDATE: {
           const precondition = versioned
             ? await preReadTopLevel(Model, gqltype, attemptArgs, true, context, mySession) : undefined;
-          return onUpdateSubject(Model, gqltype, controller, attemptArgs, mySession, null, context, false, precondition);
+          record = await onUpdateSubject(Model, gqltype, controller, attemptArgs, mySession, null, context, false, precondition);
+          break;
         }
         case operations.DELETE: {
-          if (!versioned) return onDelete(Model, controller, attemptArgs, mySession, context);
-          const { expectedVersion, record } = await preReadTopLevel(Model, gqltype, attemptArgs, false, context,
-            mySession);
-          return onDelete(Model, controller, attemptArgs.id, mySession, context, record, { gqltype, expectedVersion });
+          if (!versioned) record = await onDelete(Model, controller, attemptArgs, mySession, context);
+          else {
+            const { expectedVersion, record: current } = await preReadTopLevel(Model, gqltype, attemptArgs, false, context,
+              mySession);
+            record = await onDelete(Model, controller, attemptArgs.id, mySession, context, current, { gqltype, expectedVersion });
+          }
+          break;
         }
         case operations.STATE_CHANGED:
-          return onStateChanged(Model, gqltype, controller,
+          record = await onStateChanged(Model, gqltype, controller,
             attemptArgs, mySession, actionField, context);
+          break;
         default:
           return null;
       }
+      afterCommit.queue({ typeName: gqltype.name, controller, operation, record, args: attemptArgs,
+        context, session: mySession, action: actionName });
+      return record;
     },
     Model,
   );
@@ -1956,19 +1976,22 @@ const executeItemFunction = async (gqltype, collectionField, parentKey, session,
       }
     }
 
+    let record;
     switch (operationType) {
       case operations.SAVE:
-        await onSaveObject(type.model, collectionGQLType, type.controller,
+        record = await onSaveObject(type.model, collectionGQLType, type.controller,
           args.input, session, linkToParent, context);
         break;
       case operations.UPDATE:
-        await onUpdateSubject(type.model, collectionGQLType, type.controller,
+        record = await onUpdateSubject(type.model, collectionGQLType, type.controller,
           args.input, session, linkToParent, context, true, versioned ? { expectedVersion, observedVersion, record: child } : undefined);
         break;
       case operations.DELETE:
-        await onDelete(type.model, type.controller, args.id, session, context, child,
+        record = await onDelete(type.model, type.controller, args.id, session, context, child,
           versioned ? { gqltype: collectionGQLType, expectedVersion } : null);
     }
+    afterCommit.queue({ typeName: collectionGQLType.name, controller: type.controller,
+      operation: operationType, record, args: args.input, context, session });
   }
 };
 
@@ -3158,7 +3181,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
                   await executeMiddleware(params);
                   return executeOperation(type.model, type.gqltype, type.controller,
                     args.input, operations.STATE_CHANGED, actionField,
-                    null, context, type.inputType);
+                    null, context, type.inputType, actionName);
                 },
               };
             }
@@ -3893,6 +3916,7 @@ const readSchemaOptions = (options) => {
 };
 
 const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomMutations, options) => {
+  Object.values(typesDict.types).forEach(({ controller }) => afterCommit.validate(controller));
   // Reject before models, resolvers or roots are built, so a rejected schema changes nothing.
   const { includedCustomQueries } = readSchemaOptions(options);
   assertQueryNamesAvailable(includedQueryTypes, includedCustomQueries);
@@ -4335,6 +4359,7 @@ function formatArgs(argsArray) {
   return {
     configureQueryLimits,
     configureMutationLimits,
+    configureAfterCommit: afterCommit.configure,
     connect,
     addNoEndpointType,
     createSchema,

@@ -575,6 +575,7 @@ const postgresSource = `import assert from 'node:assert/strict';
     scalars,
     validators,
     configureMutationLimits,
+    configureAfterCommit,
     MAX_RECORD_VERSION,
     RecordVersion,
   } from '@simtlix/simfinity-postgres';
@@ -610,6 +611,9 @@ const postgresSource = `import assert from 'node:assert/strict';
   assert.equal(api.validators, validators);
   assert.equal(api.configureMutationLimits, configureMutationLimits);
   assert.equal(configureMutationLimits, coreConfigureMutationLimits);
+  assert.equal(typeof configureAfterCommit, 'function');
+  assert.notEqual(api.configureAfterCommit, configureAfterCommit);
+  assert.throws(() => configureAfterCommit({ onError: 42 }), (error) => error.getCode() === 'INVALID_AFTER_COMMIT_OPTIONS');
   api.connect(null, bookType, 'postgresBook', 'postgresBooks');
   const schema = api.createSchema();
   const beforeReady = await graphql({ schema, source: '{ postgresBooks { id } }' });
@@ -743,6 +747,9 @@ const mongoSource = `import assert from 'node:assert/strict';
   assert.equal(legacyEntry.connect, simfinity.connect);
   assert.equal(legacyEntry.registerCustomQuery, simfinity.registerCustomQuery);
   assert.equal(legacyEntry.registerView, simfinity.registerView);
+  assert.equal(typeof simfinity.configureAfterCommit, 'function');
+  assert.equal(legacyEntry.configureAfterCommit, simfinity.configureAfterCommit);
+  assert.throws(() => simfinity.configureAfterCommit({ onError: 42 }), (error) => error.getCode() === 'INVALID_AFTER_COMMIT_OPTIONS');
   assert.equal(simfinity.registerQuery, undefined);
   assert.equal(legacyAuth, auth);
   assert.equal(legacyIsOwner, auth.isOwner);
@@ -779,6 +786,7 @@ const mongoSource = `import assert from 'node:assert/strict';
   assert.equal(custom.errors, undefined);
   assert.equal(custom.data.mongoRead, 'mongo');
   const runtime = simfinity.createRuntime(adapter);
+  assert.notEqual(runtime.configureAfterCommit, simfinity.configureAfterCommit);
   const type = new GraphQLObjectType({
     name: 'RootRuntimeBook',
     fields: { id: { type: GraphQLID }, title: { type: GraphQLString } },
@@ -2165,6 +2173,25 @@ adapter.batchesChildren = undefined;
 void createMongoAdapter({ batchedCollections: undefined });
 void createRuntime({ ...adapter, queryFeatures: undefined });`;
 
+const afterCommitTypes = (name, runtimeType, singleton = false) => `import type { AfterCommitOptions, AfterCommitErrorDetails, CommittedControllerCallbacks, EntityController } from '${name}';
+declare const runtime: ${runtimeType};
+const options: AfterCommitOptions = { onError(error: unknown, details: AfterCommitErrorDetails) { const committed: true = details.committed; void [error, committed, details.operation, details.callbackName, details.context]; } };
+runtime.configureAfterCommit(options);
+runtime.configureAfterCommit();
+const controller: EntityController = {
+  onSaveCommitted(record, args, context) { void [record, args, context]; },
+  onUpdateCommitted(record, context) { void [record, context]; },
+  onDeleteCommitted(record, context) { void [record, context]; },
+  onTransitionCommitted(record, action, context) { void [record, action.toUpperCase(), context]; },
+};
+const shared: CommittedControllerCallbacks = controller;
+// @ts-expect-error A reporter is a function, not a flag.
+runtime.configureAfterCommit({ onError: true });
+// @ts-expect-error Unknown options must not compile.
+runtime.configureAfterCommit({ reporter: () => {} });
+void shared;
+${singleton ? `import { configureAfterCommit } from '${name}'; configureAfterCommit(options);` : ''}`;
+
 const customQueryTypes = (name, runtimeType, singleton = false) => `import type { CreateSchemaOptions } from '${name}';
 import type { CreateSchemaOptions as CoreOptions } from '@simtlix/simfinity-core';
 // @ts-expect-error RegisterQueryOptions is not exported: custom queries have no options.
@@ -2263,6 +2290,7 @@ const cases = [
       'auth-plugins.ts': coreAuthPluginsTypes,
       'schema-plugins.ts': coreSchemaPluginTypes,
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
+      'after-commit.ts': afterCommitTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
       'views.ts': viewTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
     },
     // NodeNext, Node16 and Bundler read the subpath declarations from the exports map; Node10, which
@@ -2279,6 +2307,7 @@ const cases = [
     extraTypes: {
       'barrel.ts': databaseBarrelTypes('@simtlix/simfinity-sql'),
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
+      'after-commit.ts': afterCommitTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
       'views.ts': viewTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
     },
     forbiddenPackages: ['pg', 'mongoose', 'mongodb', '@simtlix/simfinity-postgres', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
@@ -2292,6 +2321,7 @@ const cases = [
     extraTypes: {
       'barrel.ts': databaseBarrelTypes('@simtlix/simfinity-postgres'),
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', true),
+      'after-commit.ts': afterCommitTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', true),
       'views.ts': viewTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', true),
     },
     typeDependencies: ['@types/pg@8'],
@@ -2332,7 +2362,9 @@ const cases = [
       'legacy-mcp-root.ts': mongoLegacyMcpBarrel('@simtlix/simfinity-js'),
       'legacy-mcp-workaround.ts': mongoLegacyMcpWorkaroundTypes,
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
+      'after-commit.ts': afterCommitTypes('@simtlix/simfinity-js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
       'legacy-custom-queries.ts': customQueryTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
+      'legacy-after-commit.ts': afterCommitTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
       'views.ts': viewTypes('@simtlix/simfinity-js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
       'legacy-views.ts': viewTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
     },

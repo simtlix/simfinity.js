@@ -15,6 +15,9 @@ export {
   validators,
 } from '@simtlix/simfinity-core';
 export type {
+  AfterCommitErrorDetails,
+  AfterCommitOptions,
+  CommittedControllerCallbacks,
   AuthPluginOptions,
   AuthRule,
   AuthRuleFunction,
@@ -300,6 +303,7 @@ export function createPostgres(options?: PostgresConfiguration): PostgresRuntime
  * anything other than a non-empty string.
  */
 export function caseFoldExpression(sqlExpression: string): string;
+export const configureAfterCommit: PostgresRuntime['configureAfterCommit'];
 export const configure: PostgresRuntime['configure'];
 export const connect: PostgresRuntime['connect'];
 export const addNoEndpointType: PostgresRuntime['addNoEndpointType'];
