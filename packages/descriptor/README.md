@@ -2,7 +2,7 @@
 
 Optional schema-owned JSON client metadata for Simfinity. Depends on the exact
 matching version of `@simtlix/simfinity-core`; supports both database facades.
-This is a next-release package, not part of the published 3.12.0 API. Install it
+Available since 3.15.0. Install it
 as a direct application dependency at the version of your Simfinity runtime.
 
 ```javascript

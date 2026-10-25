@@ -390,9 +390,9 @@ Each collection-frame test from the pre-integration implementation was checked t
 
 Named-view integration preserves separate compiled-unit budgets for client arguments and `where`, one provenance registry and scoped nested quantified groups. Evidence: `tests/register-view-frames.test.js`, the named-view cases in `tests/integration/collection-frames-parity.test.js`, and `tests/register-view-mcp.test.js`. These integration cases were checked against the pre-fix merged tree; the earlier feature tests retain their recorded 3.11.0 baseline evidence.
 
-## Next release: controller callbacks after commit
+## 3.15.0: controller callbacks after commit
 
-Optional committed controller callbacks extend the lifecycle on both backends. Existing lifecycle hooks remain transactional and supported. See the [upgrade notes](resources/compatibility.md#upgrade-notes-for-the-next-release) and [controller contract](guide/controllers.md#after-commit-callbacks).
+Optional committed controller callbacks extend the lifecycle on both backends. Existing lifecycle hooks remain transactional and supported. See the [upgrade notes](resources/compatibility.md#upgrade-to-3-15-0) and [controller contract](guide/controllers.md#after-commit-callbacks).
 
 | Behavior | Decision | Executable evidence |
 | --- | --- | --- |
@@ -410,3 +410,15 @@ Optional committed controller callbacks extend the lifecycle on both backends. E
 These callbacks are best effort: they do not provide durable or exactly-once delivery. An outbox and workers remain necessary when delivery must survive process failure. Runner failure tests use controlled driver failures; the database cases verify the stored rows and notifications separately.
 
 The public runtime suite, `tests/after-commit.test.js`, was checked to fail on 3.12.0 (`7387671`) using that revision's implementation: ten cases failed because notifications, configuration or callback validation were absent; the existing lifecycle-hook rejection case passed by design. All eleven cases passed again on the feature branch. The ESLint regression cases were also checked before its one-line fix: all four failed because the expected diagnostic was absent, then passed after the fix. These checks do not claim that unchanged regression tests or every database case must fail on the base.
+
+## 3.15.0: schema-owned client descriptors
+
+The optional `@simtlix/simfinity-descriptor` package joins the aligned release set. It describes the exact schema returned by `createSchema()` without changing the default 3.x introspection behavior. See the [upgrade notes](resources/compatibility.md#upgrade-to-3-15-0) and [descriptor contract](reference/client-descriptor.md).
+
+| Behavior | Decision | Executable evidence |
+| --- | --- | --- |
+| Metadata belongs to the exact schema; later registrations and different allowlists cannot contaminate it. | Core captures registrations; the descriptor freezes graph metadata on first use. Cloned/composed schemas are rejected. | `tests/client-descriptor.test.js`; `tests/descriptor-package.test.js`. |
+| Root input hints describe the generated root inputs, including defaults; nested inverse references retain their contextual input shapes. | Expose `rootInputUsage`, without redundant wrapper flags or authorization claims. | `tests/client-descriptor.test.js`; `tests/client-descriptor-parity.test.js`. |
+| Existing introspection clients keep their default metadata; an early opt-out is explicit and irreversible once installed. | The side-effect-free core `/introspection` subpath rejects late configuration. | Fresh-process `tests/introspection-configuration.test.js`, including auth and descriptor-first import ordering. |
+| HTTP access is explicit and checked before conditional responses. | GET/HEAD only; expected denials stay 401/403, unexpected failures are masked and reported. | `tests/client-descriptor-http.test.js`; `tests/client-descriptor-backends.test.js` pins deterministic bodies and ETags. |
+| The format is independent of physical database storage and imports no runtime through its HTTP declarations. | Optional sixth package with an exact core dependency and structural HTTP types; no facade re-exports. | Backend fixtures, `tests/package-dependencies.test.js`, and all six archives plus seven isolated runtime/TypeScript consumers in `scripts/test-packages.js`. |
