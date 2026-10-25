@@ -35,7 +35,7 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22.12.0 or newer |
 
-## Upgrade notes for the next release
+## Upgrade to 3.15.0
 
 ### Controller callbacks after commit
 
@@ -49,12 +49,12 @@ Controller callbacks after commit are additive. Applications that declare none k
 - **Exports and types**: core's `Runtime` exposes `configureAfterCommit`; core exports `AfterCommitOptions`, `AfterCommitErrorDetails` and `CommittedControllerCallbacks`. MongoDB, SQL and PostgreSQL re-export these types and expose the method on created runtimes. MongoDB (including its compatible `src/` entry) and PostgreSQL also export their singleton configuration function. Each runtime owns its reporter configuration. `EntityController` declares the four callbacks and `DatabaseAdapter` the optional queue capability.
 - **Linting**: the optional application ESLint plugin recognizes `configureAfterCommit` as a runtime member, preserving subsequent schema and relation checks.
 
-See [controllers](../guide/controllers#after-commit-callbacks), the [API reference](../reference/api#configureaftercommit) and the [compatibility ledger](../compatibility#next-release-controller-callbacks-after-commit).
+See [controllers](../guide/controllers#after-commit-callbacks), the [API reference](../reference/api#configureaftercommit) and the [compatibility ledger](../compatibility#_3-15-0-controller-callbacks-after-commit).
 
 ### Client descriptor
 
 The optional `@simtlix/simfinity-descriptor` package joins the aligned release set
-as its sixth package. These APIs are not in the published 3.14.0 packages.
+as its sixth package. It is available starting with 3.15.0.
 
 - **Metadata**: import `buildClientDescriptor` and `createClientDescriptorHandler`
   from the descriptor package, not core or either facade. Install it directly at

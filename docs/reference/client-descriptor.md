@@ -15,7 +15,7 @@ Both `buildClientDescriptor` and `createClientDescriptorHandler` are named expor
 of the optional `@simtlix/simfinity-descriptor` package. It depends on the exact
 matching core version; the facades do not re-export it. Install it as a direct
 application dependency, aligned with your Simfinity packages. This package is new
-in the next release; it is not part of the published 3.12.0 API.
+since 3.15.0.
 
 Core remains dependency-free. The handler uses structural request/response types
 compatible with Node HTTP and Express; its declarations need no Node ambient

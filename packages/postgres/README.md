@@ -31,7 +31,7 @@ import { postgresPlugin } from '@simtlix/simfinity-postgres';
 const simfinity = createSQL({ plugin: postgresPlugin({ pool, schema: 'library' }) });
 ```
 
-Install `@simtlix/simfinity-sql@3.14.0` as a direct dependency when importing its factory. PostgreSQL 15 or later is the only supported SQL plugin. The [SQL package guide](https://github.com/simtlix/simfinity.js/tree/master/packages/sql) documents relational planning and the versioned plugin contract.
+Install `@simtlix/simfinity-sql@3.15.0` as a direct dependency when importing its factory. PostgreSQL 15 or later is the only supported SQL plugin. The [SQL package guide](https://github.com/simtlix/simfinity.js/tree/master/packages/sql) documents relational planning and the versioned plugin contract.
 
 Both factories permanently bind one pool and schema, and five optional settings: `multiRowInserts: false` keeps one `INSERT` per owned row instead of multi-row statements; `explicitNullsOrder: true` keeps the `NULLS` clause on sorts of `id` and required fields, as 3.5.9 did, instead of letting indexes serve them; `batchedCollections: true` reads the generated collection fields of the parents that share their arguments with one statement per 100 parents, in a transaction that turns JIT off for that transaction only, instead of one statement per field as 3.6.0 did and as the default still does, and can return unsorted and tied rows in another order; the opt-in `refreshTriggers: 'perRoot'` refreshes each changed root's owned shape and unique keys once per transaction, while its guard trigger stays deferred, instead of once per changed row; and the opt-in `ownerIndexes: 'minimal'` leaves out the `(__owner_id)` indexes that the primary key or a unique index covers on new owned and guard tables. An unknown `refreshTriggers` or `ownerIndexes` value throws `INVALID_DATABASE_SCHEMA` (400). Read the [upgrade notes](https://simtlix.github.io/simfinity.js/resources/compatibility.html#upgrade-to-3-6-0) before enabling the opt-ins: versions up to 3.5.9 cannot validate databases created with them. The returned runtime supports registration, generated queries and mutations, middleware and scopes, controllers and validators, custom queries and mutations, named views, state machines, nested relationship writes, embedded reconstruction, and native PostgreSQL model handles. Native handles expose `findById`, `find`, `create`, `update`, and `delete`; they are not Mongoose models. `find(args, { session })` accepts the generated GraphQL list query arguments. Existing `pg.Pool` configuration and `pg.PoolClient` query interfaces remain compatible across both factories. A custom pool or client wrapper should pass `pg`'s `command` through in query results: the plugin reads it from the `COMMIT` result to detect a transaction that PostgreSQL rolled back because one of its statements failed, and without it such a transaction reports success with nothing stored.
 
@@ -62,7 +62,7 @@ The module and every `createPostgres` instance expose the shared `auth`, `valida
 MCP integration is an independent opt-in and does not add MCP dependencies to PostgreSQL applications:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.14.0 @modelcontextprotocol/sdk@^1.31.0
+npm install @simtlix/simfinity-mcp@3.15.0 @modelcontextprotocol/sdk@^1.31.0
 ```
 
 ```javascript
@@ -127,7 +127,7 @@ Controller `onSaveCommitted`, `onUpdateCommitted`, `onDeleteCommitted` and `onTr
 
 ## Client metadata
 
-In the next release, install the optional `@simtlix/simfinity-descriptor` package,
+Since 3.15.0, install the optional `@simtlix/simfinity-descriptor` package,
 aligned with your Simfinity version. It exports `buildClientDescriptor(schema)`
 and `createClientDescriptorHandler(schema, { authorize: 'public' })`. The builder
 describes the exact `createSchema()` result; the explicitly mounted handler can

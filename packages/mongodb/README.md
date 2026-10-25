@@ -100,7 +100,7 @@ Controller `onSaveCommitted`, `onUpdateCommitted`, `onDeleteCommitted` and `onTr
 
 ## Client metadata
 
-In the next release, install the optional `@simtlix/simfinity-descriptor` package,
+Since 3.15.0, install the optional `@simtlix/simfinity-descriptor` package,
 aligned with your Simfinity version. It exports `buildClientDescriptor(schema)`
 and `createClientDescriptorHandler(schema, { authorize: 'public' })`. The builder
 describes the exact `createSchema()` result; the explicitly mounted handler can
