@@ -227,7 +227,8 @@ for (const [backend, uri] of [
       expect(view.errors[0].extensions.code).toBe(code);
       expect(view.data.shopItems).toBeNull();
       const list = await run(listSource({}, [shopGroup('not-an-id')]), { tenant: 'a' });
-      expect(list.errors[0].extensions).toEqual(view.errors[0].extensions);
+      // Separate errors can be created on opposite sides of a UTC second boundary.
+      expect(list.errors[0].extensions).toEqual({ ...view.errors[0].extensions, timestamp: expect.any(String) });
     });
 
     it('rejects the view when middleware rejects the list', async () => {
