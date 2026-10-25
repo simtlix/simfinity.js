@@ -1,5 +1,6 @@
 export { describeModels } from './metadata.js';
 export { isVirtualField, virtualFieldOptions } from './relation-storage.js';
+export { MAX_RECORD_VERSION, RecordVersion } from './record-version.js';
 export { default as SimfinityError } from './errors/simfinity.error.js';
 export { createValidatedScalar } from './scalars/factory.js';
 export {

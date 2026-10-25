@@ -560,14 +560,45 @@ const virtualLeftovers = (description, catalog, virtualFields) => {
   return `${series(fields)} ${many ? 'are' : 'is'} virtual (extensions.virtual), so ${many ? 'they are' : 'it is'} never stored, but this database still holds ${many ? 'their' : 'its'} `
     + `earlier storage. Once nothing reads that storage, migrate it: ${statements.join(' ')} See the upgrade notes at ${UPGRADE_NOTES}`;
 };
-// A SCHEMA_MISMATCH of a database that still holds storage of fields that are now virtual also names them.
+// Explain version-column drift from catalog contents, including when equal column counts hide a missing
+// or leftover version in the original mismatch. Private owned and auxiliary tables have no record version.
+const versionColumns = (description, catalog) => {
+  const explanations = [];
+  for (const table of description.tables) {
+    if (table.ownership || table.auxiliary) continue;
+    const actual = catalog.tables.get(table.name);
+    if (!actual) continue;
+    const column = table.columns.find((item) => item.name === 'version');
+    const stored = actual.columns.find((item) => item.name === 'version');
+    const target = qualified(description.schema, table.name);
+    if (column?.type === 'bigint') {
+      const declaration = `${table.name} declares optimistic concurrency (extensions.concurrency), so its table needs the version column`;
+      if (!stored) explanations.push(`${declaration}. Migrate it: ALTER TABLE ${target} ADD COLUMN "version" bigint NOT NULL DEFAULT 1;`);
+      else if (stored.type !== column.type || stored.nullable !== column.nullable
+        || (column.collation && (stored.collation !== column.collation || stored.collation_schema !== 'pg_catalog'))
+        || normalizeExpression(stored.default) !== normalizeExpression(column.default || null) || stored.attidentity || stored.attgenerated) {
+        explanations.push(`${declaration} defined as bigint NOT NULL DEFAULT 1.`);
+      }
+    } else if (!column && stored?.type === 'bigint') {
+      explanations.push(`${table.name} does not declare optimistic concurrency, but its table has the version column. `
+        + 'If other instances of this application declare it, deploy the declaration here: while the column exists, instances without it cannot start. '
+        + `Otherwise, once no instance declares it: ALTER TABLE ${target} DROP COLUMN "version";`);
+    }
+  }
+  return explanations.length ? explanations.join(' ') : null;
+};
+
+// A SCHEMA_MISMATCH also explains optimistic-concurrency columns and earlier storage of virtual fields.
 const explainMismatch = (error, description, catalog, layouts, virtualFields) => {
-  if (!virtualFields.length || !catalog || !(error instanceof SimfinityError) || error.extensions?.code !== 'SCHEMA_MISMATCH') return error;
+  if (!catalog || !(error instanceof SimfinityError) || error.extensions?.code !== 'SCHEMA_MISMATCH') return error;
   let resolved = description;
   // Refresh-trigger objects of two layouts in one root are themselves the mismatch; compare with the description.
   try { resolved = resolveLayouts(description, catalog, layouts); } catch { /* keep the description */ }
   try {
-    const explanation = virtualLeftovers(resolved, catalog, virtualFields);
+    const explanation = [
+      versionColumns(resolved, catalog),
+      virtualFields.length ? virtualLeftovers(resolved, catalog, virtualFields) : null,
+    ].filter(Boolean).join(' ');
     return explanation ? new SimfinityError(`${error.message} ${explanation}`, 'SCHEMA_MISMATCH', 409) : error;
   } catch {
     // An explanation never replaces the mismatch it explains.

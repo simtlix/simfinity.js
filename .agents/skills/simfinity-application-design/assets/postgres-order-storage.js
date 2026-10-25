@@ -8,6 +8,6 @@ export const postgresOrderStorage = (api, namespace) => {
       const { rows } = await session.query(`SELECT quantity, "unitPrice" FROM "${namespace}"."SkillLine" WHERE "orderId" = $1`, [orderId]);
       return rows;
     },
-    setTotal: (type, id, total, session) => api.getModel(type).update(id, { total }, { session }),
+    setTotal: (type, id, total, session) => api.getModel(type).update(id, { total }, { session, version: false }),
   };
 };

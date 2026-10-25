@@ -60,7 +60,9 @@ simfinity.createSchema()
        |
        +-- assertCollectionConnections() // INVALID_MODEL for collections without connectionField
        +-- storedIdentity flags       // entities: connect() types and relation targets
+       +-- assert concurrency        // fixed protection, registered entities, storage/name collisions and adapter support
        +-- adapter.prepare()          // prepare storage metadata
+       +-- inject managed version     // protected types only, before models/inputs
        +-- adapter.createModel()      // Mongoose models or PostgreSQL handles
        +-- installIdResolver()        // entity `id` -> `_id ?? id`
        +-- autoGenerateResolvers()    // wire relationship resolvers
@@ -83,6 +85,7 @@ simfinity.createSchema()
 |------|---------------|
 | `packages/mongodb/src/index.js` | MongoDB facade and legacy helper exports |
 | `packages/core/src/runtime.js` | Shared registration, input/schema generation, lifecycle, middleware, scopes and resolvers |
+| `packages/core/src/record-version.js` | Managed `RecordVersion`/`MAX_RECORD_VERSION`, injected-field marker, version validation and conflict helpers. Root exports are public; `internal/record-version` is adapter-internal and untyped. Module-level scalar/protection identities require one core copy per process |
 | `packages/core/src/relation-owners.js` | Internal `relationFieldOwners` `WeakMap` shared by `runtime.js` and the auth plugin; not exported |
 | `packages/core/src/relation-storage.js` | Internal connection-storage helpers (`getListShape`, `getFieldStorageName`, `normalizeConnectionField`) shared by `runtime.js` and the MongoDB adapter, models and query builder. Exported only as the `@simtlix/simfinity-core/internal/relation-storage` subpath, which is not public API and has no type declarations; Mongo code imports it by package name, never by a relative path |
 | `packages/core/src/query-plan.js` | Driver-free typed query paths and predicate/sort/aggregation plans |
@@ -143,6 +146,7 @@ simfinity.createSchema()
 These registries are per runtime. Module-scope state shared by every runtime:
 
 - the introspection extension;
+- `RecordVersion`/`RecordVersionRef` scalar/input identities in `record-version.js`, and `protectionStatus` in `runtime.js`, a `WeakMap` fixing protection for each type after a successful schema;
 - `maxPageSize` in `packages/core/src/query-limits.js` (`configureQueryLimits()`);
 - `maxNestedOperations` in `packages/core/src/mutation-limits.js` (`configureMutationLimits()`), null (unlimited) by default;
 - `runtimeBoundTypes` in `runtime.js`, a `WeakMap` from each GraphQL object type to the identity of the runtime that generated its relation resolvers (bound) or whose schema reached it with an unresolved non-embedded relation field (reserved, such as an unregistered custom mutation result). `connect()`, `addNoEndpointType()` and `createSchema()` throw `TYPE_BOUND_TO_OTHER_RUNTIME` (409) for a type bound or reserved elsewhere;
@@ -157,3 +161,9 @@ Simfinity adds `extensions` to the field map returned by `__Field.getFields()`. 
 The extension is still global to the shared GraphQL peer, and Simfinity's registries belong to each runtime instance. Schemas constructed after import collect `FieldExtensionsType` and `RelationType` (or their fallback names `SimfinityFieldExtensionsType` and `SimfinityRelationType`, which a clash in the process's first Simfinity schema sets for every later schema) in their type maps. Pre-existing schemas retain their original type maps: ordinary operations and direct metadata introspection work, but named fragments on these new types require a schema constructed after import.
 
 Tools that clone types (`graphql-middleware`'s `applyMiddleware` / `mapSchema`) remain unsupported. `buildClientSchema()` on a post-import schema's introspection can also produce duplicate metadata types when run in the same process as Simfinity. Use Envelop plugins and in-place resolver wrapping; initialization safety does not provide schema isolation or schema-cloning compatibility.
+
+## Optimistic concurrency in the current source
+
+Core owns declaration/schema validation, field injection, captured preconditions, scoped early-conflict visibility and defensive result diagnostics; adapters own atomic ID/version predicates, increments, same-session no-match disambiguation and their guarded-write abort policy. SQL remains driver-free and passes `operation.version` to capable plugins. Result diagnostics do not prove arbitrary overrides preserved atomicity. Do not add a SQL-handle pre-read merely to reproduce core's observed-version diagnostic. A malformed stored version can fail before hooks; only stale/exhausted valid-version errors use `get_by_id` visibility. Root mutation authorization/middleware still precede the pre-read.
+
+Protected updates/actions/deletes require their record's observed version; nested protected children change parent collection inputs even if the parent is unprotected. Neither protection nor graph-wide observations may be inferred from a parent version. Derived-value maintenance in the same transaction uses a native MongoDB `updateOne` without version changes or a SQL/PostgreSQL model handle with `{ session, version: false }`. Native Mongoose query/save middleware must preserve managed predicates, increments, initialization and returned versions. Preserve supplied-session ownership: transactional MongoDB aborts adapter-detected conflicts, core early/result errors do not add a universal automatic abort.

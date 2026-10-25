@@ -4,7 +4,7 @@ import { queryFunctions } from '../query/functions.js';
 import { constraintBuilder, withLayouts } from './constraints.js';
 import { identifier, literal, generatedName, invalid } from './sql.js';
 
-const scalarTypes = { ID: 'uuid', String: 'text', Enum: 'text', Int: 'integer', Float: 'double precision', Boolean: 'boolean', DateTime: 'timestamp with time zone', Embedded: 'jsonb' };
+const scalarTypes = { ID: 'uuid', Version: 'bigint', String: 'text', Enum: 'text', Int: 'integer', Float: 'double precision', Boolean: 'boolean', DateTime: 'timestamp with time zone', Embedded: 'jsonb' };
 const physicalType = (column) => `${scalarTypes[column.scalar]}${column.list ? '[]' : ''}`;
 const physicalDefault = (value) => value.kind === 'identity' ? 'gen_random_uuid()' : typeof value.value === 'string' ? `${literal(value.value)}::text` : String(value.value);
 // The first value is the default, which keeps the 3.5.9 description.
