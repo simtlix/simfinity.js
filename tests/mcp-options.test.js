@@ -1461,6 +1461,24 @@ describe('MCP nested collections and $defs of core-generated schemas', () => {
   describe('shared $defs', () => {
     const defsOf = (tools) => tools.flatMap((tool) => Object.entries(tool.inputSchema.$defs || {}));
 
+    it('publishes quantified descriptions consistently in shared and standalone definitions', () => {
+      const schema = buildShops().schema;
+      const fields = schema.getQueryType().getFields();
+      const { tools } = simfinity.generateMCPTools(schema);
+      for (const name of ['mcpoptncshops', 'mcpoptncshops_aggregate']) {
+        const shared = byName(tools, name);
+        const standalone = simfinity.graphqlArgsToJSONSchema(fields[name]);
+        expect(shared.description).toContain('nested AND/OR and ANY/ALL/NONE filter groups');
+        expect(shared.description).toContain('queryFeatures.quantifiers');
+        for (const defs of [shared.inputSchema.$defs, standalone.$defs]) {
+          expect(defs.QLQuantifier.description).toContain('ALL and NONE hold when there are no visible elements');
+          expect(defs.QLQuantifiedGroup.description).toContain('same element');
+          expect(defs.QLQuantifiedGroup.properties.path.description).toContain('relative to the containing element');
+          expect(defs.QLFilterGroup.description).toContain('ANY/ALL/NONE');
+        }
+      }
+    });
+
     it('builds each input or enum def once per tool set', () => {
       for (const schema of [buildShops().schema, buildChain(5)]) {
         const defs = defsOf(simfinity.generateMCPTools(schema).tools);
@@ -1524,8 +1542,8 @@ describe('MCP nested collections and $defs of core-generated schemas', () => {
         + '"McpOptDefsMood":{"type":"string","enum":["UP","DOWN"]}}}',
       );
       expect(defKeys(simfinity.generateMCPTools(buildChain(5)).tools, ['mcpoptchain0s', 'addmcpoptchain3'])).toEqual([
-        ['QLFilter', 'QLOperator', 'QLTypeFilterExpression', 'QLTypeFilter', 'QLPagination', 'QLSortExpression', 'QLSort',
-          'QLSortOrder', 'QLFilterGroup', 'QLFilterCondition'],
+        ['QLFilter', 'QLOperator', 'QLTypeFilterExpression', 'QLTypeFilter', 'QLQuantifier', 'QLPagination', 'QLSortExpression', 'QLSort',
+          'QLSortOrder', 'QLFilterGroup', 'QLQuantifiedGroup', 'QLFilterCondition'],
         ['McpOptChain3Input', 'McpOptChainStatus', 'IdInputType', 'OneToManyMcpOptChain3Achildren',
           'McpOptChain3AMcpOptChain4InputForParent', 'McpOptChain4InputForUpdate'],
       ]);

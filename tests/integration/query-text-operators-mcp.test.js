@@ -1,17 +1,19 @@
 // The literal text operators (#108, part 1) through generated MCP tools on both backends: list, counted list and
 // aggregate calls return the rows that the same GraphQL filters return (the cases of tests/helpers/query-text-operators.js),
 // an SDK client that validates tool input and output runs them, and invalid values come back as INVALID_FILTER_VALUE
-// tool errors.
+// tool errors. Collection frames (#108, part 3) return each parent once, support a NONE counted list and an ANY
+// aggregate, and fail before reads when the same real adapter does not declare quantifiers.
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { graphql } from 'graphql';
+import { graphql, GraphQLID, GraphQLInt, GraphQLList, GraphQLObjectType, GraphQLString } from 'graphql';
 import mongoose from 'mongoose';
 import pg from 'pg';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createRuntime } from '../../packages/core/src/index.js';
 import { createMongoAdapter } from '../../packages/mongodb/src/mongo/adapter.js';
-import { createPostgres } from '../../packages/postgres/src/index.js';
+import { createPostgres, postgresPlugin } from '../../packages/postgres/src/index.js';
+import { createSQLAdapter } from '../../packages/sql/src/adapter.js';
 import { createMCPServer, generateMCPTools } from '../../packages/mcp/src/index.js';
 import { createTextOperatorFixture, registerTextOperatorFixture, seedTextOperatorFixture } from '../helpers/query-text-operators.js';
 
@@ -25,6 +27,41 @@ const keysOf = (result, field) => {
 };
 const firstError = (result) => JSON.parse(result.content[0].text).errors[0];
 
+const undeclaredTools = (adapter) => {
+  const queryFeatures = { ...adapter.queryFeatures };
+  delete queryFeatures.quantifiers;
+  const reads = [];
+  const rejectRead = (method) => () => { reads.push(method); throw new Error(`Unexpected ${method} on undeclared adapter`); };
+  const api = createRuntime({
+    ...adapter,
+    queryFeatures,
+    find: rejectRead('find'),
+    count: rejectRead('count'),
+    aggregate: rejectRead('aggregate'),
+  });
+  api.preventCreatingCollection(true);
+  // Distinct names avoid replacing the live fixture's Mongoose models. Rejection needs no stored rows.
+  const Review = new GraphQLObjectType({
+    name: 'QtMcpUndeclaredReview',
+    fields: () => ({
+      id: { type: GraphQLID },
+      author: { type: GraphQLString },
+      item: { type: Item, extensions: { relation: { embedded: false, connectionField: 'item' } } },
+    }),
+  });
+  const Item = new GraphQLObjectType({
+    name: 'QtMcpUndeclaredItem',
+    fields: {
+      id: { type: GraphQLID },
+      rank: { type: GraphQLInt },
+      reviews: { type: new GraphQLList(Review), extensions: { relation: { embedded: false, connectionField: 'item' } } },
+    },
+  });
+  api.connect(null, Item, 'qtMcpUndeclaredItem', 'qtMcpUndeclaredItems');
+  api.connect(null, Review, 'qtMcpUndeclaredReview', 'qtMcpUndeclaredReviews');
+  return { reads, ...generateMCPTools(api.createSchema(), { context: () => ({}) }) };
+};
+
 const backends = [
   {
     name: 'MongoDB',
@@ -35,6 +72,7 @@ const backends = [
       api.preventCreatingCollection(true);
       return {
         api,
+        undeclared: () => undeclaredTools(createMongoAdapter()),
         async initialize() { for (const { model } of api.getRegistrations()) if (model) await model.createCollection(); },
         async close() { if (mongoose.connection.readyState) { await mongoose.connection.db.dropDatabase(); await mongoose.disconnect(); } },
       };
@@ -48,6 +86,7 @@ const backends = [
       const api = createPostgres({ pool, schema: namespace });
       return {
         api,
+        undeclared: () => undeclaredTools(createSQLAdapter(postgresPlugin({ pool, schema: namespace }))),
         initialize: () => api.initializeDatabase(),
         async close() { await pool.query(`DROP SCHEMA IF EXISTS "${namespace}" CASCADE`); await pool.end(); },
       };
@@ -94,14 +133,35 @@ for (const backend of backends) {
       }
     });
 
-    it('counts and pages a text condition, and repeats records per matching child as GraphQL does', async () => {
+    it('counts and pages a text condition, and returns each matching parent once as GraphQL does', async () => {
       const page = await callTool('qtItems', { name: { operator: 'ISTARTS_WITH', value: 'palermo' }, ...byKey, pagination: { page: 2, size: 1, count: true } });
       expect(keysOf(page, 'qtItems')).toEqual(['B']);
       expect(page.structuredContent.totalCount).toBe(2);
       expect(page._meta).toEqual({ count: 2 });
       const repeated = await callTool('qtItems', { reviews: { terms: [{ path: 'author', operator: 'ILIKE', value: '' }] }, ...byKey, pagination: { page: 1, size: 10, count: true } });
-      expect(keysOf(repeated, 'qtItems')).toEqual(['A', 'A', 'B']);
-      expect(repeated.structuredContent.totalCount).toBe(3);
+      expect(keysOf(repeated, 'qtItems')).toEqual(['A', 'B']);
+      expect(repeated.structuredContent.totalCount).toBe(2);
+    });
+
+    it('runs a NONE collection field filter with counted pagination through the list tool', async () => {
+      const result = await callTool('qtItems', {
+        reviews: { quantifier: 'NONE', terms: [{ path: 'author', operator: 'ISTARTS_WITH', value: 'ana' }] },
+        ...byKey,
+        pagination: { page: 1, size: 10, count: true },
+      });
+      expect(keysOf(result, 'qtItems')).toEqual(['C', 'D', 'E', 'F', 'G', 'H']);
+      expect(result.structuredContent.totalCount).toBe(6);
+      expect(result._meta).toEqual({ count: 6 });
+    });
+
+    it('runs an ANY collection group through the aggregate tool without multiplying roots', async () => {
+      const result = await callTool('qtItems_aggregate', {
+        AND: [{ ANY: [{ path: 'reviews', conditions: [{ field: 'author', operator: 'ILIKE', value: '' }] }] }],
+        aggregation: { groupId: 'rank', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }] },
+        sort: { terms: [{ field: 'groupId', order: 'ASC' }] },
+      });
+      expect(result.isError, result.content[0].text).toBe(false);
+      expect(result.structuredContent.qtItems_aggregate).toEqual([{ groupId: 1, facts: { n: 1 } }, { groupId: 2, facts: { n: 1 } }]);
     });
 
     it('filters an aggregate call with a text condition', async () => {
@@ -112,6 +172,25 @@ for (const backend of backends) {
       });
       expect(result.isError, result.content[0].text).toBe(false);
       expect(result.structuredContent.qtItems_aggregate).toEqual([{ groupId: 1, facts: { n: 1 } }, { groupId: 2, facts: { n: 1 } }]);
+    });
+
+    it('returns UNSUPPORTED_QUERY before list, count or aggregate reads on an adapter without quantifiers', async () => {
+      const undeclared = database.undeclared();
+      for (const [name, args] of [
+        ['qtMcpUndeclaredItems', {
+          reviews: { quantifier: 'NONE', terms: [{ path: 'author', operator: 'ISTARTS_WITH', value: 'ana' }] },
+          pagination: { page: 1, size: 10, count: true },
+        }],
+        ['qtMcpUndeclaredItems_aggregate', {
+          AND: [{ ANY: [{ path: 'reviews', conditions: [{ field: 'author', operator: 'ILIKE', value: '' }] }] }],
+          aggregation: { groupId: 'rank', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }] },
+        }],
+      ]) {
+        const result = await undeclared.callTool(name, args);
+        expect(result.isError, name).toBe(true);
+        expect(firstError(result).extensions?.code, name).toBe('UNSUPPORTED_QUERY');
+      }
+      expect(undeclared.reads).toEqual([]);
     });
 
     it('returns INVALID_FILTER_VALUE tool errors for invalid text values', async () => {

@@ -352,7 +352,7 @@ describe.skipIf(!uri)('PostgreSQL batched collection reads (#165)', () => {
     ['a relationship sort ending in id', 'books(sort: { terms: [{ field: "publisher.name", order: DESC }, { field: "id", order: ASC }] }, pagination: { page: 2, size: 4 }) { id publisher { name } }', {},
       (result) => expect(result.data.pgcbauthors[0].books.map((book) => book.publisher.name)).toEqual(['P2', 'P2', 'P2', 'P2'])],
     ['a filter through the children\'s own collection', 'books(chapters: { terms: [{ path: "title", operator: IN, value: ["C1", "C2"] }] }, sort: { terms: [{ field: "id", order: ASC }] }) { id }', {},
-      (result) => expect(result.data.pgcbauthors[1].books).toHaveLength(12)],
+      (result) => expect(result.data.pgcbauthors[1].books).toHaveLength(6)],
     ['a find scope', 'books(sort: { terms: [{ field: "id", order: ASC }] }) { id tenant }', { tenant: 't1' },
       (result) => expect(new Set(books(result).map((book) => book.tenant))).toEqual(new Set(['t1']))],
     ['a joined scope', 'books(publisher: { terms: [{ path: "name", operator: NE, value: "P1" }] }) { id publisher { name } }', { hidePublisher: 'P0' },

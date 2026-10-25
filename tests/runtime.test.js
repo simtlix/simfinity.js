@@ -527,13 +527,13 @@ describe('createRuntime', () => {
         from: ChildType.name,
         foreignField: 'parentKey',
         localField: '_id',
-        as: '__sf_l0',
+        pipeline: [{ $match: { value: 'child' } }, { $limit: 1 }, { $project: { _id: 1 } }],
+        as: '__sf_q0',
       },
     });
     expect(pipeline).toContainEqual({
       $match: {
-        requiredTags: 'one',
-        '__sf_l0.value': 'child',
+        $and: [{ requiredTags: 'one' }, { '__sf_q0.0': { $exists: true } }],
       },
     });
   });
@@ -592,15 +592,14 @@ describe('createRuntime', () => {
 
     expect(pipeline).toContainEqual({
       $lookup: {
-        from: GrandchildType.name,
-        foreignField: 'childKey',
-        localField: '__sf_l0._id',
-        as: '__sf_l1',
+        from: ChildType.name, foreignField: 'parentKey', localField: '_id', as: '__sf_q0',
+        pipeline: [
+          { $lookup: { from: GrandchildType.name, foreignField: 'childKey', localField: '_id', as: '__sf_q1', pipeline: [{ $match: { value: 'nested' } }, { $limit: 1 }, { $project: { _id: 1 } }] } },
+          { $match: { '__sf_q1.0': { $exists: true } } }, { $limit: 1 }, { $project: { _id: 1 } },
+        ],
       },
     });
-    expect(pipeline).toContainEqual({
-      $match: { '__sf_l1.value': 'nested' },
-    });
+    expect(pipeline).toContainEqual({ $match: { '__sf_q0.0': { $exists: true } } });
   });
 
   test('aggregates inverse-list facts with parent-to-child lookup direction and reuse', async () => {
@@ -3683,7 +3682,7 @@ describe('pagination count reporting', () => {
 });
 
 describe('filter values built from variables', () => {
-  test('reads a variable that a list literal names but the request leaves unset as null', async () => {
+  test('coerces an unset list variable to null and rejects it in BTW before middleware', async () => {
     const adapter = createMemoryAdapter();
     const find = vi.spyOn(adapter, 'find');
     const runtime = createRuntime(adapter);
@@ -3702,9 +3701,10 @@ describe('filter values built from variables', () => {
       variableValues: { b: 2020 },
     });
 
-    expect(result).toEqual({ data: { variableItemSeries: [] } });
-    expect(seen).toEqual([[null, 2020]]);
-    expect(find.mock.calls[0][2].year).toEqual({ operator: 'BTW', value: [null, 2020] });
+    expect(result.errors?.[0]?.extensions).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
+    expect(result.errors[0].message).toBe('Filter lists require non-null scalar elements');
+    expect(seen).toEqual([]);
+    expect(find).not.toHaveBeenCalled();
   });
 });
 

@@ -17,6 +17,7 @@ import type {
   DatabaseAdapter,
   MutationLimitsOptions,
   QueryFeatures,
+  QueryLimitsOptions,
   RuntimeRegistration,
   SimfinityError,
   ViewOptions,
@@ -50,6 +51,12 @@ export type {
   MutationLimitsOptions,
   PermissionSchema,
   PolicyExpression,
+  QLFilterCondition,
+  QLFilterGroup,
+  QLQuantifiedGroup,
+  QLTypeFilterExpression,
+  QueryLimitsOptions,
+  QueryQuantifier,
   ScopeFunction,
   ScopeOperation,
   ScopeParams,
@@ -103,7 +110,7 @@ export interface MongoAdapter extends DatabaseAdapter {
   /** Frozen declaration of atomic expectedVersion writes; wrappers must forward every argument. */
   readonly writeFeatures: Readonly<{ optimisticConcurrency: true }>;
   /**
-   * Frozen; lists every `QLOperator` value and declares `referenceEmptiness: true`. The literal text
+   * Frozen; lists every `QLOperator` value and declares `referenceEmptiness: true` and `quantifiers: true`. The literal text
    * operators compile to escaped regular expressions: `ILIKE` unanchored, `STARTS_WITH` and
    * `ISTARTS_WITH` anchored with `^`, `ENDS_WITH` and `IENDS_WITH` with `\z`, and `IEQ` with both, with
    * the `i` option for the case-insensitive ones. `IS_EMPTY` and `IS_NOT_EMPTY` compile to plain query
@@ -284,21 +291,10 @@ export function use(
 /** Globally prevent Mongoose collection creation for generated models. */
 export function preventCreatingCollection(prevent: boolean): void;
 
-/** Process-wide limits for generated list and paginated aggregate queries. */
-export interface QueryLimitsOptions {
-  /** Positive safe integer; defaults to 1000. Unpaged lists use min(100, maxPageSize). */
-  maxPageSize?: number;
-  /**
-   * Positive safe integer; defaults to 10. The most distinct scoped joins and frames that the
-   * client's reference and collection emptiness may need in one list, aggregate or collection-field
-   * call; more fail with `FILTER_DEPTH_EXCEEDED` (400).
-   */
-  maxReferenceFrames?: number;
-}
-
 /**
- * Configure at startup. Invalid configuration throws INVALID_QUERY_LIMITS (400) and keeps both
- * limits; an omitted option takes its default again.
+ * Process-wide limits for generated list and paginated aggregate queries. Configure at startup.
+ * Invalid configuration throws INVALID_QUERY_LIMITS (400) and keeps all limits; an omitted option
+ * takes its default again.
  */
 export function configureQueryLimits(options?: QueryLimitsOptions): void;
 
@@ -352,10 +348,13 @@ export function getType(
  * Query building (src/index.js)
  * ========================================================================== */
 
-/** A QLFilterGroup input value (recursive AND/OR groups plus flat conditions). */
+/** A QLFilterGroup input value: conditions, logical groups and element-relative quantified groups. */
 export interface FilterGroupInput {
   AND?: FilterGroupInput[];
   OR?: FilterGroupInput[];
+  ANY?: QuantifiedGroupInput[];
+  ALL?: QuantifiedGroupInput[];
+  NONE?: QuantifiedGroupInput[];
   conditions?: Array<{
     field: string;
     operator?: string;
@@ -365,6 +364,11 @@ export interface FilterGroupInput {
     path?: string;
   }>;
   [key: string]: any;
+}
+
+/** A reference or collection frame; its body uses paths relative to the target element. */
+export interface QuantifiedGroupInput extends FilterGroupInput {
+  path: string;
 }
 
 /**
@@ -403,16 +407,25 @@ export interface FilterGroupInput {
  * that a scope hides reads as missing. A crossing or frame after a scoped crossing stays in that chain,
  * also when its own scope is null. The aliases are unset at the end of find pipelines. A target type
  * without a model fails with `INVALID_FILTER_PATH` (400), and a marker that is not filled for every
- * path the construct reads, or that sits on a construct that reads none or on another operator, with
+ * path the construct reads, or that sits on a construct that reads no relation or on an ordinary
+ * condition outside a quantified frame, with
  * `DETACHED_CLIENT_FILTER` (500), after the 400 checks. Supplied models on another database or
  * connection and discriminator targets are not supported here, as for the other relation paths.
+ *
+ * Ordinary paths through collections compile as correlated `ANY` frames. Conditions in one group
+ * sharing a collection must hold on the same child, and each parent appears once. Explicit `ANY`,
+ * `ALL` and `NONE` groups and `quantifier` field filters accept element-relative conditions; `ALL`
+ * alone is true, including an OR branch. Target find scopes precede frame conditions; trusted
+ * constructs read stored data. References inside a client frame use its element-relative scope
+ * keys. Off-root collection correlation keys get an inner non-null connection guard. Aggregate
+ * groupId/fact collection prefixes keep legacy joins, and other filters can anchor frames on them.
+ * Collection sorts reject with `INVALID_FILTER_PATH`, including count mode.
  *
  * The checks, and their codes, are those of `createQueryPlan` in the same order: `MISSING_FILTER_PATH`
  * for an emptiness operator on an object filter without terms or beside terms, `INVALID_FILTER_PATH`
  * for a value inside an embedded list or a collection and for an interface or union field or member,
  * `INVALID_FILTER_OPERATOR` for an embedded type that reaches itself through single embedded members,
- * and `INVALID_FILTER_VALUE` for a value that is not omitted or null. Other operators keep their
- * pipelines.
+ * and `INVALID_FILTER_VALUE` for a value that is not omitted or null.
  */
 export function buildQuery(
   input: Record<string, any>,

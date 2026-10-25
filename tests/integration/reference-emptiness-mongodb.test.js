@@ -773,9 +773,11 @@ describe.each(servers)('MongoDB reference emptiness on a %s', (label, uri, prefi
         ['pro.shop', 'IS_EMPTY', 'shopNE', { __sf_l0: ['_id_'], __sf_q0: ['_id_'] }],
         ['odim', 'IS_EMPTY', 'EQ', { __sf_q0: ['_id_'] }],
         ['shop', 'IS_EMPTY', 'admin', { __sf_q0: ['_id_'] }],
+        ['reviews.rating', 'GTE', 'admin', { __sf_q0: ['productId_1'] }, { reviews: { terms: [{ path: 'rating', operator: 'GTE', value: 4 }] } }],
+        ['shop.products.name', 'EQ', 'admin', { __sf_l0: ['_id_'], __sf_q0: ['shop_1'] }, { shop: { terms: [{ path: 'products.name', operator: 'EQ', value: 'Ka' }] } }],
       ];
-      for (const [path, operator, shape, indexes] of cases) {
-        const args = clientArgs({ root: 'product', path, operator }, shape, 'field');
+      for (const [path, operator, shape, indexes, input] of cases) {
+        const args = input ?? clientArgs({ root: 'product', path, operator }, shape, 'field');
         args.name = { operator: 'IS_NOT_EMPTY' };
         const pipeline = await target.adapter.buildQuery(args, target.types.Product);
         const explain = await target.model('product').aggregate(pipeline).explain('executionStats');

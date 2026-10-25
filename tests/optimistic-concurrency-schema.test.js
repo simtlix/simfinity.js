@@ -899,7 +899,7 @@ describe('clients sending the wrong shape (Review Focus 4)', () => {
   });
 });
 
-// printSchema() of libraryTypes() at 3.11.0, before optimistic concurrency.
+// printSchema() of libraryTypes() with collection frames, before optimistic concurrency.
 const UNPROTECTED_SDL = `schema {
   query: RootQueryType
   mutation: Mutation
@@ -979,8 +979,21 @@ enum QLSortOrder {
 }
 
 input QLFilterGroup {
+  ANY: [QLQuantifiedGroup]
+  ALL: [QLQuantifiedGroup]
+  NONE: [QLQuantifiedGroup]
   AND: [QLFilterGroup]
   OR: [QLFilterGroup]
+  conditions: [QLFilterCondition]
+}
+
+input QLQuantifiedGroup {
+  path: String!
+  AND: [QLFilterGroup]
+  OR: [QLFilterGroup]
+  ANY: [QLQuantifiedGroup]
+  ALL: [QLQuantifiedGroup]
+  NONE: [QLQuantifiedGroup]
   conditions: [QLFilterCondition]
 }
 
@@ -993,12 +1006,19 @@ input QLFilterCondition {
 
 input QLTypeFilterExpression {
   terms: [QLTypeFilter]
+  quantifier: QLQuantifier
 }
 
 input QLTypeFilter {
   operator: QLOperator
   value: QLValue
   path: String
+}
+
+enum QLQuantifier {
+  ANY
+  ALL
+  NONE
 }
 
 type QLTypeAggregationResult {

@@ -254,6 +254,15 @@ export interface PostgresRuntime extends Runtime<PostgresModel, PostgresSession>
  * state column and a `NOT EXISTS` subquery on the owned table, null list items counting as items. `IS_NOT_EMPTY` is
  * the positive form of a leaf, which a btree can serve, and the `NOT` of an object or owned form.
  *
+ * The plugin declares `queryFeatures.quantifiers: true`: collection filters become correlated EXISTS frames,
+ * preserving one parent row, and explicit ANY/NONE/ALL frames also admit single references. Client frames and
+ * crossings apply target find scopes; trusted frames read stored data. ALL uses NOT EXISTS with a two-valued
+ * failing body (null operands fail ordering comparisons), and an absent body is TRUE. A frame's aliases and
+ * scope/body joins are local to its subquery. Aggregate anchors share the joins of groupId and facts; filters
+ * whose collection prefixes are already joined keep their multiplicity. A reference reached through an embedded
+ * list keeps its vector join when the target scope is null, including after a restricted prefix; a non-null
+ * target scope there is FORBIDDEN_FILTER_PATH (403). Sorting through a collection is invalid.
+ *
  * The plugin also declares `queryFeatures.referenceEmptiness`. A client's condition reads as missing every record that
  * the target's `find` scope hides. The references it crosses share the plain `LEFT JOIN` of other conditions while
  * the scopes crossed so far add nothing; from the first scope that adds conditions on, each crossing is a

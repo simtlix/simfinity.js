@@ -82,13 +82,16 @@ describe('named views through MCP', () => {
       kind: 'query', title: 'openItems', annotations: { title: 'openItems', openWorldHint: false, readOnlyHint: true },
     });
     expect(tool.description.startsWith('Open items with stock. ')).toBe(true);
-    expect(tool.description).toContain('nested AND/OR filter groups, pagination (page/size) and sorting');
+    expect(tool.description).toContain('nested AND/OR and ANY/ALL/NONE filter groups, pagination (page/size) and sorting');
     const list = tools.find((t) => t.name === 'nvItems');
     expect(list.title).toBe('List NvItem'); // the generated tool keeps its title
     // The view's language is the generated list sentence, byte for byte.
     const language = tool.description.slice('Open items with stock. '.length);
     expect(language.startsWith('Supports per-field filters (operators: EQ, ')).toBe(true);
-    expect(language.endsWith('nested AND/OR filter groups, pagination (page/size) and sorting.')).toBe(true);
+    expect(language).toContain('nested AND/OR and ANY/ALL/NONE filter groups, pagination (page/size) and sorting.');
+    expect(language).toContain('queryFeatures.quantifiers: true');
+    expect(language).toContain('conditions on the same collection prefix in one group must match the same element');
+    expect(language.endsWith('otherwise they fail with UNSUPPORTED_QUERY.')).toBe(true);
     expect(list.description).toBe(`List and search NvItem records. ${language} Returns an array of NvItem.`);
   });
 
