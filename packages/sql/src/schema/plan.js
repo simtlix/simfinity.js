@@ -89,11 +89,12 @@ export const planRelationalSchema = (models, { schema = 'public', naming = defau
         continue;
       }
       const scalar = field.kind === 'embedded' ? 'Embedded' : field.kind === 'reference' ? 'ID' : field.scalar;
-      if (!['ID', 'String', 'Enum', 'Int', 'Float', 'Boolean', 'DateTime', 'Embedded'].includes(scalar)) invalid(`Unsupported scalar at ${table.name}.${field.name}`);
+      if (!['ID', 'String', 'Enum', 'Int', 'Float', 'Boolean', 'DateTime', 'Version', 'Embedded'].includes(scalar)) invalid(`Unsupported scalar at ${table.name}.${field.name}`);
+      if (scalar === 'Version') requirements.add('optimisticConcurrency');
       if (field.kind === 'embedded') requirements.add('embeddedValues');
       else if (field.list) requirements.add('scalarLists');
       const presenceColumn = table.ownership || field.kind === 'embedded' ? naming.generatedName('__field', field.name, 'present') : null;
-      addColumn(table, { name: field.storageName, scalar, list: field.kind !== 'embedded' && field.list, nullable: !required, ...(presenceColumn ? { presenceColumn } : {}) });
+      addColumn(table, { name: field.storageName, scalar, list: field.kind !== 'embedded' && field.list, nullable: !required, ...(scalar === 'Version' ? { default: { kind: 'value', value: 1 } } : {}), ...(presenceColumn ? { presenceColumn } : {}) });
       if (presenceColumn) addColumn(table, { name: presenceColumn, scalar: 'Boolean', nullable: false, default: { kind: 'value', value: false } });
       if (conditional && field.required) addCheck(table, field.storageName, 'required', { kind: 'requiredWhenItem' });
       if (field.kind === 'reference') addReference(table, field.storageName, field.target);

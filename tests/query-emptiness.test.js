@@ -14,6 +14,13 @@ import {
   writeMongoEmptinessDocuments,
 } from './helpers/query-emptiness.js';
 
+// Preserve the pre-frame collector contract while the collection-frame suite checks new metadata.
+const legacyEntries = (entries) => entries.map((entry) => {
+  const legacy = { ...entry };
+  for (const key of ['use', 'container', 'frames', 'relative', 'quantifier']) delete legacy[key];
+  return legacy;
+});
+
 // #108 part 2a: the emptiness operators IS_EMPTY and IS_NOT_EMPTY on the queried record's own fields. This file holds
 // the core rules that need no runtime: the shared module, the shape of what "empty" means for a path and the order of
 // its checks, the collectors the runtime reads, and createQueryPlan. It also holds what the shared test helper does
@@ -534,7 +541,7 @@ describe('emptinessMemberPaths', () => {
 });
 
 describe('collectQueryOperators', () => {
-  it('reports the form, raw field and path, value, group depth and construct of each condition', () => {
+  it('pin: reports the form, raw field and path, value, group depth and construct of each condition', () => {
     // The construct is the term or condition object itself, and null for a field filter's own operator.
     const entry = (fields, construct = null) => ({
       rawPath: undefined, value: undefined, hasValue: false, ambiguous: false, depth: 0, ...fields, segments: fields.path.split('.'),
@@ -559,7 +566,7 @@ describe('collectQueryOperators', () => {
     const terms = args.dims.terms;
     const conditions = args.AND[0].conditions;
     const entries = collectQueryOperators(args);
-    expect(entries).toEqual([
+    expect(legacyEntries(entries)).toEqual([
       entry({ operator: 'IS_EMPTY', path: 'note', form: 'filter', field: 'note' }),
       // A term without a path names the field itself.
       entry({ operator: 'IS_EMPTY', path: 'dims', form: 'term', field: 'dims' }, terms[0]),
@@ -591,11 +598,11 @@ describe('collectQueryOperators', () => {
     expect(collectQueryOperators(deep).map(({ path, depth }) => [path, depth])).toEqual([['shop.name', 6]]);
   });
 
-  it('keeps skipping malformed entries', () => {
+  it('pin: keeps skipping malformed entries', () => {
     expect(collectQueryOperators(null)).toEqual([]);
     expect(collectQueryOperators({ note: 'x', dims: { terms: [null, 'x', [1]] }, AND: [null, { conditions: [null, 5] }] })).toEqual([]);
     const condition = { operator: 'IS_EMPTY' };
-    expect(collectQueryOperators({ AND: [{ conditions: [condition] }] })).toEqual([{
+    expect(legacyEntries(collectQueryOperators({ AND: [{ conditions: [condition] }] }))).toEqual([{
       operator: 'IS_EMPTY', path: undefined, segments: [], form: 'condition', field: undefined, rawPath: undefined,
       value: undefined, hasValue: false, ambiguous: false, depth: 0, construct: condition, emptiness: true,
     }]);
@@ -603,7 +610,7 @@ describe('collectQueryOperators', () => {
 });
 
 describe('collectQueryPathEntries', () => {
-  it('adds the field of every emptiness term without a path, next to the paths of its sibling terms', () => {
+  it('pin: adds the field of every emptiness term without a path, next to the paths of its sibling terms', () => {
     const args = {
       dims: { terms: [{ operator: 'IS_EMPTY' }, { path: 'w', operator: 'EQ', value: 1 }] },
       plain: { terms: [{ path: 'a', operator: 'EQ', value: 1 }, { path: '', operator: 'IS_NOT_EMPTY' }, { path: null, operator: 'IS_EMPTY' }] },
@@ -614,7 +621,7 @@ describe('collectQueryPathEntries', () => {
     const entry = (path, operator, construct = null) => ({
       segments: path.split('.'), group: null, operator, construct,
     });
-    expect(collectQueryPathEntries(args)).toEqual([
+    expect(legacyEntries(collectQueryPathEntries(args))).toEqual([
       entry('dims', 'IS_EMPTY', args.dims.terms[0]), entry('dims.w', 'EQ', args.dims.terms[1]),
       entry('plain.a', 'EQ', args.plain.terms[0]), entry('plain', 'IS_NOT_EMPTY', args.plain.terms[1]),
       entry('tags.x', 'EQ', args.tags.terms[1]), entry('lines', 'EQ'),
@@ -623,7 +630,7 @@ describe('collectQueryPathEntries', () => {
       .toEqual([['dims', 'w'], ['dims']]);
   });
 
-  it('expands the members an emptiness condition reads when asked, marked as members, after the named path', () => {
+  it('pin: expands the members an emptiness condition reads when asked, marked as members, after the named path', () => {
     const args = {
       dims: { terms: [{ path: 'w', operator: 'EQ', value: 1 }, { operator: 'IS_EMPTY' }] },
       AND: [{ conditions: [{ field: 'odim', operator: 'IS_NOT_EMPTY' }, { field: 'outer', path: 'inner', operator: 'IS_EMPTY' }] }],
@@ -637,7 +644,7 @@ describe('collectQueryPathEntries', () => {
       segments: path.split('.'), group: owner, operator, construct,
     });
     const member = (path, owner, operator, construct) => ({ ...entry(path, owner, operator, construct), member: true });
-    expect(collectQueryPathEntries(args, 'find', { gqltype: fixture.Item, expandMembers: true })).toEqual([
+    expect(legacyEntries(collectQueryPathEntries(args, 'find', { gqltype: fixture.Item, expandMembers: true }))).toEqual([
       entry('dims.w', null, 'EQ', dimsW),
       entry('dims', null, 'IS_EMPTY', dims), member('dims.w', null, 'IS_EMPTY', dims), member('dims.label', null, 'IS_EMPTY', dims),
       member('dims.tags', null, 'IS_EMPTY', dims),
@@ -650,13 +657,13 @@ describe('collectQueryPathEntries', () => {
     // Without the flag or the type, and for other operators, nothing is expanded.
     expect(collectQueryPathEntries(args)).toEqual(collectQueryPathEntries(args, 'find', { gqltype: fixture.Item }));
     expect(collectQueryPathEntries(args, 'find', { expandMembers: true }).some((item) => item.member)).toBe(false);
-    expect(collectQueryPathEntries({ AND: [{ conditions: [{ field: 'dims', operator: 'EQ', value: 1 }] }] }, 'find', { gqltype: fixture.Item, expandMembers: true }))
+    expect(legacyEntries(collectQueryPathEntries({ AND: [{ conditions: [{ field: 'dims', operator: 'EQ', value: 1 }] }] }, 'find', { gqltype: fixture.Item, expandMembers: true })))
       .toEqual([{
         segments: ['dims'], group: expect.any(Object), operator: 'EQ', construct: expect.any(Object),
       }]);
   });
 
-  it('expands fields filters and pathed terms too, and nothing for lists, scalars and virtual members', () => {
+  it('pin: expands fields filters and pathed terms too, and nothing for lists, scalars and virtual members', () => {
     const paths = (args) => collectQueryPathEntries(args, 'find', { gqltype: fixture.Item, expandMembers: true })
       .map(({ segments, member }) => `${segments.join('.')}${member ? '*' : ''}`);
     expect(paths({
@@ -676,7 +683,7 @@ describe('collectQueryPathEntries', () => {
     }
     expect(paths({ outer: { terms: [{ operator: 'IS_EMPTY' }] } })).toEqual(['outer', 'outer.x*', 'outer.inner*', 'outer.inner.y*', 'outer.inner.z*']);
     expect(paths({ aggregation: { groupId: 'dims', facts: [{ path: 'dims.w' }] } })).toEqual(['aggregation']);
-    expect(collectQueryPathEntries({ aggregation: { groupId: 'dims', facts: [{ path: 'dims.w' }] } }, 'aggregate', { gqltype: fixture.Item, expandMembers: true }))
+    expect(legacyEntries(collectQueryPathEntries({ aggregation: { groupId: 'dims', facts: [{ path: 'dims.w' }] } }, 'aggregate', { gqltype: fixture.Item, expandMembers: true })))
       .toEqual([{
         segments: ['dims'], group: null, operator: null, construct: null,
       }, {

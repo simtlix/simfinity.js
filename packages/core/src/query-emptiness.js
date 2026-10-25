@@ -45,7 +45,7 @@ const LISTS = { embeddedList: 'an embedded list', collection: 'a collection' };
 // collection names its `target` type, and a collection the child's storage column that links it,
 // `connectionField`, derived as MongoDB derives it; without a declared connectionField a collection
 // reads through its own field name.
-const graphqlStep = (name, field) => {
+export const graphqlStep = (name, field) => {
   const type = getNamedType(field.type);
   const list = !!getListShape(field.type);
   if (isInterfaceType(type) || isUnionType(type)) return { name, kind: 'abstract' };
@@ -69,7 +69,7 @@ const graphqlMembers = (type) => Object.entries(type.getFields())
 // The same classification of a describeModels field description: inferred inverse references are ID
 // scalars, as GraphQL exposes them. Descriptions hold no interface or union fields, and describeModels
 // has already normalized a collection's connectionField to the child's storage column.
-const modelStep = (field) => {
+export const modelStep = (field) => {
   if (field.kind === 'embedded') return { name: field.name, kind: field.list ? 'embeddedList' : 'embedded', node: field.fields ?? [] };
   if (field.kind === 'collection') return { name: field.name, kind: 'collection', target: field.target, connectionField: field.connectionField };
   if (field.kind === 'reference' && !field.inferred) return { name: field.name, kind: 'reference', target: field.target };

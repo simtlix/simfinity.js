@@ -510,6 +510,8 @@ query {
 }
 ```
 
+In Example 9, `episodes` is in J because `totalRevenue` crosses it. Its join preserves one row per episode, including one null row when none exists, so `seriesCount` counts those rows rather than distinct series. A collection used only by a filter becomes an `ANY` frame and does not multiply facts; beyond a joined prefix it tests the joined alias through an anchor. Explicit `ANY`/`ALL`/`NONE` and relation-filter `quantifier` always stay frames. See [aggregate collection semantics](../../docs/guide/queries.md#aggregate-records).
+
 ## Field Path Resolution
 
 The `groupId` and `path` parameters support:
@@ -528,7 +530,7 @@ The `groupId` and `path` parameters support:
 The aggregation queries are translated to MongoDB aggregation pipelines:
 
 1. **$lookup**: Used for non-embedded related entities
-2. **$unwind**: Used to flatten joined collections
+2. **$unwind**: Expands collection prefixes used by `groupId` or facts (J), preserving their joined-row cardinality; filter-only collection frames use correlated `$lookup` existence probes without unwinding root rows
 3. **$match**: Applied for filtering (before grouping)
 4. **$group**: Groups by the specified field with aggregation operations
 5. **$project**: Formats the final output with groupId and facts fields

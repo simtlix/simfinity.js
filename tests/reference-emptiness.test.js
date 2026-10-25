@@ -8,10 +8,19 @@ import {
 import { createQueryPlan, createRuntime, describeModels, resolveModelPath } from '../packages/core/src/index.js';
 import { collectQueryOperators, collectQueryPathEntries } from '../packages/core/src/query-plan.js';
 import {
-  REFERENCE_CASES, REFERENCE_DANGLING_KEY, REFERENCE_DATA, REFERENCE_SCOPES, REFERENCE_SHAPES, createEmptinessTypes,
+  REFERENCE_CASES, REFERENCE_DATA, REFERENCE_SCOPES, REFERENCE_SHAPES, createEmptinessTypes,
   createReferenceEmptinessTypes, expectedReferenceRows, referenceCaseArgs, referenceQuery, registerReferenceEmptinessTypes,
   seedReferenceEmptiness, writeMongoDanglingReference,
 } from './helpers/query-emptiness.js';
+
+import { referenceOracle as oracle } from './helpers/collection-frames.js';
+
+// Preserve the pre-frame collector contract while the collection-frame suite checks new metadata.
+const legacyEntries = (entries) => entries.map((entry) => {
+  const legacy = { ...entry };
+  for (const key of ['use', 'container', 'frames', 'relative', 'quantifier']) delete legacy[key];
+  return legacy;
+});
 
 // #108 part 2b: IS_EMPTY and IS_NOT_EMPTY through references and at references and collections. This file holds the
 // core pieces that need no runtime marker and no database: the shapes and their scope paths, the adapter feature, the
@@ -429,7 +438,7 @@ describe('collectors for the client scope marker', () => {
     expect(collectQueryOperators({ aggregation: { operator: 'IS_EMPTY' } }, 'aggregate')).toEqual([]);
   });
 
-  it('gives each path entry its operator and construct, members included', () => {
+  it('pin: gives each path entry its operator and construct, members included', () => {
     const term = { path: 'shop', operator: 'IS_EMPTY' };
     const legacy = { path: 'name', value: 'S1' };
     const pathless = { operator: 'IS_EMPTY' };
@@ -444,7 +453,7 @@ describe('collectors for the client scope marker', () => {
     };
     const group = args.AND[0];
     const entries = collectQueryPathEntries(args, 'find', { gqltype: types.Product, expandMembers: true });
-    expect(entries).toEqual([
+    expect(legacyEntries(entries)).toEqual([
       {
         segments: ['stock'], group: null, operator: 'LT', construct: null,
       },
@@ -475,7 +484,7 @@ describe('collectors for the client scope marker', () => {
     ]);
     expect(entries[1].construct).toBe(term);
     expect(entries[5].construct).toBe(condition);
-    expect(collectQueryPathEntries({ aggregation: { groupId: 'shop.name', facts: [{ path: 'stock' }] } }, 'aggregate')).toEqual([
+    expect(legacyEntries(collectQueryPathEntries({ aggregation: { groupId: 'shop.name', facts: [{ path: 'stock' }] } }, 'aggregate'))).toEqual([
       {
         segments: ['shop', 'name'], group: null, operator: null, construct: null,
       },
@@ -639,9 +648,9 @@ describe('createQueryPlan with reference emptiness', () => {
     const aggregate = plan({ ...input, aggregation }, { mode: 'aggregate' });
     expect(aggregate.where).toEqual(expected);
     expect(aggregate.aggregation).toEqual({ groupId: ['name'], facts: [{ operation: 'COUNT', factName: 'n', path: ['stock'] }] });
-    // A find checks a scope's sort paths, which count and aggregate plans leave unchecked.
+    // Lifted scopes are always planned as finds, so their collection sorts fail in every outer mode.
     const sortedScope = { shop: { terms: [marked({ operator: 'IS_EMPTY' }, { shop: { sort: { terms: [{ field: 'products', order: 'ASC' }] } } })] } };
-    const sortRejected = ['INVALID_FILTER_PATH', 400, 'Sort path must end in a scalar field'];
+    const sortRejected = ['INVALID_FILTER_PATH', 400, 'Sort path products crosses the collection QsShop.products; a record has no single value there'];
     expect(outcomeOf(() => plan(sortedScope))).toEqual(sortRejected);
     expect(outcomeOf(() => plan(sortedScope, { mode: 'count' }))).toEqual(sortRejected);
     expect(outcomeOf(() => plan({ ...sortedScope, aggregation }, { mode: 'aggregate' }))).toEqual(sortRejected);
@@ -686,159 +695,8 @@ describe('createQueryPlan with reference emptiness', () => {
   });
 });
 
-// An independent reading of the definitions over REFERENCE_DATA, which checks every row of REFERENCE_CASES: hidden reads
-// as missing for client constructs, trusted ones read stored data, legacy conditions read through plain joins with
-// the target scopes of their references ANDed into their group (a sort path's into the whole query), and the root's
-// own scope always applies.
-const ORACLE_SCHEMA = {
-  shop: {
-    id: 'identity', key: 'string', name: 'string', state: 'string', minStock: 'scalar', products: { collection: 'product', via: 'shop' },
-  },
-  pro: {
-    id: 'identity', key: 'string', name: 'string', shop: { reference: 'shop' },
-  },
-  product: {
-    id: 'identity',
-    key: 'string',
-    name: 'string',
-    stock: 'scalar',
-    shop: { reference: 'shop' },
-    pro: { reference: 'pro' },
-    odim: { embedded: { w: 'scalar', shop: { reference: 'shop' } } },
-    olines: 'list',
-    reviews: { collection: 'review', via: 'product' },
-  },
-  review: {
-    id: 'identity', key: 'string', rating: 'scalar', author: 'string', product: { reference: 'product' },
-  },
-};
-// The scopes as the spec states them, written apart from REFERENCE_SCOPES.
-const ORACLE_SCOPES = {
-  admin: {},
-  NE: { shop: (record) => record.name !== 'S2', review: (record) => record.author !== 'hidden', pro: (record) => record.name !== 'P2' },
-  EQ: { shop: (record) => record.state === 'OPEN', review: (record) => record.author === 'x', pro: (record) => record.name === 'P1' },
-  proOnly: { pro: (record) => record.name !== 'P2' },
-  shopNE: { shop: (record) => record.name !== 'S2' },
-  shopEQ: { shop: (record) => record.state === 'OPEN' },
-};
-// The legacy form of the same scopes, a prefixed condition read through plain joins.
-const ORACLE_JOINED = {
-  NE: { shop: ['name', 'NE', 'S2'], review: ['author', 'NE', 'hidden'], pro: ['name', 'NE', 'P2'] },
-  EQ: { shop: ['state', 'EQ', 'OPEN'], review: ['author', 'EQ', 'x'], pro: ['name', 'EQ', 'P1'] },
-  proOnly: { pro: ['name', 'NE', 'P2'] },
-  shopNE: { shop: ['name', 'NE', 'S2'] },
-  shopEQ: { shop: ['state', 'EQ', 'OPEN'] },
-  admin: {},
-};
-
-const oracle = (shape, { dangling = false } = {}) => {
-  const records = {
-    ...REFERENCE_DATA,
-    product: [
-      ...REFERENCE_DATA.product,
-      ...(dangling ? [{
-        key: REFERENCE_DANGLING_KEY, name: REFERENCE_DANGLING_KEY, stock: 1, shop: 'ghost', pro: 'ghost', odim: { shop: 'ghost' }, olines: [{ qty: 1, shop: 'ghost' }],
-      }] : []),
-    ],
-  };
-  const visible = (client, typeKey, record) => !client || (ORACLE_SCOPES[shape][typeKey]?.(record) ?? true);
-  const deref = (client, typeKey, key) => {
-    const record = key == null ? undefined : records[typeKey].find((item) => item.key === key);
-    return record && visible(client, typeKey, record) ? record : undefined;
-  };
-  const endEmpty = (client, field, stored, holder) => {
-    if (field === 'identity') return false;
-    if (field === 'string') return stored == null || stored === '';
-    if (field === 'scalar') return stored == null;
-    if (field === 'list') return stored == null || stored.length === 0;
-    if (field.reference) return !deref(client, field.reference, stored);
-    if (field.collection) return !records[field.collection].some((child) => child[field.via] === holder.key && visible(client, field.collection, child));
-    return stored == null || Object.entries(field.embedded).every(([name, member]) => endEmpty(client, member, stored[name], stored));
-  };
-  const empty = (client, fields, value, segments) => {
-    const [head, ...rest] = segments;
-    const field = fields[head];
-    if (!rest.length) return endEmpty(client, field, value[head], value);
-    if (field.reference) {
-      const target = deref(client, field.reference, value[head]);
-      return target ? empty(client, ORACLE_SCHEMA[field.reference], target, rest) : true;
-    }
-    return value[head] == null ? true : empty(client, field.embedded, value[head], rest);
-  };
-  // A legacy condition: the stored value through plain joins, missing when a hop is; NE accepts a missing value.
-  const stored = (fields, value, segments) => {
-    const [head, ...rest] = segments;
-    const field = fields[head];
-    if (!rest.length) return field === 'identity' ? value.key : value[head];
-    const next = field.reference ? deref(false, field.reference, value[head]) : value[head];
-    return next == null ? undefined : stored(field.reference ? ORACLE_SCHEMA[field.reference] : field.embedded, next, rest);
-  };
-  const compare = (actual, operator, expected) => (operator === 'EQ' ? actual === expected : actual !== expected);
-  const legacy = (root, record, path, operator, value) => compare(stored(ORACLE_SCHEMA[root], record, path.split('.')), operator, value);
-  // The joined scopes of a legacy path: one prefixed condition per reference on it whose target the shape scopes.
-  const joinedScopes = (root, path) => {
-    const conditions = [];
-    let fields = ORACLE_SCHEMA[root];
-    const segments = path.split('.');
-    for (const [index, name] of segments.slice(0, -1).entries()) {
-      const field = fields[name];
-      if (!field.reference) {
-        fields = field.embedded;
-        continue;
-      }
-      const scope = ORACLE_JOINED[shape][field.reference];
-      if (scope) conditions.push([`${segments.slice(0, index + 1).join('.')}.${scope[0]}`, scope[1], scope[2]]);
-      fields = ORACLE_SCHEMA[field.reference];
-    }
-    return conditions;
-  };
-  const construct = (root, record, path, operator, value, client) => (operator === 'IS_EMPTY' || operator === 'IS_NOT_EMPTY'
-    ? empty(client, ORACLE_SCHEMA[root], record, path.split('.')) === (operator === 'IS_EMPTY')
-    : legacy(root, record, path, operator, value));
-  const pathOf = (field, path) => (path ? `${field}.${path}` : field);
-  const group = (root, record, value, client) => {
-    const results = [];
-    for (const { field, path, operator, value: expected } of value.conditions ?? []) {
-      results.push(construct(root, record, pathOf(field, path), operator, expected, client));
-      if (client && !['IS_EMPTY', 'IS_NOT_EMPTY'].includes(operator)) {
-        for (const [scoped, scopeOperator, scopeValue] of joinedScopes(root, pathOf(field, path))) {
-          results.push(legacy(root, record, scoped, scopeOperator, scopeValue));
-        }
-      }
-    }
-    for (const item of value.AND ?? []) results.push(group(root, record, item, client));
-    if (value.OR?.length) results.push(value.OR.some((item) => group(root, record, item, client)));
-    return results.every(Boolean);
-  };
-  const query = (root, record, args, client) => {
-    const results = [];
-    for (const [name, value] of Object.entries(args)) {
-      if (['AND', 'OR', 'sort'].includes(name)) continue;
-      for (const term of value.terms) {
-        results.push(construct(root, record, pathOf(name, term.path), term.operator, term.value, client));
-        if (client && !['IS_EMPTY', 'IS_NOT_EMPTY'].includes(term.operator)) {
-          for (const [scoped, scopeOperator, scopeValue] of joinedScopes(root, pathOf(name, term.path))) results.push(legacy(root, record, scoped, scopeOperator, scopeValue));
-        }
-      }
-    }
-    results.push(group(root, record, { AND: args.AND, OR: args.OR }, client));
-    for (const term of args.sort?.terms ?? []) {
-      for (const [scoped, scopeOperator, scopeValue] of joinedScopes(root, term.field)) results.push(legacy(root, record, scoped, scopeOperator, scopeValue));
-    }
-    return results.every(Boolean);
-  };
-  return (item, { trusted = false } = {}) => {
-    const ids = Object.fromEntries(Object.values(REFERENCE_DATA).flat().map((record) => [record.key, record.key]));
-    const args = referenceCaseArgs(item, ids);
-    return records[item.root]
-      .filter((record) => visible(true, item.root, record))
-      .filter((record) => query(item.root, record, args, !trusted))
-      .filter((record) => !item.scopeArgs || query(item.root, record, item.scopeArgs, false))
-      .map((record) => record.key)
-      .sort();
-  };
-};
-
+// The independent oracle now lives with the shared collection-frame helpers; its default data
+// remains the frozen 2b seed, so every REFERENCE_CASES row keeps its original meaning.
 describe('the reference emptiness fixture', () => {
   it('lists every shape, scope and case once (helper check, passes on 3.10.0)', () => {
     expect(REFERENCE_SHAPES).toEqual(['admin', 'NE', 'EQ', 'proOnly', 'shopNE', 'shopEQ']);

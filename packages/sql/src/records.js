@@ -1,5 +1,6 @@
 import { getNamedType } from 'graphql';
 import { SimfinityError } from '@simtlix/simfinity-core';
+import { MAX_RECORD_VERSION, readStoredVersion, versionConflictError, versionExhaustedError, unadvancedVersionError, unexpectedDeleteError } from '@simtlix/simfinity-core/internal/record-version';
 
 const missing = (name) => { throw new SimfinityError(`Required value ${name} is missing`, 'REQUIRED_VALUE', 400); };
 const shapeError = (name) => { throw new SimfinityError(`Invalid value for ${name}`, 'INVALID_VALUE', 400); };
@@ -237,9 +238,20 @@ export const createRecordStore = (models, database, query, plugin, { multiRowIns
     await persistOwned(storage, entity.fields, row.id, normalized, session);
     return (await hydrateRows(name, [row], session))[0];
   };
-  const update = async (name, value, changes, session) => {
+  // Read with the same key and session only after a conditional update matched nothing.
+  const unmatchedUpdate = async (name, id, session, expectedVersion) => {
+    const record = await getById(name, id, session);
+    if (!record) return null;
+    const stored = readStoredVersion(record.version, { typeName: name, id });
+    if (stored !== expectedVersion) throw versionConflictError(name, id);
+    if (stored >= MAX_RECORD_VERSION) throw versionExhaustedError(name, id);
+    return null;
+  };
+  const update = async (name, value, changes, session, { expectedVersion } = {}) => {
     const id = castId(value);
     const entity = model(name); const storage = table(name);
+    const conditional = expectedVersion !== undefined;
+    if (conditional && expectedVersion >= MAX_RECORD_VERSION) return unmatchedUpdate(name, id, session, expectedVersion);
     const source = normalize(entity.fields, changes, false);
     delete source.$unset;
     for (const field of Object.keys(changes.$unset || {})) source[field] = undefined;
@@ -248,13 +260,25 @@ export const createRecordStore = (models, database, query, plugin, { multiRowIns
       const column = storage.columns.find((item) => item.name === field);
       if (column && !['id', '_id'].includes(field)) data[field] = null;
     }
-    const operation = Object.keys(data).length ? { kind: 'update', table: storage, id, data } : { kind: 'selectById', table: storage, id };
+    if (conditional) delete data.version;
+    const operation = conditional ? { kind: 'update', table: storage, id, data, version: { column: 'version', expected: expectedVersion } } : Object.keys(data).length ? { kind: 'update', table: storage, id, data } : { kind: 'selectById', table: storage, id };
     const { rows } = await execute(operation, session);
-    if (!rows.length) return null;
+    if (!rows.length) return conditional ? unmatchedUpdate(name, id, session, expectedVersion) : null;
+    // A diagnostic for plugin compilers that ignored the version operation, not a proof of its predicate.
+    if (conditional && decodeScalar(entity.fields.find((field) => field.version), rows[0].version) !== expectedVersion + 1) throw unadvancedVersionError(name, id);
     await persistOwned(storage, entity.fields, id, source, session, true);
     return (await hydrateRows(name, rows, session))[0];
   };
-  const remove = async (name, value, session) => {
+  const remove = async (name, value, session, { expectedVersion } = {}) => {
+    if (expectedVersion !== undefined) {
+      const record = await getById(name, value, session, { lock: true });
+      if (!record) return null;
+      const id = record._id;
+      if (readStoredVersion(record.version, { typeName: name, id }) !== expectedVersion) throw versionConflictError(name, id);
+      const { rows } = await execute({ kind: 'deleteById', table: table(name), id, version: { column: 'version', expected: expectedVersion } }, session);
+      if (!rows.length) throw unexpectedDeleteError(name, id);
+      return record;
+    }
     const record = await getById(name, value, session);
     if (!record) return null;
     await execute({ kind: 'deleteById', table: table(name), id: record._id }, session);

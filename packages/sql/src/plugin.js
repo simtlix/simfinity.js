@@ -51,8 +51,9 @@ export const bindPlugin = (plugin) => {
   // declares its own. A declaration that names none describes the plugin's compileQuery, whichever it is.
   // `referenceEmptiness: true` (#108 part 2b) says that compileQuery compiles emptiness predicates that cross or end at
   // references and collections, and the `scopes` of client constructs; it is copied under the same rule, and only
-  // when true, so a plugin that does not declare it binds the `{ operators }` of earlier versions and its plans keep
-  // UNSUPPORTED_QUERY for such paths. Undefined and null mean false.
+  // when true. `quantifiers` additionally declares collection/reference frames and requires referenceEmptiness;
+  // its declaration follows the same compiler identity rule. Each omitted flag stays absent in the bound
+  // declaration, and the adapter rejects requests for that feature. Undefined and null mean false.
   const { queryFeatures } = plugin;
   if (queryFeatures != null && (typeof queryFeatures !== 'object' || Array.isArray(queryFeatures)
     || !Array.isArray(queryFeatures.operators) || queryFeatures.operators.some((value) => typeof value !== 'string'))) {
@@ -64,10 +65,17 @@ export const bindPlugin = (plugin) => {
   if (queryFeatures?.referenceEmptiness != null && typeof queryFeatures.referenceEmptiness !== 'boolean') {
     invalid('SQL plugin queryFeatures.referenceEmptiness must be a boolean');
   }
+  if (queryFeatures?.quantifiers != null && typeof queryFeatures.quantifiers !== 'boolean') {
+    invalid('SQL plugin queryFeatures.quantifiers must be a boolean');
+  }
+  if (queryFeatures?.quantifiers === true && queryFeatures.referenceEmptiness !== true) {
+    invalid('SQL plugin queryFeatures.quantifiers requires referenceEmptiness');
+  }
   const declared = queryFeatures != null && (queryFeatures.compileQuery === undefined || queryFeatures.compileQuery === bound.compileQuery);
   bound.queryFeatures = Object.freeze({
     operators: Object.freeze([...(declared ? queryFeatures.operators : LEGACY_QUERY_OPERATORS)]),
     ...(declared && queryFeatures.referenceEmptiness === true ? { referenceEmptiness: true } : {}),
+    ...(declared && queryFeatures.quantifiers === true ? { quantifiers: true } : {}),
   });
   for (const [group, names] of Object.entries(methods)) {
     const members = {};
@@ -80,6 +88,8 @@ export const bindPlugin = (plugin) => {
   return Object.freeze(bound);
 };
 
+// Protected entities add optimisticConcurrency to their plan. Declaring it commits compileRecord to
+// conditional updates (including empty data) and deletes, with returned rows and numeric Version decoding.
 export const assertCapabilities = (plugin, plan) => {
   for (const capability of new Set(['transactions', ...plan.requirements])) {
     if (!plugin.capabilities.includes(capability)) throw new SimfinityError(`SQL plugin ${plugin.name} does not support required capability ${capability}`, 'UNSUPPORTED_SQL_CAPABILITY', 400);

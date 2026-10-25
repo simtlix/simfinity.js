@@ -12,8 +12,24 @@ import type {
 
 /** The filter operator enum; its values are the {@link QueryOperator} names. */
 export const QLOperator: GraphQLEnumType;
+/** The collection and reference quantifier enum. */
+export const QLQuantifier: GraphQLEnumType;
 export const QLSort: GraphQLInputObjectType;
 export const QLValue: GraphQLScalarType<unknown, unknown>;
+
+/**
+ * The scalar of the `version` field that Simfinity adds to a type that declares optimistic
+ * concurrency (see {@link ConcurrencyDeclaration}). It holds safe integers from 1 to
+ * {@link MAX_RECORD_VERSION}, a JSON number on the wire: a string, a float, 0, a negative number and an
+ * unsafe integer fail GraphQL coercion. A client sends the version it read back unchanged in updates
+ * and deletes, and Simfinity advances it. Only the managed field may use it in a type, which
+ * `createSchema()` and `describeModels()` enforce with `INVALID_MODEL` (400); a registered mutation or
+ * custom query may use it in its own input and output types. Import it from the facade the application
+ * uses: the protection depends on one copy of core per process.
+ */
+export const RecordVersion: GraphQLScalarType;
+/** The highest version, `Number.MAX_SAFE_INTEGER`. The version of a record never goes past it. */
+export const MAX_RECORD_VERSION: number;
 
 /**
  * A `QLOperator` value. The operators of 3.7.0 are `EQ`, `NE`, `LT`, `LTE`, `GT`, `GTE`, `BTW`, `IN`,
@@ -31,18 +47,56 @@ export const QLValue: GraphQLScalarType<unknown, unknown>;
  * embedded object or one whose stored members are all empty by these rules; the record identity is
  * never empty. The target's `id` right after a reference is empty exactly when the reference is,
  * including when the target is missing or hidden by its `find` scope. A path that continues inside an
- * embedded list or a collection fails with `INVALID_FILTER_PATH`. With an adapter that declares
+ * embedded list fails with `INVALID_FILTER_PATH`; shorthand through a collection excludes emptiness
+ * on a leaf, so use an explicit group. With an adapter that declares
  * `queryFeatures.referenceEmptiness: true`, a path may also cross single references and end at a
  * reference or a collection, and an embedded object may have reference and collection members: a
  * reference is empty when no record it points to exists that the target's `find` scope admits for
  * the caller, a collection when no such child exists, and a hidden record on the way reads as
  * missing; constructs that middleware and scopes add read stored data. With any other adapter they
- * fail with `UNSUPPORTED_QUERY`. A term or group condition without a path tests the field itself.
+ * fail with `UNSUPPORTED_QUERY`. A term or group condition without a path tests the field itself, except that every term
+ * of a quantified relation filter needs a non-empty element-relative path.
  */
 export type QueryOperator =
   | 'EQ' | 'NE' | 'LT' | 'LTE' | 'GT' | 'GTE' | 'BTW' | 'IN' | 'NIN' | 'LIKE'
   | 'ILIKE' | 'STARTS_WITH' | 'ISTARTS_WITH' | 'ENDS_WITH' | 'IENDS_WITH' | 'IEQ'
   | 'IS_EMPTY' | 'IS_NOT_EMPTY';
+
+/** The quantifier applied to the elements visible in a collection or reference frame. */
+export type QueryQuantifier = 'ANY' | 'ALL' | 'NONE';
+
+/** A condition inside a filter group, with paths relative to the current frame. */
+export interface QLFilterCondition {
+  field: string;
+  operator?: QueryOperator | null;
+  value?: any;
+  path?: string | null;
+}
+
+/** Recursive Boolean groups and quantified frames. */
+export interface QLFilterGroup {
+  conditions?: Array<QLFilterCondition | null> | null;
+  AND?: Array<QLFilterGroup | null> | null;
+  OR?: Array<QLFilterGroup | null> | null;
+  ANY?: Array<QLQuantifiedGroup | null> | null;
+  ALL?: Array<QLQuantifiedGroup | null> | null;
+  NONE?: Array<QLQuantifiedGroup | null> | null;
+}
+
+/** A frame path ends at a collection or single reference without crossing a list; inner paths are element-relative. */
+export interface QLQuantifiedGroup extends QLFilterGroup {
+  path: string;
+}
+
+/** A quantified field filter may omit terms; every supplied term needs a non-empty element-relative path. */
+export interface QLTypeFilterExpression {
+  quantifier?: QueryQuantifier | null;
+  terms?: Array<{
+    operator?: QueryOperator | null;
+    value?: any;
+    path?: string | null;
+  } | null> | null;
+}
 
 /**
  * A condition of a {@link FilterGroup}, as the `QLFilterCondition` input takes it: the field it
@@ -57,8 +111,11 @@ export interface FilterCondition {
   path?: string;
 }
 
-/** A `QLFilterGroup` value: flat conditions plus nested `AND` and `OR` groups. */
+/** A `QLFilterGroup` value: flat conditions, Boolean groups and element-relative quantified groups. */
 export interface FilterGroup {
+  ANY?: QLQuantifiedGroup[];
+  ALL?: QLQuantifiedGroup[];
+  NONE?: QLQuantifiedGroup[];
   AND?: FilterGroup[];
   OR?: FilterGroup[];
   conditions?: FilterCondition[];
@@ -83,6 +140,15 @@ export interface QueryFeatures {
    * must apply each target scope in `scopes`; constructs without a marker read stored data.
    */
   referenceEmptiness?: boolean | null | undefined;
+  /**
+   * Whether the adapter compiles quantified frames and their scoped joins. Requires
+   * `referenceEmptiness: true`; undefined or null means false. Invalid declarations fail with
+   * `INVALID_QUERY_FEATURES` (500). Client markers have frame-relative scope keys; compilers must
+   * apply frame scopes before quantification and honour scoped joins/aggregate anchors. Without
+   * this flag explicit quantified forms fail with `UNSUPPORTED_QUERY`; collection filters keep
+   * legacy joins. All adapters reject list sorts through collections, including count mode.
+   */
+  quantifiers?: boolean | null | undefined;
 }
 
 export interface ModelRegistration {
@@ -99,7 +165,8 @@ export interface FieldDescription {
   itemRequired: boolean;
   unique: boolean;
   readOnly: boolean;
-  scalar?: 'ID' | 'String' | 'Int' | 'Float' | 'Boolean' | 'DateTime' | 'Enum';
+  /** `'Version'` is the managed version field of a type that declares optimistic concurrency (`version: true`). */
+  scalar?: 'ID' | 'String' | 'Int' | 'Float' | 'Boolean' | 'DateTime' | 'Enum' | 'Version';
   values?: string[];
   enumValues?: { name: string; value: unknown }[];
   target?: string;
@@ -107,6 +174,12 @@ export interface FieldDescription {
   fields?: FieldDescription[];
   private?: boolean;
   inferred?: boolean;
+  /**
+   * Set on the managed version field of a type that declares optimistic concurrency, which
+   * `describeModels()` appends after the type's own fields: `{ name: 'version', scalar: 'Version',
+   * required: true, readOnly: true, version: true }`.
+   */
+  version?: true;
 }
 export interface ModelDescription {
   entities: Array<{
@@ -121,6 +194,13 @@ export interface ModelDescription {
  * fields are left out of every entity and embedded type, and the types only they reach are not
  * described. Throws `INVALID_MODEL` (400) for an invalid `extensions.virtual` declaration, as
  * `createSchema()` does (see {@link VirtualFieldOptions}).
+ *
+ * A type that declares optimistic concurrency (see {@link ConcurrencyDeclaration}) is described with
+ * its version field last, before `createSchema()` has added it and after, and the call throws
+ * `INVALID_MODEL` (400) for an invalid declaration, for a field named `version` that Simfinity did not
+ * add, for a reference stored under `version` (`connectionField: 'version'`), for a collection of
+ * such items that links through `version`, for such a type used as an embedded value, and for any
+ * other field typed {@link RecordVersion}.
  */
 export function describeModels(registrations: ModelRegistration[]): ModelDescription;
 /**
@@ -312,6 +392,19 @@ export type ScopeFunction<Model = any, Session = any> = (params: ScopeParams<Mod
  * was changed.
  */
 export type TypeScopes<Model = any, Session = any> = Partial<Record<ScopeOperation, ScopeFunction<Model, Session>>>;
+/**
+ * Value of a type's `extensions.concurrency`: the entity is protected by optimistic concurrency.
+ * Simfinity adds a read-only `version: RecordVersion!` field to the type, which starts at 1 and grows
+ * by 1 with each accepted write; a client sends the version it read back in updates and deletes, and a
+ * write at another version fails with `VERSION_CONFLICT` (409). The only valid value is
+ * `{ mode: 'optimistic' }`: `null`, an array, another mode or an extra key throws `INVALID_MODEL`
+ * (400). So does a type that is not an entity, one used as an embedded value, one that already has a
+ * field named `version` (or a field stored under that name), and an adapter that does not declare
+ * `writeFeatures.optimisticConcurrency`.
+ */
+export interface ConcurrencyDeclaration {
+  mode: 'optimistic';
+}
 
 /**
  * Process-wide limits for generated add, update and state-action mutations. Any other option,
@@ -342,11 +435,17 @@ export interface QueryLimitsOptions {
   /** Positive safe integer; defaults to 1000. Unpaged lists use min(100, maxPageSize). */
   maxPageSize?: number;
   /**
-   * Positive safe integer; defaults to 10. The most distinct scoped joins and frames that the
-   * client's reference and collection emptiness may need in one list, aggregate or collection-field
-   * call; more fail with `FILTER_DEPTH_EXCEEDED` (400).
+   * Positive safe integer; defaults to 10. The most compiled frames and scoped joins that the
+   * client's conditions may need in one list, aggregate or collection-field call; more fail with
+   * `FILTER_DEPTH_EXCEEDED` (400), after every client 400 check and before middleware. Units count
+   * independently of markers: shorthand per group/prefix, explicit frames separately, scoped joins
+   * per containing frame/path/scope chain and emptiness frames per path/shape. Trusted units do
+   * not count toward this total. Named views check client arguments and their `where` groups
+   * against separate budgets of the same size; the `where` budget runs after middleware.
    */
   maxReferenceFrames?: number;
+  /** Positive safe integer; defaults to 3. Maximum client/trusted collection or reference frames on one chain. */
+  maxFrameNesting?: number;
 }
 
 /**
@@ -501,6 +600,15 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * collections also needs `referenceEmptiness: true`, and fails with `UNSUPPORTED_QUERY` without it.
    */
   queryFeatures?: QueryFeatures | null | undefined;
+  /**
+   * Optional. Declares the write features this adapter implements. `createRuntime` reads it once and
+   * throws `INVALID_WRITE_FEATURES` (500) unless it is undefined, null or an object whose
+   * `optimisticConcurrency`, if present, is a boolean. A schema with a type that declares
+   * `extensions.concurrency` (see {@link ConcurrencyDeclaration}) throws `INVALID_MODEL` (400) unless
+   * the adapter declares `optimisticConcurrency: true`, which commits it to the `options.expectedVersion`
+   * contract of `update` and `delete` and to the requirements on `find` below.
+   */
+  writeFeatures?: { optimisticConcurrency?: boolean } | null | undefined;
   bind?(runtime: Pick<Runtime<Model, Session>, 'getModel' | 'getType' | 'getRegistrations'>): void;
   validateRegistration?(registration: RuntimeRegistration<Model, Session>): void;
   /**
@@ -509,10 +617,16 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * must never be stored: an adapter that builds storage from a type's fields skips each field for
    * which {@link isVirtualField} returns true, on the types its embedded fields reach as well, or
    * builds it from `describeModels(registrations)`, which leaves them out. Generated writes, filters,
-   * sorts and aggregations never name a virtual field; a controller hook can still assign one.
+   * sorts and aggregations never name a virtual field; a controller hook can still assign one. The
+   * version field of a type that declares optimistic concurrency is injected after `prepare()`, so a
+   * type here may not have it yet; `describeModels(registrations)` describes it either way.
    */
   prepare?(registrations: RuntimeRegistration<Model, Session>[], options: { createCollection: boolean }): void;
-  /** Creates the model of a registered type. Its fields include virtual fields; see `prepare()`. */
+  /**
+   * Creates the model of a registered type. Its fields include virtual fields; see `prepare()`. A type
+   * that declares optimistic concurrency already has its injected version field here, which
+   * `describeModels(registrations)` describes as well.
+   */
   createModel(type: GraphQLObjectType, callback: ((model: Model) => void) | null | undefined, options: { createCollection: boolean }): Model;
   /**
    * Casts a reference or batch key to the stored identifier type. Throw a `SimfinityError` with
@@ -574,8 +688,31 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    */
   readByIdIsInert?(model: Model): boolean;
   prepareUpdate(set: Record<string, any>, unset: Record<string, string>): any;
-  update(model: Model, id: any, changes: any, session?: Session): any;
-  delete(model: Model, id: any, session?: Session): any;
+  /**
+   * With `options.expectedVersion`, one atomic write that matches the ID and a stored version equal to
+   * it (on MongoDB a missing or null stored version counts as 1), applies `changes`, sets the version
+   * to `expectedVersion + 1` and returns the updated record. When nothing matches, or when
+   * `expectedVersion >= MAX_RECORD_VERSION` and the write is skipped, it reads the record by ID in the
+   * same session: it returns null for a missing one, throws `VERSION_CONFLICT` (409) when the stored
+   * version differs, `VERSION_EXHAUSTED` (409) when stored and expected are `MAX_RECORD_VERSION`, and
+   * returns null otherwise. Without `options.expectedVersion` it behaves as before. A wrapper must
+   * forward every argument, `options` included.
+   */
+  update(model: Model, id: any, changes: any, session?: Session, options?: { expectedVersion?: number }): any;
+  /**
+   * With `options.expectedVersion`, one atomic delete that matches the ID and the version, and returns
+   * the deleted record. When nothing matches, it decides as `update` does, without the exhausted case:
+   * a delete does not advance the version, so a record at `MAX_RECORD_VERSION` is deleted like any
+   * other. Without it, it behaves as before. A wrapper must forward every argument, `options`
+   * included.
+   */
+  delete(model: Model, id: any, session?: Session, options?: { expectedVersion?: number }): any;
+  /**
+   * An adapter that declares `writeFeatures.optimisticConcurrency` must run `find` inside the given
+   * `session`, honor `options.requiredId` and accept `options.context`: the runtime reads through
+   * `find` with the caller's session to check, before a hook runs, whether the caller can read a
+   * record whose version is stale.
+   */
   find(model: Model, type: GraphQLObjectType, args: any, session?: Session | null, options?: { requiredId?: any; context?: any }): any;
   count(model: Model, type: GraphQLObjectType, args: any, session?: Session | null): Promise<number> | number;
   aggregate(model: Model, type: GraphQLObjectType, args: any, session?: Session | null): any;
@@ -618,6 +755,9 @@ export interface DatabaseAdapter<Model = any, Session = any> {
 }
 export function createRuntime<Model = any, Session = any>(adapter: DatabaseAdapter<Model, Session>): Runtime<Model, Session>;
 
+/** Scoped single-reference joins, keyed by a dotted prefix relative to the containing frame. */
+export type QueryJoins = Record<string, QueryPredicate | null>;
+
 /**
  * `operator` is a {@link QueryOperator}; the value of a text operator is a validated string. For
  * `IS_EMPTY` and `IS_NOT_EMPTY` the value is null, and `path` may end at an embedded object, an
@@ -626,17 +766,31 @@ export function createRuntime<Model = any, Session = any>(adapter: DatabaseAdapt
  * references and end at a reference or a collection.
  *
  * `scopes` exists only on such an emptiness predicate from a client, and only for a compiler that
- * declares `referenceEmptiness: true`. It has one key per dotted path from the queried record: each
+ * declares `referenceEmptiness: true`. It has one key per dotted path relative to its frame: each
  * single reference the path crosses (a scoped join, which admits the target only where the scope
  * admits it), the end when it is a reference or a collection, and each reference and collection
  * member of an embedded object (frames, which keep only the records the scope admits). Each value is
  * the target's `find` scope as a predicate in the target's own frame, or null when the scope added
  * nothing; after a scoped crossing, a null hop still correlates through that scoped join. Without
- * `scopes` the predicate reads stored data, through plain joins.
+ * `scopes` the predicate reads stored data, through plain joins. `joins` carries the scopes of
+ * single references crossed inside a client frame, with keys relative to the containing frame.
+ * A `quantified` node selects elements with `ANY`, `ALL` or `NONE`, applying `scope` before `where`;
+ * both predicates use paths relative to the element, and null means no restriction. Empty elements
+ * give ANY false, ALL/NONE true; scope is never negated, and frames never multiply roots. `anchor` is
+ * an aggregate's legacy join chain; when present, `path` is relative to it and `joins` is absent.
  */
 export type QueryPredicate =
-  | { kind: 'predicate'; path: string[]; operator: string; value: any; scopes?: Record<string, QueryPredicate | null> }
-  | { kind: 'and' | 'or'; terms: QueryPredicate[] };
+  | { kind: 'predicate'; path: string[]; operator: string; value: any; scopes?: Record<string, QueryPredicate | null>; joins?: QueryJoins }
+  | { kind: 'and' | 'or'; terms: QueryPredicate[] }
+  | {
+      kind: 'quantified';
+      quantifier: QueryQuantifier;
+      path: string[];
+      where: QueryPredicate | null;
+      scope: QueryPredicate | null;
+      joins?: QueryJoins;
+      anchor?: string[];
+    };
 export interface QueryPlan {
   entity: string;
   where: QueryPredicate | null;
@@ -659,8 +813,8 @@ export interface QueryPlan {
  * value inside an embedded list or a collection, `INVALID_FILTER_OPERATOR` for an embedded type that
  * reaches itself through single embedded members, `INVALID_FILTER_VALUE` for a value that is not
  * omitted or null, and `UNSUPPORTED_QUERY` for a reference or collection on the path or among the
- * members. A term without a path (omitted, null or `""`) and a group condition without a path test
- * the field itself. For other operators, a filter path of more than one segment that ends at an
+ * members. A nonquantified emptiness term without a path (omitted, null or `""`) and a group
+ * condition without a path test the field itself; quantified filter terms always need a path. For other operators, a filter path of more than one segment that ends at an
  * object fails with `INVALID_FILTER_PATH`, as on MongoDB; a bare object field keeps
  * `MISSING_FILTER_PATH`.
  *
@@ -669,18 +823,22 @@ export interface QueryPlan {
  * reads a reference or collection member, fails with `UNSUPPORTED_QUERY` where the order above has
  * `UNSUPPORTED_QUERY` for references; when it is true, such a condition plans with stored semantics,
  * unless its term or group condition carries a client scope marker that the runtime filled, which
- * becomes the predicate's `scopes`. A marker that is not filled for every path of the condition fails
+ * becomes the predicate's `scopes`. `quantifiers` has the same default rule and requires reference
+ * emptiness; enabled collection filters emit quantified nodes, with per-group/prefix correlation,
+ * element-relative scopes/joins and aggregate anchors beyond legacy J joins. `__scope`, `__implicit`
+ * and `__anchor` are reserved internal input metadata. A marker not filled for every path fails
  * with `DETACHED_CLIENT_FILTER` (500).
  */
-export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode']; operators?: Iterable<string>; referenceEmptiness?: boolean }): QueryPlan;
+export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode']; operators?: Iterable<string>; referenceEmptiness?: boolean; quantifiers?: boolean }): QueryPlan;
 export function resolveModelPath(models: ModelDescription, entityName: string, path: string | string[]): FieldDescription[];
 
 /**
  * Process-wide. `maxPageSize` (default 1000) caps page sizes. `maxReferenceFrames` (default 10) caps,
- * per list, aggregate or collection-field call, the distinct scoped joins and frames that a client's
- * reference and collection emptiness needs; more fail with `FILTER_DEPTH_EXCEEDED` (400). Each must be
- * a positive safe integer, or the call throws `INVALID_QUERY_LIMITS` (400) and keeps both limits; an
- * omitted option takes its default again.
+ * per list, aggregate or collection-field call, the compiled frames and scoped joins a client's
+ * conditions need. Named views check client arguments and `where` groups separately. `maxFrameNesting` (default 3) caps nested frames along one chain in client and
+ * trusted constructs. Exceeding either frame limit fails with `FILTER_DEPTH_EXCEEDED` (400). Each
+ * option must be a positive safe integer, or the call throws `INVALID_QUERY_LIMITS` (400) and keeps
+ * every current limit; an omitted option takes its default again.
  */
 export function configureQueryLimits(options?: QueryLimitsOptions): void;
 /**

@@ -1,5 +1,6 @@
 export { describeModels } from './metadata.js';
 export { isVirtualField, virtualFieldOptions } from './relation-storage.js';
+export { MAX_RECORD_VERSION, RecordVersion } from './record-version.js';
 export { default as SimfinityError } from './errors/simfinity.error.js';
 export { createValidatedScalar } from './scalars/factory.js';
 export {
@@ -9,6 +10,7 @@ export {
 } from './runtime.js';
 export { createQueryPlan, resolveModelPath } from './query-plan.js';
 export { default as QLOperator } from './const/QLOperator.js';
+export { default as QLQuantifier } from './const/QLQuantifier.js';
 export { default as QLSort } from './const/QLSort.js';
 export { default as QLValue } from './const/QLValue.js';
 export { configureQueryLimits, paginationStages } from './query-limits.js';

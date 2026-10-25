@@ -17,15 +17,16 @@ export const postgresPlugin = (options) => ({
   options: options || null,
   // singleStatementReads: one statement reads one snapshot at any isolation level, so a read without owned
   // tables needs no repeatable-read transaction.
-  capabilities: ['transactions', 'foreignKeys', 'deferredForeignKeys', 'embeddedValues', 'ownedRecords', 'scalarLists', 'uniqueValues', 'nullableUnique', 'singleStatementReads'],
+  capabilities: ['transactions', 'optimisticConcurrency', 'foreignKeys', 'deferredForeignKeys', 'embeddedValues', 'ownedRecords', 'scalarLists', 'uniqueValues', 'nullableUnique', 'singleStatementReads'],
   // Every filter operator compileQuery and compileChildrenQuery compile, listed one by one so that a later
   // QLOperator value is rejected until the compiler supports it, and emptiness through references and collections
   // (#108 part 2b): the scoped joins and frames of client constructs, and stored semantics for the others. The
   // declaration names the compileQuery it describes, so a copy of this plugin with another compileQuery compiles the
-  // operators of 3.7.0, without reference emptiness, until it declares its own.
+  // operators of 3.7.0, without reference emptiness or quantifiers, until it declares its own.
   queryFeatures: {
     operators: ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE', 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ', 'IS_EMPTY', 'IS_NOT_EMPTY'],
     referenceEmptiness: true,
+    quantifiers: true,
     compileQuery,
   },
   naming: { validateIdentifier: identifier, generatedName },

@@ -16,7 +16,7 @@ The MongoDB facade retains MCP compatibility exports. For either database, the d
 The following examples import `@simtlix/simfinity-mcp`, which works with either adapter. In either application, install it from npm:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.12.0
+npm install @simtlix/simfinity-mcp@3.14.0
 ```
 
 Keep it at the same version as your other Simfinity packages. The archived MongoDB starter already includes its matching version for compatibility. The published MongoDB 3.0.1 release instead exports these functions from `@simtlix/simfinity-js`.
@@ -218,6 +218,12 @@ const lean = mcp.generateMCPTools(schema, {
 
 [Virtual fields](./queries#virtual-fields) cost a resolver call each, so list tools select one only when it sets `extensions: { virtual: { mcp: 'select' } }`, while get-by-id and mutation tools select every virtual field without required arguments, except inside the items of a nested collection or embedded list, where the same `mcp: 'select'` rule applies. A virtual field with a required argument, which no generated selection can include, gets its own read tool instead, named `<byIdQuery>_<field>`, such as `barbershop_busyRanges`: it takes the record's `id` and the field's arguments and returns the field under its record. Set `mcp: false` on the field to leave that tool out; see [virtual field tools](/reference/mcp#virtual-field-tools).
 
-An explicit selection omits that tool's generated `outputSchema`, because the generator can no longer promise a matching output contract. Tool annotations describe behavior to clients; they do not grant or restrict access. Generated updates are marked idempotent unless their input can add collection items, and deletes are marked destructive and idempotent; see [annotations](/reference/mcp#annotations).
+An explicit selection omits that tool's generated `outputSchema`, because the generator can no longer promise a matching output contract. Tool annotations describe behavior to clients; they do not grant or restrict access. Generated unprotected updates are marked idempotent unless their input can add collection items, and deletes are marked destructive and idempotent; protected updates keep the idempotent hint even with added items; see [annotations](/reference/mcp#annotations).
 
 See the [MCP reference](/reference/mcp) for all options, remote execution, middleware, and error behavior.
+
+## Protected records
+
+For [optimistic concurrency](./concurrency), generated selections include `version`, and `RecordVersion` becomes an integer from 1 to `9007199254740991` in tool input/output schemas. Send the observed version on updates, state actions and deletes; nested protected children also need their own versions. Protected update/delete hints remain idempotent for stored data, including updates with `added` items, because the same version cannot apply another revision. Hooks may still run again. Re-read and reapply on `VERSION_CONFLICT` or `TRANSACTION_RETRY_EXCEEDED`; an earlier call may already have applied the change. Transition hints are unchanged.
+
+If an oversized protected mutation result is compacted, MCP keeps `{ id, version }` when it fits within the configured cap. Keep `version` in any `toolOverrides.selection` so subsequent edits use the new revision. The compact-result and retry messages explain what was applied; avoid a blind repeat.

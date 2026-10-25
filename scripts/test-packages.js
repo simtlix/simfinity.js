@@ -166,10 +166,19 @@ const quotedUnion = (names) => names.map((name) => `'${name}'`).join(' | ');
 // the module's keys, and the TypeScript fixture with the declared exports. A new root export needs an
 // explicit `export` in types/index.d.ts and an entry here.
 const coreRootValues = [
-  'ForbiddenError', 'InternalServerError', 'QLOperator', 'QLSort', 'QLValue', 'SimfinityError',
-  'UnauthenticatedError', 'auth', 'buildErrorFormatter', 'configureMutationLimits', 'configureQueryLimits',
-  'createQueryPlan', 'createRuntime', 'createValidatedScalar', 'describeModels', 'isVirtualField',
+  'ForbiddenError', 'InternalServerError', 'MAX_RECORD_VERSION', 'QLOperator', 'QLQuantifier', 'QLSort', 'QLValue', 'RecordVersion',
+  'SimfinityError', 'UnauthenticatedError', 'auth', 'buildErrorFormatter', 'configureMutationLimits',
+  'configureQueryLimits', 'createQueryPlan', 'createRuntime', 'createValidatedScalar', 'describeModels', 'isVirtualField',
   'paginationStages', 'plugins', 'resolveModelPath', 'scalars', 'validators', 'virtualFieldOptions',
+];
+// Everything the untyped internal subpath `@simtlix/simfinity-core/internal/record-version` exports, which the
+// adapters import for optimistic concurrency (#98): its module, whole. The root exports only the scalar and its maximum.
+const recordVersionInternals = [
+  'MAX_RECORD_VERSION', 'RECORD_VERSION_FIELD', 'RecordVersion', 'RecordVersionRef', 'assertVersionInput',
+  'concurrencyDeclared', 'createVersionFieldConfig', 'isProtectedType', 'isVersionField', 'readStoredVersion',
+  'recordVersionFieldMisuse', 'retainStoredVersion', 'retainedStoredVersion', 'unadvancedVersionError', 'unexpectedDeleteError', 'versionConflictError',
+  'versionConnectionCollision', 'versionEmbeddedMisuse', 'versionExhaustedError', 'versionFieldCollision',
+  'versionManagedError',
 ];
 // MongoDB's legacy deep imports of the core subpaths, which re-export them unchanged, as do their
 // sibling declarations.
@@ -188,9 +197,12 @@ const coreSource = `import assert from 'node:assert/strict';
   import {
     ForbiddenError,
     InternalServerError,
+    MAX_RECORD_VERSION,
     QLOperator,
+    QLQuantifier,
     QLSort,
     QLValue,
+    RecordVersion,
     SimfinityError,
     UnauthenticatedError,
     buildErrorFormatter,
@@ -247,7 +259,29 @@ const coreSource = `import assert from 'node:assert/strict';
   assert.equal(isVirtualField(type.getFields().title), false);
   assert.deepEqual(virtualFieldOptions({ extensions: { virtual: { mcp: 'select' } } }), { mcp: 'select' });
   assert.equal(createValidatedScalar('Count', '', GraphQLInt, () => {}).parseValue(3), 3);
+  // Optimistic concurrency: the scalar and its maximum are root exports, and the archive ships the internal module the
+  // adapters import, whole, with the scalar they share.
+  assert.equal(RecordVersion.name, 'RecordVersion');
+  assert.equal(MAX_RECORD_VERSION, Number.MAX_SAFE_INTEGER);
+  assert.equal(RecordVersion.parseValue(MAX_RECORD_VERSION), MAX_RECORD_VERSION);
+  assert.throws(() => RecordVersion.parseValue(0), TypeError);
+  const recordVersion = await import('@simtlix/simfinity-core/internal/record-version');
+  assert.deepEqual(Object.keys(recordVersion).sort(), ${JSON.stringify([...recordVersionInternals].sort())});
+  assert.equal(recordVersion.RecordVersion, RecordVersion);
+  assert.equal(recordVersion.MAX_RECORD_VERSION, MAX_RECORD_VERSION);
+  assert.equal(recordVersion.readStoredVersion(undefined), 1);
+  assert.throws(() => recordVersion.readStoredVersion('2', { typeName: 'CoreBook', id: 'b1' }), (error) => error.getCode() === 'DATABASE_ERROR');
+  assert.throws(() => recordVersion.assertVersionInput('7'), (error) => error.getCode() === 'INVALID_VERSION');
+  assert.equal(recordVersion.versionConflictError('CoreBook', 'b1').getStatus(), 409);
+  assert.equal(recordVersion.concurrencyDeclared(type), false);
+  assert.throws(() => describeModels([{ gqltype: new GraphQLObjectType({ name: 'CoreBadConcurrency', extensions: { concurrency: {} }, fields: { id: { type: GraphQLID } } }) }]), (error) => error.getCode() === 'INVALID_MODEL');
+  const versionField = recordVersion.createVersionFieldConfig(() => 1);
+  assert.equal(recordVersion.isVersionField(versionField), true);
+  const concurrentBook = new GraphQLObjectType({ name: 'CoreConcurrentBook', extensions: { concurrency: { mode: 'optimistic' } }, fields: { id: { type: GraphQLID } } });
+  assert.deepEqual(describeModels([{ gqltype: concurrentBook }]).entities[0].fields.map((field) => [field.name, field.scalar, field.version]), [['id', 'ID', undefined], ['version', 'Version', true]]);
   assert.equal(QLOperator.name, 'QLOperator');
+  assert.equal(QLQuantifier.name, 'QLQuantifier');
+  assert.deepEqual(QLQuantifier.getValues().map(({ value }) => value), ['ANY', 'ALL', 'NONE']);
   assert.equal(QLSort.name, 'QLSort');
   assert.equal(QLValue.name, 'QLValue');
   const known = new SimfinityError('known', 'KNOWN', 400);
@@ -366,9 +400,8 @@ const coreSource = `import assert from 'node:assert/strict';
   const declaredSchema = declared.createSchema();
   const declaredResult = await graphql({ schema: declaredSchema, source: '{ coreDeclaredBooks(shop: { terms: [{ operator: IS_EMPTY }] }) { id } }' });
   assert.equal(declaredResult.errors, undefined);
-  // The Shop type has no find scope, so the marker's scope for shop is null. The copy of the arguments keeps the null
-  // prototype of an inline literal.
-  assert.deepEqual(JSON.parse(JSON.stringify(reads.at(-1).shop)), { terms: [{ operator: 'IS_EMPTY', __scope: { id: 0, scopes: { shop: null } } }] });
+  // The Shop type has no find scope, so no provenance marker is needed. Inline input keeps its null prototype.
+  assert.deepEqual(JSON.parse(JSON.stringify(reads.at(-1).shop)), { terms: [{ operator: 'IS_EMPTY' }] });
   assert.equal(Object.getPrototypeOf(reads.at(-1).shop.terms[0]), null);
   const undeclared = createRuntime({ ...adapter, queryFeatures: { operators: allOperators } });
   const undeclaredTypes = referenceTypes('CoreUndeclared');
@@ -391,17 +424,39 @@ const coreSource = `import assert from 'node:assert/strict';
   assert.deepEqual(createQueryPlan(referenceModels, 'CoreShapeBook', { shop: { terms: [{ operator: 'IS_EMPTY', __scope: { id: 0, scopes: { shop: { name: { operator: 'EQ', value: 'a' } } } } }] } }).where, {
     kind: 'predicate', path: ['shop'], operator: 'IS_EMPTY', value: null, scopes: { shop: { kind: 'predicate', path: ['name'], operator: 'EQ', value: 'a' } },
   });
-  assert.throws(() => createQueryPlan(referenceModels, 'CoreShapeBook', { shop: { terms: [{ operator: 'IS_EMPTY' }] } }, { operators: allOperators }), (error) => error.getCode() === 'UNSUPPORTED_QUERY');`;
+  assert.throws(() => createQueryPlan(referenceModels, 'CoreShapeBook', { shop: { terms: [{ operator: 'IS_EMPTY' }] } }, { operators: allOperators }), (error) => error.getCode() === 'UNSUPPORTED_QUERY');
+  // Recursive quantified inputs, frame plans and capability/limit validation survive packing.
+  assert.equal(queryOperators.resolveQueryFeatures(undefined).quantifiers, false);
+  for (const quantifiers of [null, undefined]) assert.equal(queryOperators.resolveQueryFeatures({ operators: [], quantifiers }).quantifiers, false);
+  assert.throws(() => createRuntime({ ...adapter, queryFeatures: { operators: allOperators, quantifiers: true } }), (error) => error.getCode() === 'INVALID_QUERY_FEATURES');
+  assert.throws(() => createRuntime({ ...adapter, queryFeatures: { operators: allOperators, referenceEmptiness: true, quantifiers: 'yes' } }), (error) => error.getCode() === 'INVALID_QUERY_FEATURES');
+  const quantifiedRuntime = createRuntime({ ...adapter, queryFeatures: { operators: allOperators, referenceEmptiness: true, quantifiers: true } });
+  const quantifiedTypes = referenceTypes('PackedFrame');
+  quantifiedRuntime.connect(null, quantifiedTypes.shop, 'packedFrameShop', 'packedFrameShops');
+  quantifiedRuntime.connect(null, quantifiedTypes.book, 'packedFrameBook', 'packedFrameBooks');
+  const quantifiedSchema = quantifiedRuntime.createSchema();
+  const quantified = await graphql({ schema: quantifiedSchema, source: '{ packedFrameBooks(AND:[{ALL:[{path:"shop",OR:[{conditions:[{field:"name",value:"a"}]},{AND:[{conditions:[{field:"name",value:"b"}]}]}]}]}]){id} }' });
+  assert.equal(quantified.errors, undefined);
+  const quantifiedFilter = await graphql({ schema: quantifiedSchema, source: '{ packedFrameBooks(shop:{quantifier:ALL,terms:[{path:"name",value:"a"}]}){id} }' });
+  assert.equal(quantifiedFilter.errors, undefined);
+  assert.deepEqual(createQueryPlan(referenceModels, 'CoreShapeBook', { AND: [{ ALL: [{ path: 'shop', conditions: [{ field: 'name', value: 'a' }] }] }] }).where, {
+    kind: 'quantified', quantifier: 'ALL', path: ['shop'], where: { kind: 'predicate', path: ['name'], operator: 'EQ', value: 'a' }, scope: null,
+  });
+  assert.throws(() => configureQueryLimits({ maxFrameNesting: 0 }), (error) => error.getCode() === 'INVALID_QUERY_LIMITS');
+  configureQueryLimits({ maxFrameNesting: 2 }); configureQueryLimits();`;
 
 const sqlSource = `import assert from 'node:assert/strict';
   import { createRequire } from 'node:module';
-  import { createSQL, planRelationalSchema } from '@simtlix/simfinity-sql';
-  import { describeModels } from '@simtlix/simfinity-core';
+  import { MAX_RECORD_VERSION, RecordVersion, createSQL, planRelationalSchema } from '@simtlix/simfinity-sql';
+  import { MAX_RECORD_VERSION as coreMaxRecordVersion, RecordVersion as coreRecordVersion, describeModels } from '@simtlix/simfinity-core';
   import { GraphQLID, GraphQLObjectType, GraphQLString, graphql } from 'graphql';
   const require = createRequire(import.meta.url);
   for (const dependency of ['pg', 'mongoose', 'mongodb', '@simtlix/simfinity-postgres', '@simtlix/simfinity-mcp', '@modelcontextprotocol/sdk']) {
     assert.throws(() => require.resolve(dependency), { code: 'MODULE_NOT_FOUND' });
   }
+  // The facade re-exports core's scalar and maximum, not copies.
+  assert.equal(RecordVersion, coreRecordVersion);
+  assert.equal(MAX_RECORD_VERSION, coreMaxRecordVersion);
   const book = new GraphQLObjectType({ name: 'SQLBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
   const plan = planRelationalSchema(describeModels([{ gqltype: book }]), { schema: 'recording' });
   assert.deepEqual(plan.requirements, ['transactions']);
@@ -491,7 +546,7 @@ const sqlSource = `import assert from 'node:assert/strict';
   await declared.instance.initializeDatabase();
   const declaredResult = await graphql({ schema: declared.schema, source: '{ sqlDeclaredBooks(shop: { terms: [{ operator: IS_EMPTY }] }) { id } }' });
   assert.equal(declaredResult.errors, undefined);
-  assert.deepEqual(plans.at(-1).where, { kind: 'predicate', path: ['shop'], operator: 'IS_EMPTY', value: null, scopes: { shop: null } });
+  assert.deepEqual(plans.at(-1).where, { kind: 'predicate', path: ['shop'], operator: 'IS_EMPTY', value: null });
   const undeclared = referenceApi('SQLUndeclared', 'sqlUndeclared', false);
   await undeclared.instance.initializeDatabase();
   const undeclaredResult = await graphql({ schema: undeclared.schema, source: '{ sqlUndeclaredBooks(shop: { terms: [{ operator: IS_EMPTY }] }) { id } }' });
@@ -521,8 +576,15 @@ const postgresSource = `import assert from 'node:assert/strict';
     scalars,
     validators,
     configureMutationLimits,
+    MAX_RECORD_VERSION,
+    RecordVersion,
   } from '@simtlix/simfinity-postgres';
-  import { configureMutationLimits as coreConfigureMutationLimits, createRuntime } from '@simtlix/simfinity-core';
+  import {
+    MAX_RECORD_VERSION as coreMaxRecordVersion,
+    RecordVersion as coreRecordVersion,
+    configureMutationLimits as coreConfigureMutationLimits,
+    createRuntime,
+  } from '@simtlix/simfinity-core';
   import { createSQL } from '@simtlix/simfinity-sql';
   import {
     GraphQLID,
@@ -572,6 +634,7 @@ const postgresSource = `import assert from 'node:assert/strict';
   // only reach the uninitialized database; a copy that declares the operators alone, or replaces compileQuery, keeps
   // UNSUPPORTED_QUERY for them before any statement runs.
   assert.equal(postgresPlugin().queryFeatures.referenceEmptiness, true);
+  assert.equal(postgresPlugin().queryFeatures.quantifiers, true);
   for (const [prefix, endpoint, plugin, code] of [
     ['PgDeclared', 'pgDeclared', postgresPlugin({ pool, schema: 'app' }), 'DATABASE_NOT_INITIALIZED'],
     ['PgOperators', 'pgOperators', { ...postgresPlugin({ pool, schema: 'app' }), queryFeatures: { operators: postgresPlugin().queryFeatures.operators } }, 'UNSUPPORTED_QUERY'],
@@ -655,7 +718,10 @@ const postgresSource = `import assert from 'node:assert/strict';
   }
   const formatted = buildErrorFormatter()(new Error('postgres'));
   assert(formatted.originalError instanceof InternalServerError);
-  assert(formatted.originalError instanceof SimfinityError);`;
+  assert(formatted.originalError instanceof SimfinityError);
+  // The facade re-exports core's scalar and maximum, not copies.
+  assert.equal(RecordVersion, coreRecordVersion);
+  assert.equal(MAX_RECORD_VERSION, coreMaxRecordVersion);`;
 
 const mongoSource = `import assert from 'node:assert/strict';
   import * as legacyEntry from '@simtlix/simfinity-js/src/index.js';
@@ -665,6 +731,8 @@ const mongoSource = `import assert from 'node:assert/strict';
   import legacyMcp from '@simtlix/simfinity-js/src/mcp.js';
   import * as simfinity from '@simtlix/simfinity-js';
   import {
+    MAX_RECORD_VERSION,
+    RecordVersion,
     SimfinityError,
     auth,
     plugins,
@@ -689,11 +757,16 @@ const mongoSource = `import assert from 'node:assert/strict';
   assert(Object.isFrozen(queryFeatures) && Object.isFrozen(queryFeatures.operators));
   // The adapter declares reference emptiness, and a spread copy keeps the declaration.
   assert.equal(queryFeatures.referenceEmptiness, true);
+  assert.equal(queryFeatures.quantifiers, true);
+  assert.equal({ ...simfinity.createMongoAdapter() }.queryFeatures.quantifiers, true);
   assert.equal({ ...simfinity.createMongoAdapter() }.queryFeatures.referenceEmptiness, true);
   assert.equal(simfinity.auth, auth);
   assert.equal(simfinity.plugins, plugins);
   assert.equal(simfinity.scalars, scalars);
   assert.equal(simfinity.validators, validators);
+  // The facade re-exports core's scalar and maximum, not copies.
+  assert.equal(simfinity.RecordVersion, RecordVersion);
+  assert.equal(simfinity.MAX_RECORD_VERSION, MAX_RECORD_VERSION);
   assert.equal(typeof simfinity.generateMCPTools, 'function');
   assert.equal(simfinity.mcp.generateMCPTools, simfinity.generateMCPTools);
   simfinity.registerCustomQuery('mongoRead', '', undefined, GraphQLString, (...args) => {
@@ -791,6 +864,7 @@ const mcpSdkSource = `import assert from 'node:assert/strict';
 const coreTypes = `import {
   InternalServerError,
   QLOperator,
+  QLQuantifier,
   QLSort,
   QLValue,
   SimfinityError,
@@ -806,11 +880,21 @@ const coreTypes = `import {
   scalars,
   validators,
   virtualFieldOptions,
+  MAX_RECORD_VERSION,
+  RecordVersion,
   type AuthRuleFunction,
+  type ConcurrencyDeclaration,
   type DatabaseAdapter,
+  type FieldDescription,
   type FieldValidations,
   type MutationLimitsOptions,
+  type QLFilterCondition,
+  type QLFilterGroup,
+  type QLQuantifiedGroup,
+  type QLTypeFilterExpression,
   type QueryFeatures,
+  type QueryJoins,
+  type QueryQuantifier,
   type QueryLimitsOptions,
   type QueryOperator,
   type QueryPredicate,
@@ -823,6 +907,7 @@ import {
   GraphQLError,
   GraphQLInputObjectType,
   GraphQLObjectType,
+  GraphQLScalarType,
   GraphQLString,
   type GraphQLFormattedError,
 } from 'graphql';
@@ -996,16 +1081,95 @@ runtime.configureQueryLimits({ maxReferenceFrames: 12 });
 configureQueryLimits();
 // @ts-expect-error maxReferenceFrames is a number.
 configureQueryLimits({ maxReferenceFrames: '10' });
-// @ts-expect-error The options are maxPageSize and maxReferenceFrames.
+// @ts-expect-error The option name is maxReferenceFrames, not maxReferenceFrame.
 runtime.configureQueryLimits({ maxReferenceFrame: 10 });
 const referenceMembers: {
   feature: Equals<QueryFeatures['referenceEmptiness'], boolean | null | undefined>;
   scopes: Equals<Extract<QueryPredicate, { kind: 'predicate' }>['scopes'], Record<string, QueryPredicate | null> | undefined>;
-  limits: Equals<QueryLimitsOptions, { maxPageSize?: number; maxReferenceFrames?: number }>;
+  limits: Equals<QueryLimitsOptions, { maxPageSize?: number; maxReferenceFrames?: number; maxFrameNesting?: number }>;
   rootLimits: Equals<Parameters<typeof configureQueryLimits>[0], QueryLimitsOptions | undefined>;
   runtimeLimits: Equals<Parameters<typeof runtime.configureQueryLimits>[0], QueryLimitsOptions | undefined>;
 } = { feature: true, scopes: true, limits: true, rootLimits: true, runtimeLimits: true };
-void [referenceAdapter, plainFeatures, nullReference, undefinedReference, textReference, scopedPredicate, textScope, scopeCount(referencePlan.where), queryLimits, referenceMembers, createRuntime(referenceAdapter), createRuntime(nullReference)];`;
+const quantifierEnum: GraphQLEnumType = QLQuantifier;
+const quantifier: QueryQuantifier = 'ALL';
+const frameCondition: QLFilterCondition = { field: 'rating', operator: 'GTE', value: 4 };
+const quantifiedGroup: QLQuantifiedGroup = {
+  path: 'reviews', conditions: [frameCondition],
+  ALL: [{ path: 'author', conditions: [{ field: 'name', operator: 'IEQ', value: 'Ada' }] }],
+};
+const quantifiedFilter: QLFilterGroup = { ANY: [quantifiedGroup], OR: [{ NONE: [{ path: 'reviews' }] }] };
+const quantifiedExpression: QLTypeFilterExpression = { quantifier, terms: [{ path: 'rating', operator: 'GTE', value: 4 }] };
+const quantifiedFeatures: QueryFeatures = { operators: ['EQ'], referenceEmptiness: true, quantifiers: true };
+const nullQuantifiers: QueryFeatures = { operators: [], quantifiers: null };
+const undefinedQuantifiers: QueryFeatures = { operators: [], quantifiers: undefined };
+const frameJoins: QueryJoins = { author: scopedPredicate, 'author.shop': null };
+const quantifiedPredicate: QueryPredicate = {
+  kind: 'quantified', quantifier: 'ANY', path: ['reviews'], where: scopedPredicate, scope: null, joins: frameJoins,
+};
+const anchoredPredicate: QueryPredicate = {
+  kind: 'quantified', quantifier: 'NONE', path: ['reviews'], where: null, scope: null, anchor: ['reviews', 'product'],
+};
+const joinedPredicate: QueryPredicate = { kind: 'predicate', path: ['author', 'name'], operator: 'EQ', value: 'Ada', joins: frameJoins };
+createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', {}, { quantifiers: true });
+configureQueryLimits({ maxFrameNesting: 4 });
+runtime.configureQueryLimits({ maxFrameNesting: 2 });
+// @ts-expect-error quantified groups require a path.
+const missingFramePath: QLQuantifiedGroup = { conditions: [] };
+// @ts-expect-error a quantifier is ANY, ALL or NONE.
+const invalidQuantifier: QueryQuantifier = 'SOME';
+// @ts-expect-error a frame's where is a predicate or null.
+const invalidWhere: QueryPredicate = { kind: 'quantified', quantifier: 'ANY', path: ['reviews'], where: 'x', scope: null };
+// @ts-expect-error a join scope is a predicate or null.
+const invalidJoins: QueryJoins = { author: 'x' };
+// @ts-expect-error quantifiers is a boolean, null or undefined.
+const invalidQuantifiers: QueryFeatures = { operators: [], quantifiers: 'true' };
+// @ts-expect-error the plan option is a boolean.
+createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', {}, { quantifiers: 'true' });
+// @ts-expect-error the nesting limit is a number.
+configureQueryLimits({ maxFrameNesting: '3' });
+const quantifiedMembers: {
+  feature: Equals<QueryFeatures['quantifiers'], boolean | null | undefined>;
+  joins: Equals<Extract<QueryPredicate, { kind: 'predicate' }>['joins'], QueryJoins | undefined>;
+  frameJoins: Equals<Extract<QueryPredicate, { kind: 'quantified' }>['joins'], QueryJoins | undefined>;
+  quantifier: Equals<Extract<QueryPredicate, { kind: 'quantified' }>['quantifier'], QueryQuantifier>;
+  where: Equals<Extract<QueryPredicate, { kind: 'quantified' }>['where'], QueryPredicate | null>;
+  scope: Equals<Extract<QueryPredicate, { kind: 'quantified' }>['scope'], QueryPredicate | null>;
+} = { feature: true, joins: true, frameJoins: true, quantifier: true, where: true, scope: true };
+void [quantifierEnum, quantifiedFilter, quantifiedExpression, quantifiedFeatures, nullQuantifiers, undefinedQuantifiers, quantifiedPredicate, anchoredPredicate, joinedPredicate, missingFramePath, invalidQuantifier, invalidWhere, invalidJoins, invalidQuantifiers, quantifiedMembers];
+void [referenceAdapter, plainFeatures, nullReference, undefinedReference, textReference, scopedPredicate, textScope, scopeCount(referencePlan.where), queryLimits, referenceMembers, createRuntime(referenceAdapter), createRuntime(nullReference)];
+// Optimistic concurrency (#98): the scalar and its maximum, the declaration, the description of the version field and the
+// optional adapter members. The 3.11-shaped adapter above compiles without them.
+const versionScalar: GraphQLScalarType = RecordVersion;
+const versionMaximum: number = MAX_RECORD_VERSION;
+const concurrencyDeclaration: ConcurrencyDeclaration = { mode: 'optimistic' };
+const concurrentType = new GraphQLObjectType({ name: 'TypedConcurrentBook', extensions: { concurrency: concurrencyDeclaration }, fields: { title: { type: GraphQLString } } });
+const versionDescription: FieldDescription = describeModels([{ gqltype: concurrentType }]).entities[0].fields[1];
+const versionFieldScalar: FieldDescription['scalar'] = 'Version';
+const versionFlag: true | undefined = versionDescription.version;
+// @ts-expect-error The only mode is optimistic.
+const pessimistic: ConcurrencyDeclaration = { mode: 'pessimistic' };
+// @ts-expect-error The version flag is true when present.
+const falseFlag: FieldDescription['version'] = false;
+const concurrentAdapter: DatabaseAdapter<Model, Session> = {
+  ...adapter,
+  writeFeatures: { optimisticConcurrency: true },
+  update(model, id, changes, session, options) { void [model.name, id, changes, session?.active, options?.expectedVersion]; return null; },
+  delete(model, id, session, options) { void [model.name, id, session?.active, options?.expectedVersion]; return null; },
+};
+const plainWriteFeatures: DatabaseAdapter<Model, Session>[] = [{ ...adapter, writeFeatures: null }, { ...adapter, writeFeatures: undefined }, { ...adapter, writeFeatures: {} }];
+// @ts-expect-error optimisticConcurrency is a boolean.
+const textFeature: DatabaseAdapter<Model, Session> = { ...adapter, writeFeatures: { optimisticConcurrency: 'yes' } };
+// @ts-expect-error expectedVersion is a number.
+void concurrentAdapter.update({ name: 'A' }, 'a1', {}, undefined, { expectedVersion: '2' });
+// @ts-expect-error delete takes its options fourth, after the session.
+void concurrentAdapter.delete({ name: 'A' }, 'a1', undefined, undefined, { expectedVersion: 2 });
+const writeMembers: {
+  features: Equals<DatabaseAdapter['writeFeatures'], { optimisticConcurrency?: boolean } | null | undefined>;
+  update: Equals<Parameters<DatabaseAdapter<Model, Session>['update']>, [model: Model, id: any, changes: any, session?: Session, options?: { expectedVersion?: number }]>;
+  delete: Equals<Parameters<DatabaseAdapter<Model, Session>['delete']>, [model: Model, id: any, session?: Session, options?: { expectedVersion?: number }]>;
+  scalar: Equals<FieldDescription['scalar'], 'ID' | 'String' | 'Int' | 'Float' | 'Boolean' | 'DateTime' | 'Enum' | 'Version' | undefined>;
+} = { features: true, update: true, delete: true, scalar: true };
+void [versionScalar, versionMaximum, versionFieldScalar, versionFlag, pessimistic, falseFlag, plainWriteFeatures, textFeature, writeMembers, createRuntime(concurrentAdapter)];`;
 
 // The expected type of a subpath's default export.
 const subpathDefaultType = ({ namespace, values, defaultExport, defaultExtras }) => {
@@ -1251,9 +1415,15 @@ const sqlTypes = `import {
   type VirtualFieldDeclaration,
   type VirtualFieldOptions,
   validators,
+  MAX_RECORD_VERSION,
+  RecordVersion,
+  type ConcurrencyDeclaration,
 } from '@simtlix/simfinity-sql';
 import {
   describeModels,
+  MAX_RECORD_VERSION as CoreMaxRecordVersion,
+  RecordVersion as CoreRecordVersion,
+  type ConcurrencyDeclaration as CoreConcurrencyDeclaration,
   type ItemValidators as CoreItemValidators,
   type QueryFeatures as CoreQueryFeatures,
   type QueryPlan,
@@ -1426,8 +1596,18 @@ const undefinedReferencePlugin: SQLPlugin<Configuration, Client, Description> = 
 // @ts-expect-error referenceEmptiness is a boolean, null or undefined.
 const textReferencePlugin: SQLPlugin<Configuration, Client, Description> = { ...plugin, queryFeatures: { operators: [], referenceEmptiness: 'yes' } };
 const sqlReference: Equals<SQLQueryFeatures['referenceEmptiness'], boolean | null | undefined> = true;
+const sqlQuantifiers: Equals<SQLQueryFeatures['quantifiers'], boolean | null | undefined> = true;
+const quantifiedPlugin: SQLPlugin<Configuration, Client, Description> = { ...plugin, queryFeatures: { operators: ['EQ'], referenceEmptiness: true, quantifiers: true, compileQuery: plugin.compileQuery } };
+// @ts-expect-error quantifiers is boolean, null or undefined.
+const badQuantifiedPlugin: SQLPlugin = { ...plugin, queryFeatures: { operators: [], quantifiers: 'true' } };
+void [sqlQuantifiers, quantifiedPlugin, badQuantifiedPlugin];
 const scopedPaths = (query: QueryPlan): string[] => (query.where?.kind === 'predicate' ? Object.keys(query.where.scopes ?? {}) : []);
-void [referencePlugin, nullReferencePlugin, undefinedReferencePlugin, textReferencePlugin, sqlReference, scopedPaths, createSQL({ plugin: referencePlugin }), createSQL({ plugin: nullReferencePlugin })];`;
+void [referencePlugin, nullReferencePlugin, undefinedReferencePlugin, textReferencePlugin, sqlReference, scopedPaths, createSQL({ plugin: referencePlugin }), createSQL({ plugin: nullReferencePlugin })];
+// The facade re-exports core's scalar and maximum, with the same types, and the declaration type.
+const sqlRecordVersion: Equals<typeof RecordVersion, typeof CoreRecordVersion> = true;
+const sqlMaxVersion: Equals<typeof MAX_RECORD_VERSION, typeof CoreMaxRecordVersion> = true;
+const sqlConcurrency: Equals<ConcurrencyDeclaration, CoreConcurrencyDeclaration> = true;
+void [sqlRecordVersion, sqlMaxVersion, sqlConcurrency];`;
 
 const postgresTypes = `import { Pool, type PoolClient } from 'pg';
 import { createSQL, type SQLChildrenQueryCompiler, type SQLQueryFeatures, type SQLStatement } from '@simtlix/simfinity-sql';
@@ -1459,7 +1639,15 @@ import {
   type ItemValidators,
   type VirtualFieldDeclaration,
   type VirtualFieldOptions,
+  MAX_RECORD_VERSION,
+  RecordVersion,
+  type ConcurrencyDeclaration,
 } from '@simtlix/simfinity-postgres';
+import {
+  MAX_RECORD_VERSION as CoreMaxRecordVersion,
+  RecordVersion as CoreRecordVersion,
+  type ConcurrencyDeclaration as CoreConcurrencyDeclaration,
+} from '@simtlix/simfinity-core';
 import type {
   ItemValidators as CoreItemValidators,
   QueryFeatures as CoreQueryFeatures,
@@ -1565,11 +1753,20 @@ const legacyPg = createSQL({ plugin: { ...postgresPlugin({ pool }), queryFeature
 void [pgFeatures, pgCoreFeatures, pgOperators, legacyPg];
 // The plugin declares reference emptiness, and the facade's query limits take maxReferenceFrames.
 const pgReference: boolean | null | undefined = postgresPlugin().queryFeatures?.referenceEmptiness;
+const pgQuantifiers: boolean | null | undefined = postgresPlugin().queryFeatures?.quantifiers;
+configureQueryLimits({ maxFrameNesting: 3 });
+api.configureQueryLimits({ maxFrameNesting: 2 });
+void pgQuantifiers;
 configureQueryLimits({ maxPageSize: 100, maxReferenceFrames: 5 });
 api.configureQueryLimits({ maxReferenceFrames: 5 });
 // @ts-expect-error maxReferenceFrames is a number.
 configureQueryLimits({ maxReferenceFrames: 'five' });
-void pgReference;`;
+void pgReference;
+// The facade re-exports core's scalar and maximum, with the same types, and the declaration type.
+const pgRecordVersion: Equals<typeof RecordVersion, typeof CoreRecordVersion> = true;
+const pgMaxVersion: Equals<typeof MAX_RECORD_VERSION, typeof CoreMaxRecordVersion> = true;
+const pgConcurrency: Equals<ConcurrencyDeclaration, CoreConcurrencyDeclaration> = true;
+void [pgRecordVersion, pgMaxVersion, pgConcurrency];`;
 
 const mongoTypes = `import {
   InternalServerError,
@@ -1589,6 +1786,11 @@ const mongoTypes = `import {
   type EnvelopSchemaPlugin,
   type GeneratedMCPTools,
   type MongoAdapter,
+  type FilterGroupInput,
+  type QuantifiedGroupInput,
+  type QLFilterGroup,
+  type QLQuantifiedGroup,
+  type QLTypeFilterExpression,
   type MongoAdapterOptions,
   type MutationLimitsOptions,
   type QueryLimitsOptions,
@@ -1597,7 +1799,15 @@ const mongoTypes = `import {
   type VirtualFieldDeclaration,
   type VirtualFieldOptions,
   configureQueryLimits,
+  MAX_RECORD_VERSION,
+  RecordVersion,
+  type ConcurrencyDeclaration,
 } from '@simtlix/simfinity-js';
+import {
+  MAX_RECORD_VERSION as CoreMaxRecordVersion,
+  RecordVersion as CoreRecordVersion,
+  type ConcurrencyDeclaration as CoreConcurrencyDeclaration,
+} from '@simtlix/simfinity-core';
 import type {
   AuthSchemaPlugin as CoreAuthSchemaPlugin,
   DatabaseAdapter as CoreDatabaseAdapter,
@@ -1679,12 +1889,25 @@ const legacyMongo: CoreDatabaseAdapter = { ...plain, queryFeatures: undefined };
 void [mongoFeatures, mongoOperators, createRuntime(legacyMongo)];
 // The adapter declares reference emptiness, and the facade's query limits take maxReferenceFrames, as core's do.
 const mongoReference: boolean | null | undefined = plain.queryFeatures.referenceEmptiness;
+const mongoQuantifiers: boolean | null | undefined = plain.queryFeatures.quantifiers;
+const mongoFrame: QuantifiedGroupInput = { path: 'reviews', conditions: [{ field: 'rating', value: 4 }], NONE: [{ path: 'product' }] };
+const mongoGroup: FilterGroupInput = { ALL: [mongoFrame] };
+const canonicalFrame: QLQuantifiedGroup = { path: 'reviews', conditions: [{ field: 'rating', operator: 'GTE', value: 4 }] };
+const canonicalGroup: QLFilterGroup = { ALL: [canonicalFrame] };
+const canonicalExpression: QLTypeFilterExpression = { quantifier: 'NONE', terms: [] };
+configureQueryLimits({ maxFrameNesting: 3 });
+void [mongoQuantifiers, mongoGroup, canonicalGroup, canonicalExpression];
 const mongoLimits: QueryLimitsOptions = { maxPageSize: 50, maxReferenceFrames: 3 };
 configureQueryLimits(mongoLimits);
 // @ts-expect-error maxReferenceFrames is a number.
 configureQueryLimits({ maxReferenceFrames: '3' });
 const sameMongoLimits: Equals<QueryLimitsOptions, CoreQueryLimitsOptions> = true;
-void [mongoReference, sameMongoLimits];`;
+void [mongoReference, sameMongoLimits];
+// The facade re-exports core's scalar and maximum, with the same types, and the declaration type.
+const mongoRecordVersion: Equals<typeof RecordVersion, typeof CoreRecordVersion> = true;
+const mongoMaxVersion: Equals<typeof MAX_RECORD_VERSION, typeof CoreMaxRecordVersion> = true;
+const mongoConcurrency: Equals<ConcurrencyDeclaration, CoreConcurrencyDeclaration> = true;
+void [mongoRecordVersion, mongoMaxVersion, mongoConcurrency];`;
 
 // MongoDB's legacy deep imports of public API and their aliases: each value and type export has
 // exactly the type of the core subpath or root member it re-exports, so a missing sibling
@@ -1920,16 +2143,18 @@ declare const adapter: DatabaseAdapter;
 adapter.findChildrenBatch = undefined;
 adapter.batchesChildren = undefined;
 adapter.queryFeatures = undefined;
-const copy: DatabaseAdapter = { ...adapter, findChildrenBatch: undefined, batchesChildren: undefined, queryFeatures: undefined };
-const features: QueryFeatures[] = [{ operators: [], referenceEmptiness: undefined }, { operators: [], referenceEmptiness: null }];
+adapter.writeFeatures = undefined;
+const copy: DatabaseAdapter = { ...adapter, findChildrenBatch: undefined, batchesChildren: undefined, queryFeatures: undefined, writeFeatures: undefined };
+const features: QueryFeatures[] = [{ operators: [], referenceEmptiness: undefined, quantifiers: undefined }, { operators: [], referenceEmptiness: null, quantifiers: null }];
 adapter.queryFeatures = { operators: ['IS_EMPTY'], referenceEmptiness: undefined };
+adapter.writeFeatures = { optimisticConcurrency: true };
 void [copy, features];`;
 
 const sqlExactOptionalTypes = `import type { SQLConfiguration, SQLPlugin, SQLQueryFeatures } from '@simtlix/simfinity-sql';
 declare const plugin: SQLPlugin;
 const copy: SQLPlugin = { ...plugin, compileChildrenQuery: undefined, compileRecordBatch: undefined, maxRecordBatchValues: undefined, queryFeatures: undefined };
 const configuration: SQLConfiguration = { batchedCollections: undefined };
-const features: SQLQueryFeatures[] = [{ operators: [], referenceEmptiness: undefined, compileQuery: undefined }, { operators: [], referenceEmptiness: null }];
+const features: SQLQueryFeatures[] = [{ operators: [], referenceEmptiness: undefined, quantifiers: undefined, compileQuery: undefined }, { operators: [], referenceEmptiness: null, quantifiers: null }];
 const declared: SQLPlugin = { ...plugin, queryFeatures: { operators: ['EQ'], referenceEmptiness: undefined } };
 void [copy, configuration, features, declared];`;
 
@@ -2016,7 +2241,10 @@ register('asyncItems', {
 const paramType: ViewParamType = new GraphQLList(new GraphQLList(GraphQLString));
 const param: ViewParam = { type: paramType };
 const condition: FilterCondition = { field: 'name', operator: 'IS_EMPTY' };
-const group: FilterGroup = { AND: [{ conditions: [condition] }] };
+const group: FilterGroup = { AND: [{ conditions: [condition] }], ANY: [{ path: 'reviews', ALL: [{ path: 'author', conditions: [{ field: 'name', operator: 'NE', value: 'hidden' }] }] }], NONE: [{ path: 'reviews', conditions: [{ field: 'rating', operator: 'LT', value: 1 }] }] };
+// @ts-expect-error A quantified view group requires its element path.
+const invalidFrame: FilterGroup = { ANY: [{ conditions: [] }] };
+void invalidFrame;
 const options: ViewOptions = { type, description: 'd', params: { param }, where: () => [group] };
 register('typedItems', options);
 // @ts-expect-error A param is a scalar, an enum or a list of them, not an input object.
