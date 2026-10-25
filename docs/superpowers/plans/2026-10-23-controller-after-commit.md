@@ -75,5 +75,7 @@ Initial evidence: [local verification report](../reports/2026-10-23-controller-a
 - [x] Pin facade runtime exports, reporter context identity, invalid controllers, continued dispatch, registered mutation ownership/rollback and transitions with children.
 - [x] Add real database rollback cases after an earlier child write for missing IDs and unique constraint violations.
 - [x] Correct SQL session guidance and lifecycle terminology; add error codes, callback/outbox cross-links, upgrade notes and a compatibility ledger. Keep the approved static-only default logging contract.
-- [ ] Check the public runtime tests against the actual 3.12.0 base, then restore this branch and verify the final changes with disposable databases, packed consumers, docs and the independent ESLint plugin checks.
-- [ ] Record fresh evidence and update the authorized PR without merging or publishing a release.
+- [x] Check the public runtime tests against the actual 3.12.0 base, then restore this branch and verify the final changes with disposable databases, packed consumers, docs and the independent ESLint plugin checks.
+- [x] Record fresh evidence and prepare the authorized PR update without merging or publishing a release.
+
+The [review-corrections report](../reports/2026-10-25-after-commit-review-corrections.md) distinguishes the initial full pass, a later timeout after the security dependency update, and the unchanged affected suite's isolated pass. It also records the required security fix, package checks and limits of the historical OCC evidence. The PR's final CI checks are separate from local verification.
