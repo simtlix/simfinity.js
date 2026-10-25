@@ -81,6 +81,7 @@ describe('core subpath type declarations', () => {
     expect(manifest.exports['./internal/object-id']).toBe('./src/auth/object-id.js');
     expect(manifest.exports['./internal/relation-storage']).toBe('./src/relation-storage.js');
     expect(manifest.exports['./internal/query-operators']).toBe('./src/query-operators.js');
+    expect(manifest.exports['./internal/record-version']).toBe('./src/record-version.js');
   });
 
   it('maps exactly the public subpaths in typesVersions, to the same declarations, for Node10 resolution', () => {
@@ -167,6 +168,17 @@ describe('core root declarations', () => {
     // lists, so every value the root declares must say `export`.
     expect(rootDeclarations).not.toMatch(/^(?:declare )?(?:abstract )?(?:const|let|var|function|class|enum|namespace) /m);
   });
+
+  it('declares RecordVersion, MAX_RECORD_VERSION and the optimistic concurrency members of the contract', () => {
+    expect(rootDeclarations).toMatch(/^export const RecordVersion: GraphQLScalarType;$/m);
+    expect(rootDeclarations).toMatch(/^export const MAX_RECORD_VERSION: number;$/m);
+    expect(rootDeclarations).toMatch(/^ {2}scalar\?: [^;]*\| 'Version';$/m);
+    expect(rootDeclarations).toMatch(/^ {2}version\?: true;$/m);
+    expect(rootDeclarations).toMatch(/^export interface ConcurrencyDeclaration \{\n {2}mode: 'optimistic';\n\}$/m);
+    expect(rootDeclarations).toMatch(/^ {2}writeFeatures\?: \{ optimisticConcurrency\?: boolean \} \| null \| undefined;$/m);
+    expect(rootDeclarations).toMatch(/^ {2}update\(model: Model, id: any, changes: any, session\?: Session, options\?: \{ expectedVersion\?: number \}\): any;$/m);
+    expect(rootDeclarations).toMatch(/^ {2}delete\(model: Model, id: any, session\?: Session, options\?: \{ expectedVersion\?: number \}\): any;$/m);
+  });
 });
 
 // MongoDB's legacy `src/` deep imports that re-export a core subpath, and that subpath. Their
@@ -246,6 +258,21 @@ const packageDeclarations = (name) => readFileSync(resolve(root, `../${name}/typ
 const ownDeclaration = (name) => new RegExp(`^(?:export )?(?:declare )?(?:interface|type|class) ${name}\\b`, 'm');
 const reexportedCoreTypes = (text) => [...text.matchAll(/^export type \{([^}]*)\} from '@simtlix\/simfinity-core';/gm)]
   .flatMap(([, list]) => list.split(',').map((item) => item.trim()).filter(Boolean));
+
+const reexportedCoreValues = (text) => [...text.matchAll(/^export \{([^}]*)\} from '@simtlix\/simfinity-core';/gm)]
+  .flatMap(([, list]) => list.split(',').map((item) => item.trim()).filter(Boolean));
+
+describe('RecordVersion declarations', () => {
+  it.each(['sql', 'postgres', 'mongodb'])('re-exports both values from the %s root', (name) => {
+    expect(reexportedCoreValues(packageDeclarations(name))).toEqual(expect.arrayContaining(['MAX_RECORD_VERSION', 'RecordVersion']));
+  });
+
+  it.each(['sql', 'postgres', 'mongodb'])('re-exports core\'s ConcurrencyDeclaration type from the %s root', (name) => {
+    const text = packageDeclarations(name);
+    expect(reexportedCoreTypes(text)).toContain('ConcurrencyDeclaration');
+    expect(text).not.toMatch(ownDeclaration('ConcurrencyDeclaration'));
+  });
+});
 
 describe('EnvelopSchemaPlugin declarations', () => {
   it('types the core hook to return nothing or a promise, and the auth plugin hook to return nothing', () => {

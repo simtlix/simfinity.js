@@ -321,8 +321,8 @@ describe.skipIf(!uri)('PostgreSQL collection frame rows and plans', () => {
     await api.initializeDatabase();
     ids = await seedCollectionFrames(schema, types);
     directAdapter = createSQLAdapter(postgresPlugin({ pool: recordedPool, schema: namespace }));
-    directModel = directAdapter.createModel(types.Product);
     directAdapter.prepare(registrations);
+    directModel = directAdapter.createModel(types.Product);
     await directAdapter.initialize({ mode: 'validate' });
     const line = await graphql({ schema, source: 'mutation($input:QfReviewInputForUpdate!){updateqfReview(input:$input){id}}', variableValues: { input: { id: ids['Ka:null:x'], lines: [{ qty: 1, shop: { id: ids.S1 } }] } } });
     expect(line.errors).toBeUndefined();

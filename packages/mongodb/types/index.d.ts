@@ -28,7 +28,9 @@ export {
   createRuntime,
   createValidatedScalar,
   InternalServerError,
+  MAX_RECORD_VERSION,
   plugins,
+  RecordVersion,
   scalars,
   SimfinityError,
   validators,
@@ -38,6 +40,7 @@ export type {
   AuthRule,
   AuthRuleFunction,
   AuthSchemaPlugin,
+  ConcurrencyDeclaration,
   CreateSchemaOptions,
   EnvelopSchemaPlugin,
   FieldValidations,
@@ -104,6 +107,8 @@ export interface MongoAdapterOptions {
  */
 export interface MongoAdapter extends DatabaseAdapter {
   readonly referentialIntegrity: 'off' | 'transactional';
+  /** Frozen declaration of atomic expectedVersion writes; wrappers must forward every argument. */
+  readonly writeFeatures: Readonly<{ optimisticConcurrency: true }>;
   /**
    * Frozen; lists every `QLOperator` value and declares `referenceEmptiness: true` and `quantifiers: true`. The literal text
    * operators compile to escaped regular expressions: `ILIKE` unanchored, `STARTS_WITH` and
@@ -134,6 +139,15 @@ export interface MongoAdapter extends DatabaseAdapter {
   /** After connecting MongoDB and createSchema(), await the transaction capability and existing-reference audit. */
   initialize(): Promise<void>;
 }
+/**
+ * Supports extensions.concurrency: { mode: 'optimistic' }. Generated models store version as Number.
+ * Supplied models must declare version: Number without immutable, select: false, getters, setters
+ * or a default other than 1; versionKey must not be 'version'. Missing/null stored versions mean 1.
+ * Protected writes use findOneAndUpdate/findOneAndDelete statics (integrity deletes still call
+ * findByIdAndDelete). Query middleware must preserve the version condition and increment.
+ * Adapter-detected conflicts abort supplied transactions only in transactional integrity mode;
+ * in default mode, the caller owns the abort. Core-detected conflicts keep that caller ownership.
+ */
 export function createMongoAdapter(options?: MongoAdapterOptions): MongoAdapter;
 export function getRegistrations(): RuntimeRegistration[];
 

@@ -88,6 +88,8 @@ export const bindPlugin = (plugin) => {
   return Object.freeze(bound);
 };
 
+// Protected entities add optimisticConcurrency to their plan. Declaring it commits compileRecord to
+// conditional updates (including empty data) and deletes, with returned rows and numeric Version decoding.
 export const assertCapabilities = (plugin, plan) => {
   for (const capability of new Set(['transactions', ...plan.requirements])) {
     if (!plugin.capabilities.includes(capability)) throw new SimfinityError(`SQL plugin ${plugin.name} does not support required capability ${capability}`, 'UNSUPPORTED_SQL_CAPABILITY', 400);

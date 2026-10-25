@@ -56,7 +56,7 @@ simfinity.use(async (params, next) => {
 
 | Property | Availability |
 | --- | --- |
-| `args` | GraphQL arguments: for example, `args.input` for add/update or `args.id` for delete. |
+| `args` | GraphQL arguments: `args.input` for add/update/actions, `{ id }` for deletes; `{ id, version }` for protected root and nested deletes. |
 | `operation` | One of the operation values below. |
 | `context` | The GraphQL request context. For nested collection children of a programmatic `saveObject()` call, the `context` passed to `saveObject()`, which is `undefined` when omitted; guard with `context?.`. |
 | `type` | Registered type metadata for generated entity operations; absent for custom queries and mutations. |
@@ -105,3 +105,9 @@ On the bundled adapters, eligible client collection constructs and emptiness con
 - Do not place one marked condition object both where it reads a reference or a collection and where it reads none, such as under a reference field and under an embedded list, since one marker cannot serve both. Place a spread copy, `{ ...condition }`, where it reads none.
 
 A request that breaks these rules fails with `DETACHED_CLIENT_FILTER` (500), naming the original path, before the adapter. Valid operator/path edits that still read relations are allowed only when the final construct can receive its scope: an emptiness condition, an explicit quantified group, a condition inside a frame, or shorthand through a collection outside aggregate joined prefixes J. A marked non-emptiness condition on a reference-only path outside a frame fails with the same error. Narrowing to an own field removes the marker; a relative scope key aliased to different target types is rejected. Changing an ordinary top-frame shorthand condition's aggregate J membership is rejected; explicit groups remain frames regardless of J, and separate emptiness constructs keep their existing rules. Conditions on unscoped collection chains need no marker, so rebuilding those remains valid. Appending a server group preserves the client filter but allows a different child witness; merge within a group when the same child is required. See [client and trusted conditions](/guide/query-scope#client-and-trusted-conditions).
+
+## Version preconditions
+
+With optimistic concurrency, a protected root delete and each protected nested `deleted` child receive `params.args = { id, version }`. Unprotected deletes retain `{ id }`. Update and state-action middleware keep `{ input }`, with the version in `input.version`; nested `updated` entries use the same shape. A protected collection's `deleted` input is `[RecordVersionRef]`, not `[ID]`, even when the parent is unprotected. Null entries are still skipped.
+
+The runtime captures and validates the version after the applicable middleware and before the protected pre-read. Middleware may prepare it then, but validators, controller hooks and state actions cannot replace the captured precondition. Missing/null versions on paths that bypass GraphQL coercion raise `REQUIRED_VALUE`; invalid ones raise `INVALID_VERSION`. Keep authorization in the appropriate rules/hooks, and preserve arguments when wrapping adapters: the middleware stage does not itself prove a conditional write is atomic. See [optimistic concurrency](./concurrency).

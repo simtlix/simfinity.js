@@ -6,6 +6,10 @@ import {
   assertVirtualConnection, assertVirtualDeclaration, assertVirtualIndexes, assertVirtualStateField,
 } from './virtual-fields.js';
 import { assertPlainConnectionField } from './relation-storage.js';
+import {
+  isProtectedType, isVersionField, recordVersionFieldMisuse, versionConnectionCollision, versionEmbeddedMisuse,
+  versionFieldCollision,
+} from './record-version.js';
 
 const invalid = (message) => {
   throw new SimfinityError(message, 'INVALID_MODEL', 400);
@@ -62,10 +66,20 @@ const scalarDescription = (type) => {
   return { scalar };
 };
 
+// The version field of a protected entity, described the same way whether the type carries Simfinity's
+// injected field or only declares the extension and createSchema() has not injected it yet.
+const versionDescription = () => ({
+  name: 'version', storageName: 'version', kind: 'scalar', scalar: 'Version', required: true,
+  list: false, itemRequired: false, unique: false, readOnly: true, version: true,
+});
+
 /**
  * Describe persistent entities without importing a database driver or mutating GraphQL types.
  * Virtual fields (`extensions.virtual`) store nothing, so they are left out of every entity and
  * embedded type, and their result types are neither described nor required to declare a relation.
+ * An entity that declares optimistic concurrency (`extensions.concurrency`), or already carries its
+ * injected field, ends with the version field. A field that would collide with it, any other field
+ * typed RecordVersion, and a protected type used as an embedded value throw INVALID_MODEL.
  */
 export const describeModels = (registrations) => {
   if (!Array.isArray(registrations)) invalid('registrations must be an array');
@@ -91,10 +105,17 @@ export const describeModels = (registrations) => {
   const fieldsOf = (type, ancestors, path, embedded = false) => {
     if (ancestors.includes(type)) invalid(`Embedded cycle at ${path}`);
     registerType(type);
+    const isProtected = isProtectedType(type);
+    if (isProtected && embedded) invalid(versionEmbeddedMisuse(type.name, path));
+    const collision = isProtected ? versionFieldCollision(type) : null;
+    if (collision) invalid(collision);
+    const misuse = recordVersionFieldMisuse(type);
+    if (misuse) invalid(misuse);
     const stored = Object.values(type.getFields()).filter((field) => !assertVirtualDeclaration(
       type.name, field.name, field, () => typeof field.resolve === 'function',
     ));
     const fields = stored.map((field) => {
+      if (isVersionField(field)) return versionDescription();
       const { named, ...wrappers } = unwrap(field.type);
       const extensions = field.extensions || {};
       const descriptor = {
@@ -117,12 +138,15 @@ export const describeModels = (registrations) => {
       assertPlainConnectionField(type.name, field.name, field);
       addEntity(named);
       if (wrappers.list) {
+        const connectionCollision = versionConnectionCollision(type, field.name, field);
+        if (connectionCollision) invalid(connectionCollision);
         if (!relation.connectionField) invalid(`${path}.${field.name} requires a child connectionField`);
         if (embedded) invalid(`Non-embedded collections inside embedded objects are not supported: ${path}.${field.name}`);
         return { ...descriptor, kind: 'collection', target: named.name, connectionField: relation.connectionField };
       }
       return { ...descriptor, kind: 'reference', target: named.name, storageName: relation.connectionField || field.name };
     });
+    if (isProtected && !fields.some((item) => item.version)) fields.push(versionDescription());
     const storage = new Set();
     for (const field of fields.filter((item) => item.kind !== 'collection')) {
       if (storage.has(field.storageName)) invalid(`Storage collision at ${path}.${field.storageName}`);

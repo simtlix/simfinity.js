@@ -2,7 +2,7 @@ import { auth, createRuntime, plugins, scalars, validators } from '@simtlix/simf
 import { createSQLAdapter } from './adapter.js';
 
 export { planRelationalSchema } from './schema/plan.js';
-export { auth, buildErrorFormatter, createValidatedScalar, InternalServerError, plugins, scalars, SimfinityError, validators } from '@simtlix/simfinity-core';
+export { auth, buildErrorFormatter, createValidatedScalar, InternalServerError, MAX_RECORD_VERSION, plugins, RecordVersion, scalars, SimfinityError, validators } from '@simtlix/simfinity-core';
 
 /** Create a runtime permanently bound to one SQL plugin and configuration. */
 export const createSQL = ({ plugin } = {}) => {

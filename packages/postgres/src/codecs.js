@@ -2,7 +2,7 @@ import { getNamedType, isEnumType } from 'graphql';
 import { SimfinityError } from '@simtlix/simfinity-core';
 import { isCaseFoldUnsupported } from './query/case-fold.js';
 
-export const storageTypes = { ID: 'uuid', String: 'text', Enum: 'text', Int: 'integer', Float: 'double precision', Boolean: 'boolean', DateTime: 'timestamp with time zone' };
+export const storageTypes = { ID: 'uuid', Version: 'bigint', String: 'text', Enum: 'text', Int: 'integer', Float: 'double precision', Boolean: 'boolean', DateTime: 'timestamp with time zone' };
 export const invalidValue = (message) => { throw new SimfinityError(message, 'INVALID_FILTER_VALUE', 400); };
 export const castId = (value) => {
   const id = typeof value === 'object' && value ? value._id || value.id : value;
@@ -23,6 +23,7 @@ export const encodeScalar = (field, value) => {
     }
     case 'String': if (typeof value !== 'string') invalidValue(`Expected a string for ${field.name}`); break;
     case 'Boolean': if (typeof value !== 'boolean') invalidValue(`Expected a boolean for ${field.name}`); break;
+    case 'Version': if (!Number.isSafeInteger(value) || value < 1) invalidValue(`Expected a safe positive integer for ${field.name}`); break;
     case 'Int': if (!Number.isInteger(value) || value < -2147483648 || value > 2147483647) invalidValue(`Expected a 32-bit integer for ${field.name}`); break;
     case 'Float': if (typeof value !== 'number' || !Number.isFinite(value)) invalidValue(`Expected a finite number for ${field.name}`); break;
     case 'DateTime': {
@@ -37,6 +38,10 @@ export const encodeScalar = (field, value) => {
 
 export const decodeScalar = (field, value, gqlField) => {
   if (value == null) return value;
+  if (field.scalar === 'Version' && ['string', 'number', 'bigint'].includes(typeof value)) {
+    const version = Number(value);
+    return Number.isSafeInteger(version) && version >= 1 ? version : value;
+  }
   if (field.scalar === 'Enum' && gqlField) {
     const type = getNamedType(gqlField.type);
     if (isEnumType(type)) return type.getValues().find((item) => String(item.value) === value)?.value ?? value;

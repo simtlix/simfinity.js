@@ -1082,6 +1082,6 @@ MCP publishes each view as a read-only list tool with its params and the generat
 
 Authorize the root as `RootQueryType.<view name>`, such as `RootQueryType: { upcomingBookings: requireAuth() }`. Under `defaultPolicy: 'DENY'`, an unruled view fails with `FORBIDDEN`. Returned rows keep the base type's field and virtual-field rules.
 
-The paths a view's `where` names are the author's, like paths added by middleware and scopes. The authorization plugin's field read rules do not check them, and `queryable` does not restrict them. Virtual fields still fail. The type's scope remains the visibility boundary; the view's predicate only narrows its result.
+The paths a view's `where` names are the author's, like paths added by middleware and scopes. The authorization plugin's field read rules do not check them, and `queryable` does not restrict them. Virtual fields still fail. Conditions on the managed `version` field in a view's `where` are unsupported: MongoDB filters cannot reproduce the read-as-1 rule for legacy documents. The type's scope remains the visibility boundary; the view's predicate only narrows its result.
 
 To constrain which records a caller may query, continue with [query scope](./query-scope).
