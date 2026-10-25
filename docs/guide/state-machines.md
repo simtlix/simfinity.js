@@ -169,7 +169,7 @@ The callback runs after the source-state check and before the managed state is a
 
 The lookup above uses the MongoDB Model API. With PostgreSQL, use `await simfinity.getModel(SeasonType).findById(input.id, { session })`; it returns a plain record and joins the same transaction.
 
-Next release: actions on a protected entity take its generated update input with required `input.version`; successful actions return the incremented version, and the precondition is captured before `action` can mutate its input. Re-read and reapply after `VERSION_CONFLICT` or `TRANSACTION_RETRY_EXCEEDED`. Driver retries can repeat an action; use an outbox for external effects. Protection applies to the action's record, not its whole relationship graph. See [optimistic concurrency](./concurrency).
+Actions on a protected entity take its generated update input with required `input.version`; successful actions return the incremented version, and the precondition is captured before `action` can mutate its input. Re-read and reapply after `VERSION_CONFLICT` or `TRANSACTION_RETRY_EXCEEDED`. Driver retries can repeat an action; use an outbox for external effects. Protection applies to the action's record, not its whole relationship graph. See [optimistic concurrency](./concurrency).
 
 ## Failure behavior
 
@@ -177,8 +177,8 @@ Next release: actions on a protected entity take its generated update input with
 | --- | --- |
 | ID is malformed for the backend | `SimfinityError` with code `NOT_VALID_ID` and status `400` |
 | ID does not identify a record | `SimfinityError` with code `NOT_VALID_ID` and status `404` |
-| Protected action has a stale version (next release) | `VERSION_CONFLICT` (409), before the source-state check/action for a caller visible to `get_by_id` scope |
-| Protected update cannot advance past the maximum version (next release) | `VERSION_EXHAUSTED` (409); a hidden caller reaches its usual checks/hooks first |
+| Protected action has a stale version | `VERSION_CONFLICT` (409), before the source-state check/action for a caller visible to `get_by_id` scope |
+| Protected update cannot advance past the maximum version | `VERSION_EXHAUSTED` (409); a hidden caller reaches its usual checks/hooks first |
 | Current state does not match the action's `from` | `SimfinityError` with code `BAD_REQUEST` and status `400` |
 | Action callback or update validation throws | The mutation transaction is aborted |
 | Transient transaction failure | The mutation may be retried, including its callback |

@@ -12,6 +12,10 @@ export const versionFilter = (Model, expected) => ({
   version: expected === 1 ? Model.base.trusted({ $in: [1, null] }) : expected,
 });
 
+export const versionedUpdate = (update, expected) => Array.isArray(update)
+  ? [...update, { $set: { version: expected + 1 } }]
+  : { ...update, version: expected + 1 };
+
 // A supplied model need not share its GraphQL type's name. Do not choose arbitrarily when one
 // model serves several registrations, or when a direct adapter caller has no runtime binding.
 export const versionTypeName = (Model, registrations = []) => {
@@ -331,7 +335,7 @@ export const createMongoIntegrity = (options = {}) => {
         const versioned = expectedVersion !== undefined;
         const query = (versioned
           ? Model.findOneAndUpdate({ _id: objectId, ...versionFilter(Model, expectedVersion) },
-            { ...update, version: expectedVersion + 1 }, { new: true })
+            versionedUpdate(update, expectedVersion), { new: true })
           : Model.findByIdAndUpdate(objectId, update, { new: true })).session(session);
         // No write at the ceiling, but still cast the raw existence lookup's key once.
         const exhausted = versioned && expectedVersion >= MAX_RECORD_VERSION;

@@ -6,7 +6,7 @@ import { getListShape, normalizeConnectionField } from '@simtlix/simfinity-core/
 import { createMongoModel } from './models.js';
 import { MONGO_QUERY_OPERATORS, createMongoQueries } from './queries.js';
 import { withMongoTransaction } from './transactions.js';
-import { createMongoIntegrity, readVersionMiss, versionFilter, versionTypeName } from './integrity.js';
+import { createMongoIntegrity, readVersionMiss, versionFilter, versionTypeName, versionedUpdate } from './integrity.js';
 import {
   castModelId, castObjectId, castPathValue, invalidId, isQueryKeyCastFailure, mapIdCastError,
 } from './ids.js';
@@ -441,7 +441,7 @@ export const createMongoAdapter = (options) => {
       if (expected !== undefined) {
         return mapIdCastErrors(async () => {
           const query = mapQueryIdCastErrors(withSession(Model.findOneAndUpdate(
-            { _id: id, ...versionFilter(Model, expected) }, { ...update, version: expected + 1 }, { new: true },
+            { _id: id, ...versionFilter(Model, expected) }, versionedUpdate(update, expected), { new: true },
           ), session), mapIdCastError);
           if (expected >= MAX_RECORD_VERSION) {
             try {

@@ -1,11 +1,11 @@
 ---
 title: PostgreSQL storage reference
-description: PostgreSQL types, generated foreign keys, embedded storage, schema validation, native APIs, and compatibility boundaries in Simfinity 3.12.0.
+description: PostgreSQL types, generated foreign keys, embedded storage, schema validation, native APIs, and compatibility boundaries in Simfinity 3.13.0.
 ---
 
 # PostgreSQL support
 
-Simfinity 3.12.0 provides PostgreSQL schema generation and GraphQL execution through the shared core and SQL runtime. PostgreSQL is the first [SQL plugin](guide/sql-plugins.md); its existing facade and generated 3.2.0 physical schema remain compatible. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.12.0 is available from npm; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
+Simfinity 3.13.0 provides PostgreSQL schema generation and GraphQL execution through the shared core and SQL runtime. PostgreSQL is the first [SQL plugin](guide/sql-plugins.md); its existing facade and generated 3.2.0 physical schema remain compatible. The existing `@simtlix/simfinity-js` package continues to run MongoDB. Both backends share schema/input generation, scopes, middleware, validators, controllers, nested mutations, and state-machine orchestration. Version 3.13.0 is available from npm; supported behavior and remaining limits are listed below and in the [compatibility ledger](compatibility.md).
 
 Start with the canonical [PostgreSQL quick start](guide/postgresql.md) for a complete Yoga server, initialization choice, controller/session example, and pool shutdown. This page is the detailed storage and compatibility reference.
 
@@ -23,7 +23,7 @@ Use the [v3.11.0 starters](guide/databases.md#download-the-starters) and run `np
 | `@simtlix/simfinity-postgres` | `postgresPlugin`, `createPostgres`, default-module runtime facade, schema description/DDL/initialization, shared scalar factory and errors. Depends on SQL, core and `pg`; GraphQL peer. No MongoDB, Mongoose or MCP dependency. |
 | `@simtlix/simfinity-mcp` | Optional database-independent tool generation and transports. Depends on core; the MCP SDK is an optional peer. |
 
-All five packages are versioned together at version `3.12.0` with exact internal dependencies. The verified package set includes standalone consumer checks for SQL as well as both facades, covering MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; the starter requires Node.js 22.15.0+. PostgreSQL 15, 16, and 18 are covered by the release verification.
+All five packages are versioned together at version `3.13.0` with exact internal dependencies. The verified package set includes standalone consumer checks for SQL as well as both facades, covering MCP with and without its SDK and strict TypeScript checks. Library code requires Node.js >=18.18.0; the starter requires Node.js 22.15.0+. PostgreSQL 15, 16, and 18 are covered by the release verification.
 
 ## Executable example
 
@@ -214,9 +214,9 @@ Existing schemas generated before these constraints or presence columns require 
 
 This version does not claim compatibility with arbitrary Mongoose models, native Mongoose code, MongoDB aggregation pipelines, automatic schema migration, or runtime backend switching. PostgreSQL's Model and Session APIs are intentionally native to its adapter. Shared auth, scalar, validator, and count-plugin helpers live in core; MCP lives in its opt-in package while the MongoDB facade retains compatibility exports.
 
-## Optimistic concurrency (next release)
+## Optimistic concurrency
 
-This next-release feature is not available in 3.12.0. A protected model handle starts creates at version 1 and takes `model.update(id, { ...changes, version: record.version }, { session })` or `model.delete(id, { session, version: record.version })`. It captures the supplied version once before retries without mutating the changes object. Updates increment even with no data fields; stale versions raise `VERSION_CONFLICT`, and updates at `MAX_RECORD_VERSION` raise `VERSION_EXHAUSTED`. Missing versions raise `REQUIRED_VALUE` with handle-specific guidance. For a derived value maintained in the same revision, `model.update(id, changes, { session, version: false })` skips check/increment and ignores `changes.version`; delete also accepts `version: false`. Native handles still bypass validators, controllers, scopes and authorization; unprotected handles ignore the option.
+A protected model handle starts creates at version 1 and takes `model.update(id, { ...changes, version: record.version }, { session })` or `model.delete(id, { session, version: record.version })`. It captures the supplied version once before retries without mutating the changes object. Updates increment even with no data fields; stale versions raise `VERSION_CONFLICT`, and updates at `MAX_RECORD_VERSION` raise `VERSION_EXHAUSTED`. Missing versions raise `REQUIRED_VALUE` with handle-specific guidance. For a derived value maintained in the same revision, `model.update(id, changes, { session, version: false })` skips check/increment and ignores `changes.version`; delete also accepts `version: false`. Native handles still bypass validators, controllers, scopes and authorization; unprotected handles ignore the option.
 
 Protected root storage requires `version bigint NOT NULL DEFAULT 1`. Initialization reports `SCHEMA_MISMATCH` for a missing column with a migration using the actual table/schema names, for example `ALTER TABLE "app"."Book" ADD COLUMN "version" bigint NOT NULL DEFAULT 1;`. An existing column with a differing definition is explained as needing `bigint NOT NULL DEFAULT 1`, without `ADD` or `DROP` advice. A leftover bigint version column on a type without the declaration is explained as requiring deployment of the declaration if other instances use it, or a reviewed `DROP COLUMN` once no instance does. These explanations also apply to low-level initialization; there is no automatic migration.
 

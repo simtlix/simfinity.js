@@ -250,11 +250,26 @@ describe('update of a protected type', () => {
     expect(fixture.updates()[0].options).toEqual({ expectedVersion: 3 });
   });
 
-  test('a record stored without a version reads as 1 and advances to 2', async () => {
+  test.each([
+    ['without a version', undefined],
+    ['with a null version', null],
+  ])('a record stored %s reads as 1 without backfill and advances to 2', async (label, version) => {
     const fixture = buildProtected();
-    seedLegacyProduct(fixture.adapter);
+    if (version === null) seedProduct(fixture.adapter, null);
+    else seedLegacyProduct(fixture.adapter);
+    const read = await fixture.run('{ producto(id: "1") { name price version } }');
+    expect(read.errors).toBeUndefined();
+    expect(read.data.producto).toEqual({ name: 'a', price: 1, version: 1 });
+    expect(storedData(fixture.adapter, 'Producto', '1')).toEqual(
+      version === null ? { name: 'a', price: 1, version: null } : { name: 'a', price: 1 },
+    );
+    expect(fixture.updates()).toEqual([]);
     const stale = await fixture.run('mutation { updateproducto(input: { id: "1", version: 2, name: "b" }) { id } }');
     expect(failure(stale)).toEqual(CONFLICT('Producto', 1));
+    expect(storedData(fixture.adapter, 'Producto', '1')).toEqual(
+      version === null ? { name: 'a', price: 1, version: null } : { name: 'a', price: 1 },
+    );
+    expect(fixture.updates()).toEqual([]);
     const result = await fixture.run('mutation { updateproducto(input: { id: "1", version: 1, name: "b" }) { version } }');
     expect(result.errors).toBeUndefined();
     expect(result.data.updateproducto).toEqual({ version: 2 });
@@ -420,6 +435,28 @@ describe('delete of a protected type', () => {
 });
 
 describe('nested entries of protected children', () => {
+  test('null updated and deleted entries are skipped around protected child writes', async () => {
+    const fixture = buildProtected();
+    seedOrders(fixture.adapter);
+    const result = await fixture.run(`mutation { updatepedido(input: { id: "1", version: 2,
+      items: { updated: [null, { id: "11", version: 4, nombre: "x" }, null],
+        deleted: [null, { id: "12", version: 7 }, null] } }) {
+      version items { id nombre version } } }`);
+    expect(result.errors).toBeUndefined();
+    expect(result.data.updatepedido).toEqual({ version: 3, items: [{ id: '11', nombre: 'x', version: 5 }] });
+    expect(fixture.adapter.reads()).toEqual([`Pedido 1 ${LOCKED}`, `Item 11 ${LOCKED}`, `Item 12 ${LOCKED}`]);
+    expect(fixture.updates().map(({ type, id, options }) => ({ type, id, options }))).toEqual([
+      { type: 'Pedido', id: '1', options: { expectedVersion: 2 } },
+      { type: 'Item', id: '11', options: { expectedVersion: 4 } },
+    ]);
+    expect(fixture.deletes()).toEqual([{ type: 'Item', id: '12', options: { expectedVersion: 7 } }]);
+    expect(fixture.events).toEqual([
+      'middleware update Pedido', 'Pedido.onUpdating',
+      'middleware update Item', 'Item.onUpdating', 'Item.onUpdated',
+      'middleware delete Item', 'Item.onDelete', 'Pedido.onUpdated', 'middleware find Item',
+    ]);
+  });
+
   test('with current versions, each child is read once, checked and written on its version', async () => {
     const fixture = buildProtected();
     seedOrders(fixture.adapter);

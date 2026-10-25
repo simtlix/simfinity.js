@@ -3598,16 +3598,20 @@ const assertConcurrencyDeclarations = (applicationTypes) => {
   const protectedTypes = registrations.filter(({ gqltype }) => concurrencyDeclared(gqltype));
   // Generated inputs, models and stored data follow the protection a type had when the first schema
   // containing it was created, and an injected field is never removed, so neither can change later.
-  // Inputs or a model that an earlier createSchema() built without the field, even one that failed
-  // afterwards, count as such a schema; a model supplied to connect() does not.
+  // Inputs or a model that an earlier createSchema() built without the field also fix protection,
+  // even if the call failed afterwards; a model supplied to connect() does not.
   for (const registration of registrations) {
     const { gqltype } = registration;
     const declared = protectedTypes.includes(registration);
     const builtWithoutField = !isProtected(gqltype)
       && (!!registration.inputType || generatedModels.has(registration.model));
-    if (declared && (protectionStatus.get(gqltype) === false || builtWithoutField)) {
+    if (declared && protectionStatus.get(gqltype) === false) {
       throw invalidModel(`${gqltype.name} declares optimistic concurrency after a schema was created without it; `
         + `declare it before the first createSchema() that contains ${gqltype.name}`);
+    }
+    if (declared && builtWithoutField) {
+      throw invalidModel(`${gqltype.name} declares optimistic concurrency after its inputs or generated model were built without it; `
+        + `declare it before the first createSchema() attempt that builds ${gqltype.name}`);
     }
     if (!declared && isProtected(gqltype)) {
       throw invalidModel(`${gqltype.name} no longer declares optimistic concurrency, but Simfinity already added its `

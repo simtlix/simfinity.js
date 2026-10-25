@@ -1,17 +1,15 @@
 ---
 title: Optimistic concurrency
-description: Next-release opt-in record versions for conditional updates, state actions and deletes on MongoDB and PostgreSQL.
+description: Opt-in record versions for conditional updates, state actions and deletes on MongoDB and PostgreSQL.
 ---
 
 # Optimistic concurrency
 
-::: warning Next release
-This page describes the next release's source contract. Optimistic concurrency is not available in the 3.12.0 packages. See the [upgrade notes](/resources/compatibility#upgrade-notes-for-the-next-release) before enabling it on existing storage.
-:::
+Optimistic concurrency uses a record's observed version to reject writes based on stale data. See the [upgrade notes](/resources/compatibility#upgrade-to-3-13-0) before enabling it on existing storage.
 
 ## Declare a protected entity
 
-Declare `extensions.concurrency` before the first `createSchema()` that contains the type. The only accepted value is `{ mode: 'optimistic' }`; protection is fixed once a schema containing that type succeeds. Use one copy of `@simtlix/simfinity-core` per process, and import `RecordVersion` or `MAX_RECORD_VERSION` from the facade your application uses when you need them in custom operations.
+Declare `extensions.concurrency` before the first `createSchema()` that contains the type. The only accepted value is `{ mode: 'optimistic' }`; protection is fixed once a schema containing that type succeeds. A failed call that already built the type's inputs or generated model without the managed field also prevents enabling protection on that registration; recreate the runtime and type objects before trying again. Use one copy of `@simtlix/simfinity-core` per process, and import `RecordVersion` or `MAX_RECORD_VERSION` from the facade your application uses when you need them in custom operations.
 
 ```javascript
 import { GraphQLID, GraphQLObjectType, GraphQLString } from 'graphql';
@@ -83,7 +81,7 @@ Hook signatures stay unchanged. `onSaving(document, args, session, context)` rec
 
 Keep write authorization in root mutation rules and in `onUpdating`/`onDelete` as appropriate. Declare record visibility in the protected type's `get_by_id` scope when some callers must not receive an early stale/exhausted-version error. A readable caller receives that error before the record's own validators, hooks or action. A hidden caller, including one whose scope throws, continues through the usual merge, validators, source-state check, action and hooks; only if they accept the write does the adapter report the conflict. The visibility check runs the scope, without `get_by_id` middleware, only for stale or exhausted versions. Errors from its query gates or adapter still propagate.
 
-Root mutation authorization and middleware run before the protected pre-read. The visibility rule covers stale or exhausted valid versions, not every storage error: a malformed stored version can raise `DATABASE_ERROR` before controller authorization. Hiding a root query with an auth-plugin rule alone does not establish this visibility boundary; use `get_by_id` scope as well. Missing-record behavior is preserved: updates, state actions and nested entries return `NOT_VALID_ID` (404), while a top-level delete runs `onDelete(null)` and returns `null`. Protected malformed IDs fail in the pre-read before controller hooks.
+Root mutation authorization and middleware run before the protected pre-read. The visibility rule covers stale or exhausted valid versions, not every storage error: a malformed stored version can raise `DATABASE_ERROR` before controller authorization. Hiding a root query with an auth-plugin rule alone does not establish this visibility boundary; use `get_by_id` scope as well. Missing-record behavior is preserved: updates, state actions and nested entries return `NOT_VALID_ID` (404), while a top-level delete runs `onDelete(null)` and returns `null`. Protected malformed IDs fail in the pre-read before controller hooks. On MongoDB, the no-match existence read uses the raw collection and bypasses query middleware, so a record hidden only by that middleware can still produce `VERSION_CONFLICT`; express its visibility in `get_by_id` scope instead of relying on middleware hiding.
 
 Middleware for updates and actions still receives `{ input }`, including `input.version`. A protected root or nested delete receives `{ id, version }`; an unprotected one receives `{ id }`. Middleware may prepare the version before capture, but later input changes never replace the captured precondition.
 
@@ -113,9 +111,9 @@ order.total = total; // Keep the mutation result in sync without changing its ve
 
 ## Custom operations, adapters and native writers
 
-Custom operations that return a protected type must return its stored `version`; an omitted or null value reads as 1 for legacy compatibility. The field has no generated filter argument, and client conditions, sorts, grouping and aggregation facts on it are rejected. Conditions that middleware or scopes write on `version` are unsupported too: missing MongoDB versions cannot reproduce the read-as-1 rule in filters.
+Custom operations that return a protected type must return its stored `version`; an omitted or null value reads as 1 for legacy compatibility. The field has no generated filter argument, and client conditions, sorts, grouping and aggregation facts on it are rejected. Conditions on `version` supplied by middleware, scopes or a named view's `where` are unsupported too: missing MongoDB versions cannot reproduce the read-as-1 rule in filters.
 
-Adapters opt in with `writeFeatures: { optimisticConcurrency: true }`, honor `expectedVersion` atomically in `update`/`delete`, and run the visibility `find` in the supplied session with `requiredId` and `context`. Wrappers must forward every argument, including options. Core checks returned update versions against `expected + 1` and the immutable version observed before hooks, and checks a deleted record against the expected version. SQL model handles also check the returned increment. These are defensive diagnostics, not proof that an arbitrary wrapper or compiler preserved the atomic predicate. See the [adapter contract](https://github.com/simtlix/simfinity.js/blob/master/packages/core/README.md) and [SQL plugin contract](./sql-plugins#optimistic-concurrency-next-release).
+Adapters opt in with `writeFeatures: { optimisticConcurrency: true }`, honor `expectedVersion` atomically in `update`/`delete`, and run the visibility `find` in the supplied session with `requiredId` and `context`. Wrappers must forward every argument, including options. Core checks returned update versions against `expected + 1` and the immutable version observed before hooks, and checks a deleted record against the expected version. SQL model handles also check the returned increment. These are defensive diagnostics, not proof that an arbitrary wrapper or compiler preserved the atomic predicate. See the [adapter contract](https://github.com/simtlix/simfinity.js/blob/master/packages/core/README.md) and [SQL plugin contract](./sql-plugins#optimistic-concurrency).
 
 Native writers must implement the protocol themselves. For MongoDB's raw collection API, using an expected safe integer:
 

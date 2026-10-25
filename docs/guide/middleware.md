@@ -56,7 +56,7 @@ simfinity.use(async (params, next) => {
 
 | Property | Availability |
 | --- | --- |
-| `args` | GraphQL arguments: `args.input` for add/update/actions, `{ id }` for deletes; next release: `{ id, version }` for protected root and nested deletes. |
+| `args` | GraphQL arguments: `args.input` for add/update/actions, `{ id }` for deletes; `{ id, version }` for protected root and nested deletes. |
 | `operation` | One of the operation values below. |
 | `context` | The GraphQL request context. For nested collection children of a programmatic `saveObject()` call, the `context` passed to `saveObject()`, which is `undefined` when omitted; guard with `context?.`. |
 | `type` | Registered type metadata for generated entity operations; absent for custom queries and mutations. |
@@ -105,8 +105,8 @@ With an adapter that supports [emptiness through references and collections](/gu
 
 A request that breaks these rules fails with `DETACHED_CLIENT_FILTER` (500), whose message names the condition's original path, before the adapter is called, so the condition never runs without its scopes. Copies of a marked condition, the same condition object under a second key where it also reads a reference or a collection, an edited path and a condition narrowed to a field of the queried record all work: the runtime reads the final path of each, a condition object placed under several keys gets the target scopes of all of them, a copy gets those of its own path, and a condition or a copy that reads no reference or collection where it is placed runs as one that middleware added. See [client and trusted conditions](/guide/query-scope#client-and-trusted-conditions).
 
-## Version preconditions (next release)
+## Version preconditions
 
 With optimistic concurrency, a protected root delete and each protected nested `deleted` child receive `params.args = { id, version }`. Unprotected deletes retain `{ id }`. Update and state-action middleware keep `{ input }`, with the version in `input.version`; nested `updated` entries use the same shape. A protected collection's `deleted` input is `[RecordVersionRef]`, not `[ID]`, even when the parent is unprotected. Null entries are still skipped.
 
-The runtime captures and validates the version after the applicable middleware and before the protected pre-read. Middleware may prepare it then, but validators, controller hooks and state actions cannot replace the captured precondition. Missing/null versions on paths that bypass GraphQL coercion raise `REQUIRED_VALUE`; invalid ones raise `INVALID_VERSION`. Keep authorization in the appropriate rules/hooks, and preserve arguments when wrapping adapters: the middleware stage does not itself prove a conditional write is atomic. See [optimistic concurrency](./concurrency). This feature is not in 3.12.0.
+The runtime captures and validates the version after the applicable middleware and before the protected pre-read. Middleware may prepare it then, but validators, controller hooks and state actions cannot replace the captured precondition. Missing/null versions on paths that bypass GraphQL coercion raise `REQUIRED_VALUE`; invalid ones raise `INVALID_VERSION`. Keep authorization in the appropriate rules/hooks, and preserve arguments when wrapping adapters: the middleware stage does not itself prove a conditional write is atomic. See [optimistic concurrency](./concurrency).

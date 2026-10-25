@@ -5,7 +5,7 @@ import {
 } from 'vitest';
 import {
   GraphQLEnumType, GraphQLID, GraphQLInputObjectType, GraphQLInt, GraphQLList, GraphQLNonNull, GraphQLObjectType,
-  GraphQLScalarType, GraphQLString, graphql, printSchema, printType,
+  GraphQLScalarType, GraphQLString, coerceInputValue, graphql, printSchema, printType,
 } from 'graphql';
 import { buildErrorFormatter, createRuntime, describeModels } from '@simtlix/simfinity-core';
 
@@ -17,6 +17,8 @@ const RANGE = 'RecordVersion must be an integer from 1 to 9007199254740991';
 const SHAPE = (type) => `${type} extensions.concurrency must be { mode: 'optimistic' }`;
 const TOGGLE = (type) => `${type} declares optimistic concurrency after a schema was created without it; declare it `
   + `before the first createSchema() that contains ${type}`;
+const BUILT = (type) => `${type} declares optimistic concurrency after its inputs or generated model were built without it; `
+  + `declare it before the first createSchema() attempt that builds ${type}`;
 const REMOVED = (type) => `${type} no longer declares optimistic concurrency, but Simfinity already added its version `
   + 'field; keep extensions.concurrency on a type once it has that field';
 const ENTITY = (type) => `${type} declares optimistic concurrency, so it must be an entity: register it with connect() `
@@ -538,16 +540,18 @@ describe('startup validation', () => {
     expect(() => protecting.createSchema()).not.toThrow();
   });
 
-  it('counts inputs or a model that a failed createSchema() built without the field as an earlier schema, but not a supplied model', () => {
+  it('reports inputs retained by a failed createSchema() when protection is added afterwards', () => {
     // Inputs: the first call fails when the schema is constructed, after the inputs were built.
     const Producto = productType({ extensions: {} });
     const runtime = connectAll(createRuntime(createAdapter()), Producto);
     runtime.registerMutation('duplicado', 'duplicado', null, objectType('Producto', () => ({})), () => null);
     expect(() => runtime.createSchema()).toThrow('multiple types named "Producto"');
     Producto.extensions.concurrency = { mode: 'optimistic' };
-    expectError(thrown(() => runtime.createSchema()), invalidModel(TOGGLE('Producto')));
+    expectError(thrown(() => runtime.createSchema()), invalidModel(BUILT('Producto')));
     expect(hasVersionField(Producto)).toBe(false);
+  });
 
+  it('reports a generated model retained by a failed createSchema() when protection is added afterwards', () => {
     // A model: the first call fails at a later type's model, after this type's model was created.
     const adapter = createAdapter();
     adapter.createModel.mockImplementation((gqltype) => {
@@ -558,8 +562,11 @@ describe('startup validation', () => {
     const modelled = connectAll(createRuntime(adapter), Articulo, productType({ name: 'Etiqueta', extensions: {} }));
     expect(() => modelled.createSchema()).toThrow('model failed');
     Articulo.extensions.concurrency = { mode: 'optimistic' };
-    expectError(thrown(() => modelled.createSchema()), invalidModel(TOGGLE('Articulo')));
+    expectError(thrown(() => modelled.createSchema()), invalidModel(BUILT('Articulo')));
+    expect(hasVersionField(Articulo)).toBe(false);
+  });
 
+  it('does not count a supplied model as having built the type without protection', () => {
     // A model supplied to connect() was not built from the type by Simfinity.
     const supplier = createAdapter();
     const supplied = createRuntime(supplier);
@@ -879,6 +886,16 @@ describe('clients sending the wrong shape (Review Focus 4)', () => {
         + 'Field "version" of required type "RecordVersion!" was not provided.');
     expectBadRequest(await run(schema, update, { input: { id: '1', items: { deleted: ['2'] } } }),
       'Variable "$input" got invalid value "2" at "input.items.deleted[0]"; Expected type "RecordVersionRef" to be an object.');
+  });
+
+  it.each(['updated', 'deleted'])('accepts null entries around versioned %s entries during input coercion', (operation) => {
+    const { schema } = buildStore();
+    const errors = [];
+    const coerced = coerceInputValue({
+      id: '1', items: { [operation]: [null, { id: '2', version: 7 }, null] },
+    }, schema.getType('PedidoInputForUpdate'), (_path, _value, error) => errors.push(error.message));
+    expect(errors).toEqual([]);
+    expect(coerced).toEqual({ id: '1', items: { [operation]: [null, { id: '2', version: 7 }, null] } });
   });
 });
 

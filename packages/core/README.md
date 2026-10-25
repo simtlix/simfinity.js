@@ -46,9 +46,9 @@ The package also exports the `auth`, `validators`, `scalars`, and `plugins` help
 
 The same helpers are available from the `@simtlix/simfinity-core/auth`, `/auth/errors`, `/auth/expressions`, `/auth/rules`, `/plugins`, `/scalars` and `/validators` subpaths, each with TypeScript declarations whose types match the root namespaces. `moduleResolution` `node16`, `nodenext` and `bundler` read them through the export map, and `node10` through `typesVersions`. The `internal/*` subpaths are not public API and have no declarations.
 
-## Optimistic concurrency (next release)
+## Optimistic concurrency
 
-This source contract is for the next release and is not available in 3.12.0 packages. `extensions: { concurrency: { mode: 'optimistic' } }` opts an entity into the managed `version: RecordVersion!` field. Core exports `RecordVersion` and `MAX_RECORD_VERSION` (`9007199254740991`); import from the application's facade to share their identity. See the [concurrency guide](https://simtlix.github.io/simfinity.js/guide/concurrency.html).
+`extensions: { concurrency: { mode: 'optimistic' } }` opts an entity into the managed `version: RecordVersion!` field. Core exports `RecordVersion` and `MAX_RECORD_VERSION` (`9007199254740991`); import from the application's facade to share their identity. See the [concurrency guide](https://simtlix.github.io/simfinity.js/guide/concurrency.html).
 
 An adapter advertises `writeFeatures: { optimisticConcurrency: true }`; `createRuntime()` snapshots/freezes this declaration and rejects invalid shapes with `INVALID_WRITE_FEATURES` (500). A protected schema rejects an adapter without support. `update(model, id, changes, session, { expectedVersion })` must atomically match ID/version, apply changes and set `expectedVersion + 1`, returning the updated record; `delete(model, id, session, { expectedVersion })` must atomically match both and return the deleted record. An update at the maximum skips the write. After no match, read the same cast key in the same session: return `null` if absent, report `VERSION_CONFLICT` if stale or `VERSION_EXHAUSTED` for an equal maximum on update, otherwise return `null`. MongoDB missing/null versions count as 1. Without `expectedVersion`, existing writes and call paths remain unchanged.
 

@@ -77,9 +77,9 @@ Simfinity decides this from the stored data and never runs a schema getter or vi
 When your schema declares a getter, a virtual other than Mongoose's automatic `id`, an alias or a subdocument method on a member anywhere inside the object, including its subdocuments, the items of its lists and the values of its maps, the stored data does not show what the object renders: a getter default, a virtual, a method (GraphQL calls one named like a member) or an alias (which stores the value under its own path) may supply a required member. By-ID reads, reference reads and update responses then keep the object as stored and render it as before, running only the getters of the members a query selects. List reads and create responses return the stored data, which no getter, virtual or alias renders, so there such an object that holds no data and misses a required member reads as `null`; give the member your own resolver or mark it `readOnly` if it must count as present. Generated models declare no getters, virtuals, methods or aliases. If reading the stored data fails, the object is returned unchanged.
 :::
 
-### Version preconditions (next release)
+### Version preconditions
 
-For a type declaring `extensions.concurrency: { mode: 'optimistic' }`, send the version you read in `input.version`, alongside `id` and the patch; select the returned `version` for the next edit. Every accepted update advances it once, including `{ id, version }`-only patches. Creates exclude the field and initialize it at 1. A conflict means re-read and reapply, rather than replacing the version blindly. The next-release feature is not in 3.12.0 packages; see [optimistic concurrency](./concurrency).
+For a type declaring `extensions.concurrency: { mode: 'optimistic' }`, send the version you read in `input.version`, alongside `id` and the patch; select the returned `version` for the next edit. Every accepted update advances it once, including `{ id, version }`-only patches. Creates exclude the field and initialize it at 1. A conflict means re-read and reapply, rather than replacing the version blindly. See [optimistic concurrency](./concurrency).
 
 ## Delete a record
 
@@ -96,7 +96,7 @@ The mutation returns the deleted document, or `null` when no document matches. A
 
 Deleting a parent does not automatically delete referenced children. Choose an application policy—reject deletion, retain children, or remove related records—and implement it using the same transaction session.
 
-Next release: protected deletes take `deletebook(id: ID!, version: RecordVersion!)` and return the deleted record including its stored version. Protected children use `{ id, version }` entries in collection `deleted` and require `version` in `updated`, even with an unprotected parent. A parent version covers only that parent; see [nested writes](./concurrency#deletes-nested-writes-and-state-actions).
+Protected deletes take `deletebook(id: ID!, version: RecordVersion!)` and return the deleted record including its stored version. Protected children use `{ id, version }` entries in collection `deleted` and require `version` in `updated`, even with an unprotected parent. A parent version covers only that parent; see [nested writes](./concurrency#deletes-nested-writes-and-state-actions).
 
 ## Transaction boundaries
 
@@ -112,7 +112,7 @@ Multiple root mutation fields in a GraphQL request are not one shared transactio
 
 Controllers, validators, state actions and the middleware of nested collection children can run again on a retry. Keep their database work on the supplied session and design external side effects separately from the transaction. See [controllers](./controllers#transactions-and-side-effects).
 
-For next-release protected writes, `VERSION_CONFLICT` and `VERSION_EXHAUSTED` roll back the owned mutation without retrying those errors; a stale child also rolls back parent and sibling writes. Driver conflicts can rerun hooks before ending in a version conflict or `TRANSACTION_RETRY_EXCEEDED`. With supplied sessions preserve the caller's ownership: default MongoDB requires its caller to abort, while transactional-integrity mode aborts adapter-detected conflicts but not core-detected early conflicts. Core result diagnostics do not add a universal abort guarantee for supplied sessions. See [transactions and concurrent requests](./concurrency#transactions-and-concurrent-requests).
+For protected writes, `VERSION_CONFLICT` and `VERSION_EXHAUSTED` roll back the owned mutation without retrying those errors; a stale child also rolls back parent and sibling writes. Driver conflicts can rerun hooks before ending in a version conflict or `TRANSACTION_RETRY_EXCEEDED`. With supplied sessions preserve the caller's ownership: default MongoDB requires its caller to abort, while transactional-integrity mode aborts adapter-detected conflicts but not core-detected early conflicts. Core result diagnostics do not add a universal abort guarantee for supplied sessions. See [transactions and concurrent requests](./concurrency#transactions-and-concurrent-requests).
 
 ## Limit nested collection operations
 

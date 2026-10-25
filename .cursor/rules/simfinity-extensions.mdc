@@ -57,7 +57,7 @@ createdAt: {
 }
 ```
 
-Excludes the field from both add and update input types. The field can only be set programmatically (e.g., in a controller hook). Next release: the injected managed `RecordVersion` is an exception; clients must return it as an update/delete precondition despite `readOnly: true`, and hooks must not assign it.
+Excludes the field from both add and update input types. The field can only be set programmatically (e.g., in a controller hook). The injected managed `RecordVersion` is an exception; clients must return it as an update/delete precondition despite `readOnly: true`, and hooks must not assign it.
 
 ### `extensions.queryable`
 
@@ -172,8 +172,8 @@ Scope functions modify query args in-place to enforce row-level security. The sh
 
 Client paths through a non-embedded single reference to a type with a `find` scope get that scope via `applyJoinedScopes`: it runs with empty `args`, its conditions are prefixed with the relation path, and they are ANDed into the query or, for paths used only in `AND`/`OR` group conditions, into those groups. When the target's `find` scope adds conditions for the caller, a path into a non-embedded collection of that type, or into a type whose scope conditions cross a non-embedded collection or a reference inside an embedded list, fails with `FORBIDDEN_FILTER_PATH`. See `docs/guide/query-scope.md`.
 
-## Next-release optimistic concurrency
+## Optimistic concurrency
 
-`extensions.concurrency` is absent or a plain object with exactly `mode: 'optimistic'`. Declare it before the first successful schema containing the type; protection is fixed thereafter. Protected types must be registered entities, cannot be embedded, and cannot collide with the injected `version` field or its storage name. Other stored fields cannot use `RecordVersion`; protected schemas reserve `RecordVersion` and `RecordVersionRef`. Core injects the managed field after adapter preparation and before model/input generation; metadata describers synthesize it before injection. A failure after injection leaves the field on the type object. Use one core copy per process.
+`extensions.concurrency` is absent or a plain object with exactly `mode: 'optimistic'`. Declare it before the first `createSchema()` containing the type; protection is fixed after a successful schema, and inputs or a generated model built by a failed call also prevent enabling it later. Protected types must be registered entities, cannot be embedded, and cannot collide with the injected `version` field or its storage name. Other stored fields cannot use `RecordVersion`; protected schemas reserve `RecordVersion` and `RecordVersionRef`. Core injects the managed field after adapter preparation and before model/input generation; metadata describers synthesize it before injection. A failure after injection leaves the field on the type object. Use one core copy per process.
 
-The injected `version: RecordVersion!` is read-only but required in update inputs and delete preconditions, excluded from create inputs, and not queryable. Clients identify it by its named scalar type. Conditions on it from middleware/scopes are unsupported too. Protected child collections use `deleted: [RecordVersionRef]` and version-bearing `updated` items even under an unprotected parent. Introspection adds no new extension field. See [optimistic concurrency](../../docs/guide/concurrency.md), explicitly documented for the next release rather than 3.12.0.
+The injected `version: RecordVersion!` is read-only but required in update inputs and delete preconditions, excluded from create inputs, and not queryable. Clients identify it by its named scalar type. Conditions on it from middleware, scopes or a named view's `where` are unsupported too. Protected child collections use `deleted: [RecordVersionRef]` and version-bearing `updated` items even under an unprotected parent. Introspection adds no new extension field. See [optimistic concurrency](../../docs/guide/concurrency.md).
