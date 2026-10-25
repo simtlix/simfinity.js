@@ -9,7 +9,7 @@ import library from '../../package.json';
 
 # Compatibility and releases
 
-This documentation covers Simfinity.js **{{ library.version }}**, for **MongoDB and PostgreSQL**. All five packages are versioned and released together.
+This documentation covers Simfinity.js **{{ library.version }}**, for **MongoDB and PostgreSQL**. All six packages are versioned and released together.
 
 ## Package availability
 
@@ -37,8 +37,24 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 
 ## Upgrade notes for the next release
 
+### Controller callbacks after commit
+
+Controller callbacks after commit are additive. Applications that declare none keep their existing behavior; lifecycle hooks such as `onSaved` and `onUpdated` remain supported and run inside the transaction, including retries.
+
+- **Callbacks**: controllers may declare `onSaveCommitted(record, args, context)`, `onUpdateCommitted(record, context)`, `onDeleteCommitted(record, context)` and `onTransitionCommitted(record, action, context)`. A state action emits only the transition notification for its own record; its nested children keep their notifications. Callback records and creation arguments are snapshots of ordinary values; opaque scalar instances retain their identity. Context is the original reference. No session is passed.
+- **Completion**: an owning mutation, sessionless `saveObject()` or SQL `withTransaction(null, callback)` resolves after its callbacks have been awaited serially. Nested lifecycle writes join the owner's queue in completion order, children before their parent. A failed or retried attempt discards its queue; an uncertain MongoDB commit dispatches only after confirmation. Cleanup is attempted before dispatch. A confirmed commit still dispatches if cleanup fails, but the existing cleanup error can reject the operation.
+- **Failure reporting**: callback and reporter failures do not roll back, retry or fail the confirmed write. Runtime-local `configureAfterCommit({ onError })` receives the thrown value and static operation details with the original context. The guarded default logs only static metadata, without arbitrary error messages, stacks, record, arguments or context; configure an explicit reporter for application diagnostics. Delivery is best effort, not durable or exactly once. Use an outbox and workers when delivery must survive a process failure.
+- **Sessions**: externally owned native MongoDB sessions skip notifications and warn once per runtime/type; Simfinity does not observe their commit. SQL lifecycle calls using a session from their owning runtime join its queue. SQL continues to reject foreign sessions with `INVALID_SESSION` before any write.
+- **Adapters and errors**: custom adapters need the optional `enqueueAfterCommit(session, run)` capability only when controllers declare these callbacks; otherwise `createSchema()` or operation entry rejects with `UNSUPPORTED_AFTER_COMMIT` (500). Non-function callbacks other than `null`/`undefined` produce `INVALID_CONTROLLER` (400). Invalid reporter options produce `INVALID_AFTER_COMMIT_OPTIONS` (400) and preserve the previous configuration.
+- **Exports and types**: core's `Runtime` exposes `configureAfterCommit`; core exports `AfterCommitOptions`, `AfterCommitErrorDetails` and `CommittedControllerCallbacks`. MongoDB, SQL and PostgreSQL re-export these types and expose the method on created runtimes. MongoDB (including its compatible `src/` entry) and PostgreSQL also export their singleton configuration function. Each runtime owns its reporter configuration. `EntityController` declares the four callbacks and `DatabaseAdapter` the optional queue capability.
+- **Linting**: the optional application ESLint plugin recognizes `configureAfterCommit` as a runtime member, preserving subsequent schema and relation checks.
+
+See [controllers](../guide/controllers#after-commit-callbacks), the [API reference](../reference/api#configureaftercommit) and the [compatibility ledger](../compatibility#next-release-controller-callbacks-after-commit).
+
+### Client descriptor
+
 The optional `@simtlix/simfinity-descriptor` package joins the aligned release set
-as its sixth package. These APIs are not in the published 3.12.0 packages.
+as its sixth package. These APIs are not in the published 3.14.0 packages.
 
 - **Metadata**: import `buildClientDescriptor` and `createClientDescriptorHandler`
   from the descriptor package, not core or either facade. Install it directly at
@@ -65,13 +81,6 @@ as its sixth package. These APIs are not in the published 3.12.0 packages.
   declares structural request/response types, so core, both facades and the
   descriptor compile without Node ambient types. There is no core `/http` export
   or facade re-export of the descriptor API.
-
-The development lockfile also updates `body-parser` to 2.4.0, `fast-uri` to 3.1.9
-and `zod` to 4.6.7, within the existing dependency ranges, to address the current
-[body-parser](https://github.com/advisories/GHSA-27r3-jxmh-p828),
-[fast-uri](https://github.com/advisories/GHSA-w74x-v6f9-j3xg) and
-[Zod](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5) advisories. This does not
-change runtime package dependency declarations or consumer lockfiles.
 
 See the [client descriptor reference](../reference/client-descriptor) for bootstrap
 ordering, format v1, consumption examples, HTTP errors and composition limits.

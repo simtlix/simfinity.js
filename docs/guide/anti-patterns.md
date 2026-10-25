@@ -211,7 +211,7 @@ simfinity.registerMutation('sendinvoiceemail', 'Email an invoice.', SendInvoiceI
 
 **Why it hurts.** A custom mutation's callback runs inside a database transaction, which Simfinity retries up to five times on transient errors, running the callback again each time. The email can therefore be sent twice, and an email sent before a later failure is not taken back by the rollback. The transaction also stays open for the duration of a network call, and adds nothing to work that touches no data.
 
-**Do this instead.** Inside the mutation that changes the data, write an outbox record with the session, and deliver it from a worker after commit; see [transactions and side effects](./controllers#transactions-and-side-effects). Work that touches no data does not need a Simfinity operation: run it in your own service code or endpoint.
+**Do this instead.** Use [after-commit callbacks](./controllers#after-commit-callbacks) for best-effort external notifications. When delivery must survive a process failure, write an outbox record with the mutation's session and deliver it from a worker after commit; see [transactions and side effects](./controllers#transactions-and-side-effects). Work that touches no data does not need a Simfinity operation: run it in your own service code or endpoint.
 
 ## Reading stored records through a custom mutation
 

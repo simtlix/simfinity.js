@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { SimfinityError } from '@simtlix/simfinity-core';
 import { MAX_RECORD_VERSION, isProtectedType, isVersionField, readStoredVersion, retainStoredVersion } from '@simtlix/simfinity-core/internal/record-version';
 import { getListShape, normalizeConnectionField } from '@simtlix/simfinity-core/internal/relation-storage';
+import { createTransactionCallbacks } from '@simtlix/simfinity-core/internal/transaction-callbacks';
 
 import { createMongoModel } from './models.js';
 import { MONGO_QUERY_OPERATORS, createMongoQueries } from './queries.js';
@@ -255,7 +256,8 @@ const nestedPathOf = (nested) => {
 };
 
 export const createMongoAdapter = (options) => {
-  const integrity = createMongoIntegrity(options);
+  const callbacks = createTransactionCallbacks();
+  const integrity = createMongoIntegrity(options, callbacks);
   const collectionBatching = readCollectionBatching(options);
   let queries;
   let getRegistrations = () => [];
@@ -303,8 +305,8 @@ export const createMongoAdapter = (options) => {
 
   // A supplied session or model is used as is; only an owned session without a model looks up
   // the registrations.
-  const withOwnedTransaction = (session, body, Model, ...rest) => withMongoTransaction(
-    session, body, (Model || session) ? Model : sessionModel(), ...rest,
+  const withOwnedTransaction = (session, body, Model, transactionOptions) => withMongoTransaction(
+    session, body, (Model || session) ? Model : sessionModel(), transactionOptions, callbacks,
   );
 
   const versionedRead = (Model, query, many = false) => getRegistrations().some(
@@ -364,6 +366,7 @@ export const createMongoAdapter = (options) => {
     castId: castObjectId,
     initialize: integrity.initialize,
     withTransaction: integrity.enabled ? integrity.withTransaction : withOwnedTransaction,
+    enqueueAfterCommit: callbacks.enqueue,
     newRecord(Model, data, session) {
       const record = new Model(data);
       record.$session(session);

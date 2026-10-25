@@ -13,6 +13,7 @@ Examples use the selected runtime from [database setup](./databases#runtime-setu
 
 - A record and the child records that change with it, such as an order and its lines: one [generated mutation with nested collection writes](#write-a-parent-and-its-children-together).
 - Writes that must accompany an entity change, such as audit rows, outbox events, counters or derived totals: [controller hooks](#work-inside-the-transaction-with-controllers) that use the session they receive.
+- Best-effort external notifications after an entity commits: [after-commit callbacks](./controllers#after-commit-callbacks). Keep a transactional outbox and worker when delivery must survive a process failure.
 - A job, worker or webhook that reads data or runs an existing generated operation: [execute the generated schema in-process](#execute-the-generated-schema-in-process).
 - A read that generated filters, scopes and aggregates cannot express, for clients and server code alike: a [virtual field](./queries#virtual-fields) on the type it belongs to, read through the generated queries.
 - A frequent list read with a fixed predicate and typed params, shared by web, MCP and in-process callers: a [named view](./queries#named-views).
@@ -410,6 +411,8 @@ The counter changes in the same transaction as the line, so a rollback undoes bo
 Simfinity adds nothing to a native call. GraphQL input coercion, global middleware, query scopes, field and type validators, controller hooks, permission rules, state machine transitions, nested-write ownership checks and mutation limits do not run, and on MongoDB [transactional reference integrity](./mongodb-integrity#existing-databases-and-native-writes) does not check native writes. PostgreSQL still enforces its foreign keys, `NOT NULL` columns and unique keys, and maps their violations to the [PostgreSQL database errors](../reference/errors#postgresql-database-errors). The calling code must therefore authorize and validate the change itself, and write values in their stored form: reference fields under their storage names, internal enum values and the backend's identifiers.
 
 Inside a hook or a custom mutation, pass the session you received. A call without it runs outside the transaction: it commits even when the operation later rolls back. A single native statement from a job needs no transaction; to make several native writes atomic, open one with `simfinity.withTransaction(null, callback)` on PostgreSQL, or with Mongoose's `connection.transaction(callback)` on MongoDB, or put them in a custom mutation.
+
+Lifecycle writes inside a registered mutation or SQL's `withTransaction(null, callback)` join the outer owner's [after-commit notification queue](./controllers#after-commit-callbacks). Sessionless `saveObject()` owns its own queue. An external native MongoDB session does not provide observable commit ownership: new callbacks are skipped, while existing hooks keep their session semantics. There is no public arbitrary-closure enqueue or manual-flush API. Keep durable delivery intents in the transaction's outbox and process them with a worker.
 
 ## What Simfinity does not provide
 

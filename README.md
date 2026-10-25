@@ -50,6 +50,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
 - [State Machines](#-state-machines)
 - [Controllers & Lifecycle Hooks](#️-controllers--lifecycle-hooks)
   - [Hook Parameters](#hook-parameters)
+  - [After-commit callbacks](#after-commit-callbacks)
 - [Query Scope](#-query-scope)
   - [Overview](#overview)
   - [Defining Scope](#defining-scope)
@@ -1642,6 +1643,25 @@ simfinity.connect(null, BookType, 'book', 'books', bookController);
 The parent update executes before nested child operations. A malformed ID throws `NOT_VALID_ID` (400) before anything is written. For a type without embedded fields, `onUpdating` runs before that check and receives the raw ID, so a hook that looks the record up with `findById()` must handle a malformed value, which makes Mongoose throw a `CastError`. An update with no matching parent throws `NOT_VALID_ID` (404), without running child operations or `onUpdated`.
 
 Lifecycle hooks, including `onSaved` and `onUpdated`, run before the transaction commits. They can run again after a transient transaction failure, with up to five retries after the first attempt; each retry waits a short random delay first. A write conflict that persists after the last retry fails with `TRANSACTION_RETRY_EXCEEDED` (409), with the driver error as `error.cause`. Keep additional database writes on the supplied session. For email or webhooks, write an outbox record in that transaction and deliver it after commit; external calls inside hooks cannot be rolled back. An uncertain commit result retries only the commit, up to five times, without repeating hooks. If the result remains uncertain, the error is returned and the database may already have committed; reconcile the outcome before repeating the operation.
+
+### After-commit callbacks
+
+Both database runtimes support optional controller `onSaveCommitted(record, args, context)`, `onUpdateCommitted(record, context)`, `onDeleteCommitted(record, context)` and `onTransitionCommitted(record, action, context)`. A transition uses its own notification only; existing hooks keep their current transactional behavior.
+
+```javascript
+const controller = {
+  onSaveCommitted: async (record, args, context) => {
+    await notifications.created(String(record._id ?? record.id), context?.requestId);
+  },
+};
+simfinity.configureAfterCommit({
+  onError: (error, details) => monitoring.report(error, details),
+});
+```
+
+Register `controller` with `connect()`; `notifications` and `monitoring` are application services. A queue belongs to one transaction attempt, and only the confirmed attempt dispatches. Children precede their parent; callbacks are serial and awaited after cleanup is attempted. Callback failures are reported independently and never fail the committed mutation or retry its writes. Records are detached plain operation results, with ordinary objects/arrays/Dates copied and opaque scalar instances preserved. Context retains its original identity. No session is passed.
+
+Lifecycle writes in registered mutations or SQL's `withTransaction()` join the owner's queue. Native externally owned sessions have no observed commit: callbacks are skipped with a warning. Cleanup failures after commit retain their existing rejection behavior while confirmed callbacks still run. No callback is a durable delivery or exactly-once guarantee; use an outbox and worker when delivery must survive process failure. See the [full contract](docs/guide/controllers.md#after-commit-callbacks) and [configuration API](docs/reference/api.md#configureaftercommit).
 
 ### Using Context in Controllers
 

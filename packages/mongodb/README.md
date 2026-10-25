@@ -96,6 +96,8 @@ For tooling that locates the package, use `require.resolve('@simtlix/simfinity-j
 - [Complete library documentation](https://github.com/simtlix/simfinity.js#readme)
 - [Aggregation examples](./AGGREGATION_EXAMPLE.md)
 
+Controller `onSaveCommitted`, `onUpdateCommitted`, `onDeleteCommitted` and `onTransitionCommitted` callbacks run serially after the owning transaction confirms commit and attempts cleanup. `configureAfterCommit({ onError })` configures reporting per runtime; callback failures do not fail the committed write. Borrowed lifecycle writes join an adapter-owned attempt; externally owned native sessions do not provide observed commit notifications. Existing hooks remain transactional. See [the contract, payloads and outbox requirements](https://simtlix.github.io/simfinity.js/guide/controllers.html#after-commit-callbacks).
+
 ## Client metadata
 
 In the next release, install the optional `@simtlix/simfinity-descriptor` package,

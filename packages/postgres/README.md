@@ -123,6 +123,8 @@ await initializeDatabase(pool, description, { mode: 'validate' });
 
 Low-level `describeDatabase(registrations, { schema, refreshTriggers, ownerIndexes })` uses the `public` schema when `schema` is omitted, not the schema of a configured runtime; pass the schema given to `configure()` or `createPostgres()`, or call `describeDatabase()` and `compileDatabaseSchema()` without arguments for the default instance. `compileDatabaseSchema` returns reviewable SQL. Low-level `initializeDatabase(pool, description, { mode })` creates or validates storage transactionally and never closes the pool. Create mode adds missing objects and rejects incompatible definitions; validate mode performs no DDL. Neither mode performs destructive schema synchronization or data migration.
 
+Controller `onSaveCommitted`, `onUpdateCommitted`, `onDeleteCommitted` and `onTransitionCommitted` callbacks run serially after the owning transaction confirms commit and attempts cleanup. `configureAfterCommit({ onError })` configures reporting per runtime; callback failures do not fail the committed write. Borrowed lifecycle writes, such as those inside a registered mutation or `withTransaction(null, callback)`, join that owner's queue; a session this runtime did not create is rejected with `INVALID_SESSION`, as before. Existing hooks remain transactional. See [the contract, payloads and outbox requirements](https://simtlix.github.io/simfinity.js/guide/controllers.html#after-commit-callbacks).
+
 ## Client metadata
 
 In the next release, install the optional `@simtlix/simfinity-descriptor` package,
