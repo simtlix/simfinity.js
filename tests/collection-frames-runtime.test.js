@@ -672,13 +672,21 @@ describe('alias unions and list-reference edges', () => {
       else args.AND = [{ ANY: [{ path: 'products' }] }];
     } } });
     code(result, 'FORBIDDEN_FILTER_PATH'); expect(f.calls).toEqual([]);
+    expect(result.error.message).toBe('Query path olines.shop enters CfShop, whose find scope filters through the collection CfShop.products');
   });
-  it('keeps a quantified reference scope under an embedded-list prefix forbidden', async () => {
-    const f = build({ scoped: ['shop'], configure: (types) => { types.Shop.getFields().pro = { ...types.Product.getFields().pro }; } });
+  it.each([
+    ['pro', 'tests the quantified reference CfShop.pro under an embedded-list prefix'],
+    ['pro.products', 'filters through the collection CfPro.products'],
+  ])('names the unsupported joined scope path %s under an embedded-list prefix', async (path, cause) => {
+    const f = build({ scoped: ['shop'], configure: (types) => {
+      types.Shop.getFields().pro = { ...types.Product.getFields().pro };
+      types.Pro.getFields().products = { ...types.Shop.getFields().products, extensions: { relation: { embedded: false, connectionField: 'pro' } } };
+    } });
     const result = await f.invoke({ AND: [{ conditions: [condition('olines.shop.name', 'S1', 'EQ')] }] }, {
-      scopes: { shop: ({ args }) => { args.AND = [{ ANY: [{ path: 'pro' }] }]; } },
+      scopes: { shop: ({ args }) => { args.AND = [{ ANY: [{ path }] }]; } },
     });
     code(result, 'FORBIDDEN_FILTER_PATH'); expect(f.calls).toEqual([]);
+    expect(result.error.message).toBe(`Query path olines.shop enters CfShop, whose find scope ${cause}`);
   });
   it.each(['queryable', 'virtual'])('pin: checks the reached collection %s property before the collection sort error', async (restriction) => {
     const f = build({ configure: (types) => {

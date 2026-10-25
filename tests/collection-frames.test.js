@@ -994,6 +994,25 @@ describe('collection frames: plan', () => {
       expect(errorOf(() => plan(args, { quantifiers: false }))?.extensions?.code).toBe('UNSUPPORTED_QUERY');
     }
   });
+  it.each(['ANY', 'ALL', 'NONE'])('rejects implicit %s forms when the planner has not declared quantifiers', (quantifier) => {
+    for (const options of [{ quantifiers: false }, { operators: ['EQ', 'GTE'] }]) {
+      for (const rows of [[{ __implicit: true, path: 'reviews', conditions: [rating] }], []]) {
+        const args = { AND: [{ __implicit: true, [quantifier]: rows }] };
+        const error = errorOf(() => plan(args, options));
+        expect(error?.extensions).toMatchObject({ code: 'UNSUPPORTED_QUERY', status: 400 });
+        expect(error?.message).toBe('Quantified groups are not supported by this query compiler');
+      }
+    }
+  });
+  it.each([
+    { quantifier: 'NONE', terms: [{ operator: 'IS_NOT_EMPTY' }] },
+    { quantifier: 'ANY', terms: [{ operator: 'EQ', value: 1 }] },
+    { quantifier: 'ANY', terms: [{ path: '' }] },
+  ])('rejects path-less quantified terms before planning %j', (reviews) => {
+    const error = errorOf(() => plan({ reviews }));
+    expect(error?.extensions).toMatchObject({ code: 'INVALID_FILTER_PATH', status: 400 });
+    expect(error?.message).toBe('Relationship terms require a path');
+  });
   it('pin: keeps operators-only plans legacy and ignored carrier operators', () => {
     const operators = ['EQ', 'NE', 'GTE'];
     const args = { reviews: { operator: 'UNKNOWN_IGNORED', terms: [{ path: 'rating', operator: 'GTE', value: 4 }] } };

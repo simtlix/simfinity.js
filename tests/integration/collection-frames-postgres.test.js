@@ -118,6 +118,14 @@ describe('PostgreSQL collection frame statements', () => {
     expect(make({ reviews: { terms: [{ path: 'rating', operator: 'GTE', value: 4 }] } })).toEqual(compile(frame(), 'Product', { mode: 'find', pagination: { limit: 100, offset: 0 } }));
     expect(make({ AND: [{ ANY: [{ path: 'reviews', conditions: [{ field: 'rating', operator: 'GTE', value: 4 }] }] }] })).toEqual(make({ reviews: { terms: [{ path: 'rating', operator: 'GTE', value: 4 }] } }));
   });
+  it('pin: keeps J-only aggregate shorthand byte-equal to the AND form', () => {
+    const aggregation = { groupId: 'key', facts: [{ path: 'reviews.id', operation: 'COUNT', factName: 'n' }, { path: 'reviews.rating', operation: 'SUM', factName: 'total' }] };
+    const make = (filter) => compileQuery(models, database, createQueryPlan(models, 'QfProduct', { ...filter, aggregation }, { mode: 'aggregate' }));
+    const shorthand = make({ reviews: { terms: [{ path: 'rating', operator: 'GTE', value: 4 }] } });
+    expect(shorthand.text).toBe('SELECT * FROM (SELECT (t0."key") COLLATE "pg_catalog"."C" AS "groupId", count(*) AS "fact_0", COALESCE(SUM(t1."rating"), 0) AS "fact_1" FROM "app"."QfProduct" t0 LEFT JOIN "app"."QfReview" t1 ON t1."productId" = t0."id" WHERE (t1."rating" >= $1::integer) GROUP BY (t0."key") COLLATE "pg_catalog"."C") aggregated ORDER BY "groupId" ASC NULLS FIRST');
+    expect(shorthand.values).toEqual([4]);
+    expect(shorthand).toEqual(make({ AND: [{ conditions: [{ field: 'reviews.rating', operator: 'GTE', value: 4 }] }] }));
+  });
   it.each([['EQ', 'IS NOT DISTINCT FROM', 'x'], ['IN', 'COALESCE', ['x']], ['NIN', 'COALESCE', ['x']]])('keeps ALL %s two-valued', (operator, expected, value) => {
     const result = compile(frame('reviews', pred('author', operator, value), { quantifier: 'ALL' }));
     expect(result.text).toContain(expected);
@@ -148,6 +156,13 @@ describe('PostgreSQL collection frame statements', () => {
     const error = caught(() => compile(frame('products', pred('pro.name', 'GT', null, { joins: {} })), 'Shop'));
     expect(error?.extensions).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
   });
+  it.each([
+    [['shop', 'name'], 'ANY', 'INVALID_FILTER_PATH'],
+    [['shop', 'products'], 'SOME', 'INVALID_FILTER_VALUE'],
+  ])('checks 400 errors before rejecting an anchored path %j with quantifier %s', (path, quantifier, code) => {
+    const error = caught(() => compile(frame('shop.products', null, { anchor: ['pro'], path, quantifier })));
+    expect(error?.extensions).toMatchObject({ code, status: 400 });
+  });
   it.each(['find', 'count'])('rejects a hand-built collection sort in %s', (mode) => {
     expect(caught(() => compile(null, 'Product', { mode, sort: [{ path: ['reviews', 'rating'], order: 'ASC' }] }))?.extensions).toMatchObject({ code: 'INVALID_FILTER_PATH', status: 400 });
   });
@@ -175,6 +190,7 @@ describe('PostgreSQL collection frame statements', () => {
     ['non-object joins', { joins: [] }], ['malformed crossing', { joins: { shop: false } }],
     ['malformed scope', { scope: { kind: 'unknown' } }], ['undefined scope', { scope: undefined }],
     ['anchor joins', { anchor: ['shop'], joins: { shop: null }, path: ['products'] }],
+    ['anchor multi-segment path', { anchor: ['pro'], path: ['shop', 'products'] }],
   ];
   it.each(malformed)('rejects hand-built quantified %s before crossing', (label, extra) => {
     const error = caught(() => compile(frame('shop.products', null, extra)));
@@ -601,7 +617,7 @@ describe.skipIf(!uri)('PostgreSQL collection frame rows and plans', () => {
     const statement = physical(frame('reviews', pred('rating', 'GTE', 4), { quantifier }));
     expect(statement.text).toContain('EXISTS (SELECT 1');
     const result = await explain(statement);
-    expect(result.some((node) => node['Join Type'] === (quantifier === 'ANY' ? 'Semi' : 'Anti')) || statement.text.includes('EXISTS (SELECT 1')).toBe(true);
+    expect(result.some((node) => node['Join Type'] === (quantifier === 'ANY' ? 'Semi' : 'Anti'))).toBe(true);
     expect(result.some((node) => node['Index Name'] === 'QfReview__productId__idx' && (node['Index Cond']?.includes('t0.id') || node['Index Cond']?.includes(ids.Ka)))).toBe(true);
   });
   it('probes nested frames, reference before frame, scoped LATERAL, OR and scoped NONE in every batch branch', async () => {

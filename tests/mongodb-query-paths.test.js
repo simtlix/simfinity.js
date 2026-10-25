@@ -274,6 +274,30 @@ describe('MongoDB aggregation paths and facts', () => {
   });
 });
 
+describe('MongoDB shared filter value diagnostics', () => {
+  test.each([
+    ['IN', ['x', null], 'Filter lists require non-null scalar elements'],
+    ['NIN', [null], 'Filter lists require non-null scalar elements'],
+    ['BTW', ['a', null], 'Filter lists require non-null scalar elements'],
+    ['LT', null, 'Expected a scalar filter value'],
+    ['GTE', null, 'Expected a scalar filter value'],
+    ['LIKE', null, 'Expected a scalar filter value'],
+    ['BTW', ['a'], 'BTW requires two values'],
+  ])('pin: reports %s with %j before native compilation', async (operator, value, message) => {
+    const condition = { field: 'title', operator, value };
+    const group = { conditions: [condition] };
+    for (const compile of [
+      () => queries.buildQuery({ title: { operator, value } }, NoteType),
+      () => queries.buildQuery({ AND: [group] }, NoteType),
+      () => queries.buildFilterGroupMatch(group, NoteType, [], {}),
+    ]) {
+      const error = await compile().then(() => null, (caught) => caught);
+      expect(error?.extensions).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
+      expect(error?.message).toBe(message);
+    }
+  });
+});
+
 describe('MongoDB filters on chained validated scalars', () => {
   test('uses the root storage scalar for LIKE and date filters', async () => {
     expect(matchOf(await queries.buildQuery({ workEmail: { operator: 'LIKE', value: '@acme' } }, NoteType)))
@@ -678,6 +702,12 @@ describe('MongoDB emptiness paths', () => {
     // Ignored ordinary terms never hide an emptiness term, even when the actual carrier has no value.
     const error = await holderQueries.buildQuery({ [field]: { terms: [{ path: 'ignored', value: 1 }, { operator: 'IS_EMPTY' }] } }, HolderType).then(() => null, (caught) => caught);
     expect(error?.message).toBe(`IS_EMPTY cannot test ${field}: ${field} is an interface or union field, whose emptiness is not defined`);
+  });
+
+  test.each(['shape', 'shapes', 'either'])('pin: sorts the abstract %s carrier and ignores it in count mode', async (field) => {
+    const args = { sort: { terms: [{ field, order: 'ASC' }] } };
+    expect(await holderQueries.buildQuery(args, HolderType)).toEqual([{ $sort: { [field]: 1 } }, ...PAGE]);
+    expect(await holderQueries.buildQuery(args, HolderType, true)).toEqual([{ $count: 'size' }]);
   });
 
   // Paths that other operators already reject with the same code.

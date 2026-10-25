@@ -563,6 +563,7 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
       throw new SimfinityError('A quantified path must end at a reference or collection', 'INVALID_FILTER_PATH', 400);
     }
     if (!QLQuantifier.getValue(node.quantifier)) throw new SimfinityError('Unknown quantifier', 'INVALID_FILTER_VALUE', 400);
+    if (node.anchor && parts.length !== 1) detached('An anchored quantified path must name the collection or reference alone');
     const joins = joinsOfNode(node, frame);
     if (Object.hasOwn(node, 'scope') && !queryScope(node.scope)) detached('A quantified predicate has an invalid scope');
     if (node.quantifier === 'ALL' && node.where === null) return 'TRUE';

@@ -2044,12 +2044,16 @@ const assertJoinedScopePaths = (rootType, groups, prefix, target) => {
   const depth = prefix.split('.').length;
   for (const { segments, quantifier } of collectQueryPathEntries({ AND: groups })) {
     let inList = false;
-    walkQueryPath(target.gqltype, segments.slice(depth), ({ type, fieldName, field }) => {
+    walkQueryPath(target.gqltype, segments.slice(depth), ({ type, fieldName, field, index }) => {
       const relation = field.extensions?.relation;
       const list = !!getListShape(field.type);
-      if (relation && !relation.embedded && (inList || (list && (!supportsQuantifiers || embeddedPrefix)) || (quantifier && embeddedPrefix))) {
+      if (relation && !relation.embedded && (inList || (list && (!supportsQuantifiers || embeddedPrefix)))) {
         throw forbiddenPath(`Query path ${prefix} enters ${target.gqltype.name}, whose find scope filters through `
           + `${list ? 'the collection' : 'the relation'} ${type.name}.${fieldName}${list ? '' : ' inside a list'}`);
+      }
+      if (relation && !relation.embedded && quantifier && embeddedPrefix && index === segments.length - depth - 1) {
+        throw forbiddenPath(`Query path ${prefix} enters ${target.gqltype.name}, whose find scope tests `
+          + `the quantified reference ${type.name}.${fieldName} under an embedded-list prefix`);
       }
       inList = relation && !relation.embedded ? false : inList || list;
     });

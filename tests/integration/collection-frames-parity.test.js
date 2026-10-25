@@ -22,6 +22,74 @@ const sorted = (rows) => rows.map((row) => row.key).sort();
 const pins = new Set(['ALL alone', 'ALL alone AND neutral', 'reference inside frame EQ', 'ALL reference shop alone', 'ALL reference pro alone']);
 const shapes = REFERENCE_SHAPES;
 
+describe.skipIf(!mongoUri || !postgresUri).each([
+  ['Product', [
+    ['nested reference', 'shop', { AND: [{ ANY: [{ path: 'products', conditions: [condition('pro.name', 'P2')] }] }] }, { admin: ['S1', 'S2'], NE: [] }],
+    ['nested collection', 'shop', { AND: [{ ANY: [{ path: 'products', ANY: [{ path: 'reviews', conditions: [condition('rating', 5, 'GTE')] }] }] }] }, { admin: ['S1', 'S3'], NE: ['S1'] }],
+  ]],
+  ['Review', [
+    ['nested item reference', 'product', { AND: [{ ANY: [{ path: 'reviews', conditions: [condition('item.name', 'c')] }] }] }, { admin: ['Ka'], NE: [] }],
+  ]],
+])('MongoDB/PostgreSQL nested-only collection scopes with unscoped %s', (unscoped, cases) => {
+  const namespace = `qframes_nested_${randomUUID().replaceAll('-', '')}`;
+  let pool;
+  const backends = [];
+  beforeAll(async () => {
+    await mongoose.connect(mongoUri, { dbName: namespace });
+    pool = new pg.Pool({ connectionString: postgresUri });
+    for (const name of ['mongodb', 'postgres']) {
+      const adapter = name === 'mongodb' ? createMongoAdapter()
+        : createSQLAdapter(postgresPlugin({ pool, schema: namespace }));
+      const api = createRuntime(adapter);
+      const types = createReferenceEmptinessTypes(`Qfn${unscoped}`, {
+        backend: name,
+        scopes: { product: { find: ({ args, context }) => {
+          if (context?.shape === 'NE') args.name = { operator: 'NE', value: 'c' };
+        } } },
+      });
+      types[unscoped].extensions = {};
+      if (unscoped === 'Review') {
+        types.Review.getFields().item = { name: 'item', type: types.Product, args: [], extensions: { relation: { embedded: false } } };
+      }
+      if (name === 'mongodb') api.preventCreatingCollection(true);
+      registerReferenceEmptinessTypes(api, types);
+      const schema = api.createSchema();
+      if (adapter.initialize) await adapter.initialize();
+      else for (const { model } of api.getRegistrations()) if (model) { await model.createCollection(); await model.init(); }
+      const ids = await seedCollectionFrames(schema, types);
+      if (unscoped === 'Review') {
+        // The outer product Ka stays visible: only its review's item points to hidden product c.
+        const result = await graphql({
+          schema,
+          source: `mutation($input:${types.Review.name}InputForUpdate!){update${types.roots.review.single}(input:$input){id}}`,
+          variableValues: { input: { id: ids['Ka:5:x'], item: { id: ids.c } } },
+        });
+        expect(result.errors).toBeUndefined();
+      }
+      backends.push({ name, types, schema });
+    }
+  }, 60000);
+  afterAll(async () => {
+    if (mongoose.connection.readyState) { await mongoose.connection.db.dropDatabase(); await mongoose.disconnect(); }
+    if (pool) { await pool.query(`DROP SCHEMA IF EXISTS "${namespace}" CASCADE`); await pool.end(); }
+  });
+  it.each(cases)('pin: %s applies its inner scope to rows and counts', async (name, root, args, expected) => {
+    for (const shape of ['admin', 'NE']) {
+      const rows = [];
+      for (const backend of backends) {
+        expect(backend.types[unscoped].extensions.scope).toBeUndefined();
+        const context = { shape };
+        const field = backend.schema.getQueryType().getFields()[backend.types.roots[root].plural];
+        const result = await field.resolve(null, { ...structuredClone(args), pagination: { page: 1, size: 100, count: true } }, context);
+        rows.push(sorted(result));
+        expect(sorted(result), `${backend.name} ${shape}`).toEqual(expected[shape]);
+        expect(context.count, `${backend.name} ${shape}`).toBe(expected[shape].length);
+      }
+      expect(rows[1]).toEqual(rows[0]);
+    }
+  });
+});
+
 describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL collection frame parity', () => {
   const namespace = `qframes_parity_${randomUUID().replaceAll('-', '')}`;
   let pool; let backends;

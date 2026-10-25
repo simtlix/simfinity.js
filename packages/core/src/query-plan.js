@@ -367,6 +367,9 @@ export const createQueryPlan = (models, entityName, source = {}, {
       if (condition.field.includes('.') && condition.path) fail('Filter condition cannot use both dotted field syntax and a separate path', 'AMBIGUOUS_FILTER_FIELD');
       terms.push(predicate(condition.path ? `${condition.field}.${condition.path}` : condition.field, condition.operator, condition.value, condition, frameEntity, inFrame));
     }
+    if (quantifiers !== true && QUANTIFIED_LISTS.some((key) => value[key] != null)) {
+      fail('Quantified groups are not supported by this query compiler', 'UNSUPPORTED_QUERY');
+    }
     for (const quantifier of QUANTIFIED_LISTS) for (const item of value[quantifier] || []) {
       const anchor = item.__implicit === true ? item.__anchor : undefined;
       const path = item.path.split('.');

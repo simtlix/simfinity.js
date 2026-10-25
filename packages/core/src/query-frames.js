@@ -315,7 +315,7 @@ const validateSort = (args, ctx) => {
         fail(`Sort path ${term.field} crosses the collection ${type}.${step.name}; a record has no single value there`, 'INVALID_FILTER_PATH');
       }
     });
-    if (!['scalar', 'scalarList'].includes(steps.at(-1).kind)) fail('Sort path must end in a scalar field', 'INVALID_FILTER_PATH');
+    if (!valueLeaf(steps.at(-1), ctx)) fail('Sort path must end in a scalar field', 'INVALID_FILTER_PATH');
   }
 };
 

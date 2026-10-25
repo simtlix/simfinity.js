@@ -147,6 +147,16 @@ describe('MongoDB collection frame compiled forms', () => {
       expect(await build(input)).toStrictEqual(expected);
     }
   });
+  test.each([
+    { quantifier: 'NONE', terms: [{ operator: 'IS_NOT_EMPTY' }] },
+    { quantifier: 'ANY', terms: [{ operator: 'EQ', value: 1 }] },
+    { quantifier: 'ANY', terms: [{ path: '' }] },
+  ])('pin: direct buildQuery rejects a path-less quantified term: %j', async (reviews) => {
+    await expect(build({ reviews })).rejects.toMatchObject({
+      message: 'Relationship terms require a path',
+      extensions: { code: 'INVALID_FILTER_PATH', status: 400 },
+    });
+  });
   test.each(['ANY', 'NONE', 'ALL'])('%s predicates and where:null forms', async (quantifier) => {
     const match = { rating: { $gte: 4 } };
     const body = quantifier === 'ALL' ? { $nor: [match] } : match;
@@ -237,6 +247,24 @@ describe('MongoDB collection frame compiled forms', () => {
     ]);
     const through = await f.queries.buildAggregationQuery({}, f.types.Product, { ...expression, groupId: 'shop.products.key' });
     expect(through[2].$lookup).toMatchObject({ localField: '__sf_l0._id', foreignField: 'shop', pipeline: [{ $match: { shop: { $ne: null } } }] });
+  });
+  test('pin: J-only aggregate shorthand keeps the complete legacy AND pipeline', async () => {
+    const expression = { groupId: 'key', facts: [
+      { operation: 'COUNT', factName: 'n', path: 'reviews.id' },
+      { operation: 'SUM', factName: 'rating', path: 'reviews.rating' },
+    ] };
+    const shorthand = { reviews: { terms: [{ path: 'rating', operator: 'GTE', value: 5 }] } };
+    const expected = [
+      { $lookup: { from: from('Review'), foreignField: 'productId', localField: '_id', as: '__sf_l0' } },
+      { $unwind: { path: '$__sf_l0', preserveNullAndEmptyArrays: true } },
+      { $match: { '__sf_l0.rating': { $gte: 5 } } },
+      { $group: { _id: '$key', fact_0: { $sum: 1 }, fact_1: { $sum: '$__sf_l0.rating' } } },
+      { $project: { _id: 0, groupId: '$_id', facts: { n: '$fact_0', rating: '$fact_1' } } },
+      { $sort: { groupId: 1 } },
+    ];
+    const pipeline = await f.queries.buildAggregationQuery(shorthand, f.types.Product, expression);
+    expect(pipeline).toStrictEqual(expected);
+    expect(pipeline).toStrictEqual(await f.queries.buildAggregationQuery(args(condition('reviews.rating', 5)), f.types.Product, expression));
   });
   test('explicit ALL on aggregate J keeps a nested frame rather than legacy joins in its body', async () => {
     const pipeline = await f.queries.buildAggregationQuery({ AND: [{ ALL: [{ path: 'products', conditions: [condition('reviews.rating', 5)] }] }] }, f.types.Shop, {
