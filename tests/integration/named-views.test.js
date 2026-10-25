@@ -179,9 +179,9 @@ for (const [backend, uri] of [
         expect(view.data.openItems).toBeNull();
         const list = await run(listSource({}, [group]), { tenant: 'a' });
         // Separate requests can fail in different seconds; their semantic error fields must still agree.
-      expect(list.errors[0].extensions).toEqual({
-        ...view.errors[0].extensions, timestamp: expect.any(String),
-      });
+        expect(list.errors[0].extensions).toEqual({
+          ...view.errors[0].extensions, timestamp: expect.any(String),
+        });
       });
     });
 
