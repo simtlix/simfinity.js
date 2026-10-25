@@ -520,12 +520,12 @@ describe('runtime with an adapter that declares no queryFeatures', () => {
     expect(calls.map((call) => call.method)).toEqual(['find']);
   });
 
-  it('leaves operators outside QLOperator to the adapter, as before', async () => {
-    const { run, calls } = build(undefined);
+  it.each([undefined, { operators: ALL, referenceEmptiness: true, quantifiers: true }])('rejects an unknown actual predicate before the adapter (%j)', async (features) => {
+    const { run, calls } = build(features);
     const result = await run('{ qtItems { id } }', { middleware: (params) => { params.args.name = { operator: 'SOUNDS_LIKE', value: 'a' }; } });
     expect(result.codes).toEqual(['INVALID_FILTER_OPERATOR']);
-    // The adapter received the condition and its plan rejected it, as in 3.7.0.
-    expect(calls.map((call) => [call.method, call.args.name])).toEqual([['find', { operator: 'SOUNDS_LIKE', value: 'a' }]]);
+    // The mandatory shared gate checks trusted actual predicates as well as client input.
+    expect(calls).toEqual([]);
   });
 });
 
@@ -545,8 +545,8 @@ describe('queryFeatures declarations', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('ignores operator names this version does not know', async () => {
-    const { run } = build({ operators: [...ALL, 'CONTAINS_ALL'], quantifiers: true });
+  it('pin: ignores operator names and future feature fields this version does not know', async () => {
+    const { run } = build({ operators: [...ALL, 'CONTAINS_ALL'], futureCollectionFeature: true });
     expect((await run('{ qtItems(name: { operator: IEQ, value: "alpha" }) { id } }')).data.qtItems).toEqual([{ id: 'i1' }]);
   });
 

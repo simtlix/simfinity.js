@@ -318,7 +318,7 @@ for (const backend of backends) {
       ]);
     });
 
-    it('rejects masked, non-queryable and scoped collection paths', async () => {
+    it('rejects masked and non-queryable paths and scopes collection frames', async () => {
       for (const context of [viewer, admin]) {
         await forbiddenPath(`{qpiposts_aggregate(${countBy('author.passwordHash')}) {groupId facts}}`, context);
         await forbiddenPath('{qpiposts(author: {terms: [{path: "passwordHash", operator: LT, value: "hash-b"}]}) {title}}', context);
@@ -326,9 +326,9 @@ for (const backend of backends) {
         await forbiddenPath('{qpiusers(tenant: {value: "B"}) {name}}', context);
         await forbiddenPath(`{qpiteam(id: "${teams.Public}") {members(passwordHash: {value: "hash-ada"}) {name}}}`, context);
       }
-      // A scoped collection is rejected while its scope restricts the caller.
+      // Collection frames apply the child scope inside the lookup.
       const bobsTeams = '{qpiteams(members: {terms: [{path: "name", value: "bob"}]}) {name}}';
-      await forbiddenPath(bobsTeams);
+      expect((await ok(bobsTeams)).data.qpiteams).toEqual([]);
       expect((await ok(bobsTeams, admin)).data.qpiteams).toEqual([{ name: 'Beta' }]);
       expect(await titles('author: {terms: [{path: "nickname", value: "ann-nick"}]}')).toEqual(['Ann post']);
       const users = await ok('{qpiusers(sort: {terms: [{field: "name", order: ASC}]}) {name tenant passwordHash}}');
@@ -339,14 +339,15 @@ for (const backend of backends) {
       ]);
     });
 
-    it('rejects paths into a type whose find scope filters through a collection', async () => {
+    it('applies joined find scopes containing collection frames', async () => {
       const notes = async (args, context) => (
         await ok(`{qpinotes(${args}) {title}}`, context)
       ).data.qpinotes.map((note) => note.title);
       expect(await notes('sort: {terms: [{field: "title", order: ASC}]}')).toEqual(['Ann note', 'Bob note']);
-      await forbiddenPath('{qpinotes(sort: {terms: [{field: "member.name", order: ASC}]}) {title}}');
-      await forbiddenPath('{qpinotes(member: {terms: [{path: "name", value: "bob"}]}) {title}}');
-      await forbiddenPath(`{qpinotes_aggregate(${countBy('member.name')}) {groupId facts}}`);
+      expect(await notes('sort: {terms: [{field: "member.name", order: ASC}]}')).toEqual(['Ann note']);
+      expect(await notes('member: {terms: [{path: "name", value: "bob"}]}')).toEqual([]);
+      const admitted = await ok(`{qpinotes_aggregate(${countBy('member.name')}) {groupId facts}}`);
+      expect(admitted.data.qpinotes_aggregate).toEqual([{ groupId: 'ann', facts: { n: 1 } }]);
       // When the scope adds nothing, paths through the member keep one row per note.
       expect(await notes('sort: {terms: [{field: "member.name", order: DESC}]}', admin)).toEqual(['Bob note', 'Ann note']);
       expect(await notes('member: {terms: [{path: "name", value: "ann"}]}', admin)).toEqual(['Ann note']);

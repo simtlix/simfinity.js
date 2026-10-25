@@ -198,7 +198,7 @@ describe('MongoDB text operator compilation', () => {
       ]);
     });
 
-    test('relation, embedded and collection paths keep their lookups, matches, sorts and unset', async () => {
+    test('reference and embedded paths keep their forms while collections use frames', async () => {
       expect(await build({
         shop: { terms: [{ path: 'name', operator: 'LIKE', value: 'North' }] },
         reviews: { terms: [{ path: 'author', value: null }] },
@@ -209,22 +209,23 @@ describe('MongoDB text operator compilation', () => {
         ...shopLookup,
         {
           $lookup: {
-            from: 'QtmPlanReview', foreignField: 'product', localField: '_id', as: '__sf_l1',
+            from: 'QtmPlanReview', foreignField: 'product', localField: '_id', as: '__sf_q0',
+            pipeline: [{ $match: { author: null } }, { $limit: 1 }, { $project: { _id: 1 } }],
           },
         },
-        { $unwind: { path: '$__sf_l1', preserveNullAndEmptyArrays: true } },
         {
           $match: {
-            '__sf_l0.name': { $regex: '.*North.*' },
-            '__sf_l1.author': null,
-            'lines.sku': { $regex: '.*\\(x\\).*' },
-            'lines.qty': { $gt: 1 },
-            tags: { $regex: '.*.*' },
+            $and: [{
+              '__sf_l0.name': { $regex: '.*North.*' },
+              'lines.sku': { $regex: '.*\\(x\\).*' },
+              'lines.qty': { $gt: 1 },
+              tags: { $regex: '.*.*' },
+            }, { '__sf_q0.0': { $exists: true } }],
           },
         },
         { $sort: { '__sf_l0.name': -1 } },
         ...page,
-        { $unset: ['__sf_l0', '__sf_l1'] },
+        { $unset: ['__sf_l0', '__sf_q0'] },
       ]);
     });
 
@@ -332,8 +333,13 @@ describe('MongoDB text operator compilation', () => {
         ...page,
         { $unset: ['__sf_l0'] },
       ]);
-      expect((await build({ reviews: { terms: [{ path: 'author', operator: 'ISTARTS_WITH', value: 'ab' }] } }))[2])
-        .toEqual({ $match: { '__sf_l0.author': prefix } });
+      const collectionPipeline = await build({ reviews: { terms: [{ path: 'author', operator: 'ISTARTS_WITH', value: 'ab' }] } });
+      expect(collectionPipeline[0]).toStrictEqual({
+        $lookup: {
+          from: 'QtmPlanReview', localField: '_id', foreignField: 'product',
+          pipeline: [{ $match: { author: prefix } }, { $limit: 1 }, { $project: { _id: 1 } }], as: '__sf_q0',
+        },
+      });
       // Group conditions, by field and path or by a dotted field, and nested groups.
       expect(await build({
         AND: [{
@@ -424,7 +430,7 @@ describe('MongoDB text operator compilation', () => {
   describe('queryFeatures', () => {
     test('the adapter declares every QLOperator value, listed explicitly, and reference emptiness', () => {
       for (const adapter of [fixture.adapter, createMongoAdapter({ batchedCollections: true })]) {
-        expect(adapter.queryFeatures).toEqual({ operators: [...LEGACY, ...TEXT, ...EMPTINESS], referenceEmptiness: true });
+        expect(adapter.queryFeatures).toEqual({ operators: [...LEGACY, ...TEXT, ...EMPTINESS], referenceEmptiness: true, quantifiers: true });
         expect(Object.isFrozen(adapter.queryFeatures)).toBe(true);
         expect(Object.isFrozen(adapter.queryFeatures.operators)).toBe(true);
       }
@@ -757,8 +763,8 @@ describe.each(servers)('MongoDB text operators on a %s', (_label, uri, prefix) =
       expect(await keys(term('reviews', 'author', 'ILIKE'), 'ana')).toEqual(['p01', 'p02', 'p03']);
       expect(await keys(term('reviews', 'author', 'IEQ'), 'ana')).toEqual(['p01']);
       expect(await keys(term('reviews', 'author', 'ENDS_WITH'), 'Ana')).toEqual(['p01', 'p03']);
-      // A collection path keeps one row per matching child.
-      expect(await keys(term('reviews', 'author', 'ISTARTS_WITH'), '')).toEqual(['p01', 'p01', 'p02', 'p03']);
+      // A collection frame keeps each matching parent once.
+      expect(await keys(term('reviews', 'author', 'ISTARTS_WITH'), '')).toEqual(['p01', 'p02', 'p03']);
     });
 
     test('AND and OR groups', async () => {
@@ -781,7 +787,7 @@ describe.each(servers)('MongoDB text operators on a %s', (_label, uri, prefix) =
       expect(context.count).toBe(4);
       const counted = {};
       await fixture.run(`{ ${fixture.products}(reviews: {terms: [{path: "author", operator: ISTARTS_WITH, value: ""}]}, pagination: {page: 1, size: 1, count: true}) { key } }`, undefined, counted);
-      expect(counted.count).toBe(4);
+      expect(counted.count).toBe(3);
     });
 
     test('aggregate filters', async () => {

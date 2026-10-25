@@ -217,8 +217,8 @@ const offline = () => {
   const models = describeModels(registrations);
   const bare = { entities: models.entities.map((entity) => Object.fromEntries(Object.entries(entity).filter(([key]) => key !== 'gqltype'))) };
   const database = describeDatabase(registrations, { schema: 'app' });
-  const { operators } = postgresPlugin().queryFeatures;
-  const plan = (entity, args, mode = 'count') => createQueryPlan(models, `Qr${entity}`, args, { mode, operators, referenceEmptiness: true });
+  const { operators, quantifiers } = postgresPlugin().queryFeatures;
+  const plan = (entity, args, mode = 'count') => createQueryPlan(models, `Qr${entity}`, args, { mode, operators, referenceEmptiness: true, quantifiers });
   const statement = (entity, args, mode = 'count') => compileQuery(models, database, plan(entity, args, mode));
   return { types, kit, models, bare, database, operators, plan, statement };
 };
@@ -300,15 +300,15 @@ describe('PostgreSQL reference emptiness statements', () => {
   });
 
   it('compiles a scope in its own frame: its joins inside the subquery after its alias, its emptiness trusted, and nested frames', () => {
-    // Shop's scope crosses the collection products: its LEFT JOIN is the frame's, after the frame's alias.
+    // Shop's scope crosses products with a nested frame inside the outer frame.
     const crossing = { products: { terms: [{ path: 'name', operator: 'EQ', value: 'Ka' }] } };
-    const joined = 'LEFT JOIN "app"."QrProduct" t3 ON t3."shop" = t2."id"';
+    const crossingSQL = '(EXISTS (SELECT 1 FROM "app"."QrProduct" t3 WHERE t3."shop" = t2."id" AND ((t3."name") COLLATE "pg_catalog"."C" = $1::text)))';
     expect(statement('Product', term('shop', 'state', 'IS_EMPTY', { shop: crossing }))).toEqual({
-      text: count('Product', lateral('t1', 't2', 'Shop', 't0."shop"', '((t3."name") COLLATE "pg_catalog"."C" = $1::text)', joined), `(${string('t1."state"')[0]})`),
+      text: count('Product', lateral('t1', 't2', 'Shop', 't0."shop"', crossingSQL), `(${string('t1."state"')[0]})`),
       values: ['Ka'],
     });
     expect(statement('Product', shop('IS_EMPTY', { shop: crossing })).text)
-      .toBe(count('Product', '', '(NOT EXISTS (SELECT 1 FROM "app"."QrShop" t1 LEFT JOIN "app"."QrProduct" t2 ON t2."shop" = t1."id" WHERE t1."id" = t0."shop" AND ((t2."name") COLLATE "pg_catalog"."C" = $1::text)))'));
+      .toBe(count('Product', '', '(NOT EXISTS (SELECT 1 FROM "app"."QrShop" t1 WHERE t1."id" = t0."shop" AND (EXISTS (SELECT 1 FROM "app"."QrProduct" t2 WHERE t2."shop" = t1."id" AND ((t2."name") COLLATE "pg_catalog"."C" = $1::text)))))'));
     // Emptiness inside a scope is trusted: a reference reads its column, a String its two forms, a collection a frame
     // of its own, nested in the scope's frame.
     const scope = { name: { operator: 'IS_NOT_EMPTY' }, AND: [{ conditions: [{ field: 'products', operator: 'IS_NOT_EMPTY' }] }] };
@@ -514,9 +514,9 @@ describe('PostgreSQL reference emptiness declaration', () => {
   it('declares referenceEmptiness in the PostgreSQL plugin, and bindPlugin copies it under the compileQuery identity rule', () => {
     expect(postgresPlugin().queryFeatures.referenceEmptiness).toBe(true);
     const bound = bindPlugin(postgresPlugin());
-    expect(bound.queryFeatures).toEqual({ operators: ALL, referenceEmptiness: true });
+    expect(bound.queryFeatures).toEqual({ operators: ALL, referenceEmptiness: true, quantifiers: true });
     expect(Object.isFrozen(bound.queryFeatures)).toBe(true);
-    expect(createSQLAdapter(postgresPlugin()).queryFeatures).toEqual({ operators: ALL, referenceEmptiness: true });
+    expect(createSQLAdapter(postgresPlugin()).queryFeatures).toEqual({ operators: ALL, referenceEmptiness: true, quantifiers: true });
     const custom = (...args) => compileQuery(...args);
     // A copy with another compileQuery inherits a declaration that names the bundled one: the operators of 3.7.0 and
     // no reference emptiness, until it declares its own.
@@ -542,7 +542,7 @@ describe('PostgreSQL reference emptiness declaration', () => {
 
 describe.skipIf(!uri)('PostgreSQL reference emptiness rows', () => {
   const namespace = `qb4_${randomUUID().replaceAll('-', '')}`;
-  let pool; let api; let types; let kit; let entities; let ids; let models; let database; let operators;
+  let pool; let api; let types; let kit; let entities; let ids; let models; let database; let operators; let quantifiers;
   const rootTypeOf = (rootKey) => (rootKey === 'kit' ? kit.Kit : types.roots[rootKey].type);
   const keys = async (rootKey, args) => (await api.getModel(rootTypeOf(rootKey)).find(args)).map((record) => record.key).sort();
   // The client's arguments as the runtime hands them to the adapter: marked and filled, legacy joined scopes added,
@@ -574,7 +574,7 @@ describe.skipIf(!uri)('PostgreSQL reference emptiness rows', () => {
     }
     models = describeModels(api.getRegistrations());
     database = api.describeDatabase();
-    ({ operators } = postgresPlugin().queryFeatures);
+    ({ operators, quantifiers } = postgresPlugin().queryFeatures);
   }, 120000);
   afterAll(async () => {
     if (pool) {
@@ -642,7 +642,7 @@ describe.skipIf(!uri)('PostgreSQL reference emptiness rows', () => {
     for (const item of constructCases.filter((entry) => entry.root === 'product')) {
       for (const shape of ['NE', 'EQ', 'proOnly']) {
         const rows = expectedReferenceRows(item, shape);
-        const plan = (mode, extra = {}) => createQueryPlan(models, 'QrProduct', { ...clientArgs('product', referenceCaseArgs(item, ids), shape), ...extra }, { mode, operators, referenceEmptiness: true });
+        const plan = (mode, extra = {}) => createQueryPlan(models, 'QrProduct', { ...clientArgs('product', referenceCaseArgs(item, ids), shape), ...extra }, { mode, operators, referenceEmptiness: true, quantifiers });
         expect((await run(compileQuery(models, database, plan('count'))))[0].size, `${item.name} ${shape}`).toBe(String(rows.length));
         const grouped = await run(compileQuery(models, database, plan('aggregate', { aggregation: { groupId: 'key', facts: [{ path: 'id', operation: 'COUNT', factName: 'n' }] } })));
         expect(grouped.map((row) => row.groupId).sort(), `${item.name} ${shape}`).toEqual(rows);
@@ -655,7 +655,7 @@ describe.skipIf(!uri)('PostgreSQL reference emptiness rows', () => {
     for (const item of constructCases.filter((entry) => entry.root === 'product')) {
       for (const shape of ['admin', 'NE', 'EQ', 'proOnly', 'shopEQ']) {
         const args = { ...clientArgs('product', referenceCaseArgs(item, ids, 'condition'), shape), sort: { terms: [{ field: 'key', order: 'ASC' }] }, pagination: { page: 1, size: 10 } };
-        const plan = createQueryPlan(models, 'QrProduct', args, { mode: 'find', operators, referenceEmptiness: true });
+        const plan = createQueryPlan(models, 'QrProduct', args, { mode: 'find', operators, referenceEmptiness: true, quantifiers });
         const batched = compileChildrenQuery(models, database, plan, { column: 'shop', ids: parents });
         const byParent = parents.map(() => []);
         for (const row of await run(batched)) byParent[Number(row[batched.parentColumn]) - 1].push(row.key);
@@ -791,7 +791,7 @@ describe.skipIf(!uri)('PostgreSQL reference emptiness rows', () => {
     const find = (rootKey, path, operator, shape) => {
       const [head, ...rest] = path.split('.');
       const args = clientArgs(rootKey, { [head]: { terms: [{ ...(rest.length ? { path: rest.join('.') } : {}), operator }] } }, shape);
-      return compileQuery(models, database, createQueryPlan(models, rootTypeOf(rootKey).name, args, { operators, referenceEmptiness: true }));
+      return compileQuery(models, database, createQueryPlan(models, rootTypeOf(rootKey).name, args, { operators, referenceEmptiness: true, quantifiers }));
     };
 
     it('probes the target\'s primary key from frames and scoped joins, and the connection index from collection frames', async () => {
@@ -822,7 +822,7 @@ describe.skipIf(!uri)('PostgreSQL reference emptiness rows', () => {
     });
 
     it('serves a trusted reference IS_EMPTY with the generated index of its column', async () => {
-      const statement = compileQuery(models, database, createQueryPlan(models, 'QrProduct', { shop: { terms: [{ operator: 'IS_EMPTY' }] } }, { operators, referenceEmptiness: true }));
+      const statement = compileQuery(models, database, createQueryPlan(models, 'QrProduct', { shop: { terms: [{ operator: 'IS_EMPTY' }] } }, { operators, referenceEmptiness: true, quantifiers }));
       expect(statement.text).toContain('WHERE (t0."shop" IS NULL)');
       expect(scans(await explain(statement))).toEqual([['QrProduct__shop__idx', '(shop IS NULL)']]);
     });
@@ -830,7 +830,7 @@ describe.skipIf(!uri)('PostgreSQL reference emptiness rows', () => {
     it('probes the same indexes in every branch of a batched children statement', async () => {
       const parents = ['S1', 'S2', 'S3'].map((key) => ids[key]);
       const args = { ...clientArgs('product', { pro: { terms: [{ path: 'shop', operator: 'IS_EMPTY' }] } }, 'NE'), pagination: { page: 1, size: 10 } };
-      const plan = createQueryPlan(models, 'QrProduct', args, { mode: 'find', operators, referenceEmptiness: true });
+      const plan = createQueryPlan(models, 'QrProduct', args, { mode: 'find', operators, referenceEmptiness: true, quantifiers });
       const used = scans(await explain(compileChildrenQuery(models, database, plan, { column: 'shop', ids: parents })));
       // EXPLAIN names each branch's copies of the aliases apart: t0, t0_1, t0_2.
       expect(used.filter(([name]) => name === 'QrPro__pk')).toEqual(parents.map(() => ['QrPro__pk', expect.stringMatching(/^\(id = t0(_\d+)?\.pro\)$/)]));

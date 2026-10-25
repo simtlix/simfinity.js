@@ -193,6 +193,7 @@ export interface SQLChildrenQueryCompiler<
  * as a `compileChildrenQuery` names the `compileQuery` it reproduces. `referenceEmptiness` may be null, which means
  * false like undefined; any other value that is not a boolean throws `INVALID_SQL_PLUGIN` (400). The adapter's
  * bound `queryFeatures` holds `referenceEmptiness: true` only when the declaration holds and says true.
+ * `quantifiers` uses the same boolean/null and compiler identity rules, and true requires referenceEmptiness true.
  */
 export interface SQLQueryFeatures<
   Configuration extends object = SQLConfiguration,
@@ -341,6 +342,15 @@ export interface SQLPlugin<
    * a scope hides reads as missing. A null hop after a restricted one still reads through that restricted join. A
    * `scopes` that lacks a key for one of those paths must not compile as trusted; `postgresPlugin()` fails such a
    * plan with `DETACHED_CLIENT_FILTER` (500).
+   *
+   * `quantifiers: true` also declares correlated collection/reference frames: ANY, NONE and ALL. The compiler
+   * receives `kind: 'quantified'` with element-relative `where`, a target `scope`, optional reference `joins`,
+   * and aggregate `anchor` paths sharing legacy joins (never alongside joins). ALL needs a two-valued body under
+   * NOT EXISTS, so a null operand fails an ordering condition; ALL without a body is TRUE. Every crossing key must be
+   * present when joins is supplied. A malformed scope or missing crossing is DETACHED_CLIENT_FILTER (500).
+   * A vector reference with null target scope keeps every target and any restricted prefix; a non-null target
+   * scope inside an embedded list is FORBIDDEN_FILTER_PATH (403).
+   * The flag follows the compileQuery identity rule and requires referenceEmptiness true.
    */
   queryFeatures?: SQLQueryFeatures<Configuration, Description, Id> | null | undefined;
   naming: SQLNaming;

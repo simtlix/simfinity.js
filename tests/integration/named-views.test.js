@@ -178,7 +178,10 @@ for (const [backend, uri] of [
         expect(view.errors[0].extensions).toMatchObject({ code: 'FILTER_DEPTH_EXCEEDED', status: 400 });
         expect(view.data.openItems).toBeNull();
         const list = await run(listSource({}, [group]), { tenant: 'a' });
-        expect(list.errors[0].extensions).toEqual(view.errors[0].extensions);
+        // Separate requests can fail in different seconds; their semantic error fields must still agree.
+        expect(list.errors[0].extensions).toEqual({
+          ...view.errors[0].extensions, timestamp: expect.any(String),
+        });
       });
     });
 
@@ -227,8 +230,10 @@ for (const [backend, uri] of [
       expect(view.errors[0].extensions.code).toBe(code);
       expect(view.data.shopItems).toBeNull();
       const list = await run(listSource({}, [shopGroup('not-an-id')]), { tenant: 'a' });
-      // Separate errors can be created on opposite sides of a UTC second boundary.
-      expect(list.errors[0].extensions).toEqual({ ...view.errors[0].extensions, timestamp: expect.any(String) });
+      // Separate requests can fail in different seconds; their semantic error fields must still agree.
+      expect(list.errors[0].extensions).toEqual({
+        ...view.errors[0].extensions, timestamp: expect.any(String),
+      });
     });
 
     it('rejects the view when middleware rejects the list', async () => {

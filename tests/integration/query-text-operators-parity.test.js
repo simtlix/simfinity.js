@@ -96,7 +96,7 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL text operator par
       expect(aggregate.errors).toBeUndefined();
       aggregates[backend.name] = aggregate.data.qtItems_aggregate;
     }
-    expect(counts).toEqual(alike({ rows: ['B'], count: 2, repeated: 3 }));
+    expect(counts).toEqual(alike({ rows: ['B'], count: 2, repeated: 2 }));
     expect(aggregates).toEqual(alike([{ groupId: 1, facts: { n: 1 } }, { groupId: 2, facts: { n: 1 } }]));
   });
 

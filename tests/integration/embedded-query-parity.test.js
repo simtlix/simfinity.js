@@ -169,7 +169,8 @@ describe.skipIf(!mongoUri || !postgresUri)('embedded query differential parity',
       results.forEach((r) => expect(r.errors).toBeUndefined());
       expect(results[1].data).toEqual(results[0].data);
       expect(contexts[1].count).toBe(contexts[0].count);
-      if (source.includes('pagination:')) expect(contexts[1].count).toBe(4);
+      // The collection predicate is boolean; only the existing vector reference duplicates the root.
+      if (source.includes('pagination:')) expect(contexts[1].count).toBe(2);
     }
   });
   it('uses immediate array elements for default group ordering, with lexicographic nested arrays', async () => {
