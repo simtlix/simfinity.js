@@ -10,7 +10,7 @@ import {
 } from 'graphql';
 
 import SimfinityError from './errors/simfinity.error.js';
-import { captureClientDescriptor } from './client-descriptor.js';
+import { captureSchemaRegistrations } from './schema-registrations.js';
 import InternalServerError from './errors/internal-server.error.js';
 import { ForbiddenError } from './auth/errors.js';
 import QLOperator from './const/QLOperator.js';
@@ -3494,7 +3494,7 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
   }
 
   const schema = constructSchema(query, mutation);
-  captureClientDescriptor(schema, Object.values(typesDict.types).map((entry) => ({
+  captureSchemaRegistrations(schema, Object.values(typesDict.types).map((entry) => ({
     gqltype: entry.gqltype, endpoint: entry.endpoint,
     // Only associate roots generated for this schema. Excluded endpoint names can be custom queries.
     simpleEntityEndpointName: shouldNotBeIncludedInSchema(includedQueryTypes, entry.gqltype)

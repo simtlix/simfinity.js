@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { GraphQLObjectType, GraphQLSchema, GraphQLString, __Field, buildClientSchema, introspectionFromSchema, validateSchema } from 'graphql';
+import { GraphQLObjectType, GraphQLSchema, GraphQLString, __Field, buildClientSchema, graphql, introspectionFromSchema, validateSchema } from 'graphql';
 
 const scenario = process.argv[2];
+if (scenario === 'descriptor') await import('@simtlix/simfinity-descriptor');
 const config = await import('../../packages/core/src/introspection-config.js');
 const configure = config.configureIntrospection;
 const plain = () => new GraphQLSchema({ query: new GraphQLObjectType({ name: 'Plain', fields: { hello: { type: GraphQLString } } }) });
@@ -30,10 +31,22 @@ if (scenario === 'late' || scenario === 'foreign') {
   }
   configure({ fieldExtensions: false });
   const runtime = runtimeModule.createRuntime({ createModel: (type) => ({ name: type.name }) });
-  runtime.connect(null, new GraphQLObjectType({ name: 'RelationType', fields: { title: { type: GraphQLString } } }), 'book', 'books');
+  const RelationType = new GraphQLObjectType({ name: 'RelationType', fields: { title: { type: GraphQLString } } });
+  runtime.connect(null, RelationType, 'book', 'books');
+  runtime.registerCustomQuery('applicationRecord', 'An application type, not introspection metadata', null, RelationType, () => ({ title: 'example' }));
   const schema = runtime.createSchema();
   assert.deepEqual(validateSchema(schema), []);
   assert.equal(schema.getType('FieldExtensionsType'), undefined);
   assert.equal(__Field.getFields().extensions, undefined);
   for (const item of [before, plain(), schema]) assert.deepEqual(validateSchema(buildClientSchema(introspectionFromSchema(item))), []);
+  if (scenario.startsWith('auth-')) {
+    runtimeModule.auth.createAuthPlugin({ RootQueryType: { applicationRecord: () => true } }, {
+      defaultPolicy: scenario === 'auth-deny' ? 'DENY' : 'ALLOW',
+    }).onSchemaChange({ schema });
+    const metadata = await graphql({ schema, source: '{ __type(name: "RelationType") { name } }' });
+    assert.equal(metadata.errors, undefined); assert.equal(metadata.data.__type.name, 'RelationType');
+    const result = await graphql({ schema, source: '{ applicationRecord { title } }' });
+    if (scenario === 'auth-deny') assert.equal(result.errors[0].extensions.code, 'FORBIDDEN');
+    else { assert.equal(result.errors, undefined); assert.equal(result.data.applicationRecord.title, 'example'); }
+  }
 }

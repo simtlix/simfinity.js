@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { buildClientDescriptor } from './client-descriptor.js';
-import SimfinityError from './errors/simfinity.error.js';
+import SimfinityError from '@simtlix/simfinity-core/internal/errors';
 
 const canonical = (value) => {
   if (Array.isArray(value)) return value.map(canonical);
@@ -59,9 +59,9 @@ export const createClientDescriptorHandler = (schema, options) => {
         res.end();
       } else send(200, body);
     } catch (error) {
-      try { if (onError) await onError(error, req, res); } catch { /* Reporting cannot replace the HTTP result. */ }
-      if (res.headersSent || res.writableEnded || res.destroyed) return;
       const known = error instanceof SimfinityError && [401, 403].includes(error.getStatus());
+      try { if (!known && onError) await onError(error, req, res); } catch { /* Reporting cannot replace the HTTP result. */ }
+      if (res.headersSent || res.writableEnded || res.destroyed) return;
       res.removeHeader('ETag');
       res.setHeader('Cache-Control', 'no-store');
       send(known ? error.getStatus() : 500,

@@ -37,6 +37,3 @@ export const describeDatabase = (registrations, options) => registrations === un
 export const compileDatabaseSchema = (description) => description === undefined
   ? defaultInstance.compileDatabaseSchema()
   : compileSchemaSQL(description);
-
-export { buildClientDescriptor } from '@simtlix/simfinity-core';
-export { createClientDescriptorHandler } from '@simtlix/simfinity-core/http';

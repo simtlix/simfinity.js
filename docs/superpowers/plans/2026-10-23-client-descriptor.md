@@ -1,5 +1,7 @@
 # Client Descriptor Implementation Plan
 
+Historical implementation record. The approved [2026-10-25 correction plan](2026-10-25-descriptor-review.md) supersedes package placement, HTTP declarations and root input hints below.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.
 
 **Goal:** Implement the approved schema-owned descriptor, early public introspection opt-out and explicit HTTP endpoint.

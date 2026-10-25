@@ -4,6 +4,7 @@ import {
   GraphQLObjectType, GraphQLScalarType, GraphQLSchema, GraphQLString, introspectionFromSchema, printSchema,
 } from 'graphql';
 import * as core from '../packages/core/src/index.js';
+import { buildClientDescriptor } from '../packages/descriptor/src/index.js';
 
 const runtime = () => core.createRuntime({ createModel: (type) => ({ name: type.name }) });
 const book = (name = 'Book') => new GraphQLObjectType({ name, fields: {
@@ -11,9 +12,28 @@ const book = (name = 'Book') => new GraphQLObjectType({ name, fields: {
   preview: { type: GraphQLString, extensions: { virtual: true }, resolve: () => 'preview' },
   secret: { type: GraphQLString, extensions: { queryable: false, readOnly: true, privateHint: 'never copy' } },
 } });
-const describeSchema = (schema) => core.buildClientDescriptor(schema);
+const describeSchema = (schema) => buildClientDescriptor(schema);
 
 describe('client descriptor', () => {
+  test('derives root input usage from actual inputs, defaults and available mutation roots', () => {
+    const api = runtime(); const Book = book(); api.connect(null, Book, 'book', 'books');
+    const schema = api.createSchema();
+    const d = describeSchema(schema);
+    const fields = Object.fromEntries(d.types.Book.fields.map((f) => [f.name, f]));
+    expect(fields.title.rootInputUsage).toEqual({ add: 'required', update: 'optional' });
+    expect(fields.preview.rootInputUsage).toEqual({});
+    expect(fields.secret.rootInputUsage).toEqual({});
+    expect(fields.id.rootInputUsage).toEqual({ update: 'required' });
+    const read = describeSchema(api.createSchema([Book], [], []));
+    expect(read.types.Book.fields.every((f) => !Object.hasOwn(f, 'rootInputUsage'))).toBe(true);
+
+    const defaultApi = runtime(); const DefaultBook = book('DefaultBook');
+    defaultApi.connect(null, DefaultBook, 'defaultBook', 'defaultBooks');
+    defaultApi.createSchema(); // Materialize inputs before supplying an application default for the next schema.
+    defaultApi.getInputType(DefaultBook).getFields().title.defaultValue = 'Untitled';
+    const withDefault = describeSchema(defaultApi.createSchema());
+    expect(withDefault.types.DefaultBook.fields.find((f) => f.name === 'title').rootInputUsage.add).toBe('optional');
+  });
   test('isolates roots on shared types, snapshots registrations, and distinguishes same-name operations', () => {
     const api = runtime(); const Book = book();
     api.connect(null, Book, 'book', 'books');
@@ -90,6 +110,7 @@ describe('client descriptor', () => {
     expect(d.types.Parent.fields.find((f) => f.name === 'children').relation).toMatchObject({ inverseField: 'parent', connectionField: 'parent_key' });
     expect(d.types.Child.fields.find((f) => f.name === 'parent').relation.inverseField).toBe('children');
     expect(d.types.Child.inputs.add).toBe('ChildInput');
+    expect(d.types.Child.fields.find((f) => f.name === 'parent').rootInputUsage).toEqual({ add: 'optional', update: 'optional' });
     expect(d.types.ChildInput.fields.some((f) => f.name === 'parent')).toBe(true);
     const nested = Object.values(d.types).find((t) => t.kind === 'input' && t.fields?.some((f) => f.name === 'added'));
     const addedType = nested.fields.find((f) => f.name === 'added').type.replace(/[[\]!]/g, '');
@@ -137,4 +158,67 @@ test('serializes a shared argument default once for operation and root-field met
   const d = describeSchema(schema);
   expect(serialize).toHaveBeenCalledTimes(1);
   expect(d.operations.query.hinted.args[0].defaultValue).toBe('"x"');
+});
+
+test('handles ambiguous and storage-only inverse links without publishing private fields', () => {
+  const api = runtime();
+  const Parent = new GraphQLObjectType({ name: 'Links', fields: () => ({
+    id: { type: GraphQLID },
+    first: { type: new GraphQLList(Child), extensions: { relation: { connectionField: 'owner' } } },
+    second: { type: new GraphQLList(Child), extensions: { relation: { connectionField: 'owner' } } },
+    privateChildren: { type: new GraphQLList(Child), extensions: { relation: { connectionField: 'private_owner' } } },
+  }) });
+  const Child = new GraphQLObjectType({ name: 'LinkedChild', fields: () => ({
+    id: { type: GraphQLID }, title: { type: GraphQLString }, owner: { type: Parent, extensions: { relation: {} } },
+  }) });
+  api.connect(null, Parent, 'link', 'links'); api.connect(null, Child, 'linkedChild', 'linkedChildren');
+  const d = describeSchema(api.createSchema());
+  expect(d.types.LinkedChild.fields.find((f) => f.name === 'owner').relation.inverseField).toBeNull();
+  expect(d.types.Links.fields.find((f) => f.name === 'privateChildren').relation.inverseField).toBeNull();
+  expect(d.types.LinkedChild.fields.some((f) => f.name === 'private_owner')).toBe(false);
+});
+
+test('omits missing generated mutations and hints for types with no writable inputs', () => {
+  const api = runtime();
+  const State = new GraphQLEnumType({ name: 'JobState', values: { OPEN: {}, DONE: {} } });
+  const Log = new GraphQLObjectType({ name: 'Log', fields: { id: { type: GraphQLID }, at: { type: GraphQLString, extensions: { readOnly: true } } } });
+  const Job = new GraphQLObjectType({ name: 'Job', fields: { id: { type: GraphQLID, extensions: { readOnly: true } }, state: { type: State } } });
+  api.connect(null, Log, 'log', 'logs');
+  api.connect(null, Job, 'job', 'jobs', null, null, { initialState: State.getValue('OPEN'), actions: { finish: { from: State.getValue('OPEN'), to: State.getValue('DONE') } } });
+  const d = describeSchema(api.createSchema());
+  expect(d.types.Log.endpoints.add).toBeUndefined();
+  expect(d.types.Log.inputs).toEqual({ update: 'LogInputForUpdate' });
+  expect(d.types.Job.endpoints.add).toBeUndefined(); expect(d.types.Job.endpoints.update).toBeUndefined();
+  expect(d.types.Job.inputs).toBeUndefined(); expect(d.types.Job.stateMachine.actions).toEqual([]);
+  expect(d.operations.mutation.finish_job).toBeUndefined();
+  expect(d.types.Job.fields.every((field) => !Object.hasOwn(field, 'rootInputUsage'))).toBe(true);
+});
+
+test('reports validated scalar roots and terminates cyclic base chains', () => {
+  const api = runtime();
+  const Email = core.createValidatedScalar('Email', 'Email address', GraphQLString, () => true);
+  const WorkEmail = core.createValidatedScalar('WorkEmail', 'Work address', Email, () => true);
+  const CycleA = new GraphQLScalarType({ name: 'CycleA', serialize: (value) => value });
+  const CycleB = new GraphQLScalarType({ name: 'CycleB', serialize: (value) => value });
+  CycleA.baseScalarType = CycleB; CycleB.baseScalarType = CycleA;
+  for (const type of [Email, WorkEmail, CycleA]) api.registerCustomQuery(`get${type.name}`, type.name, null, type, () => null);
+  const d = describeSchema(api.createSchema([], [], []));
+  expect(d.types[Email.name].baseScalar).toBe('String');
+  expect(d.types[WorkEmail.name].baseScalar).toBe('String');
+  expect(d.types.CycleA.baseScalar).toBeNull();
+});
+
+test('captures application-resolver queryability before real DENY auth wrapping', () => {
+  const api = runtime();
+  const Book = new GraphQLObjectType({ name: 'ResolvedBook', fields: {
+    id: { type: GraphQLID }, title: { type: GraphQLString },
+    computed: { type: GraphQLString, resolve: () => 'computed' },
+    forced: { type: GraphQLString, extensions: { queryable: true }, resolve: () => 'forced' },
+  } });
+  api.connect(null, Book, 'book', 'books'); const schema = api.createSchema();
+  const before = Book.getFields().title.resolve;
+  core.auth.createAuthPlugin({}, { defaultPolicy: 'DENY' }).onSchemaChange({ schema });
+  expect(Book.getFields().title.resolve).not.toBe(before);
+  const fields = Object.fromEntries(describeSchema(schema).types.ResolvedBook.fields.map((f) => [f.name, f]));
+  expect(fields.computed.queryable).toBe(false); expect(fields.forced.queryable).toBe(true); expect(fields.title.queryable).toBe(true);
 });

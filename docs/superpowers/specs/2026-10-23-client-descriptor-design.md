@@ -1,14 +1,48 @@
 # Schema-owned client descriptor and early introspection opt-out
 
-Status: contract approved by the user on 2026-10-23; local implementation and
-verification complete. See the [implementation record](../plans/2026-10-23-client-descriptor.md).
+Status: initial implementation approved on 2026-10-23; the 2026-10-25 revision
+below is approved and supersedes the historical design that follows. See the [implementation record](../plans/2026-10-23-client-descriptor.md).
 
 Issue: [#101](https://github.com/simtlix/simfinity.js/issues/101). Read on
 2026-10-23; open, last updated 2026-10-16, no comments. Its examples are proposals.
 Implementation base: `738767141ecb3e017a9a590e52c7e1a795f68428` (3.12.0), verified
 against remote master. Branch: `feat/101-schema-descriptor`.
 
-## Problem and existing implementation
+## Revision approved 2026-10-25 (supersedes the placement and input-hint decisions below)
+
+- Ship builder, format v1, package identity and the HTTP handler in the opt-in
+  `@simtlix/simfinity-descriptor` package. It joins the aligned release set at
+  3.12.0 with an exact core dependency; there is no version bump or publication.
+- Core retains early `/introspection` and immutable per-schema registration data
+  through `/internal/schema-registrations`. This is registration data, not a
+  descriptor format or HTTP API. Snapshot initial state and queryability before
+  auth wrapping; never retain a runtime callback or storage model/controller.
+- Remove descriptor exports from core and the facades, core `/http`, and core's
+  `@types/node` dependency. Reuse the canonical error class through a side-effect-free
+  internal errors subpath. Importing the descriptor must not install introspection.
+- `rootInputUsage` replaces the ambiguous proposed `write` name. It appears on
+  entity fields only when this schema exposes a generated add/update root, and
+  reports that root's actual input field as `required` only when NonNull without
+  a default, otherwise `optional`. Omit an operation key if absent from its input;
+  read-only/generated fields can have an empty usage map. Omit the entire property
+  on types with no generated add/update root. Nested inputs and relation inverse
+  hints remain authoritative for collection forms; never erase a root field
+  merely because a collection supplies it from its parent.
+- Registration/queryability values are captured during createSchema. Descriptor
+  graph data is built and frozen on the first explicit builder call; applications
+  must finish schema declarations first and create a new schema for metadata changes.
+- Handler types are structural and usable with Node/Express objects without Node
+  ambient types. `onError` observes unexpected failures only, never expected 401/403.
+  Keep explicit authorization, authorization before 304, fixed cache policy and HEAD behavior.
+- Selectors and cache header overrides are explicitly deferred. Preserve split
+  query/mutation maps and customQuery/customMutation; views remain list+view.
+- Address review documentation and test gaps. Test MCP's observable API without
+  exposing a classifier just for tests. Direct core imports require an explicit
+  exact-version core dependency, including with pnpm/Yarn PnP.
+
+## Historical design (2026-10-23; apply the revision above first)
+
+### Problem and existing implementation
 
 `packages/core/src/introspection.js` installs `__Field.extensions` at import.
 Every subsequent schema using the same GraphQL peer collects the metadata types,

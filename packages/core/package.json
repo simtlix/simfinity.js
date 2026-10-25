@@ -30,9 +30,6 @@
       ],
       "introspection": [
         "types/introspection.d.ts"
-      ],
-      "http": [
-        "types/http.d.ts"
       ]
     }
   },
@@ -76,10 +73,8 @@
       "types": "./types/introspection.d.ts",
       "default": "./src/introspection-config.js"
     },
-    "./http": {
-      "types": "./types/http.d.ts",
-      "default": "./src/http.js"
-    }
+    "./internal/schema-registrations": "./src/schema-registrations.js",
+    "./internal/errors": "./src/errors/simfinity.error.js"
   },
   "files": [
     "src",
@@ -98,9 +93,6 @@
   },
   "peerDependencies": {
     "graphql": "^16.11.0"
-  },
-  "dependencies": {
-    "@types/node": "^18.19.0"
   },
   "keywords": [
     "simfinity",

@@ -1,9 +1,10 @@
 import {
-  astFromValue, getNamedType, isEnumType, isInputObjectType, isInterfaceType,
+  astFromValue, getNamedType, isEnumType, isInputObjectType, isInterfaceType, isNonNullType,
   isObjectType, isScalarType, isUnionType, print,
 } from 'graphql';
-import SimfinityError from './errors/simfinity.error.js';
-import { getFieldStorageName, getListShape, isVirtualField, normalizeConnectionField, virtualFieldOptions } from './relation-storage.js';
+import SimfinityError from '@simtlix/simfinity-core/internal/errors';
+import { schemaRegistrations } from '@simtlix/simfinity-core/internal/schema-registrations';
+import { getFieldStorageName, getListShape, isVirtualField, normalizeConnectionField, virtualFieldOptions } from '@simtlix/simfinity-core/internal/relation-storage';
 import { packageInfo } from './package-info.js';
 
 // Exact schema ownership. No global adoption or field-name inference across module instances.
@@ -93,8 +94,7 @@ const fieldKind = (field, relation) => {
   return 'object';
 };
 
-/** Internal, called only after successful schema construction. Captures no storage registration. */
-export const captureClientDescriptor = (schema, registrations, queryable) => {
+const createDescriptor = (schema, registrations) => {
   const types = collectTypes(schema);
   const registered = new Map(registrations.map((entry) => [entry.gqltype, entry]));
   const defaults = [];
@@ -141,6 +141,12 @@ export const captureClientDescriptor = (schema, registrations, queryable) => {
     if (kind === 'entity') {
       result.endpoints = mapOf(associated.filter(([, op]) => !op.view && ['get', 'list', 'aggregate', 'add', 'update', 'delete'].includes(op.operation)).map(([key, op]) => [op.operation, key]));
     }
+    const rootInputs = ['add', 'update'].flatMap((operation) => {
+      const endpoint = result.endpoints?.[operation];
+      const root = endpoint && schema.getMutationType().getFields()[endpoint];
+      const inputType = root && getNamedType(root.args.find((arg) => arg.name === 'input')?.type);
+      return isInputObjectType(inputType) ? [[operation, inputType.getFields()]] : [];
+    });
     if (entry) {
       const inputs = Object.entries({ add: entry.inputType, update: entry.updateInputType })
         .filter(([, item]) => item && types.get(item.name) === item).map(([key, item]) => [key, item.name]);
@@ -166,7 +172,11 @@ export const captureClientDescriptor = (schema, registrations, queryable) => {
           readOnly: !!field.extensions?.readOnly || !!virtual, unique: field.extensions?.unique === true,
           stateMachine: !!entry?.stateMachine && field.name === 'state' && !field.extensions?.readOnly,
           ...(relation ? { relation } : {}), ...(virtual ? { virtual } : {}),
-          ...(entry ? { queryable: !isVirtualField(field) && queryable(type, field) } : {}),
+          ...(entry ? { queryable: !isVirtualField(field) && entry.queryableFields[field.name] } : {}),
+          ...(rootInputs.length ? { rootInputUsage: mapOf(rootInputs.flatMap(([operation, fields]) => {
+            const inputField = fields[field.name];
+            return inputField ? [[operation, isNonNullType(inputField.type) && inputField.defaultValue === undefined ? 'required' : 'optional']] : [];
+          })) } : {}),
           ...(field.args.length ? { args: field.args.map(input) } : {}),
         };
       });
@@ -183,8 +193,10 @@ export const captureClientDescriptor = (schema, registrations, queryable) => {
 };
 
 export const buildClientDescriptor = (schema) => {
+  const registrations = schemaRegistrations(schema);
+  if (!registrations) throw new SimfinityError('Expected a Simfinity schema returned by this core installation', 'NOT_A_SIMFINITY_SCHEMA', 500);
+  if (!snapshots.has(schema)) createDescriptor(schema, registrations);
   const snapshot = snapshots.get(schema);
-  if (!snapshot) throw new SimfinityError('Expected a Simfinity schema returned by this core installation', 'NOT_A_SIMFINITY_SCHEMA', 500);
   if (snapshot.defaults) {
     const pending = snapshot.defaults;
     snapshot.defaults = null;

@@ -7,7 +7,7 @@ with specific editor/CI diagnostics. It does not evaluate business authorization
 scopes, state machines or transaction correctness.
 
 The plugin is an independently versioned development tool (`0.3.1`), outside the
-five runtime packages. Install it from npm in your application:
+six runtime packages. Install it from npm in your application:
 
 ```sh
 npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.3.1'

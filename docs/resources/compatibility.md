@@ -35,6 +35,50 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22.12.0 or newer |
 
+## Upgrade notes for the next release
+
+The optional `@simtlix/simfinity-descriptor` package joins the aligned release set
+as its sixth package. These APIs are not in the published 3.12.0 packages.
+
+- **Metadata**: import `buildClientDescriptor` and `createClientDescriptorHandler`
+  from the descriptor package, not core or either facade. Install it directly at
+  the matching Simfinity version. It consumes exact `createSchema()` results;
+  cloned or composed schemas fail with `NOT_A_SIMFINITY_SCHEMA` (500).
+- **Default compatibility**: the 3.x global introspection extension remains on.
+  Opt out with `configureIntrospection({ fieldExtensions: false })` from
+  `@simtlix/simfinity-core/introspection` before importing runtime/facades. Direct
+  core imports require a direct core dependency pinned to the facade version.
+  Invalid or late configuration throws `INVALID_INTROSPECTION_CONFIGURATION`
+  (500) without deleting installed metadata. A different 4.x default remains a
+  future decision; this change does not implement it.
+- **Clients**: clients selecting `__Field.extensions` must migrate before opting
+  out. The descriptor does not update simfinity-js-client or simfinity-web,
+  evaluate caller permissions, serialize arbitrary validators, or make arbitrary
+  schema transforms safe. `rootInputUsage` describes actual generated root input
+  fields; nested input shapes can differ.
+- **HTTP**: mount the endpoint explicitly with `authorize: 'public'` or an access
+  function. Missing access or unknown options fail at setup with
+  `INVALID_CLIENT_DESCRIPTOR_OPTIONS` (500). Format v1 has no include/exclude
+  selectors or cache-header overrides; use schema allowlists for separate audiences.
+  Expected 401/403 denials do not call `onError`; unexpected failures do.
+- **Types and dependencies**: core stays dependency-free. The descriptor handler
+  declares structural request/response types, so core, both facades and the
+  descriptor compile without Node ambient types. There is no core `/http` export
+  or facade re-export of the descriptor API.
+
+The development lockfile also updates `body-parser` to 2.4.0, `fast-uri` to 3.1.9
+and `zod` to 4.6.7, within the existing dependency ranges, to address the current
+[body-parser](https://github.com/advisories/GHSA-27r3-jxmh-p828),
+[fast-uri](https://github.com/advisories/GHSA-w74x-v6f9-j3xg) and
+[Zod](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5) advisories. This does not
+change runtime package dependency declarations or consumer lockfiles.
+
+See the [client descriptor reference](../reference/client-descriptor) for bootstrap
+ordering, format v1, consumption examples, HTTP errors and composition limits.
+The new package needs the [one-time registry setup](./contributing#authentication-and-one-time-setup)
+before a future release; adding it does not publish anything or change the
+fail-closed registry checks.
+
 ## Upgrade to 3.12.0
 
 Version 3.12.0 adds named views. Every schema, filter, tool and adapter of 3.11.0 keeps its behavior; a view is a new root field only where an application registers one.

@@ -100,10 +100,10 @@ Explain the need in a [linked issue](#explain-the-change-in-an-issue), develop s
 
 A publication task is complete only when all of these conditions hold:
 
-1. The intended version is aligned across the private root and all five libraries, including exact internal dependencies, and the intended source has passed its checks and been merged into `master`.
+1. The intended version is aligned across the private root and all six libraries, including exact internal dependencies, and the intended source has passed its checks and been merged into `master`.
 2. Its `vX.Y.Z` tag points to that exact validated commit on GitHub, and the matching GitHub release is published. A tag push may let the workflow create the release automatically; the contributor or agent must still wait for and verify both results.
-3. **Release Simfinity** has succeeded, all five versions are available in npm and GitHub Packages, npm `latest` or `next` points to the intended version, and npm archive integrity matches the release manifest.
-4. The GitHub release contains the five package archives, manifest and npm verification report. For stable releases, the matching documentation is deployed successfully, or the documentation gate reports that the live site already contains it (for example after a newer documentation-only deployment) and the report links that live deployment. Prereleases do not replace the stable site.
+3. **Release Simfinity** has succeeded, all six versions are available in npm and GitHub Packages, npm `latest` or `next` points to the intended version, and npm archive integrity matches the release manifest.
+4. The GitHub release contains the six package archives, manifest and npm verification report. For stable releases, the matching documentation is deployed successfully, or the documentation gate reports that the live site already contains it (for example after a newer documentation-only deployment) and the report links that live deployment. Prereleases do not replace the stable site.
 5. The completion report identifies the version and includes the GitHub release/tag, workflow links and verification results. A failure is resolved and retried, or reported explicitly with its external blocker and remaining steps.
 
 A version bump, merged pull request, draft release, or started workflow alone does not satisfy this contract. Choose the release version once and reuse a correctly prepared unpublished version. Never move a release tag, overwrite an existing published version, or bypass the workflow with a local npm publication to conceal a failed release.
@@ -119,7 +119,7 @@ node scripts/release-packages.js version 3.4.1
 node scripts/release-packages.js check
 ```
 
-Choose the next patch, minor or major version according to the changes. Commit the private root manifest, workspace lockfile and all five package manifests together. The helper keeps exact internal dependencies aligned. Merge the reviewed changes into `master`, then choose one of these release actions:
+Choose the next patch, minor or major version according to the changes. Commit the private root manifest, workspace lockfile and all six package manifests together. The helper keeps exact internal dependencies aligned. Merge the reviewed changes into `master`, then choose one of these release actions:
 
 - Push the corresponding tag on the pull request's merge commit, for example `git tag -a v3.4.1 <merge-commit> -m v3.4.1` followed by `git push origin v3.4.1`. The workflow publishes the packages and creates the GitHub release with generated notes.
 - Open **Releases → Draft a new release**, choose or create the matching tag on that `master` merge commit, and click **Publish release**. The workflow publishes the packages and adds verified archives to that release, preserving your title and notes.
@@ -129,15 +129,15 @@ Tags must match the package versions exactly and point to source already merged 
 After either release action, the workflow automatically:
 
 1. Selects the tagged commit and validates its clean source, aligned version, tag and inclusion in `master`.
-2. Packs the five archives in a fresh checkout of that commit, with Node.js 24.21.0 and its bundled npm, before any dependency is installed or any test runs. This packing job validates the source again (`release-state.js verify-source`), refuses archives that would include untracked or Git-ignored files, and records the SHA-256 of the archive manifest, which lists every archive hash.
+2. Packs the six archives in a fresh checkout of that commit, with Node.js 24.21.0 and its bundled npm, before any dependency is installed or any test runs. This packing job validates the source again (`release-state.js verify-source`), refuses archives that would include untracked or Git-ignored files, and records the SHA-256 of the archive manifest, which lists every archive hash.
 3. Runs lint, tests, the isolated package/TypeScript consumers on exactly those archives, and the MongoDB/PostgreSQL database matrix. The test job checks the recorded digest for consistency only, since code installed for the tests could change that check.
 4. Rechecks that the existing `vX.Y.Z` tag still points to that exact commit after the tests.
 5. Publishes the same archives in dependency order: core, SQL, MCP, PostgreSQL, MongoDB. Each publishing job refuses to start unless the downloaded manifest matches the recorded digest and the validated commit. npm publication and verification finish before GitHub Packages starts, so partial failures cannot leave that registry ahead of npm.
 6. Waits for all npm versions and their distribution tags to become visible, and compares registry SHA-512 integrity against the archive manifest. It reads npm's uncached package document, because the plain one can be up to five minutes old. A 404 or a missing version or distribution tag counts as not yet visible and is waited on, as are network failures, timeouts, cut-off or unreadable answers, 429 and 5xx: 20 attempts 15 seconds apart, each request cut at 15 seconds and the whole check at 10 minutes. Integrity conflicts and other 4xx answers (401, 403, ...) fail at once; the final error names the last attempt's registry error.
-7. Checks the archives against the recorded digest again and reads the complete GitHub release list to find the release for the tag (`scripts/github-release.js`, which retries transient API failures). It creates a draft only when no release, draft or published, uses the tag, then attaches only the digest-verified manifest, the five archives it lists and the npm verification evidence, never other files of the artifact, and publishes the release. A failed lookup, or several releases for one tag, stops the job instead of adding another release.
+7. Checks the archives against the recorded digest again and reads the complete GitHub release list to find the release for the tag (`scripts/github-release.js`, which retries transient API failures). It creates a draft only when no release, draft or published, uses the tag, then attaches only the digest-verified manifest, the six archives it lists and the npm verification evidence, never other files of the artifact, and publishes the release. A failed lookup, or several releases for one tag, stops the job instead of adding another release.
 8. Deploys the stable release documentation to GitHub Pages through the documentation gate below.
 
-Stable versions use npm `latest` and become the latest GitHub release, never a pre-release, even when the release form marked them as one: the workflow clears the pre-release flag before marking the release latest. Prereleases use `next`, are marked as GitHub pre-releases, never become latest, and do not replace the stable website. Runs queue instead of canceling pending versions. Freshness checks read npm uncached and compare actually published npm versions across all five packages; a newer tag waiting in the queue does not block an earlier release. A release package missing from npm fails that check before anything is built or published; see [Authentication and one-time setup](#authentication-and-one-time-setup). A tag is never moved, an existing registry version is skipped only when its archive integrity matches, and superseded runs cannot move distribution tags or the latest release backward.
+Stable versions use npm `latest` and become the latest GitHub release, never a pre-release, even when the release form marked them as one: the workflow clears the pre-release flag before marking the release latest. Prereleases use `next`, are marked as GitHub pre-releases, never become latest, and do not replace the stable website. Runs queue instead of canceling pending versions. Freshness checks read npm uncached and compare actually published npm versions across all six packages; a newer tag waiting in the queue does not block an earlier release. A release package missing from npm fails that check before anything is built or published; see [Authentication and one-time setup](#authentication-and-one-time-setup). A tag is never moved, an existing registry version is skipped only when its archive integrity matches, and superseded runs cannot move distribution tags or the latest release backward.
 
 Documentation deployments share one queue across branches and tags and only move GitHub Pages forward. A separate gate job, without the `github-pages` environment or write permissions, runs `release-state.js verify-docs` first. It accepts only a stable version that is not superseded on npm, built from the run's own commit, and compares that commit with the one currently live on Pages:
 
@@ -151,7 +151,11 @@ The deployment job repeats the check just before deploying, because **Re-run fai
 
 npm publication uses [Trusted Publishing with OIDC](https://docs.npmjs.com/trusted-publishers/), with short-lived credentials issued to GitHub Actions. It does not use `NPMJS_TOKEN`, a local npm login, or a maintainer's passkey during releases. GitHub Packages uses the workflow's `GITHUB_TOKEN` with `packages: write`.
 
-The repository configuration expects these settings on **each** of `@simtlix/simfinity-core`, `@simtlix/simfinity-sql`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-postgres` and `@simtlix/simfinity-js`:
+The new descriptor package needs this one-time setup before its first aligned
+release. The release workflow still refuses a package missing from the registry;
+adding the workspace does not bootstrap or publish it automatically.
+
+The repository configuration expects these settings on **each** of `@simtlix/simfinity-core`, `@simtlix/simfinity-sql`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-descriptor`, `@simtlix/simfinity-postgres` and `@simtlix/simfinity-js`:
 
 | npm Trusted Publisher field | Value |
 | --- | --- |
@@ -167,7 +171,7 @@ Use the **calling** workflow filename `release.yml`, even though its reusable `p
 A Trusted Publisher is configured from the package's own npm settings, so a new package must exist on npm before it joins the release set. A maintainer publishes it once, outside the workflow, and configures its Trusted Publisher; this one-time bootstrap is the only publication from a local login. Until then the freshness check refuses every release with `<name> is not on the registry; publish it once and configure its Trusted Publisher before releasing`.
 
 The independent `@simtlix/eslint-plugin-simfinity@0.1.0` uses that same first-publication
-exception without joining the five runtime packages. Pack committed, reviewed
+exception without joining the six runtime packages. Pack committed, reviewed
 source from `master` with scripts disabled; validate the archive contents, plugin
 tests, isolated JS/TS consumer and both Barber trials before publishing it with
 public access. Verify npm's version, `latest` tag and archive integrity, then
@@ -175,7 +179,7 @@ attach the archive and its checksum to an `eslint-plugin-v0.1.0` GitHub release
 on the same merge commit. Keep this tool release from becoming the repository's
 latest runtime release. Deploy the installation guide through the documentation-only
 flow after npm availability is verified. Subsequent versions use **Release ESLint
-plugin** (`release-eslint-plugin.yml`), independently of the five runtime packages:
+plugin** (`release-eslint-plugin.yml`), independently of the six runtime packages:
 
 1. Update the plugin's package/lock versions, `meta.version`, and installation
    documentation in a reviewed PR. Run its tests, audit, packed consumer and both

@@ -13,7 +13,6 @@ const rootDeclarations = readFileSync(join(root, 'types/index.d.ts'), 'utf8');
 // Each public subpath: its runtime module, its declaration file and the root types it re-exports.
 const publicSubpaths = {
   './introspection': { target: './src/introspection-config.js', types: './types/introspection.d.ts', rootTypes: ['IntrospectionOptions'] },
-  './http': { target: './src/http.js', types: './types/http.d.ts', rootTypes: [] },
   './auth': {
     target: './src/auth/index.js',
     types: './types/auth/index.d.ts',
@@ -44,7 +43,6 @@ const publicSubpaths = {
 // Static imports, so the bundler resolves each subpath through the export map.
 const load = {
   './introspection': () => import('@simtlix/simfinity-core/introspection'),
-  './http': () => import('@simtlix/simfinity-core/http'),
   './auth': () => import('@simtlix/simfinity-core/auth'),
   './auth/errors': () => import('@simtlix/simfinity-core/auth/errors'),
   './auth/expressions': () => import('@simtlix/simfinity-core/auth/expressions'),
@@ -82,6 +80,8 @@ describe('core subpath type declarations', () => {
   });
 
   it('keeps the internal subpaths untyped and unchanged', () => {
+    expect(manifest.exports['./internal/errors']).toBe('./src/errors/simfinity.error.js');
+    expect(manifest.exports['./internal/schema-registrations']).toBe('./src/schema-registrations.js');
     expect(manifest.exports['./internal/object-id']).toBe('./src/auth/object-id.js');
     expect(manifest.exports['./internal/relation-storage']).toBe('./src/relation-storage.js');
     expect(manifest.exports['./internal/query-operators']).toBe('./src/query-operators.js');

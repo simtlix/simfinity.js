@@ -95,7 +95,6 @@ const adapterSource = `const adapter = {
 // of them. A new subpath export needs its declaration and an entry here.
 const coreSubpaths = {
   introspection: { values: ['configureIntrospection'], types: ['IntrospectionOptions'], standalone: true },
-  http: { values: ['createClientDescriptorHandler'], types: [], standalone: true },
   auth: {
     namespace: 'auth',
     values: [
@@ -168,7 +167,7 @@ const quotedUnion = (names) => names.map((name) => `'${name}'`).join(' | ');
 // explicit `export` in types/index.d.ts and an entry here.
 const coreRootValues = [
   'ForbiddenError', 'InternalServerError', 'QLOperator', 'QLSort', 'QLValue', 'SimfinityError',
-  'UnauthenticatedError', 'auth', 'buildClientDescriptor', 'buildErrorFormatter', 'configureMutationLimits', 'configureQueryLimits',
+  'UnauthenticatedError', 'auth', 'buildErrorFormatter', 'configureMutationLimits', 'configureQueryLimits',
   'createQueryPlan', 'createRuntime', 'createValidatedScalar', 'describeModels', 'isVirtualField',
   'paginationStages', 'plugins', 'resolveModelPath', 'scalars', 'validators', 'virtualFieldOptions',
 ];
@@ -1071,20 +1070,9 @@ ${Object.entries(coreSubpaths).map(([subpath, config]) => {
       `} = { ${[...types, ...errorClasses].map((name) => `${name}: true`).join(', ')} };`,
     ].join('\n');
   }).join('\n')}
-declare const descriptorSchema: import('graphql').GraphQLSchema;
-const descriptor = (null as unknown as typeof import('@simtlix/simfinity-core').buildClientDescriptor)(descriptorSchema);
-const descriptorVersion: 1 = descriptor.formatVersion;
-// @ts-expect-error Descriptors are immutable.
-descriptor.types.Book = {};
 introspectionSubpath.configureIntrospection({ fieldExtensions: false });
 // @ts-expect-error Only opt-out is accepted in 3.x.
 introspectionSubpath.configureIntrospection({ fieldExtensions: true });
-const descriptorHandler = httpSubpath.createClientDescriptorHandler<{ user: string }>(descriptorSchema, {
-  context: async () => ({ user: 'reader' }), authorize: (_req, ctx) => ctx.user === 'reader',
-});
-// @ts-expect-error Access must be explicit.
-httpSubpath.createClientDescriptorHandler(descriptorSchema, {});
-void [descriptorVersion, descriptorHandler];
 const sameAuth: typeof auth = authDefault;
 const samePlugins: typeof plugins = pluginsDefault;
 const sameScalars: typeof scalars = scalarsDefault;
@@ -2043,7 +2031,75 @@ register('objectWhere', { type, description: 'd', where: () => ({ conditions: []
 register('unknownOption', { type, description: 'd', where: () => [], transactional: true });
 void [sameOptions, exactRegister${singleton ? ', sameMember' : ''}];`;
 
+const descriptorSource = `import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { __Field, GraphQLObjectType, GraphQLString } from 'graphql';
+import { buildClientDescriptor, createClientDescriptorHandler } from '@simtlix/simfinity-descriptor';
+import { configureIntrospection } from '@simtlix/simfinity-core/introspection';
+assert.equal(__Field.getFields().extensions, undefined);
+configureIntrospection({ fieldExtensions: false });
+const { createRuntime, SimfinityError } = await import('@simtlix/simfinity-core');
+const api = createRuntime({ createModel: () => ({}) });
+api.connect(null, new GraphQLObjectType({ name: 'PackedBook', fields: { title: { type: GraphQLString } } }), 'book', 'books');
+const schema = api.createSchema();
+const descriptor = buildClientDescriptor(schema);
+assert.equal(descriptor.formatVersion, 1);
+assert.equal(descriptor.generator.name, '@simtlix/simfinity-descriptor');
+assert.equal(descriptor.generator.version, JSON.parse(readFileSync('./node_modules/@simtlix/simfinity-descriptor/package.json', 'utf8')).version);
+assert.equal(descriptor.types.PackedBook.endpoints.add, 'addbook');
+assert.equal(typeof createClientDescriptorHandler(schema, { authorize: 'public' }), 'function');
+assert.throws(() => buildClientDescriptor({}), SimfinityError);
+assert.equal(__Field.getFields().extensions, undefined);`;
+
+const descriptorTypes = `import * as Descriptor from '@simtlix/simfinity-descriptor';
+import { buildClientDescriptor, createClientDescriptorHandler } from '@simtlix/simfinity-descriptor';
+import type { GraphQLSchema } from 'graphql';
+declare const schema: GraphQLSchema;
+const keys: Record<keyof typeof Descriptor, true> = { buildClientDescriptor: true, createClientDescriptorHandler: true };
+const descriptor: Descriptor.ClientDescriptor = buildClientDescriptor(schema);
+const version: 1 = descriptor.formatVersion;
+const name: '@simtlix/simfinity-descriptor' = descriptor.generator.name;
+// @ts-expect-error Descriptors are immutable.
+descriptor.types.Book = {};
+declare const field: Descriptor.ClientDescriptorField;
+const usage: 'required' | 'optional' | undefined = field.rootInputUsage?.add;
+// @ts-expect-error Nested usage metadata is immutable too.
+field.rootInputUsage!.add = 'optional';
+declare const relation: Descriptor.ClientDescriptorRelation;
+declare const machine: Descriptor.ClientDescriptorStateMachine;
+declare const operation: Descriptor.ClientDescriptorOperation;
+declare const input: Descriptor.ClientDescriptorInputValue;
+declare const type: Descriptor.ClientDescriptorType;
+const handler = createClientDescriptorHandler<{ user: string }>(schema, {
+  context: async () => ({ user: 'reader' }), authorize: (_req, ctx) => ctx.user === 'reader',
+});
+const options: Descriptor.ClientDescriptorHandlerOptions = { authorize: 'public' };
+// @ts-expect-error Access must be explicit.
+createClientDescriptorHandler(schema, {});
+// @ts-expect-error Selectors and cache overrides are not v1 options.
+createClientDescriptorHandler(schema, { authorize: 'public', cacheControl: 'public' });
+declare const request: Descriptor.DescriptorRequest;
+declare const response: Descriptor.DescriptorResponse;
+void handler(request, response);
+void [keys, version, name, usage, relation, machine, operation, input, type, options];`;
+
 const cases = [
+  {
+    name: 'descriptor',
+    archives: ({ core, descriptor }) => [core, descriptor],
+    source: descriptorSource,
+    types: descriptorTypes,
+    extraTypes: {
+      'node.ts': `import { createServer } from 'node:http';
+import { createClientDescriptorHandler } from '@simtlix/simfinity-descriptor';
+import type { GraphQLSchema } from 'graphql';
+declare const schema: GraphQLSchema;
+createServer(createClientDescriptorHandler(schema, { authorize: 'public' }));`,
+    },
+    typeDependencies: ['@types/node@18'],
+    moduleResolutions: ['NodeNext', 'Node16', 'Bundler', 'Node10'],
+    forbiddenPackages: ['pg', 'mongoose', 'mongodb', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
+  },
   {
     name: 'core',
     exactOptionalTypes: { 'exact-optional.ts': coreExactOptionalTypes },
@@ -2141,6 +2197,7 @@ try {
   const core = check(archives, '@simtlix/simfinity-core');
   const sql = check(archives, '@simtlix/simfinity-sql');
   const mcp = check(archives, '@simtlix/simfinity-mcp');
+  const descriptor = check(archives, '@simtlix/simfinity-descriptor');
   const postgres = check(archives, '@simtlix/simfinity-postgres');
   const mongo = check(archives, '@simtlix/simfinity-js');
   for (const testCase of cases) {
@@ -2156,7 +2213,7 @@ try {
       '--ignore-scripts',
       '--no-audit',
       '--no-fund',
-      ...testCase.archives({ core, sql, mcp, postgres, mongo }),
+      ...testCase.archives({ core, sql, mcp, descriptor, postgres, mongo }),
       'graphql@16',
       'typescript@5',
       ...(testCase.dependencies || []),
@@ -2175,24 +2232,17 @@ try {
       const facade = testCase.name === 'mongo' ? '@simtlix/simfinity-js' : testCase.name === 'postgres' ? '@simtlix/simfinity-postgres' : '@simtlix/simfinity-core';
       run(process.execPath, ['--input-type=module', '--eval', `
         import assert from 'node:assert/strict';
-        import { readFileSync } from 'node:fs';
         import { __Field, GraphQLObjectType, GraphQLString, buildClientSchema, introspectionFromSchema } from 'graphql';
         import { configureIntrospection } from '@simtlix/simfinity-core/introspection';
         configureIntrospection({ fieldExtensions: false });
         assert.equal(__Field.getFields().extensions, undefined);
         const core = await import('@simtlix/simfinity-core');
         const facade = await import('${facade}');
-        const http = await import('@simtlix/simfinity-core/http');
-        assert.equal(facade.buildClientDescriptor, core.buildClientDescriptor);
-        if ('${facade}' !== '@simtlix/simfinity-core') assert.equal(facade.createClientDescriptorHandler, http.createClientDescriptorHandler);
+        assert.equal(facade.buildClientDescriptor, undefined);
+        assert.equal(facade.createClientDescriptorHandler, undefined);
         const api = core.createRuntime({ createModel: () => ({}) });
         api.connect(null, new GraphQLObjectType({ name: 'PackedBook', fields: { title: { type: GraphQLString } } }), 'book', 'books');
         const schema = api.createSchema();
-        const metadata = core.buildClientDescriptor(schema);
-        assert.equal(metadata.formatVersion, 1);
-        assert.equal(metadata.generator.version, JSON.parse(readFileSync('./node_modules/@simtlix/simfinity-core/package.json', 'utf8')).version);
-        assert.equal(metadata.types.PackedBook.endpoints.add, 'addbook');
-        assert.equal(typeof http.createClientDescriptorHandler(schema, { authorize: 'public' }), 'function');
         buildClientSchema(introspectionFromSchema(schema));
       `], cwd);
     }
@@ -2221,17 +2271,21 @@ try {
         throw error;
       }
     }
-    if (testCase.name === 'core') {
+    if (['core', 'mongo', 'postgres', 'descriptor'].includes(testCase.name)) {
+      const packageName = testCase.name === 'mongo' ? '@simtlix/simfinity-js' : `@simtlix/simfinity-${testCase.name}`;
+      writeFileSync(join(cwd, 'no-ambient.ts'), `import * as api from '${packageName}'; void api;`);
       writeFileSync(join(cwd, 'tsconfig.core-only.json'), JSON.stringify({
         compilerOptions: {
-          strict: true, target: 'ES2022', lib: ['ES2022'], types: [],
+          // The existing Mongo facade re-exports MCP's AbortSignal API (a DOM global),
+          // but none of these main-entry graphs may require Node ambient declarations.
+          strict: true, target: 'ES2022', lib: testCase.name === 'mongo' ? ['ES2022', 'DOM'] : ['ES2022'], types: [],
           module: 'NodeNext', moduleResolution: 'NodeNext', noEmit: true, skipLibCheck: false,
         },
-        include: ['root.ts'],
+        include: ['no-ambient.ts'],
       }));
       const files = run(process.execPath, ['node_modules/typescript/bin/tsc', '--project', 'tsconfig.core-only.json', '--listFiles'], cwd);
-      assert(!files.includes('/@types/node/'), 'Core main-entry declarations must not load Node types');
-      assert(!files.includes('/types/http.d.ts'), 'Core main-entry declarations must not load HTTP types');
+      assert(!files.includes('/@types/node/'), `${testCase.name} main-entry declarations must not load Node types`);
+      assert(!files.includes('/types/http.d.ts'), `${testCase.name} main-entry declarations must not load HTTP types`);
     }
     if (testCase.exactOptionalTypes) {
       for (const [file, source] of Object.entries(testCase.exactOptionalTypes)) writeFileSync(join(cwd, file), source);
