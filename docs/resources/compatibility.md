@@ -35,7 +35,7 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22.12.0 or newer |
 
-## Upgrade notes for the next release
+## Upgrade to 3.14.0
 
 ### Collection frames
 
