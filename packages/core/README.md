@@ -59,3 +59,22 @@ The same helpers are available from the `@simtlix/simfinity-core/auth`, `/auth/e
 An adapter advertises `writeFeatures: { optimisticConcurrency: true }`; `createRuntime()` snapshots/freezes this declaration and rejects invalid shapes with `INVALID_WRITE_FEATURES` (500). A protected schema rejects an adapter without support. `update(model, id, changes, session, { expectedVersion })` must atomically match ID/version, apply changes and set `expectedVersion + 1`, returning the updated record; `delete(model, id, session, { expectedVersion })` must atomically match both and return the deleted record. An update at the maximum skips the write. After no match, read the same cast key in the same session: return `null` if absent, report `VERSION_CONFLICT` if stale or `VERSION_EXHAUSTED` for an equal maximum on update, otherwise return `null`. MongoDB missing/null versions count as 1. Without `expectedVersion`, existing writes and call paths remain unchanged.
 
 Support also requires `find(model, type, args, session, { requiredId, context })` to honor the session, required key and context for scoped visibility checks. Wrappers must forward every argument, including options. Core's update result diagnostic requires `expected + 1` and advancement beyond its immutable pre-read version; delete results must carry the expected version. These diagnostics raise `DATABASE_ERROR` for inconsistent results but cannot prove arbitrary wrappers kept the atomic predicate. They retain supplied-session ownership; adapters must preserve their own guarded-write abort semantics. The `get_by_id` scope defers stale/exhausted errors for hidden callers until write hooks authorize the operation, but malformed stored versions can fail before hooks. Protected writes always perform their required pre-read, regardless of `readByIdIsInert`.
+
+## Client metadata
+
+In the next release, install the optional `@simtlix/simfinity-descriptor` package,
+aligned with your Simfinity version. It exports `buildClientDescriptor(schema)`
+and `createClientDescriptorHandler(schema, { authorize: 'public' })`. The builder
+describes the exact `createSchema()` result; the explicitly mounted handler can
+instead use an application access function. These functions are not facade/core
+exports. The descriptor does not evaluate dynamic permissions or serialize
+arbitrary validators.
+
+Legacy introspection stays enabled by default in 3.x. To opt out, import
+`configureIntrospection` from `@simtlix/simfinity-core/introspection` in a separate
+bootstrap module and call it with `{ fieldExtensions: false }` **before importing
+the runtime or facades**. That direct import requires core as a direct dependency
+pinned to the facade's exact version, including under pnpm or Yarn PnP. A late
+call fails without deleting installed metadata. Migrate clients selecting
+`__Field.extensions` before opting out. See the [descriptor reference](https://simtlix.github.io/simfinity.js/reference/client-descriptor.html)
+for the format, protected HTTP access and composition limits.

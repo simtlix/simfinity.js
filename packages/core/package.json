@@ -27,6 +27,9 @@
       ],
       "validators": [
         "types/validators.d.ts"
+      ],
+      "introspection": [
+        "types/introspection.d.ts"
       ]
     }
   },
@@ -67,7 +70,13 @@
     "./validators": {
       "types": "./types/validators.d.ts",
       "default": "./src/validators.js"
-    }
+    },
+    "./introspection": {
+      "types": "./types/introspection.d.ts",
+      "default": "./src/introspection-config.js"
+    },
+    "./internal/schema-registrations": "./src/schema-registrations.js",
+    "./internal/errors": "./src/errors/simfinity.error.js"
   },
   "files": [
     "src",

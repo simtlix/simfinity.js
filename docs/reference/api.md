@@ -20,6 +20,9 @@ Shared examples can import the selected instance from [your application’s runt
 | Task | API | Result |
 | --- | --- | --- |
 | Register a domain type | [connect](#connect) | Type registration; no return value |
+| Describe a schema for clients | [buildClientDescriptor](/reference/client-descriptor) in the optional descriptor package | Immutable format-v1 document |
+| Serve client metadata | [createClientDescriptorHandler](/reference/client-descriptor#mount-the-http-handler) in the descriptor package | Explicitly authorized HTTP handler |
+| Disable legacy metadata before runtime import | [configureIntrospection](/reference/client-descriptor#disable-the-legacy-extension-explicitly) in core `/introspection` | Early opt-out |
 | Build the executable API | [createSchema](#createschema) | `GraphQLSchema` |
 | Register a read whose result is not a stored record | [registerCustomQuery](#registercustomquery) | Custom query registration |
 | Name a list read with params and a fixed predicate | [registerView](#registerview) | Named view registration |
@@ -310,6 +313,17 @@ Core and the MongoDB, SQL and PostgreSQL facades export the shared `RecordVersio
 | `buildFilterGroupMatch(group, gqltype, clauses, included, depth = 0)` | Low-level filter compiler; mutates lookup accumulators. Use one `included` per `clauses` array and `$unset` every reserved alias it adds, using `Object.keys(included)`, as `buildQuery` does. `__scope`, `__implicit` and `__anchor` are reserved internal rewrite metadata, never application input. |
 
 The `auth`, `validators`, `scalars`, and `plugins` helper objects are shared by both database facades. The MongoDB facade retains its `mcp` compatibility namespace. PostgreSQL applications import MCP factories from the opt-in `@simtlix/simfinity-mcp` package; see the [MCP API](/reference/mcp).
+
+Client metadata exports live in a separate optional package:
+
+| Import | Exports |
+| --- | --- |
+| `@simtlix/simfinity-descriptor` | `buildClientDescriptor`, `createClientDescriptorHandler` and their descriptor/HTTP types |
+| `@simtlix/simfinity-core/introspection` | `configureIntrospection` and `IntrospectionOptions`; no runtime is loaded |
+
+Neither core nor the database facades re-export the descriptor functions. Direct
+core imports require an exact matching core dependency. See the [descriptor
+reference](/reference/client-descriptor) for the next-release API and limits.
 
 ## PostgreSQL initialization and transactions
 

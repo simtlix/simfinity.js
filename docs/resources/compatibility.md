@@ -9,7 +9,7 @@ import library from '../../package.json';
 
 # Compatibility and releases
 
-This documentation covers Simfinity.js **{{ library.version }}**, for **MongoDB and PostgreSQL**. All five packages are versioned and released together.
+This documentation covers Simfinity.js **{{ library.version }}**, for **MongoDB and PostgreSQL**. All six packages are versioned and released together.
 
 ## Package availability
 
@@ -37,6 +37,8 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 
 ## Upgrade notes for the next release
 
+### Controller callbacks after commit
+
 Controller callbacks after commit are additive. Applications that declare none keep their existing behavior; lifecycle hooks such as `onSaved` and `onUpdated` remain supported and run inside the transaction, including retries.
 
 - **Callbacks**: controllers may declare `onSaveCommitted(record, args, context)`, `onUpdateCommitted(record, context)`, `onDeleteCommitted(record, context)` and `onTransitionCommitted(record, action, context)`. A state action emits only the transition notification for its own record; its nested children keep their notifications. Callback records and creation arguments are snapshots of ordinary values; opaque scalar instances retain their identity. Context is the original reference. No session is passed.
@@ -48,6 +50,43 @@ Controller callbacks after commit are additive. Applications that declare none k
 - **Linting**: the optional application ESLint plugin recognizes `configureAfterCommit` as a runtime member, preserving subsequent schema and relation checks.
 
 See [controllers](../guide/controllers#after-commit-callbacks), the [API reference](../reference/api#configureaftercommit) and the [compatibility ledger](../compatibility#next-release-controller-callbacks-after-commit).
+
+### Client descriptor
+
+The optional `@simtlix/simfinity-descriptor` package joins the aligned release set
+as its sixth package. These APIs are not in the published 3.14.0 packages.
+
+- **Metadata**: import `buildClientDescriptor` and `createClientDescriptorHandler`
+  from the descriptor package, not core or either facade. Install it directly at
+  the matching Simfinity version. It consumes exact `createSchema()` results;
+  cloned or composed schemas fail with `NOT_A_SIMFINITY_SCHEMA` (500).
+- **Default compatibility**: the 3.x global introspection extension remains on.
+  Opt out with `configureIntrospection({ fieldExtensions: false })` from
+  `@simtlix/simfinity-core/introspection` before importing runtime/facades. Direct
+  core imports require a direct core dependency pinned to the facade version.
+  Invalid or late configuration throws `INVALID_INTROSPECTION_CONFIGURATION`
+  (500) without deleting installed metadata. A different 4.x default remains a
+  future decision; this change does not implement it.
+- **Clients**: clients selecting `__Field.extensions` must migrate before opting
+  out. The descriptor does not update simfinity-js-client or simfinity-web,
+  evaluate caller permissions, serialize arbitrary validators, or make arbitrary
+  schema transforms safe. `rootInputUsage` describes actual generated root input
+  fields; nested input shapes can differ.
+- **HTTP**: mount the endpoint explicitly with `authorize: 'public'` or an access
+  function. Missing access or unknown options fail at setup with
+  `INVALID_CLIENT_DESCRIPTOR_OPTIONS` (500). Format v1 has no include/exclude
+  selectors or cache-header overrides; use schema allowlists for separate audiences.
+  Expected 401/403 denials do not call `onError`; unexpected failures do.
+- **Types and dependencies**: core stays dependency-free. The descriptor handler
+  declares structural request/response types, so core, both facades and the
+  descriptor compile without Node ambient types. There is no core `/http` export
+  or facade re-export of the descriptor API.
+
+See the [client descriptor reference](../reference/client-descriptor) for bootstrap
+ordering, format v1, consumption examples, HTTP errors and composition limits.
+The new package needs the [one-time registry setup](./contributing#authentication-and-one-time-setup)
+before a future release; adding it does not publish anything or change the
+fail-closed registry checks.
 
 ## Upgrade to 3.14.0
 

@@ -124,3 +124,22 @@ await initializeDatabase(pool, description, { mode: 'validate' });
 Low-level `describeDatabase(registrations, { schema, refreshTriggers, ownerIndexes })` uses the `public` schema when `schema` is omitted, not the schema of a configured runtime; pass the schema given to `configure()` or `createPostgres()`, or call `describeDatabase()` and `compileDatabaseSchema()` without arguments for the default instance. `compileDatabaseSchema` returns reviewable SQL. Low-level `initializeDatabase(pool, description, { mode })` creates or validates storage transactionally and never closes the pool. Create mode adds missing objects and rejects incompatible definitions; validate mode performs no DDL. Neither mode performs destructive schema synchronization or data migration.
 
 Controller `onSaveCommitted`, `onUpdateCommitted`, `onDeleteCommitted` and `onTransitionCommitted` callbacks run serially after the owning transaction confirms commit and attempts cleanup. `configureAfterCommit({ onError })` configures reporting per runtime; callback failures do not fail the committed write. Borrowed lifecycle writes, such as those inside a registered mutation or `withTransaction(null, callback)`, join that owner's queue; a session this runtime did not create is rejected with `INVALID_SESSION`, as before. Existing hooks remain transactional. See [the contract, payloads and outbox requirements](https://simtlix.github.io/simfinity.js/guide/controllers.html#after-commit-callbacks).
+
+## Client metadata
+
+In the next release, install the optional `@simtlix/simfinity-descriptor` package,
+aligned with your Simfinity version. It exports `buildClientDescriptor(schema)`
+and `createClientDescriptorHandler(schema, { authorize: 'public' })`. The builder
+describes the exact `createSchema()` result; the explicitly mounted handler can
+instead use an application access function. These functions are not facade/core
+exports. The descriptor does not evaluate dynamic permissions or serialize
+arbitrary validators.
+
+Legacy introspection stays enabled by default in 3.x. To opt out, import
+`configureIntrospection` from `@simtlix/simfinity-core/introspection` in a separate
+bootstrap module and call it with `{ fieldExtensions: false }` **before importing
+the runtime or facades**. That direct import requires core as a direct dependency
+pinned to the facade's exact version, including under pnpm or Yarn PnP. A late
+call fails without deleting installed metadata. Migrate clients selecting
+`__Field.extensions` before opting out. See the [descriptor reference](https://simtlix.github.io/simfinity.js/reference/client-descriptor.html)
+for the format, protected HTTP access and composition limits.

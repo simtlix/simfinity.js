@@ -99,6 +99,7 @@ export default defineConfig({
       { text: 'Reference', collapsed: false, items: [
         { text: 'Core API', link: '/reference/api' },
         { text: 'Field extensions', link: '/reference/extensions' },
+        { text: 'Client descriptor', link: '/reference/client-descriptor' },
         { text: 'Scalars', link: '/reference/scalars' },
         { text: 'Aggregation', link: '/reference/aggregation' },
         { text: 'Plugins', link: '/reference/plugins' },

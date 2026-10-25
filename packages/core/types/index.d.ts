@@ -1124,3 +1124,6 @@ export const plugins: {
     };
   };
 };
+
+/** Early opt-out. Import its function from /introspection before loading the runtime. */
+export interface IntrospectionOptions { fieldExtensions: false; }

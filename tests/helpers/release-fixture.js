@@ -7,6 +7,7 @@ export const writeReleaseFixture = (root) => {
     ['packages/mongodb', '@simtlix/simfinity-js', { '@simtlix/simfinity-core': '0.1.0', '@simtlix/simfinity-mcp': '0.1.0' }],
     ['packages/core', '@simtlix/simfinity-core', {}],
     ['packages/sql', '@simtlix/simfinity-sql', { '@simtlix/simfinity-core': '0.1.0' }],
+    ['packages/descriptor', '@simtlix/simfinity-descriptor', { '@simtlix/simfinity-core': '0.1.0' }],
     ['packages/mcp', '@simtlix/simfinity-mcp', { '@simtlix/simfinity-core': '0.1.0' }],
     ['packages/postgres', '@simtlix/simfinity-postgres', { '@simtlix/simfinity-core': '0.1.0', '@simtlix/simfinity-sql': '0.1.0', pg: '^8.16.3' }],
   ];
