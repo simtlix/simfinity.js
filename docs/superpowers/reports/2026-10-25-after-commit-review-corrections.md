@@ -4,9 +4,9 @@ This records corrections to the [2026-10-25 review](https://github.com/simtlix/s
 
 ## Scope and decisions
 
-The reviewed head was `c6bf164398721c2408ac06db33ed9ef19ca1743e`; the base remains `738767141ecb3e017a9a590e52c7e1a795f68428` (3.12.0). Corrections are on `feat/143-controller-after-commit`, beginning with `e541a91c7472deea1728da7e5bda742814c91238`. All work, including the temporary base check, stayed in this session's worktree. No consumer application or other session's worktree was changed.
+The reviewed head was `c6bf164398721c2408ac06db33ed9ef19ca1743e` on base `738767141ecb3e017a9a590e52c7e1a795f68428` (3.12.0). Corrections first reached `e8350749ca1720f91d225d5f54a000b91a9a4c5b` on that base, beginning with `e541a91c7472deea1728da7e5bda742814c91238`. The branch was subsequently rebased after #147 merged; see the final integration section. All work stayed in this session's worktree, on `feat/143-controller-after-commit`. No consumer application or other session's worktree was changed.
 
-The controller, queue and database runtime implementations are unchanged from the reviewed head. The executable fix adds `configureAfterCommit` to the optional ESLint plugin's known runtime members so later schema/relation checks retain binding provenance. No plugin or runtime version was bumped.
+The initial review corrections left the controller, queue and database runtime implementations unchanged from the reviewed head. The executable fix adds `configureAfterCommit` to the optional ESLint plugin's known runtime members so later schema/relation checks retain binding provenance. No plugin or runtime version was bumped.
 
 | Review items | Resolution |
 | --- | --- |
@@ -23,7 +23,7 @@ The controller, queue and database runtime implementations are unchanged from th
 | 13 | Unit and real-database cases perform child add/update/delete inside a transition and require child notifications followed by transition only. |
 | 15 | Real database cases reject a later nested update with `NOT_VALID_ID`, or the second child with an actual unique violation. Each proves the earlier child's lifecycle hook ran, all writes rolled back and no notification escaped. |
 
-## Verification
+## Verification before the base changed
 
 Fresh checks use Node.js 24.2.0 and synthetic records in task-owned disposable MongoDB 8.0.32 replica-set/standalone databases and PostgreSQL 16.14. MongoDB callbacks run with integrity both off and transactional. The PostgreSQL fixture uses a one-client pool. Logs are local ignored artifacts under `.superpowers/sdd/2026-10-25-review-150/`.
 
@@ -47,10 +47,16 @@ The first root `npm run test:security` failed on three dependencies already lock
 
 A fresh root `npm ci` and `npm run test:security` both passed with zero vulnerabilities. A separate temporary application freshly installed the same SDK version, `@modelcontextprotocol/sdk@1.32.1`, and its audit also found zero vulnerabilities; it was removed afterward. `npm run lint` and the release-metadata consistency check passed after the root reinstall. The first complete database suite had already passed 5,283 tests with six skips in 235.22 seconds before this dependency update; a new full run verifies the final dependency graph separately. Documentation dependencies were installed independently with `npm run docs:install` (zero audit findings), and `npm run docs:build` passed in 6.03 seconds with only the existing bundle-size warning.
 
-## Integration limits
+## Integration with the merged OCC implementation
 
-On 2026-10-25, #147 remained open at `f6efefb511de5ca5e3d2a66d305999d60642623e`, #148 at `fb91b1f2eefdfc56ddc5f938943dbfb2dae5cf70` and #149 at `cd1b7d0c5d6c30a78121e765631da40cb7ddaad7`, each still based on `7387671`. None was mixed into this branch.
+At the start of this correction on 2026-10-25, #147 remained open at `f6efefb511de5ca5e3d2a66d305999d60642623e`, #148 at `fb91b1f2eefdfc56ddc5f938943dbfb2dae5cf70` and #149 at `cd1b7d0c5d6c30a78121e765631da40cb7ddaad7`, each still based on `7387671`. None was mixed into the initial correction.
 
-The [previous report](2026-10-23-controller-after-commit-verification.md#occ-integration-evidence) preserves the separate OCC combination at `6acc1f66d6f1215c729030bbb395b382e07ad13a`. That is historical evidence at its pinned heads, not a new-head test result. These review corrections do not alter the lifecycle runtime. Repeat the combined lifecycle/OCC check after #147 lands or either implementation changes, resolving the documented shared files before final integration. The stale-version rollback case remains on that evidence branch until #147 is integrated; the new missing-ID and unique-constraint rollback cases run directly on #150.
+At 15:56:07 UTC, #147 merged at `e6fa85aadc0ff19fe46e351b5c1569630d86ea02`, including its reviewed head `8f823efb4b6de0dc972fe27696671336d54cb664`. GitHub marked #150 conflicting and created no checks for the just-pushed `e835074`. The task branch was rebased onto that exact merge commit. This brings master’s prepared 3.13.0 metadata and security fixes into the base; this PR adds no release bump, manifest or lockfile change beyond its internal queue export. The redundant security-fix commit was dropped during rebase. #148 remains excluded.
+
+The original branch is preserved locally at `codex/143-review-before-occ`; the earlier [OCC evidence branch](2026-10-23-controller-after-commit-verification.md#occ-integration-evidence) remains historical evidence. Its five lifecycle conflict resolutions were reused, preserving OCC preconditions and result checks while awaiting results before queue registration. The newer #147 schema-validation correction was retained. Shared guides, architecture guidance and packed-consumer imports now preserve both features; obsolete claims that #143 is only proposed were replaced with callback/outbox guidance.
+
+`tests/integration/after-commit-occ.test.js` is now part of this PR, rather than only the evidence branch. Its nine cases cover successful versioned save/update/transition/delete notifications, stale versions emitting nothing, a stale nested child rolling back an earlier child's write and notification, and retries retaining the expected revision while dispatching only the confirmed attempt. They run on MongoDB with integrity off and transactional, and PostgreSQL.
+
+Fresh focused verification after the rebase: **328 passed** across eight callback/OCC/declaration suites; **244 passed, three backend-inapplicable skips** across six real-database suites, including the nine interaction cases, ordinary callbacks and the current OCC contracts. Root installation and lint also passed. These runs used new task-owned disposable databases and the new base; the earlier full-suite and package results above do not certify the rebased source. Final full-suite/package/documentation results and CI links are recorded in the [PR validation section](https://github.com/simtlix/simfinity.js/pull/150).
 
 Future #142/#100 operations must reuse the existing adapter-owned transaction and lifecycle completion sites, preserving authorization, hook ordering and exactly one notification registration for each successful lifecycle operation. This PR adds no parallel dispatcher or CRUD facade. Callback delivery remains best effort and is not an exactly-once or durable worker contract.

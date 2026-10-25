@@ -79,3 +79,7 @@ Initial evidence: [local verification report](../reports/2026-10-23-controller-a
 - [x] Record fresh evidence and prepare the authorized PR update without merging or publishing a release.
 
 The [review-corrections report](../reports/2026-10-25-after-commit-review-corrections.md) distinguishes the initial full pass, a later timeout after the security dependency update, and the unchanged affected suite's isolated pass. It also records the required security fix, package checks and limits of the historical OCC evidence. The PR's final CI checks are separate from local verification.
+
+### Rebase after #147 merged
+
+#147 merged while the correction was being published, at `e6fa85aadc0ff19fe46e351b5c1569630d86ea02`. The task branch was rebased onto that commit, preserving its prepared 3.13.0 version and both lifecycle contracts. The nine OCC/callback interaction cases now live in `tests/integration/after-commit-occ.test.js`; fresh focused unit and database checks passed. Earlier verification remains evidence for its own base. The [review-corrections report](../reports/2026-10-25-after-commit-review-corrections.md#integration-with-the-merged-occ-implementation) records the integration, and the PR records the final branch checks. No merge or release was performed by this session.
