@@ -217,6 +217,18 @@ export const createSQLAdapter = (sourcePlugin) => {
       if (onModelCreated) onModelCreated(model);
       return model;
     },
+    // The affinity check of the generated transaction field (#151), before its session opens: every model must be
+    // a handle of this instance, since one instance owns the one pool whose connection a transaction uses.
+    // validateRegistration already refuses models from elsewhere, so this is defensive. It names the first handle
+    // and the first model that is not one, which cannot share its transaction. Readiness is not checked: the
+    // transaction itself reports an uninitialized database.
+    assertTransactionModels(list) {
+      const isHandle = (model) => model != null && handles.get(model.name) === model;
+      const outside = list.findIndex((model) => !isHandle(model));
+      if (outside === -1) return;
+      const names = [list.find(isHandle), list[outside]].filter(Boolean).map((model) => model.name).sort();
+      throw new SimfinityError(`Types ${names.join(', ')} cannot share one database transaction`, 'TRANSACTION_UNSUPPORTED', 500);
+    },
     castId,
     stateValue: (state) => state.value,
     withTransaction: transactions.withTransaction,

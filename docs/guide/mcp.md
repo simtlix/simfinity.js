@@ -62,7 +62,7 @@ Generated inputs distinguish omission from explicit null: defaulted arguments us
 
 `maxResultBytes` also covers errors and partial data. Oversized query results are replaced by an actionable limit error. An oversized mutation result is not an error when the mutation succeeded, because the write already ran: the tool returns a `truncated` notice telling the agent whether calling it again would repeat the change, with the record's id when the id fits within the cap. Limit diagnostics and that notice are exempt from the cap. `limits` is validated when the tools are created; see [limits](/reference/mcp#limits).
 
-`limits` bound reads, not writes. Generated add and update tools accept nested collection inputs, and each nested `added`, `updated` or `deleted` entry runs inside the parent's transaction. On servers exposed to MCP clients, cap them with [`configureMutationLimits({ maxNestedOperations })`](/guide/mutations#limit-nested-collection-operations) at startup.
+`limits` bound reads, not writes. Generated add and update tools accept nested collection inputs, and each nested `added`, `updated` or `deleted` entry runs inside the parent's transaction. On servers exposed to MCP clients, cap them with [`configureMutationLimits({ maxNestedOperations })`](/guide/mutations#limit-nested-collection-operations) at startup. Next release: the [transaction tool](#transaction-tool-next-release) takes a list of operations, which `maxTransactionOperations` caps (100 by default) in the same call.
 
 ## Custom query tools
 
@@ -221,6 +221,52 @@ const lean = mcp.generateMCPTools(schema, {
 An explicit selection omits that tool's generated `outputSchema`, because the generator can no longer promise a matching output contract. Tool annotations describe behavior to clients; they do not grant or restrict access. Generated unprotected updates are marked idempotent unless their input can add collection items, and deletes are marked destructive and idempotent; in the next release protected updates keep the idempotent hint even with added items; see [annotations](/reference/mcp#annotations).
 
 See the [MCP reference](/reference/mcp) for all options, remote execution, middleware, and error behavior.
+
+## Transaction tool (next release)
+
+::: warning Next release
+The transaction tool needs the schema's `transaction` field, which is a next-release feature, and an MCP package of the same release.
+:::
+
+A schema that opts into the [transaction mutation](./mutations#run-several-mutations-in-one-transaction-next-release) can publish it as one tool, so an agent can apply several generated writes together or not at all. It is off by default:
+
+```javascript
+const { tools, callTool } = mcp.generateMCPTools(schema, {
+  transactionTools: true,
+  include: ['serie', 'series', 'transaction'],
+});
+```
+
+Without `transactionTools: true` (unset, `null` or `false`) MCP never publishes the field, and neither does it publish any other mutation shaped like it: one with the field's `extensions`, whose description starts with `Simfinity transaction: runs the listed generated mutations in order in one database transaction.`, or that has a single `operations: [X!]!` argument whose fields match generated mutations of the schema, also when some of those mutations are missing and the field returns a list of an object type with a field named after each operation. Without this rule, an unrecognized mutation would be published as a custom tool. Any other value throws `MCP_INVALID_OPTIONS` at setup.
+
+With the opt-in, the tool is named like the field, with `toolNamePrefix`, and the filters apply as follows:
+
+- `include` and `exclude` accept it by its own name or by the category `'mutation'`. `include` does not need to list its operation keys.
+- It is omitted when `exclude` names any of its operation keys, bare or with the prefix: the tool can run every operation, so excluding `deleteserie` also removes the transaction tool, which could otherwise delete through it.
+- `includeTypes` and `excludeTypes` apply to the types its operations write: each operation's own type and, transitively, the targets of the nested collections its inputs declare. Reference targets and output relations do not count. The tool is published when none of those types is in `excludeTypes` and, if `includeTypes` is set, all of them are in it. `TransactionResult` is not an entity for these filters.
+
+The input schema is closed like every tool's: each item of `operations` is an object with exactly one known operation property, whose value is not null (`minProperties` and `maxProperties` are 1, and `additionalProperties` is `false`); nullability inside the values is kept. The annotations are always `destructiveHint: true` and `idempotentHint: false`: updates, state actions and controllers can overwrite data, and adds create records on every call. The description follows the field's, and adds how to write an operation, the `$K` references and the `$$` escape.
+
+Each operation field of the result is selected with the `selectionDepth` and `nestedCollections` of that operation's own tool; as below any list position, only virtual fields with `mcp: 'select'` are selected. The result list takes no level of `selectionDepth`. Each result item keeps only `id` and its own operation's key, so the result does not grow with the number of generated mutations the field accepts. A `toolOverrides` entry for the transaction tool changes its title, description and annotations, and an explicit `selection` on it replaces the selection of the result list and drops its `outputSchema`, as for any tool; its items are then returned as selected. Its `selectionDepth` and `nestedCollections` are ignored, and the overrides of an operation's own tool apply to that operation, except that an explicit `selection` there is not reused inside the batch: fields that selection hides still appear in the transaction result, so hide fields with [field authorization](./authorization) instead. When the result exceeds `maxResultBytes`, the compact value keeps one `{ id, <operationKey>: { id, version? } | null }` per operation, with `null` for a delete of a missing record, and the notice says that the operations were applied all together or not at all, never in part, unless the error came from the commit or from a retry-exhausted conflict, which leaves it uncertain.
+
+The tool executes the `transaction` mutation, so the [authorization rules](./authorization#authorize-the-transaction-mutation-next-release) of the field and of each operation apply in-process, through `schemaPlugins`, and remotely, on the server. A [`toolMiddleware`](/reference/mcp#tool-middleware) that gates tools by name sees only the transaction tool; the operations it runs are in `call.args.operations`.
+
+### Rebuilt and remote schemas
+
+MCP never rebuilds a schema. It recognizes the transaction field from the schema it receives, and publishes it only when the field has the marker description, the structure above, and an operation input type that is `@oneOf`. A schema that your application rebuilds from introspection must therefore request `getIntrospectionQuery({ oneOf: true })` with descriptions on, because the default introspection query leaves out `isOneOf` and the marker is a description:
+
+```javascript
+import { buildClientSchema, getIntrospectionQuery } from 'graphql';
+
+const query = getIntrospectionQuery({ descriptions: true, oneOf: true });
+const schema = buildClientSchema((await introspect(query)).data);
+```
+
+`introspect` is your application's request to the GraphQL endpoint. A schema built from SDL printed with `printSchema()` keeps `@oneOf` and descriptions. When `transactionTools` is on and a mutation has the field's shape but MCP cannot classify it, the mutation is omitted with a one-time `[simfinity-mcp]` warning. Remote execution needs the server's schema to expose the same field.
+
+A rebuild that removes generated mutations must also remove the transaction field or add it to `exclude`. MCP recognizes the field by its shape where it can, but `exclude` by operation key only applies to a recognized transaction tool, and a remote server still runs every operation it has.
+
+A server that enables `transaction` exposes the field as a custom mutation tool to an earlier MCP package, including MCP processes in remote mode that no package pin aligns. Upgrade those processes first, or add the field to their `exclude`. See the [upgrade notes](/resources/compatibility#lifecycle-helpers-and-the-generated-transaction).
 
 ## Protected records (next release)
 

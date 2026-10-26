@@ -119,6 +119,18 @@ export interface MongoAdapter extends DatabaseAdapter {
    * creates an identifier; use `new mongoose.Types.ObjectId()` for that.
    */
   castId(value: any): any;
+  /**
+   * The affinity check of the generated `transaction` field (see `CreateSchemaOptions.transaction`), run
+   * before each transaction opens. Synchronous: it never writes and opens no session. The models must
+   * share one MongoDB client: when every model's connection has a client they must be the same
+   * `MongoClient`, and while a connection has none yet (before `connect()`, or a `useDb()` child created
+   * earlier) the connections of one `useDb()` family count as one client. Otherwise it throws
+   * `TRANSACTION_UNSUPPORTED` (500), `Types <A>, <B> cannot share one database transaction`, naming the
+   * first model's type and the first type that cannot share its client, sorted, by their registrations
+   * (by `modelName` for a model that several types share). It never names a connection string. It applies
+   * in both `referentialIntegrity` modes, and an empty list passes.
+   */
+  assertTransactionModels(models: any[]): void;
   /** Returns null for a hydrated nested path whose stored value is an explicit null; otherwise the value. */
   readEmbeddedValue(value: any): any;
   /**
@@ -303,14 +315,15 @@ export interface QueryLimitsOptions {
 export function configureQueryLimits(options?: QueryLimitsOptions): void;
 
 /**
- * Process-wide limit on nested added/updated/deleted entries per generated add, update or
- * state-action mutation (`maxNestedOperations`; unlimited by default), and on the operations of
- * one generated transaction mutation (`maxTransactionOperations`, a positive safe integer;
- * 100 by default). Each call replaces both values, and calling it without options restores both
- * defaults. Invalid configuration, including an unknown or misspelled option key, throws
- * INVALID_MUTATION_LIMITS (400) and keeps the current limits; a mutation over the nested limit
- * fails with NESTED_OPERATIONS_EXCEEDED (400) before its transaction starts. `updateObject` and
- * `transitionObject` apply `maxNestedOperations` to their `input` in the same way (`null` = no limit).
+ * Process-wide mutation limits. `maxNestedOperations` caps the nested added/updated/deleted entries
+ * of one generated add, update or state-action mutation (unlimited by default; `null` = no limit),
+ * and `updateObject` and `transitionObject` apply it to their `input` in the same way.
+ * `maxTransactionOperations` caps the operations of one generated transaction mutation (a positive
+ * safe integer; 100 by default). Each call replaces both values, so an omitted option takes its
+ * default again, and calling it without options restores both defaults. Invalid configuration,
+ * including an unknown or misspelled option key, throws INVALID_MUTATION_LIMITS (400) and keeps the
+ * current limits. A mutation over the nested limit fails with NESTED_OPERATIONS_EXCEEDED (400)
+ * before its transaction starts.
  */
 export function configureMutationLimits(options?: MutationLimitsOptions): void;
 

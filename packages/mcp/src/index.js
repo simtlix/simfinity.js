@@ -283,6 +283,11 @@ const ensureEnumDef = (type, defs) => {
  * and field descriptions are propagated, with curated fallbacks for Simfinity's
  * synthetic filter types. Fields with a GraphQL default value carry a JSON
  * Schema `default` and are not listed as required (GraphQL fills them in).
+ * A `@oneOf` input object (`isOneOf`, which a schema rebuilt from
+ * introspection keeps only when it requested `oneOf: true`) takes exactly
+ * one of its fields, with a value that is not null, as GraphQL coerces it:
+ * its def has `minProperties` and `maxProperties` 1, no other property, and
+ * non-null field schemas; nullability inside the field values is kept.
  * @param {import('graphql').GraphQLInputObjectType} type
  * @param {Object} defs
  */
@@ -292,10 +297,12 @@ const ensureInputDef = (type, defs) => {
   }
   defs[type.name] = {};
 
+  const oneOf = type.isOneOf === true;
   const properties = {};
   const required = [];
   for (const [fieldName, field] of Object.entries(type.getFields())) {
-    const { schema, isRequired } = typeToJSONSchema(field.type, defs);
+    const fieldType = oneOf && !(field.type instanceof GraphQLNonNull) ? new GraphQLNonNull(field.type) : field.type;
+    const { schema, isRequired } = typeToJSONSchema(fieldType, defs);
     const fieldDescription = field.description || SIMFINITY_FILTER_DOCS[`${type.name}.${fieldName}`];
     let property = withDescription(schema, fieldDescription);
     const hasDefault = field.defaultValue !== undefined;
@@ -306,7 +313,7 @@ const ensureInputDef = (type, defs) => {
       }
     }
     properties[fieldName] = property;
-    if (isRequired && !hasDefault) {
+    if (isRequired && !hasDefault && !oneOf) {
       required.push(fieldName);
     }
   }
@@ -318,6 +325,9 @@ const ensureInputDef = (type, defs) => {
   }
   if (required.length) {
     def.required = required;
+  }
+  if (oneOf) {
+    Object.assign(def, { minProperties: 1, maxProperties: 1, additionalProperties: false });
   }
   defs[type.name] = def;
 };
@@ -545,6 +555,24 @@ const normalizeNestedCollections = (value, name) => {
 };
 
 /**
+ * Normalize the `transactionTools` option: undefined, null or false leave
+ * the generated transaction field unpublished, true publishes it (see
+ * {@link transactionPlan}). Any other value, such as 'yes' or 1, throws
+ * MCP_INVALID_OPTIONS.
+ * @param {*} value
+ * @returns {boolean}
+ */
+const normalizeTransactionTools = (value) => {
+  if (value == null || value === false) {
+    return false;
+  }
+  if (value === true) {
+    return true;
+  }
+  throw new SimfinityError(`transactionTools must be true, false or null, got ${describeCap(value)}`, 'MCP_INVALID_OPTIONS', 500);
+};
+
+/**
  * A nested collection: an object list field that takes a `pagination`
  * argument. Core generates one for every non-embedded one-to-many relation
  * and resolves it with one query per parent row; embedded lists take no
@@ -728,6 +756,21 @@ const buildOutputSchema = (fieldName, field, selectionDepth, collections = 'all'
 });
 
 /**
+ * Wrap the schema of a named output type's value in the list and nullability
+ * wrappers of `type`, as {@link returnTypeToSchema} does.
+ * @param {import('graphql').GraphQLOutputType} type
+ * @param {Object} namedSchema schema of a value of the named type
+ * @returns {Object}
+ */
+const wrapOutputSchema = (type, namedSchema) => {
+  const nullable = type instanceof GraphQLNonNull ? type.ofType : type;
+  const schema = nullable instanceof GraphQLList
+    ? { type: 'array', items: wrapOutputSchema(nullable.ofType, namedSchema) }
+    : namedSchema;
+  return type instanceof GraphQLNonNull ? schema : nullableSchema(schema);
+};
+
+/**
  * Build the `outputSchema` of a virtual field tool (see
  * {@link buildVirtualFieldTools}): the GraphQL `data`
  * `{ [byIdName]: { [fieldName]: value } | null }`. The field's value follows
@@ -868,6 +911,271 @@ const MUTATION_OPERATIONS = Object.assign(Object.create(null), {
 });
 
 /**
+ * The first sentence of the description core gives its generated transaction
+ * field (createSchema()'s `transaction` option). It is stable, and SDL and
+ * introspection keep it where they lose the field's extensions.
+ */
+const TRANSACTION_MARKER = 'Simfinity transaction: runs the listed generated mutations in order in one database transaction.';
+
+/**
+ * Whether a value type of a transaction-shaped field's operation input
+ * matches the mutation root of its key. For a root with an `input` argument
+ * (an add, update or state-machine action) it is, by name, the named type of
+ * that argument; for any other root (a delete) it is an input object whose
+ * fields are exactly the root's arguments with their types, such as
+ * `{ id: ID! }` or `{ id: ID!, version: RecordVersion! }`.
+ * @param {import('graphql').GraphQLInputType} valueType
+ * @param {import('graphql').GraphQLField} root
+ * @returns {boolean}
+ */
+const matchesOperationRoot = (valueType, root) => {
+  const value = valueType instanceof GraphQLNonNull ? valueType.ofType : valueType;
+  const rootArgs = root.args || [];
+  const input = rootArgs.find((arg) => arg.name === 'input');
+  if (input) {
+    return !(value instanceof GraphQLList) && value.name === getNamedType(input.type).name;
+  }
+  if (!(value instanceof GraphQLInputObjectType)) {
+    return false;
+  }
+  const fields = value.getFields();
+  return rootArgs.length > 0 && Object.keys(fields).length === rootArgs.length
+    && rootArgs.every((arg) => Object.hasOwn(fields, arg.name) && String(fields[arg.name].type) === String(arg.type));
+};
+
+/**
+ * The input object X of a field whose only argument is `operations: [X!]!`,
+ * or null.
+ * @param {import('graphql').GraphQLField} field
+ * @returns {import('graphql').GraphQLInputObjectType|null}
+ */
+const operationsItemType = (field) => {
+  const args = field.args || [];
+  if (args.length !== 1 || args[0].name !== 'operations') {
+    return null;
+  }
+  const list = args[0].type instanceof GraphQLNonNull ? args[0].type.ofType : null;
+  const item = list instanceof GraphQLList && list.ofType instanceof GraphQLNonNull ? list.ofType.ofType : null;
+  return item instanceof GraphQLInputObjectType ? item : null;
+};
+
+/**
+ * The structural signature of core's generated transaction field, which SDL
+ * and introspection rebuilds keep: a single argument `operations: [X!]!`,
+ * where X is an input object each of whose fields is named after another
+ * mutation root of `mutationType` and matches it (see
+ * {@link matchesOperationRoot}). X need not be `@oneOf`.
+ * @param {string} fieldName
+ * @param {import('graphql').GraphQLField} field
+ * @param {import('graphql').GraphQLObjectType} mutationType
+ * @returns {{ operationType: import('graphql').GraphQLInputObjectType,
+ *   keys: Array<{ key: string, root: import('graphql').GraphQLField,
+ *   valueType: import('graphql').GraphQLInputType }> }|null}
+ */
+const transactionSignature = (fieldName, field, mutationType) => {
+  const item = operationsItemType(field);
+  if (!item) {
+    return null;
+  }
+  const roots = mutationType.getFields();
+  const keys = [];
+  for (const [key, operationField] of Object.entries(item.getFields())) {
+    const root = key !== fieldName && Object.hasOwn(roots, key) ? roots[key] : undefined;
+    if (!root || !matchesOperationRoot(operationField.type, root)) {
+      return null;
+    }
+    keys.push({ key, root, valueType: operationField.type });
+  }
+  return keys.length > 0 ? { operationType: item, keys } : null;
+};
+
+const startsWithTransactionMarker = (field) => typeof field.description === 'string'
+  && field.description.startsWith(TRANSACTION_MARKER);
+
+/**
+ * The shape core's generated transaction field keeps in a rebuild that lost
+ * its description and extensions and also dropped some of its generated
+ * mutations (spec #151 section 5, ruling R22), which
+ * {@link transactionSignature} no longer recognizes: a single argument
+ * `operations: [X!]!`, where at least one field of X matches a mutation root
+ * of `mutationType` and every field of X named after a root matches it (see
+ * {@link matchesOperationRoot}), and a result that is a list of an object
+ * type with a field of the same name for every field of X. X need not be
+ * `@oneOf`. The result rule keeps an application's batch mutation that
+ * returns a scalar, or a list without such fields, a custom tool. This shape
+ * only excludes a field; it never classifies one as a transaction.
+ * @param {string} fieldName
+ * @param {import('graphql').GraphQLField} field
+ * @param {import('graphql').GraphQLObjectType} mutationType
+ * @returns {boolean}
+ */
+const hasTransactionResultShape = (fieldName, field, mutationType) => {
+  const item = operationsItemType(field);
+  const list = field.type instanceof GraphQLNonNull ? field.type.ofType : field.type;
+  const result = list instanceof GraphQLList ? getNamedType(list.ofType) : null;
+  if (!item || !(result instanceof GraphQLObjectType)) {
+    return false;
+  }
+  const roots = mutationType.getFields();
+  const results = result.getFields();
+  let matched = false;
+  for (const [key, operationField] of Object.entries(item.getFields())) {
+    if (!Object.hasOwn(results, key)) {
+      return false;
+    }
+    const root = key !== fieldName && Object.hasOwn(roots, key) ? roots[key] : undefined;
+    if (root) {
+      if (!matchesOperationRoot(operationField.type, root)) {
+        return false;
+      }
+      matched = true;
+    }
+  }
+  return matched;
+};
+
+/**
+ * The exclusion rule of core's generated transaction field: a mutation that
+ * has `extensions.simfinityTransaction`, whose description starts with
+ * {@link TRANSACTION_MARKER}, that has the {@link transactionSignature}, or
+ * that has {@link hasTransactionResultShape}, any one of them, is never
+ * published as a custom tool. Only `transactionTools: true` publishes it,
+ * and only when {@link transactionPlan} recognizes it.
+ * @param {string} fieldName
+ * @param {import('graphql').GraphQLField} field
+ * @param {import('graphql').GraphQLObjectType} mutationType
+ * @returns {boolean}
+ */
+const isTransactionShaped = (fieldName, field, mutationType) => (
+  (field.extensions != null && field.extensions.simfinityTransaction != null)
+  || startsWithTransactionMarker(field)
+  || transactionSignature(fieldName, field, mutationType) !== null
+  || hasTransactionResultShape(fieldName, field, mutationType)
+);
+
+/**
+ * The plan of a mutation MCP classifies as core's generated transaction
+ * field, or null. Classification needs the marker description, the
+ * {@link transactionSignature} with a `@oneOf` operation type, and the result
+ * core gives the field: a list of an object type with `id` and, for each
+ * operation key, a field of the type that key's root returns. Applications
+ * that rebuild a schema from introspection must request
+ * `getIntrospectionQuery({ oneOf: true })` with descriptions.
+ * @param {string} fieldName
+ * @param {import('graphql').GraphQLField} field
+ * @param {import('graphql').GraphQLObjectType} mutationType
+ * @returns {{ resultType: import('graphql').GraphQLObjectType,
+ *   keys: Array<{ key: string, root: import('graphql').GraphQLField,
+ *   valueType: import('graphql').GraphQLInputType,
+ *   resultField: import('graphql').GraphQLField }> }|null}
+ */
+const transactionPlan = (fieldName, field, mutationType) => {
+  const signature = startsWithTransactionMarker(field) ? transactionSignature(fieldName, field, mutationType) : null;
+  if (!signature || signature.operationType.isOneOf !== true) {
+    return null;
+  }
+  const list = field.type instanceof GraphQLNonNull ? field.type.ofType : field.type;
+  const item = list instanceof GraphQLList ? getNamedType(list.ofType) : null;
+  if (!(item instanceof GraphQLObjectType) || isListType(list.ofType)) {
+    return null;
+  }
+  const results = item.getFields();
+  const idField = Object.hasOwn(results, 'id') ? results.id : undefined;
+  if (!idField || !(getNamedType(idField.type) instanceof GraphQLScalarType) || isListType(idField.type)) {
+    return null;
+  }
+  const keys = [];
+  for (const { key, root, valueType } of signature.keys) {
+    const resultField = Object.hasOwn(results, key) ? results[key] : undefined;
+    if (!resultField || isListType(resultField.type) !== isListType(root.type)
+        || getNamedType(resultField.type).name !== getNamedType(root.type).name) {
+      return null;
+    }
+    keys.push({
+      key, root, valueType, resultField,
+    });
+  }
+  return { resultType: item, keys };
+};
+
+// The transaction-shaped mutations that `transactionTools: true` warned about, so each is warned about once.
+const warnedTransactionFields = new WeakSet();
+
+const COLLECTION_INPUT_FIELDS = new Set(['added', 'updated', 'deleted']);
+
+// The input of a nested collection, as core generates it: lists named added, updated and deleted.
+const isCollectionInput = (type) => {
+  const fields = Object.values(type.getFields());
+  return fields.length > 0 && fields.every((field) => COLLECTION_INPUT_FIELDS.has(field.name) && isListType(field.type));
+};
+
+/**
+ * The names of the types a transaction's operations write, which its type
+ * filters test: each operation's own type, the type its root returns, and,
+ * transitively, the target of each nested collection the operation's input
+ * declares, through the items it adds or updates and through embedded
+ * values. Reference targets and output relations are not written. Inputs
+ * carry no extensions, so a collection input (see {@link isCollectionInput})
+ * maps to the list field of the same name of the output type at the same
+ * position, whose item type is the target.
+ * @param {Array<{ root: import('graphql').GraphQLField,
+ *   valueType: import('graphql').GraphQLInputType }>} keys from {@link transactionPlan}
+ * @returns {Array<string>|null} null when a target cannot be resolved
+ */
+const transactionWrittenTypes = (keys) => {
+  const written = [];
+  const visited = new Set();
+  const walk = (inputType, outputType) => {
+    const position = `${inputType.name} ${outputType ? outputType.name : ''}`;
+    if (visited.has(position)) {
+      return true;
+    }
+    visited.add(position);
+    const outputFields = outputType ? outputType.getFields() : {};
+    for (const [name, inputField] of Object.entries(inputType.getFields())) {
+      const named = getNamedType(inputField.type);
+      if (!(named instanceof GraphQLInputObjectType)) {
+        continue;
+      }
+      const outputField = Object.hasOwn(outputFields, name) ? outputFields[name] : undefined;
+      const target = outputField ? getNamedType(outputField.type) : undefined;
+      if (isCollectionInput(named)) {
+        if (!(target instanceof GraphQLObjectType) || !isListType(outputField.type)) {
+          return false;
+        }
+        if (!written.includes(target.name)) {
+          written.push(target.name);
+        }
+        const members = named.getFields();
+        for (const member of ['added', 'updated']) {
+          const items = Object.hasOwn(members, member) ? getNamedType(members[member].type) : undefined;
+          if (items instanceof GraphQLInputObjectType && !walk(items, target)) {
+            return false;
+          }
+        }
+      } else if (!walk(named, target instanceof GraphQLObjectType ? target : null)) {
+        return false;
+      }
+    }
+    return true;
+  };
+  for (const { root, valueType } of keys) {
+    const own = getNamedType(root.type);
+    if (!(own instanceof GraphQLObjectType)) {
+      return null;
+    }
+    if (!written.includes(own.name)) {
+      written.push(own.name);
+    }
+    const value = getNamedType(valueType);
+    if (value instanceof GraphQLInputObjectType && !walk(value, own)) {
+      return null;
+    }
+  }
+  return written;
+};
+
+/**
  * Classify a root field into a logical operation kind so descriptions, titles
  * and annotations can be tailored. Generated list and aggregate queries carry
  * their operation in `extensions.simfinityQuery`, so a list query whose type
@@ -875,7 +1183,11 @@ const MUTATION_OPERATIONS = Object.assign(Object.create(null), {
  * filter argument) stays a list. Other queries are classified structurally: a
  * list needs a `pagination` argument and a single-record query an `id`
  * argument; any other query is a read-only 'customQuery'. Generated mutations
- * carry their operation in `extensions.simfinityMutation`. Without it (an
+ * carry their operation in `extensions.simfinityMutation`. Every other
+ * mutation goes through {@link isTransactionShaped} first: core's generated
+ * transaction field, as {@link transactionPlan} recognizes it, is
+ * 'transaction', and any other mutation the exclusion rule catches is
+ * 'transactionShaped', which is never published. Without the marker (an
  * older core, or a schema rebuilt from SDL or introspection), CRUD mutations
  * are recognized by the placeholder description Simfinity stamps on them
  * ('add'/'update'/'delete') together with the matching name prefix. Every
@@ -885,9 +1197,11 @@ const MUTATION_OPERATIONS = Object.assign(Object.create(null), {
  * @param {'query'|'mutation'} kind
  * @param {string} fieldName
  * @param {import('graphql').GraphQLField} field
- * @returns {'single'|'list'|'aggregate'|'customQuery'|'add'|'update'|'delete'|'transition'|'custom'}
+ * @param {import('graphql').GraphQLObjectType} [mutationType] the type that
+ *   declares a mutation field, whose roots the transaction rules compare with
+ * @returns {'single'|'list'|'aggregate'|'customQuery'|'add'|'update'|'delete'|'transition'|'transaction'|'transactionShaped'|'custom'}
  */
-const classifyOperation = (kind, fieldName, field) => {
+const classifyOperation = (kind, fieldName, field, mutationType) => {
   if (kind === 'query') {
     const query = field.extensions && field.extensions.simfinityQuery;
     const generated = query ? query.operation : undefined;
@@ -906,8 +1220,15 @@ const classifyOperation = (kind, fieldName, field) => {
     return hasArg(field, 'id') ? 'single' : 'customQuery';
   }
   const mutation = field.extensions && field.extensions.simfinityMutation;
-  if (mutation && MUTATION_OPERATIONS[mutation.operation]) {
-    return MUTATION_OPERATIONS[mutation.operation];
+  const generated = mutation ? MUTATION_OPERATIONS[mutation.operation] : undefined;
+  if (generated && generated !== 'custom') {
+    return generated;
+  }
+  if (mutationType && isTransactionShaped(fieldName, field, mutationType)) {
+    return transactionPlan(fieldName, field, mutationType) ? 'transaction' : 'transactionShaped';
+  }
+  if (generated) {
+    return generated;
   }
   // Generated CRUD mutations carry BOTH the placeholder description and the
   // name prefix; requiring the conjunction avoids misreading a custom mutation
@@ -952,10 +1273,20 @@ const acceptsAddedItems = (field) => {
 // and synthesize a richer description instead.
 const PLACEHOLDER_DESCRIPTIONS = new Set(['add', 'update', 'delete']);
 
+// How to call a transaction tool, after the field's own description, which starts with TRANSACTION_MARKER.
+const TRANSACTION_TOOL_TEXT = 'Each item of `operations` holds exactly one operation: its key names a generated mutation, '
+  + 'and its value is that mutation\'s `input`, except that a delete takes `{ id }`, plus `version` for a record type with '
+  + 'versions. The operations are applied all together or not at all. In an id position, "$K" stands for the id of the '
+  + 'result of the earlier operation K (counted from 0), and a value that starts with "$$" stands for itself without the '
+  + 'first "$". Returns one result per operation: the id of its record and the field named after its key.';
+
 const buildToolDescription = (op, fieldName, field, entityType) => {
   // A named view takes the generated list arguments, so its own description is followed by what they accept.
   if (isViewField(field)) {
     return `${field.description} ${LIST_LANGUAGE_TEXT}`;
+  }
+  if (op === 'transaction') {
+    return `${field.description} ${TRANSACTION_TOOL_TEXT}`;
   }
   if (field.description && !PLACEHOLDER_DESCRIPTIONS.has(field.description)) {
     return field.description;
@@ -995,6 +1326,9 @@ const buildToolDescription = (op, fieldName, field, entityType) => {
 const buildToolTitle = (op, fieldName, entityType) => {
   const entity = entityType ? entityType.name : fieldName;
   switch (op) {
+    case 'transaction':
+      // Its result type, such as TransactionResult, is no entity.
+      return fieldName;
     case 'single':
       return `Get ${entity}`;
     case 'list':
@@ -1037,8 +1371,10 @@ const buildVirtualFieldToolDescription = (fieldName, field, entityType) => {
  * create new child records on every call. A delete is
  * idempotent because a repeat deletes nothing more; it still calls
  * controller.onDelete, with null since the record is gone, so onDelete hooks
- * must tolerate null. Transitions and custom mutations get no hints beyond
- * readOnlyHint: false.
+ * must tolerate null. A transaction is always destructive and never
+ * idempotent: its updates, actions and controllers can overwrite data and its
+ * adds create records on every call. Transitions and custom mutations get no
+ * hints beyond readOnlyHint: false.
  * @param {string} op from {@link classifyOperation}
  * @param {string} title
  * @param {import('graphql').GraphQLField} field
@@ -1058,6 +1394,10 @@ const buildAnnotations = (op, title, field) => {
     case 'delete':
       return {
         ...base, readOnlyHint: false, destructiveHint: true, idempotentHint: true,
+      };
+    case 'transaction':
+      return {
+        ...base, readOnlyHint: false, destructiveHint: true, idempotentHint: false,
       };
     default:
       return { ...base, readOnlyHint: false };
@@ -2153,9 +2493,11 @@ const countPropertySchema = (countKey) => ({
   description: `Total number of matching records across all pages. Present when pagination.count is true and the server computed a total.${countKey === 'totalCount' ? '' : ' Named __totalCount because the list field itself is named totalCount.'}`,
 });
 
-const truncationPropertySchema = (returnsVersion) => ({
+const truncationPropertySchema = (returnsVersion, op) => ({
   type: 'object',
-  description: `Present instead of the full result when an applied mutation returned more than maxResultBytes: only the ${returnsVersion ? 'id and version (or ids and versions)' : 'id (or ids)'} of the root value is kept next to this notice, when they fit within maxResultBytes.`,
+  description: op === 'transaction'
+    ? 'Present instead of the full result when the transaction, whose operations were committed together in one database transaction, returned more than maxResultBytes: each result keeps only its id and the id (and version, for a record type with versions) of its operation\'s record, or null, next to this notice, when they fit within maxResultBytes.'
+    : `Present instead of the full result when an applied mutation returned more than maxResultBytes: only the ${returnsVersion ? 'id and version (or ids and versions)' : 'id (or ids)'} of the root value is kept next to this notice, when they fit within maxResultBytes.`,
   properties: {
     applied: { type: 'boolean' },
     message: { type: 'string' },
@@ -2165,18 +2507,105 @@ const truncationPropertySchema = (returnsVersion) => ({
   required: ['applied', 'message', 'resultBytes', 'maxResultBytes'],
 });
 
+/** Reduce a record to `{ id }`, or `{ id, version }` for protected types, or undefined when its id is missing. */
+const compactRecord = (item, returnsVersion) => (item !== null && typeof item === 'object'
+  && (typeof item.id === 'string' || typeof item.id === 'number')
+  ? { id: item.id, ...(returnsVersion && Object.hasOwn(item, 'version') ? { version: item.version } : {}) }
+  : undefined);
+
 /** Reduce a mutation's root value to `{ id }` or `{ id, version }` for protected types (also in lists), or undefined when an id is missing. */
 const compactMutationValue = (value, returnsVersion) => {
-  const pick = (item) => (item !== null && typeof item === 'object'
-    && (typeof item.id === 'string' || typeof item.id === 'number')
-    ? { id: item.id, ...(returnsVersion && Object.hasOwn(item, 'version') ? { version: item.version } : {}) }
-    : undefined);
   if (Array.isArray(value)) {
-    const ids = value.map(pick);
+    const ids = value.map((item) => compactRecord(item, returnsVersion));
     return ids.length > 0 && ids.every(Boolean) ? ids : undefined;
   }
-  return pick(value);
+  return compactRecord(value, returnsVersion);
 };
+
+/**
+ * The operation key of an item of a transaction's result list: the one known
+ * key whose value is set or, when none is (a delete of a missing record
+ * returns no record), the key of the operation at the item's position in
+ * `operations`. Undefined when that is ambiguous: two keys are set, or none
+ * is and that operation does not name exactly one known key.
+ * @param {Object} item a result item
+ * @param {number} index its position in the result list
+ * @param {Map<string, *>} keys the tool's operation keys
+ * @param {*} operations the `operations` argument the call ran with
+ * @returns {string|undefined}
+ */
+const transactionItemKey = (item, index, keys, operations) => {
+  const set = Object.keys(item).filter((key) => keys.has(key) && item[key] != null);
+  if (set.length === 1) {
+    return set[0];
+  }
+  const operation = Array.isArray(operations) ? operations[index] : undefined;
+  const sent = operation !== null && typeof operation === 'object' ? Object.keys(operation) : [];
+  return set.length === 0 && sent.length === 1 && keys.has(sent[0]) ? sent[0] : undefined;
+};
+
+/**
+ * Reduce each item of a transaction's result list to `{ id, <key> }`, the
+ * key of its own operation (see {@link transactionItemKey}), so an item no
+ * longer carries every other operation key as null and the result does not
+ * grow with the number of keys. An item that is not an object with `id` and
+ * that key, or whose key is ambiguous, is kept whole: nothing set is
+ * dropped. Any other value is returned as it is.
+ * @param {*} value the root value
+ * @param {Map<string, *>} keys the tool's operation keys
+ * @param {*} operations the `operations` argument the call ran with
+ * @returns {*}
+ */
+const pruneTransactionValue = (value, keys, operations) => {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+  return value.map((item, index) => {
+    if (item === null || typeof item !== 'object' || !Object.hasOwn(item, 'id')) {
+      return item;
+    }
+    const key = transactionItemKey(item, index, keys, operations);
+    return key !== undefined && Object.hasOwn(item, key) ? { id: item.id, [key]: item[key] } : item;
+  });
+};
+
+/**
+ * Reduce a transaction's result list to `[{ id, <key>: { id, version? } | null }]`,
+ * one item per operation with the key of its own operation (see
+ * {@link transactionItemKey}), or undefined when an item cannot be reduced.
+ * An item's `id` may be null: a delete of a missing record returns no record.
+ * @param {*} value the root value
+ * @param {Map<string, { returnsVersion: boolean }>} keys the tool's operation keys
+ * @param {*} operations the `operations` argument the call ran with
+ * @returns {Array<Object>|undefined}
+ */
+const compactTransactionValue = (value, keys, operations) => {
+  if (!Array.isArray(value) || value.length === 0) {
+    return undefined;
+  }
+  const items = [];
+  for (const [index, item] of value.entries()) {
+    if (item === null || typeof item !== 'object'
+        || !(item.id === null || typeof item.id === 'string' || typeof item.id === 'number')) {
+      return undefined;
+    }
+    const key = transactionItemKey(item, index, keys, operations);
+    if (key === undefined) {
+      return undefined;
+    }
+    const record = item[key] == null ? null : compactRecord(item[key], keys.get(key).returnsVersion);
+    if (record === undefined) {
+      return undefined;
+    }
+    items.push({ id: item.id, [key]: record });
+  }
+  return items;
+};
+
+/** Whether a compact value from {@link compactMutationValue} or {@link compactTransactionValue} keeps a version. */
+const keepsVersion = (compact, op) => (Array.isArray(compact) ? compact : [compact]).some((item) => (op === 'transaction'
+  ? Object.values(item).some((record) => record !== null && typeof record === 'object' && Object.hasOwn(record, 'version'))
+  : Object.hasOwn(item, 'version')));
 
 const FIRST_ERROR_MAX_LENGTH = 300;
 
@@ -2207,11 +2636,16 @@ const truncateErrorMessage = (message) => {
  * @param {boolean} params.withFirstError whether extensions.firstError is set
  * @param {string} params.sizes "(N bytes) exceeds maxResultBytes (M)"
  * @param {string} params.idNote what happened to the root ids
+ * @param {boolean} [params.remote] whether the tool executes remotely
  * @returns {string}
  */
-const oversizedMutationMessage = ({
-  name, op, idempotent, applied, withErrors, withFirstError, sizes, idNote,
-}) => {
+const oversizedMutationMessage = (params) => {
+  const {
+    name, op, idempotent, applied, withErrors, withFirstError, sizes, idNote,
+  } = params;
+  if (op === 'transaction') {
+    return oversizedTransactionMessage(params);
+  }
   if (applied === 'unknown') {
     let repeat;
     if (idempotent) {
@@ -2251,6 +2685,43 @@ const oversizedMutationMessage = ({
 };
 
 /**
+ * Text of the notice for an oversized transaction result (see
+ * {@link oversizedMutationMessage}). The operations run in one database
+ * transaction, so the notice never says they were applied in part: a root
+ * value shows that they were committed together; without one, none was
+ * applied unless the error came from the commit (or, remotely, from the
+ * request to the GraphQL endpoint) or is TRANSACTION_RETRY_EXCEEDED, which
+ * leaves it uncertain whether all were.
+ * @param {Object} params see {@link oversizedMutationMessage}
+ * @returns {string}
+ */
+function oversizedTransactionMessage({
+  name, idempotent, applied, withErrors, withFirstError, sizes, idNote, remote,
+}) {
+  if (applied === 'unknown') {
+    const firstError = withFirstError ? ' (extensions.firstError holds the start of the first error)' : '';
+    const uncertain = remote
+      ? 'came from the commit or from the request to the GraphQL endpoint, or is TRANSACTION_RETRY_EXCEEDED'
+      : 'came from the commit or is TRANSACTION_RETRY_EXCEEDED';
+    const repeat = idempotent
+      ? `Calling ${name} again with the same arguments would not repeat changes that were already applied.`
+      : `If they were applied, calling ${name} again could repeat the changes.`;
+    return `${name} returned errors; the error result ${sizes} and was omitted${firstError}. Its operations run in one `
+      + 'database transaction, so they were applied all together or not at all, never in part: none was applied, unless '
+      + `the error ${uncertain}, which leaves it uncertain whether all were. ${repeat} Check the current state with a `
+      + 'query tool before calling it again.';
+  }
+  const committed = `${name} was applied: its operations were committed together in one database transaction`;
+  const omitted = withErrors
+    ? `, but parts of its result failed; the result with errors ${sizes} and was omitted${idNote}.`
+    : `. Its full result ${sizes} and was omitted${idNote}.`;
+  const repeat = idempotent
+    ? `Calling ${name} again with the same arguments would not repeat the changes, so there is no need to call it again`
+    : `Calling ${name} again could repeat the changes; do not call ${name} again for these changes`;
+  return `${committed}${omitted} ${repeat}; use a query tool to read the records if you need their other fields.`;
+}
+
+/**
  * Result for a mutation whose payload exceeds maxResultBytes. The write has
  * already run, so a success stays a success (the root ids and, for protected
  * types, versions next to a
@@ -2267,28 +2738,33 @@ const oversizedMutationMessage = ({
  *   fractional; the notice reports it rounded down
  * @param {(value: *) => string} params.stringify serializer of the text
  *   content block, from {@link normalizeTextFormat}
+ * @param {Object} [params.args] the arguments the call ran with, whose
+ *   `operations` name the key of a transaction result without a record
+ * @param {boolean} [params.remote] whether the tool executes remotely
  * @returns {Object} CallToolResult
  */
 const oversizedMutationResult = ({
-  entry, name, result, isError, bytes, maxResultBytes, stringify,
+  entry, name, result, isError, bytes, maxResultBytes, stringify, args, remote,
 }) => {
   const root = result.data !== null && typeof result.data === 'object' ? result.data[entry.fieldName] : undefined;
   // The outputSchema declares an integer, and a fractional cap is accepted.
   // Byte counts are integers, so `bytes > cap` and `bytes > floor(cap)` agree.
   const cap = Math.floor(maxResultBytes);
-  let compact = compactMutationValue(root, entry.returnsVersion);
+  let compact = entry.op === 'transaction'
+    ? compactTransactionValue(root, entry.transactionKeys, args !== null && typeof args === 'object' ? args.operations : undefined)
+    : compactMutationValue(root, entry.returnsVersion);
   let idNote = '';
   if (compact !== undefined) {
-    const keepsVersion = (Array.isArray(compact) ? compact : [compact]).some((item) => Object.hasOwn(item, 'version'));
+    const withVersion = keepsVersion(compact, entry.op);
     if (Buffer.byteLength(JSON.stringify(compact), 'utf8') > cap) {
-      idNote = keepsVersion
+      idNote = withVersion
         ? '; its id and version values together exceed maxResultBytes and were omitted too'
         : Array.isArray(compact)
         ? '; its ids alone exceed maxResultBytes and were omitted too'
         : '; its id alone exceeds maxResultBytes and was omitted too';
       compact = undefined;
     } else {
-      idNote = keepsVersion
+      idNote = withVersion
         ? (Array.isArray(compact) ? '; only the ids and versions are returned' : '; only the id and version are returned')
         : (Array.isArray(compact) ? '; only the ids are returned' : '; only the id is returned');
     }
@@ -2308,6 +2784,7 @@ const oversizedMutationResult = ({
     withFirstError: firstError !== undefined,
     sizes: `(${bytes} bytes) exceeds maxResultBytes (${cap})`,
     idNote,
+    remote,
   });
   if (!isError) {
     const structured = {};
@@ -2473,6 +2950,20 @@ const createCallTool = ({
       }
     }
 
+    if (entry.pruneTransaction && result.data !== null && typeof result.data === 'object'
+        && Array.isArray(result.data[entry.fieldName])) {
+      // Each item of a transaction's result keeps its id and its own operation key, in both modes and in
+      // the partial data of an error, before the result is serialized and measured.
+      const operations = args !== null && typeof args === 'object' ? args.operations : undefined;
+      result = {
+        ...result,
+        data: {
+          ...result.data,
+          [entry.fieldName]: pruneTransactionValue(result.data[entry.fieldName], entry.transactionKeys, operations),
+        },
+      };
+    }
+
     const isError = !!(result.errors && result.errors.length);
     const count = mode === 'remote'
       ? (result.extensions && typeof result.extensions.count === 'number' ? result.extensions.count : undefined)
@@ -2496,7 +2987,15 @@ const createCallTool = ({
       if (bytes > limits.maxResultBytes) {
         if (entry.kind === 'mutation') {
           return oversizedMutationResult({
-            entry, name: call.name, result, isError, bytes, maxResultBytes: limits.maxResultBytes, stringify,
+            entry,
+            name: call.name,
+            result,
+            isError,
+            bytes,
+            maxResultBytes: limits.maxResultBytes,
+            stringify,
+            args,
+            remote: mode === 'remote',
           });
         }
         // Whole bytes, as in the mutation notice: a fractional cap allows
@@ -2620,6 +3119,7 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
   }
 
   const nestedCollections = normalizeNestedCollections(options.nestedCollections, 'nestedCollections');
+  const transactionTools = normalizeTransactionTools(options.transactionTools);
   // Every override is checked, published or not, so a misspelled tool key
   // or an excluded tool does not hide an invalid value.
   if (toolOverrides !== null && typeof toolOverrides === 'object') {
@@ -2633,6 +3133,69 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
   const defRegistry = createDefRegistry();
 
   const queryType = schema.getQueryType();
+
+  // Whether include and exclude accept a tool by its own name or its kind; the type filters are not applied.
+  const selectedByName = (fieldName, toolName, kind) => isIncluded({
+    names: [fieldName, toolName], kind, entityName: null, include, exclude, includeTypes: null, excludeTypes: null,
+  });
+
+  // The selection rules of a mutation root inside a transaction's result list: the selectionDepth and
+  // nestedCollections of its own tool's override over the global ones. Its value sits below a list
+  // position, so only virtual fields with mcp: 'select' are selected (see virtualFieldsInside), whatever
+  // its own tool selects.
+  const rootToolRules = (key) => {
+    const overrideKey = [`${toolNamePrefix}${key}`, key].find((name) => toolOverrides[name]);
+    const override = overrideKey ? toolOverrides[overrideKey] : {};
+    return {
+      depth: override.selectionDepth ?? selectionDepth,
+      collections: override.nestedCollections == null
+        ? nestedCollections
+        : normalizeNestedCollections(override.nestedCollections, `toolOverrides.${overrideKey}.nestedCollections`),
+      virtuals: 'select',
+    };
+  };
+
+  // Whether the filters publish a transaction tool (spec #151, section 5): include and exclude accept it by
+  // its own name or 'mutation'; exclude names none of its operation keys, bare or prefixed; and, with type
+  // filters, every type its operations write resolves, none is in excludeTypes, and includeTypes, when
+  // set, lists them all. Its result type is no entity.
+  const includesTransaction = (fieldName, toolName, plan) => {
+    if (!selectedByName(fieldName, toolName, 'mutation')) {
+      return false;
+    }
+    if (exclude && plan.keys.some(({ key }) => matchesSelector(exclude, [key, `${toolNamePrefix}${key}`], null))) {
+      return false;
+    }
+    if (!includeTypes && !excludeTypes) {
+      return true;
+    }
+    const written = transactionWrittenTypes(plan.keys);
+    return written !== null
+      && !(excludeTypes && written.some((name) => excludeTypes.includes(name)))
+      && !(includeTypes && written.some((name) => !includeTypes.includes(name)));
+  };
+
+  // The selection of a transaction field: the result's id, then each operation key selected with the
+  // rules of its root (see rootToolRules). The result list takes no level of selectionDepth.
+  const transactionSelection = (plan) => {
+    const fields = plan.keys.map(({ key, resultField }) => {
+      const { depth, collections, virtuals } = rootToolRules(key);
+      return `${key}${buildSelectionSet(resultField.type, depth, collections, virtuals)}`;
+    });
+    return ` { id ${fields.join(' ')} }`;
+  };
+
+  // The outputSchema mirroring transactionSelection, wrapped under the field name as buildOutputSchema does.
+  const transactionOutputSchema = (fieldName, field, plan) => {
+    const idField = plan.resultType.getFields().id;
+    const properties = { id: withDescription(returnTypeToSchema(idField.type, 0), idField.description) };
+    for (const { key, resultField } of plan.keys) {
+      const { depth, collections, virtuals } = rootToolRules(key);
+      properties[key] = withDescription(returnTypeToSchema(resultField.type, depth, collections, virtuals), resultField.description);
+    }
+    const item = withDescription({ type: 'object', properties }, plan.resultType.description);
+    return { type: 'object', properties: { [fieldName]: wrapOutputSchema(field.type, item) } };
+  };
 
   const resolveEntityType = (op, fieldName, field) => {
     if (op === 'aggregate' && queryType) {
@@ -2657,9 +3220,28 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
     }
     for (const [fieldName, field] of Object.entries(rootType.getFields())) {
       const toolName = `${toolNamePrefix}${fieldName}`;
-      const op = classifyOperation(kind, fieldName, field);
-      const entityType = resolveEntityType(op, fieldName, field);
-      if (!isIncluded({
+      const op = classifyOperation(kind, fieldName, field, kind === 'mutation' ? rootType : undefined);
+      // Core's generated transaction field, and any mutation shaped like it, is never a custom tool; only
+      // transactionTools publishes the field, and only when transactionPlan recognizes it.
+      let plan = null;
+      if (op === 'transaction' || op === 'transactionShaped') {
+        if (!transactionTools) {
+          continue;
+        }
+        plan = op === 'transaction' ? transactionPlan(fieldName, field, rootType) : null;
+        if (!plan) {
+          if (!warnedTransactionFields.has(field) && selectedByName(fieldName, toolName, kind)) {
+            warnedTransactionFields.add(field);
+            console.warn(`[simfinity-mcp] The mutation "${fieldName}" looks like a Simfinity transaction field, but MCP cannot publish it as one, so it is omitted. A transaction tool needs the field's marker description, an operations argument whose @oneOf input type has one field per generated mutation, and the field's result type; a schema rebuilt from introspection must request getIntrospectionQuery({ oneOf: true }) with descriptions.`);
+          }
+          continue;
+        }
+        if (!includesTransaction(fieldName, toolName, plan)) {
+          continue;
+        }
+      }
+      const entityType = plan ? null : resolveEntityType(op, fieldName, field);
+      if (!plan && !isIncluded({
         names: [fieldName, toolName],
         kind,
         entityName: entityType ? entityType.name : null,
@@ -2687,12 +3269,19 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
       // A named view is titled by its name, not as the generated list of its type.
       const title = override.title || (isViewField(field) ? fieldName : buildToolTitle(op, fieldName, entityType));
       const baseDescription = override.description || buildToolDescription(op, fieldName, field, entityType);
-      const description = hasVersionPrecondition(field) ? `${baseDescription} ${VERSION_PRECONDITION_TEXT}` : baseDescription;
+      // A transaction's operations of protected types carry their versions inside `operations`.
+      const versioned = plan
+        ? plan.keys.some(({ valueType }) => hasRecordVersionField(valueType))
+        : hasVersionPrecondition(field);
+      const description = versioned ? `${baseDescription} ${VERSION_PRECONDITION_TEXT}` : baseDescription;
       const annotations = { ...buildAnnotations(op, title, field), ...(override.annotations || {}) };
       const virtuals = virtualFieldsFor(field.type);
-      const selection = override.selection
-        ? normalizeSelection(override.selection)
-        : buildSelectionSet(field.type, depth, collections, virtuals);
+      let selection;
+      if (override.selection) {
+        selection = normalizeSelection(override.selection);
+      } else {
+        selection = plan ? transactionSelection(plan) : buildSelectionSet(field.type, depth, collections, virtuals);
+      }
 
       const tool = {
         name: toolName,
@@ -2711,12 +3300,14 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
       // An explicit selection override makes the mirrored output schema
       // unreliable, so it is omitted rather than published wrong.
       if (!override.selection) {
-        tool.outputSchema = buildOutputSchema(fieldName, field, depth, collections, virtuals);
+        tool.outputSchema = plan
+          ? transactionOutputSchema(fieldName, field, plan)
+          : buildOutputSchema(fieldName, field, depth, collections, virtuals);
         if (countKey) {
           tool.outputSchema.properties[countKey] = countPropertySchema(countKey);
         }
         if (truncationKey && maxResultBytes) {
-          tool.outputSchema.properties[truncationKey] = truncationPropertySchema(returnsVersion);
+          tool.outputSchema.properties[truncationKey] = truncationPropertySchema(returnsVersion, op);
         }
       }
       tools.push(tool);
@@ -2734,6 +3325,14 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
         countKey,
         truncationKey,
         returnsVersion,
+        // A transaction's operation keys, with whether each root returns a version, for its compact
+        // oversized value (see compactTransactionValue).
+        transactionKeys: plan
+          ? new Map(plan.keys.map(({ key, root }) => [key, { returnsVersion: hasRecordVersionField(root.type) }]))
+          : undefined,
+        // Whether each item of a transaction's result is reduced to its id and its own operation key (see
+        // pruneTransactionValue): only with the generated selection, whose result keys are the field names.
+        pruneTransaction: !!plan && !override.selection,
         idempotent: annotations.idempotentHint === true,
         // Generated find fields of a core that reports counts to a root-value
         // sink (see COUNT_SINK) advertise it with this marker.
@@ -2944,6 +3543,20 @@ const prepareMCPTools = (schema, options = {}) => {
  *   text content block of results, which `limits.maxResultBytes` measures:
  *   pretty-printed, or 'compact' without whitespace. Other values throw
  *   MCP_INVALID_OPTIONS.
+ * @param {boolean|null} [options.transactionTools] publish the generated
+ *   transaction field (core's `transaction` schema option) as one destructive,
+ *   non-idempotent multi-write tool. Off by default (undefined, null or
+ *   false): neither the field nor any mutation {@link isTransactionShaped}
+ *   catches is published, not even as a custom tool. With true, the field is
+ *   published when {@link transactionPlan} recognizes it, include/exclude
+ *   accept it by its own name or 'mutation', exclude names none of its
+ *   operation keys, and includeTypes/excludeTypes accept every type its
+ *   operations write; a shaped field it does not recognize is omitted with a
+ *   one-time warning. Each operation is selected with the selectionDepth and
+ *   nestedCollections of its own tool and, below the result list, only the
+ *   virtual fields with mcp: 'select'; each result item keeps only its id and
+ *   its own operation key, unless the tool has an explicit selection. Other
+ *   values throw MCP_INVALID_OPTIONS.
  * @param {boolean} [options.includeId] deprecated and ignored: every scalar/enum
  *   field without required arguments, `id` included, is always selected, and
  *   an object type with none selects `__typename`.
@@ -2966,7 +3579,9 @@ const prepareMCPTools = (schema, options = {}) => {
  *   undeclared argument key the caller sent that is still
  *   in `call.args` when the chain reaches execution is rejected
  *   (MCP_UNKNOWN_ARGUMENT, nothing executed); middleware may consume such a
- *   key by deleting it, and keys middleware adds are passed through.
+ *   key by deleting it, and keys middleware adds are passed through. A gate
+ *   by tool name sees only the transaction tool's name; its operations are
+ *   in `call.args.operations`.
  * @param {{ maxPageSize?: number, defaultPagination?: Object,
  *   maxResultBytes?: number }|null|false} [options.limits] guardrails: reject
  *   oversized pages/logical result payloads (including errors), inject default
@@ -3162,8 +3777,8 @@ export const startStdioMCPServer = async (schema, options = {}) => {
  * enabling per-request authentication (e.g. reading an Authorization header).
  * The SDK and its Streamable HTTP transport are loaded first, then
  * `transportOptions`, `execution`, `toolMiddleware`, `limits`, `textFormat`,
- * `nestedCollections` and `schemaPlugins` are validated, and asynchronous
- * schemaPlugins hooks awaited, before the handler is returned.
+ * `nestedCollections`, `transactionTools` and `schemaPlugins` are validated,
+ * and asynchronous schemaPlugins hooks awaited, before the handler is returned.
  *
  * @param {import('graphql').GraphQLSchema} schema
  * @param {Object} [options] same options as {@link createMCPServer}; in HTTP mode

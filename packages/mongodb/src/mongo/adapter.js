@@ -278,13 +278,19 @@ export const createMongoAdapter = (options) => {
   // - registered models on several clients have no single client to choose.
   // Once the default connection has a client, nothing changes.
   const hasModels = (connection) => Object.keys(connection.models).length > 0;
-  // A child's otherDbs also lists its parent, so the walk visits each connection once, cycles
+  // The connection and everything its otherDbs reach: its useDb() parent, children and their siblings, at
+  // any depth. A child's otherDbs also lists its parent, so the walk visits each connection once, cycles
   // included: a Set iteration also visits the entries added while it runs.
-  const defaultClientHasModels = () => {
-    const seen = new Set([mongoose.connection]);
+  const connectionFamily = (start) => {
+    const seen = new Set([start]);
     for (const connection of seen) {
-      if (hasModels(connection)) return true;
       for (const other of connection.otherDbs) seen.add(other);
+    }
+    return seen;
+  };
+  const defaultClientHasModels = () => {
+    for (const connection of connectionFamily(mongoose.connection)) {
+      if (hasModels(connection)) return true;
     }
     return false;
   };
@@ -299,6 +305,21 @@ export const createMongoAdapter = (options) => {
       else if (clientOf(found.db) !== clientOf(connection)) return undefined;
     }
     return found;
+  };
+
+  // Whether two connections share one MongoDB client, hence one session. Two resolved clients decide by
+  // identity. While either has no client yet (before connect(), or a useDb() child created earlier), the
+  // connections of one useDb() family share the client the family will have, so connections whose
+  // families meet count as one. A family is found through otherDbs, never Mongoose's private _parent;
+  // a useDb(name, { noListener: true }) child lists its parent, which does not list it, so the families
+  // meet at the parent.
+  const sharesClient = (first, second) => {
+    const firstClient = first.getClient?.();
+    const secondClient = second.getClient?.();
+    if (firstClient && secondClient) return firstClient === secondClient;
+    const family = connectionFamily(first);
+    for (const connection of connectionFamily(second)) if (family.has(connection)) return true;
+    return false;
   };
 
   // A supplied session or model is used as is; only an owned session without a model looks up
@@ -359,6 +380,20 @@ export const createMongoAdapter = (options) => {
         }
         if (onModelCreated) onModelCreated(model);
       }, integrity.enabled ? { ...modelOptions, createCollection: false } : modelOptions);
+    },
+    // The affinity check of the generated transaction field (#151), before its session opens. Every
+    // model must share the first one's client, in both referentialIntegrity modes, which run every write
+    // in a transaction. It never writes, and a connection that is still connecting is no error: its
+    // session waits for it. The error names the first model's type and the first type that cannot share
+    // its session, as the types of the registrations (a model that several types share, or has none, by
+    // its modelName), never the connections' addresses.
+    assertTransactionModels(models) {
+      const [first, ...others] = models.filter((model) => model?.db);
+      const conflict = others.find((model) => !sharesClient(first.db, model.db));
+      if (!conflict) return;
+      const registrations = getRegistrations();
+      const names = [first, conflict].map((model) => versionTypeName(model, registrations)).sort();
+      throw new SimfinityError(`Types ${names.join(', ')} cannot share one database transaction`, 'TRANSACTION_UNSUPPORTED', 500);
     },
     // Relation inputs and batch keys: only an ObjectId or its hex form, never a newly minted one.
     castId: castObjectId,

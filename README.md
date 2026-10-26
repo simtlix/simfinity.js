@@ -73,6 +73,7 @@ For builds and hosting, see the [website maintainer guide](docs/.vitepress/READM
   - [Custom Queries](#custom-queries)
   - [Named Views](#named-views)
   - [Custom Mutations](#custom-mutations)
+  - [Transaction mutation (next release)](#transaction-mutation-next-release)
   - [Working with Existing Mongoose Models](#working-with-existing-mongoose-models)
   - [Programmatic Data Access](#programmatic-data-access)
 - [MCP Generation](#-mcp-generation)
@@ -245,7 +246,7 @@ const schema = simfinity.createSchema(
   includedQueryTypes,     // Optional: Array of types to include in queries
   includedMutationTypes,  // Optional: Array of types to include in mutations
   includedCustomMutations, // Optional: Array of custom mutation names to include
-  { includedCustomQueries } // Optional: Options object; custom query names to include
+  { includedCustomQueries, transaction } // Optional: Options object; custom query names to include and, next release, the transaction mutation
 );
 ```
 
@@ -285,6 +286,8 @@ simfinity.configureMutationLimits({ maxNestedOperations: 100 });
 ```
 
 A mutation over the limit fails with `NESTED_OPERATIONS_EXCEEDED` (400) before its transaction starts. Call `configureMutationLimits()` without arguments to remove the limit. Unknown options, such as a misspelled `maxNestedOperation`, throw `INVALID_MUTATION_LIMITS` (400) and keep the current limit.
+
+Next release: `updateObject()` and `transitionObject()` apply `maxNestedOperations` to their input like the generated mutations, and `configureMutationLimits({ maxNestedOperations, maxTransactionOperations })` also caps the operations of one [transaction mutation](#transaction-mutation-next-release) (a positive safe integer; 100 by default). Each call replaces both values, so an omitted option takes its default again, and the unknown-option message reads `Unknown mutation limit option <key>; use maxNestedOperations or maxTransactionOperations`. Inside a transaction mutation the nested limit is one joint budget for every nested entry that runs on an attempt's session, including those that hooks and helper calls add.
 
 ## 📋 Basic Usage
 
@@ -1431,7 +1434,7 @@ To normalize errors in your GraphQL server, pass `simfinity.buildErrorFormatter(
 
 A GraphQL error without `path` is treated as a request error, including a scalar literal validation error that wraps another error with the same message. For subscriptions, mark unexpected source-stream failures with `InternalServerError` before the server wraps them: those wrappers can be indistinguishable from request errors. For a GraphQL error without a path, the formatter keeps an explicit internal cause for masking.
 
-The callback receives the classified error and can return a replacement. To hide unexpected messages, branch on `error instanceof simfinity.InternalServerError`. The formatter returns a `GraphQLError` whose `originalError` is the classified error. See [buildErrorFormatter](docs/reference/errors.md#builderrorformatter), [server integration](docs/reference/errors.md#connect-it-to-your-server) and [server differences](docs/reference/errors.md#server-differences).
+The callback receives the classified error and can return a replacement. To hide unexpected messages, branch on `error instanceof simfinity.InternalServerError`. Next release: an error of the [transaction mutation](#transaction-mutation-next-release) carries the position of its operation, which a callback that returns a new `InternalServerError` drops unless it copies `operationIndex` and `operation`; see [errors of the transaction mutation](docs/reference/errors.md#errors-of-the-transaction-mutation-next-release). The formatter returns a `GraphQLError` whose `originalError` is the classified error. See [buildErrorFormatter](docs/reference/errors.md#builderrorformatter), [server integration](docs/reference/errors.md#connect-it-to-your-server) and [server differences](docs/reference/errors.md#server-differences).
 
 ## Optimistic concurrency (next release)
 
@@ -1541,6 +1544,7 @@ mutation {
 - State transitions are only allowed based on the defined actions
 - Business logic in the `action` function is executed during transitions
 - Invalid transitions throw errors automatically
+- Next release: server code can run an action without GraphQL with `simfinity.transitionObject('Order', 'process', { id }, session, context)`; see [Programmatic Data Access](#programmatic-data-access)
 
 ## 🎛️ Controllers & Lifecycle Hooks
 
@@ -2275,6 +2279,8 @@ const server = createServer(yoga);
 server.listen(4000);
 ```
 
+Next release: the operations of a [transaction mutation](#transaction-mutation-next-release) get the rules of their roots from the plugin, on every attempt and before their middleware, so give rules to `Mutation.transaction` and to each operation key (under `DENY`, also to `TransactionResult` and the returned types). Use the `auth` namespace of the same release and facade as the runtime that built the schema (`simfinity.auth`, as above): a plugin from an earlier release records no operation checks. Do not change a permission map once the plugin has processed a schema. See the [authorization guide](docs/guide/authorization.md#authorize-the-transaction-mutation-next-release).
+
 ### Legacy: Integration with graphql-middleware
 
 > **Deprecated:** `applyMiddleware` from `graphql-middleware` rebuilds the schema via `mapSchema`,
@@ -2282,6 +2288,7 @@ server.listen(4000);
 > Use `createAuthPlugin` with GraphQL Yoga / Envelop instead.
 > Simfinity does not install `graphql-middleware`; add it to your application to use this example.
 > `createFieldMiddleware` returns the same middleware function as `createAuthMiddleware`, so wildcard rules and the default policy apply to every field.
+> Next release: both deny the generated `transaction` field with `ForbiddenError`, because they cannot apply the rules of its operations.
 
 ```javascript
 const { applyMiddleware } = require('graphql-middleware');
@@ -2800,6 +2807,39 @@ Include types in the schema without generating endpoints. See the [detailed guid
 simfinity.addNoEndpointType(AddressType);
 ```
 
+### Transaction mutation (next release)
+
+Each root mutation runs in its own transaction. To run several generated mutations, of several types, in one database transaction, opt in when building the schema (not in 3.12.0):
+
+```javascript
+const schema = simfinity.createSchema(null, null, null, {
+  transaction: { types: [SerieType, SeasonType] },
+});
+```
+
+The schema gains `transaction(operations: [TransactionOperation!]!): [TransactionResult!]`. Each item of `operations` is a `@oneOf` object keyed by a generated mutation (`addserie`, `updateseason`, `deleteserie`, `activate_season`, ...) whose value is that mutation's `input`; a delete takes `{ id }`, or `{ id, version }` for a type with optimistic concurrency. Inside an `id` position, `$K` refers to the ID of the record the earlier operation `K` wrote:
+
+```graphql
+mutation LaunchSerie($operations: [TransactionOperation!]!) {
+  transaction(operations: $operations) {
+    id
+    addserie { id name }
+    addseason { id number }
+  }
+}
+```
+
+```json
+{
+  "operations": [
+    { "addserie": { "name": "Northern Lights" } },
+    { "addseason": { "number": 1, "year": 2024, "serie": { "id": "$0" } } }
+  ]
+}
+```
+
+Everything commits together or nothing is stored. Each operation gets the authorization checks of its root, runs the root's middleware and its normal lifecycle, and the whole list is repeated on a retry. An operation's error carries `extensions.operationIndex` and `extensions.operation`. The adapter must implement `assertTransactionModels`, which the MongoDB, SQL and PostgreSQL adapters do; on MongoDB every model must share one `MongoClient`. See the [mutations guide](docs/guide/mutations.md#run-several-mutations-in-one-transaction-next-release) for references, limits and errors, and the [MCP guide](docs/guide/mcp.md#transaction-tool-next-release) to publish it as one tool.
+
 ### Working with Existing Mongoose Models
 
 Use your existing Mongoose models:
@@ -2832,6 +2872,11 @@ const newBook = await simfinity.saveObject('Book', {
   author: 'Author Name'
 }, session);
 
+// Next release: update, delete and run a state action through the lifecycle
+const updated = await simfinity.updateObject('Book', { id: String(newBook._id), title: 'Second Edition' }, session);
+const deleted = await simfinity.deleteObject('Book', { id: String(newBook._id) }, session); // the record, or null
+const processed = await simfinity.transitionObject('Order', 'process', { id: String(orderId) }, session);
+
 // Get the Mongoose model for a type
 const BookModel = simfinity.getModel(BookType);
 const books = await BookModel.find({ author: 'Douglas Adams' });
@@ -2844,6 +2889,8 @@ console.log(UserType.getFields()); // Access GraphQL fields
 // Get the input type for a GraphQL type
 const BookInput = simfinity.getInputType(BookType);
 ```
+
+Next release: `updateObject()`, `deleteObject()` and `transitionObject()` run the lifecycle of the generated update, delete and state action mutations, in an owned transaction or in the active `session` you pass. Like `saveObject()`, they skip GraphQL coercion, field authorization and the root record's global middleware, but they validate and copy their input first: declared fields only, no `state`, internal enum values, and record keys as strings (`String(record._id)`). They resolve to the updated record (the deleted one, or `null`, for `deleteObject()`) and throw `INVALID_OPERATION_TARGET`, `UNKNOWN_ACTION`, `INVALID_INPUT`, `REQUIRED_VALUE` or the usual `NOT_VALID_ID`, `VERSION_CONFLICT` and `NESTED_OPERATIONS_EXCEEDED`. See [update, delete and transition from code](docs/guide/server-side-operations.md#update-delete-and-transition-from-code-next-release).
 
 For jobs, workers, webhooks and other server code, read [server-side operations](docs/guide/server-side-operations.md): it shows when to use a mutation with nested writes, a controller hook, in-process execution of the generated schema, a custom mutation with `saveObject()` or the native model with the session, and what each of them runs. [Usage anti-patterns](docs/guide/anti-patterns.md) lists the approaches to avoid.
 
@@ -2976,6 +3023,7 @@ The handler catches all errors itself: `onError` is for logging/metrics, and a J
 | `textFormat` | `'pretty'` | JSON format of the text content block: `'pretty'` (two-space indentation) or `'compact'`. `maxResultBytes` measures that text. Other values throw `MCP_INVALID_OPTIONS` at setup. |
 | `includeId` | — | Deprecated and ignored: it never changed the generated selection. Every scalar/enum field without required arguments, `id` included, is always selected. |
 | `toolNamePrefix` | — | Prefix prepended to every published tool name (e.g. `'catalog_'`). Must match `/^[a-zA-Z0-9_-]+$/`; the resulting names must match `/^[a-zA-Z0-9_-]{1,128}$/` (`MCP_INVALID_TOOL_NAME` otherwise). |
+| `transactionTools` | `false` | Next release: `true` publishes the schema's generated [`transaction` field](#transaction-mutation-next-release) as one destructive, non-idempotent tool. Off, it and any mutation shaped like it are never published. `include`/`exclude` accept it by name or `'mutation'`, and it is omitted when `exclude` names any of its operation keys. Other values throw `MCP_INVALID_OPTIONS`. A schema rebuilt from introspection needs `getIntrospectionQuery({ oneOf: true })` with descriptions. See the [MCP guide](docs/guide/mcp.md#transaction-tool-next-release). |
 | `toolOverrides` | `{}` | Per-tool overrides keyed by tool (or unprefixed field) name: `{ description, title, annotations, selectionDepth, nestedCollections, selection }` (a deprecated `includeId` is ignored). See [Customizing tools](#customizing-tools). |
 | `toolMiddleware` | — | A koa-style `async (call, next)` function, or an array of them, run around every tool call. A single function is a one-element stack. Validated at setup (`MCP_INVALID_MIDDLEWARE`, also for an empty slot in a sparse array) and copied, so later changes to the array have no effect. Middleware may be synchronous; a throw rejects the previous middleware's `next()` promise. See [Tool middleware](#tool-middleware). |
 | `limits` | — | Guardrails: `{ maxPageSize, defaultPagination, maxResultBytes }`, validated at setup (`MCP_INVALID_LIMITS`) and read again on every call; a falsy value means none. See [Limits](#limits). |
@@ -3061,7 +3109,7 @@ const { callTool } = simfinity.generateMCPTools(schema, {
 - `maxPageSize`: rejects calls whose `pagination.size` exceeds the cap.
 - `defaultPagination`: injected only for tools that have a `pagination` argument, and only when the caller did not send one. At setup it is checked against the `pagination` argument type of every published tool: for QLPagination, `page` and `size` are required positive integers, `count` must be a boolean and no other key is allowed; a custom pagination type is checked against its own GraphQL type. `size` must not exceed `maxPageSize`. Core's own page-size cap (`configureQueryLimits`, default 1000) is not checked.
 - `maxResultBytes`: caps the UTF-8 byte length of the text content block (pretty-printed by default, compact JSON with `textFormat: 'compact'`): `data` on success (including a counted list's `totalCount`), or `{ errors, data? }` on failure. Oversized query results, errors and partial data are replaced by `MCP_RESULT_TOO_LARGE`; for a counted list it carries the total in `extensions.totalCount`. An oversized **mutation** result is not an error when the mutation succeeded, because the write already ran: the tool returns `isError: false`, `_meta.truncated: true` and the root id(s) next to a `truncated` notice (next release: `{ id, version }` for protected results) (see [Tool results and errors](#tool-results-and-errors)). Limit diagnostics (`MCP_RESULT_TOO_LARGE`, `MCP_PAGE_SIZE_EXCEEDED`, `MCP_UNKNOWN_ARGUMENT`) and that notice are exempt from the cap, so even a tiny cap can return an actionable result; the root id, or the id list, is returned next to the notice only when it fits within the cap. The cap excludes MCP envelope overhead, the duplicate `structuredContent`, and middleware-created results; it runs after execution and does not limit database work or remote download size.
-- None of these bound nested collections: with the default `selectionDepth: 1`, each one is read with one query per returned row, or one per batch of rows with an adapter that batches collection reads, up to 100 items (or `configureQueryLimits` `maxPageSize` when lower). Use `nestedCollections: 'none'` for list-heavy agents. Nested collection writes through add and update tools are not bounded either; cap them with `configureMutationLimits({ maxNestedOperations })`.
+- None of these bound nested collections: with the default `selectionDepth: 1`, each one is read with one query per returned row, or one per batch of rows with an adapter that batches collection reads, up to 100 items (or `configureQueryLimits` `maxPageSize` when lower). Use `nestedCollections: 'none'` for list-heavy agents. Nested collection writes through add and update tools are not bounded either; cap them with `configureMutationLimits({ maxNestedOperations })`, and, next release, a transaction tool's list with `maxTransactionOperations`.
 
 `limits` is validated when `generateMCPTools`, `createMCPServer`, `startStdioMCPServer` or `createHTTPMCPHandler` sets up, before `schemaPlugins` run, and invalid settings throw `MCP_INVALID_LIMITS`:
 
@@ -4572,6 +4620,31 @@ const newBook = await simfinity.saveObject('Book', {
 
 **Note**: When `context` is not provided, it is `undefined` in controller hooks and in the middleware that nested collection children run. This is acceptable for programmatic usage where context may not be available.
 
+### `updateObject(typeName, input, session?, context?)`, `deleteObject(typeName, target, session?, context?)` and `transitionObject(typeName, actionName, input, session?, context?)`
+
+Next release. Programmatically run the lifecycle of the generated update, delete and state action mutations: validators, controllers, nested collection entries, ownership checks and the version precondition.
+
+**Parameters:**
+- `typeName` (string): The name of a type registered in this runtime that stores records. `updateObject()` and `transitionObject()` also need its generated update input, which has an `id` field
+- `input` (object): The shape of the type's update input (`version` included on a protected type). Only declared fields, plain objects and dense arrays; no `state`; internal enum values; scalars as primitives, `Date` or plain data; record keys as strings
+- `target` (object): `{ id }`, plus `version` on a type with optimistic concurrency, for `deleteObject()`
+- `actionName` (string): A key of the type's state machine `actions`
+- `session` (optional): Caller-owned session with an active transaction, as for `saveObject()`. Without one, the helper owns its transaction and the adapter retries it
+- `context` (object, optional): Reaches the controllers and the middleware of nested collection children; may be `undefined`
+
+**Returns:**
+- `Promise<object>`: The updated record, the deleted record or `null` when no record has that ID (`deleteObject()`), or the record in the action's target state (`transitionObject()`)
+
+The target and the input are checked before anything runs, and the input is copied, so the caller's object is never written to and a retry starts from the same data: `INVALID_OPERATION_TARGET` (500) and `UNKNOWN_ACTION` (500) for the target, `REQUIRED_VALUE` (400) for a missing `input`, `id`, `version` or required value, and `INVALID_INPUT` (400) for anything else, with a message that names the path and never the value. Like `saveObject()`, they skip GraphQL coercion, field authorization and the global middleware of the root record, and they never commit, retry or abort a supplied session. They apply `maxNestedOperations` to the nested entries of `input` (not `deleteObject()`, which has none). See the [API reference](docs/reference/api.md#updateobject-deleteobject-and-transitionobject).
+
+**Example:**
+
+```javascript
+const updated = await simfinity.updateObject('Book', { id: String(book._id), title: 'Second Edition' }, session, context);
+const deleted = await simfinity.deleteObject('Book', { id: String(book._id) }, session, context);
+const shipped = await simfinity.transitionObject('Order', 'ship', { id: String(order._id) }, session, context);
+```
+
 ### `createSchema(includedQueryTypes?, includedMutationTypes?, includedCustomMutations?, options?)`
 
 Creates the final GraphQL schema with all connected types.
@@ -4580,7 +4653,7 @@ Creates the final GraphQL schema with all connected types.
 - `includedQueryTypes` (array, optional): Limit query types to include
 - `includedMutationTypes` (array, optional): Limit mutation types to include  
 - `includedCustomMutations` (array, optional): Limit custom mutations to include
-- `options` (object, optional): `{ includedCustomQueries }`, the registered custom query names to include. Omitted or `null` includes all, `[]` includes none, and unregistered names are ignored. A value that is not a plain object, such as an array, and any other key throw `INVALID_SCHEMA_OPTIONS` (500)
+- `options` (object, optional): `{ includedCustomQueries, transaction }`. `includedCustomQueries` lists the registered custom query names to include: omitted or `null` includes all, `[]` includes none, and unregistered names are ignored. Next release, `transaction: { name?, types }` adds the [transaction mutation](#transaction-mutation-next-release) over the generated mutations of `types`, and requires the adapter to implement `assertTransactionModels` (`TRANSACTION_UNSUPPORTED` otherwise). A value that is not a plain object, such as an array, and any other key throw `INVALID_SCHEMA_OPTIONS` (500); an invalid `transaction` option throws it too: its shape, `name` and `types`, a `name` that collides with a registered mutation or with a root name the included types can generate, and the lack of an included endpoint type fail before any model is prepared, and only a collision with the built schema (the name against the roots actually built, no operation left, or a derived type name that is already taken) fails once the models are prepared
 
 **Returns:**
 - `GraphQLSchema`: The complete GraphQL schema

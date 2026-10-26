@@ -48,6 +48,10 @@ const yoga = createYoga({
 
 `authenticate` is application code: it should verify the incoming credentials and return a user or `null`. A typical user for these rules is `{ id: '...', role: 'editor' }`.
 
+::: info Next release
+To protect the operations of a [transaction mutation](#authorize-the-transaction-mutation-next-release), `createAuthPlugin` must come from the same release as the runtime that built the schema, and from the same copy of core when you can. Prefer the `auth` namespace of the facade you create the runtime with (`@simtlix/simfinity-js`, `@simtlix/simfinity-postgres` or `@simtlix/simfinity-sql`) over `@simtlix/simfinity-core/auth` installed separately. A plugin from an earlier release leaves the operations of a transaction without their root rules, and nothing detects it.
+:::
+
 ::: warning Use the generated root name
 The generated query type is named `RootQueryType`. Permission keys must match the schema's actual type names. A `Query` key will not match Simfinity's generated query root.
 :::
@@ -151,9 +155,59 @@ If the permission map has a `Query` key but the schema's query root has another 
 
 Every schema type must come from the graphql module the plugin uses. If a schema contains types from another copy, such as a second installed graphql version or its ESM and CommonJS builds loaded together by a bundler, `onSchemaChange` throws `TypeError` (`Cannot authorize type X: it was created by a different copy of the graphql module…`) in every environment, before wrapping any field, instead of leaving those fields unprotected. Deduplicate graphql (`npm ls graphql`, then overrides or resolutions) and make the bundler resolve one entry point.
 
-Do not apply `graphql-middleware`'s `applyMiddleware` or schema-cloning transforms such as `mapSchema` to a Simfinity schema. Simfinity extends GraphQL introspection globally, and rebuilding the schema can duplicate those introspection types. The older `createAuthMiddleware` and `createFieldMiddleware` exports are deprecated. `createFieldMiddleware` returns the same function as `createAuthMiddleware`, so wildcard rules and the default policy apply to every field.
+Do not apply `graphql-middleware`'s `applyMiddleware` or schema-cloning transforms such as `mapSchema` to a Simfinity schema. Simfinity extends GraphQL introspection globally, and rebuilding the schema can duplicate those introspection types. The older `createAuthMiddleware` and `createFieldMiddleware` exports are deprecated. `createFieldMiddleware` returns the same function as `createAuthMiddleware`, so wildcard rules and the default policy apply to every field. Next release: they deny the generated [transaction field](#authorize-the-transaction-mutation-next-release) with `ForbiddenError`, before they resolve it, whatever their rules say, because they cannot apply the rules of each operation; everything else they do is unchanged.
 
 For standalone MCP execution, install the auth plugin through `schemaPlugins`; see [MCP authorization](/guide/mcp#preserve-authorization).
+
+## Authorize the transaction mutation (next release)
+
+A [transaction mutation](./mutations#run-several-mutations-in-one-transaction-next-release) is one root field that runs the generated mutations of other roots. The plugin gives each operation of its list the checks that a direct call to its root would get in the schema that runs the transaction, so a client cannot do through `transaction` what the root's rules deny.
+
+- **The field.** `Mutation.transaction` is a root like any other. It needs its own rule, or the default policy decides, and it is checked before the list is read. A rule on it does not replace the rules of the operations, and `defaultPolicy: 'ALLOW'` does not skip them because the field has none: an operation whose root has a rule is checked by it, and one whose root has none passes, as that root would.
+- **Each operation.** After an operation's `$K` references are resolved and before its middleware runs, the rules of its root run, such as the ones for `Mutation.deleteserie`. They run again on every attempt of a retried transaction. A denial throws the error that a direct call to the root would get and rolls back the whole list. An error a rule throws keeps its message and code: `ForbiddenError` `Requires role: admin` from `requireRole('admin')`, `Access denied`, or the message you pass, from `deny()`, `UnauthenticatedError` from `requireAuth()`. The default policy, a rule that returns `false` and an operation whose root the executing schema does not expose give `ForbiddenError` (403, `Access denied to Mutation.deleteserie`). Every denial carries the operation's `extensions.operationIndex` and `extensions.operation`.
+- **Output.** Selected result fields are authorized like the fields of any response. Under `defaultPolicy: 'DENY'`, give rules to the transaction field, to every operation key that clients may send, to `TransactionResult` (its `id` and one field per operation key) and to the types the selection returns.
+
+```javascript
+const permissions = {
+  Mutation: {
+    transaction: requireAuth(),
+    addserie: requireRole('editor'),
+    updateserie: requireRole('editor'),
+    addseason: requireRole('editor'),
+    deleteserie: requireRole('admin'),
+  },
+  TransactionResult: { '*': allow() },
+  Serie: { '*': allow() },
+  Season: { '*': allow() },
+};
+```
+
+With this map and `defaultPolicy: 'DENY'`, an editor can add and update through `transaction`, but a `deleteserie` operation is denied for them, and so is every operation whose root has no rule, such as `updateseason`. Each denial rolls back the list.
+
+A rule for an operation receives:
+
+- `parent`: the root value the transaction field receives, and `ctx`: the context, unchanged.
+- `args`: the arguments of the operation's root, built from the copy whose references are resolved: `{ input }` for add, update and state action operations, and `{ id }` or `{ id, version }` for a delete. A `$0` token is already the ID of the record that operation wrote in this attempt.
+- `info`: with the operation's root identity, so a rule that picks permissions by name works unchanged. `fieldName` is the operation key (`deleteserie`), and `parentType` and `returnType` are those of the root's field. `path`, `fieldNodes`, `operation` and the selection stay those of the `transaction` field.
+
+Rules receive no session, so a rule cannot see what earlier operations of the same list wrote. Nested children keep their contracts: no root rules run for them, and [controllers](./controllers) and child middleware cover them. Do not depend on the prototype of the `args` objects: GraphQL gives a direct call objects without a prototype, while the operations of a transaction receive ordinary copies. Test properties with `Object.hasOwn()`.
+
+### Schemas that run the transaction
+
+An operation runs only where the schema that executes the transaction exposes its generated root. The plugin keeps the checks on the root fields themselves, so they follow `new GraphQLSchema(schema.toConfig())` copies, including copies that rebuild the Mutation type, even when the copy is served without being processed again.
+
+- A copy that removes a root, or replaces it with another field, refuses the operation with `FORBIDDEN` (`Access denied to Mutation.deleteserie`) before the transaction starts. A schema whose mutation fields lost their `extensions`, for example one rebuilt from printed SDL, therefore refuses every operation.
+- A copy that renames a root, or exposes it under two names, gets the rules of every name that reaches the root, and in a renamed copy the rules still see the operation key as `info.fieldName`.
+- A copy that replaces a root's resolver but keeps its `extensions` still runs the generated operation: authorization coded inside the replacement resolver does not run. To change or hide an operation, register a mutation with the same name, which replaces the generated root and is never an operation, or build a second schema with `createSchema()` that leaves it out.
+- If a transformation clones the roots' `extensions`, run the plugin on the schema you serve. One level of cloning is covered; a clone of a processed clone, served unprocessed, can skip the rules recorded on the first clone.
+
+Treat the permission map as immutable once the plugin has processed any schema. The rules of a root are captured when the plugin wraps it; editing the map afterwards and processing another copy can let an operation pass where a direct call to its root is still denied by the earlier wrapper.
+
+External wrappers, gateway rules, rate limits and allowlists keyed by root name see only `transaction`, not the operations in its list. Adapt them to read the operation keys, or deny the field for those callers. The deprecated middleware denies the field outright, as above.
+
+### Helper calls
+
+[`updateObject()`, `deleteObject()` and `transitionObject()`](./server-side-operations#update-delete-and-transition-from-code-next-release) run no root rules, as `saveObject()` does: they are server code, not a GraphQL boundary. Authorize the caller where you call them. Inside a transaction mutation, the helpers called by a hook with the attempt's session are not operations of the list and get no operation rules either.
 
 ## Authorize protected writes (next release)
 

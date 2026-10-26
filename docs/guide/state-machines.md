@@ -171,6 +171,20 @@ The lookup above uses the MongoDB Model API. With PostgreSQL, use `await simfini
 
 Next release: actions on a protected entity take its generated update input with required `input.version`; successful actions return the incremented version, and the precondition is captured before `action` can mutate its input. Re-read and reapply after `VERSION_CONFLICT` or `TRANSACTION_RETRY_EXCEEDED`. Driver retries can repeat an action; use an outbox for external effects. Protection applies to the action's record, not its whole relationship graph. See [optimistic concurrency](./concurrency).
 
+## Run an action from code (next release)
+
+Server code, such as a job, a hook or a custom mutation, can run an action without going through GraphQL. `transitionObject(typeName, actionName, input, session?, context?)` runs the lifecycle of the generated action mutation and resolves to the updated record, with `state` set to the action's target state:
+
+```javascript
+const season = await simfinity.transitionObject('Season', 'activate', { id: String(seasonId), year: 2026 }, session, context);
+```
+
+`actionName` is the key under `stateMachine.actions`, not the mutation name. It runs the same steps as `activate_season`: the check of the current state, the action's callback, the update with its validators and controller hooks, and, for a protected type, the version precondition. `input` has the shape of the generated update input, so it can carry other writable fields next to `id`, but never `state`: the helper rejects it with `INVALID_INPUT` (400), because the state changes only through the action. An action that the type does not declare, or a type without a state machine, is `UNKNOWN_ACTION` (500), and a record in another state than the action's `from` is `BAD_REQUEST` (400), as for the mutation.
+
+Like `saveObject()`, it skips GraphQL coercion, field authorization and the global middleware of the record, so authorize the caller yourself. Pass the active session when you call it from a hook or a custom mutation, and the `context` for the middleware of nested children. Input rules, sessions, errors and limits are those of the other lifecycle helpers; see [update, delete and transition from code](./server-side-operations#update-delete-and-transition-from-code-next-release) and the [API reference](../reference/api#updateobject-deleteobject-and-transitionobject).
+
+A [transaction mutation](./mutations#run-several-mutations-in-one-transaction-next-release) can also run actions: each action of a configured type is an operation named like its mutation, such as `activate_season`, whose value is that action's input.
+
 ## Failure behavior
 
 | Condition | Result |
