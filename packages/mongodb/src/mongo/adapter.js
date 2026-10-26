@@ -135,6 +135,41 @@ const mapQueryIdCastErrors = (query, mapError = (error) => error) => {
   return query;
 };
 
+// MongoDB fails a command whose regular expression it cannot compile with Location51091. The query
+// compiler escapes every value and bounds every pattern by the 32,764 bytes the server accepts, but
+// ignoring case the server compiles each letter that has other case forms (k, K and the Kelvin sign)
+// to a class, so only a case-insensitive pattern can still be too large; then the client's filter
+// value is the cause. IIN (#108 part 4) sends its patterns as BSON regular expressions, the other
+// text operators as $regex with $options.
+const REGEX_INVALID = 51091;
+const ignoresCase = (options) => typeof options === 'string' && options.includes('i');
+const hasCaseInsensitiveRegex = (node) => {
+  if (Array.isArray(node)) return node.some(hasCaseInsensitiveRegex);
+  if (node === null || typeof node !== 'object') return false;
+  if (node._bsontype !== undefined) return node._bsontype === 'BSONRegExp' && ignoresCase(node.options);
+  if (typeof node.$regex === 'string' && ignoresCase(node.$options)) return true;
+  return Object.values(node).some(hasCaseInsensitiveRegex);
+};
+// The driver error stays available to logging, as on TRANSACTION_RETRY_EXCEEDED.
+const mapRegexError = (error, pipeline) => {
+  if (error?.code !== REGEX_INVALID || !hasCaseInsensitiveRegex(pipeline)) return error;
+  const tooLarge = new SimfinityError(
+    'Case-insensitive text filter value is too long: MongoDB cannot compile its regular expression when ignoring case, because letters such as k and s match more than one character',
+    'INVALID_FILTER_VALUE', 400,
+  );
+  tooLarge.cause = error;
+  tooLarge.getCause = () => tooLarge.cause;
+  return tooLarge;
+};
+// Runs an aggregate of a pipeline that the query compiler built from filters.
+const mapRegexErrors = async (pipeline, aggregate) => {
+  try {
+    return await aggregate;
+  } catch (error) {
+    throw mapRegexError(error, pipeline);
+  }
+};
+
 // Even a shared hook can branch on `this.op` or the filter shape. Preserve findOne semantics
 // whenever either query operation has hooks instead of inferring equivalence from function identity.
 const hasNoHooks = (hooks, operations) => {
@@ -484,18 +519,18 @@ export const createMongoAdapter = (options) => {
       // Mongoose does not cast aggregation stages, so cast the key type here, without setters.
       if (requiredId != null) pipeline.unshift({ $match: { _id: castModelId(Model, requiredId) } });
       if (pipeline.length === 0) return versionedRead(Model, withSession(Model.find({}), session), true);
-      return withSession(Model.aggregate(pipeline), session);
+      return mapRegexErrors(pipeline, withSession(Model.aggregate(pipeline), session));
     },
     async count(Model, gqltype, args, session) {
       integrity.assertReady();
       const pipeline = await queries.buildQuery(args, gqltype, true);
-      const result = await withSession(Model.aggregate(pipeline), session);
+      const result = await mapRegexErrors(pipeline, withSession(Model.aggregate(pipeline), session));
       return result[0] ? result[0].size : 0;
     },
     async aggregate(Model, gqltype, args, session) {
       integrity.assertReady();
       const pipeline = await queries.buildAggregationQuery(args, gqltype, args.aggregation);
-      return withSession(Model.aggregate(pipeline), session);
+      return mapRegexErrors(pipeline, withSession(Model.aggregate(pipeline), session));
     },
     async findChildren(Model, gqltype, connectionField, parentId, args, session) {
       integrity.assertReady();
@@ -509,7 +544,7 @@ export const createMongoAdapter = (options) => {
         throw error;
       }
       pipeline.unshift({ $match: { [connectionField]: parentKey } });
-      return withSession(Model.aggregate(pipeline), session);
+      return mapRegexErrors(pipeline, withSession(Model.aggregate(pipeline), session));
     },
   };
 
@@ -570,7 +605,7 @@ export const createMongoAdapter = (options) => {
       // overlap the remaining commands.
       const outcomes = await Promise.allSettled(commands);
       const failure = outcomes.find(({ status }) => status === 'rejected');
-      if (failure) throw failure.reason;
+      if (failure) throw mapRegexError(failure.reason, pipeline);
       for (const { value: rows } of outcomes) {
         for (const { i, d } of rows) lists[i].push(d);
       }
