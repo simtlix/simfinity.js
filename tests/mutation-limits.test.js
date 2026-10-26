@@ -7,6 +7,7 @@ import {
 } from 'graphql';
 
 import { configureMutationLimits, createRuntime } from '../packages/core/src/index.js';
+import { getMaxNestedOperations, getMaxTransactionOperations } from '../packages/core/src/mutation-limits.js';
 import * as mongo from '../packages/mongodb/src/index.js';
 import { createPostgres } from '../packages/postgres/src/index.js';
 
@@ -100,6 +101,10 @@ const execute = (schema, source, variableValues) => graphql({
 });
 const addParent = 'mutation ($input: LimitParentInput!) { addlimitParent(input: $input) { id } }';
 const children = (count, extra = {}) => Array.from({ length: count }, (_, index) => ({ name: `c${index}`, ...extra }));
+const invalidLimits = (message) => expect.objectContaining({
+  message,
+  extensions: expect.objectContaining({ code: 'INVALID_MUTATION_LIMITS', status: 400 }),
+});
 const exceeded = (limit) => ({
   message: `A mutation may perform at most ${limit} nested collection operations`,
   extensions: expect.objectContaining({ code: 'NESTED_OPERATIONS_EXCEEDED', status: 400 }),
@@ -237,7 +242,9 @@ describe('configureMutationLimits', () => {
     configureMutationLimits({ maxNestedOperations: 1 });
     const { schema } = build();
 
-    expect(() => configureMutationLimits({ maxNestedOps: 100 })).toThrow('maxNestedOps');
+    expect(() => configureMutationLimits({ maxNestedOps: 100 })).toThrow(invalidLimits(
+      'Unknown mutation limit option maxNestedOps; use maxNestedOperations or maxTransactionOperations',
+    ));
     const result = await execute(schema, addParent, { input: { name: 'p', children: { added: children(2) } } });
 
     expect(result.errors).toEqual([expect.objectContaining(exceeded(1))]);
@@ -265,5 +272,145 @@ describe('configureMutationLimits', () => {
 
     expect(result.errors).toEqual([expect.objectContaining(exceeded(1))]);
     expect(createPostgres().configureMutationLimits).toBe(configureMutationLimits);
+  });
+
+  describe('maxTransactionOperations', () => {
+    const transactionMessage = 'maxTransactionOperations must be a positive safe integer';
+    const unknownMessage = (key) => `Unknown mutation limit option ${key}; use maxNestedOperations or maxTransactionOperations`;
+
+    test('defaults to 100 next to an unlimited nested limit', () => {
+      expect(getMaxTransactionOperations()).toBe(100);
+      expect(getMaxNestedOperations()).toBeNull();
+    });
+
+    test('sets the limit and replaces the nested one', () => {
+      configureMutationLimits({ maxNestedOperations: 2 });
+      configureMutationLimits({ maxTransactionOperations: 5 });
+
+      expect(getMaxTransactionOperations()).toBe(5);
+      expect(getMaxNestedOperations()).toBeNull();
+    });
+
+    test('sets both limits in one call', () => {
+      configureMutationLimits({ maxNestedOperations: 0, maxTransactionOperations: 1 });
+
+      expect(getMaxNestedOperations()).toBe(0);
+      expect(getMaxTransactionOperations()).toBe(1);
+    });
+
+    test('accepts the largest safe integer', () => {
+      configureMutationLimits({ maxTransactionOperations: Number.MAX_SAFE_INTEGER });
+
+      expect(getMaxTransactionOperations()).toBe(Number.MAX_SAFE_INTEGER);
+    });
+
+    test.each([
+      ['no arguments', []],
+      ['empty options', [{}]],
+      ['undefined options', [undefined]],
+      ['undefined values', [{ maxNestedOperations: undefined, maxTransactionOperations: undefined }]],
+      ['a null nested limit', [{ maxNestedOperations: null }]],
+      ['a null-prototype empty object', [Object.create(null)]],
+    ])('restores both defaults with %s', (label, args) => {
+      configureMutationLimits({ maxNestedOperations: 2, maxTransactionOperations: 5 });
+
+      configureMutationLimits(...args);
+
+      expect(getMaxNestedOperations()).toBeNull();
+      expect(getMaxTransactionOperations()).toBe(100);
+    });
+
+    test('restores only the omitted value to its default', () => {
+      configureMutationLimits({ maxNestedOperations: 2, maxTransactionOperations: 5 });
+
+      configureMutationLimits({ maxNestedOperations: 3 });
+      expect(getMaxNestedOperations()).toBe(3);
+      expect(getMaxTransactionOperations()).toBe(100);
+
+      configureMutationLimits({ maxTransactionOperations: 7, maxNestedOperations: undefined });
+      expect(getMaxNestedOperations()).toBeNull();
+      expect(getMaxTransactionOperations()).toBe(7);
+    });
+
+    test.each([
+      ['null', null],
+      ['zero', 0],
+      ['a fraction', 1.5],
+      ['a negative number', -1],
+      ['a string', '5'],
+      ['NaN', Number.NaN],
+      ['Infinity', Number.POSITIVE_INFINITY],
+      ['an unsafe integer', 2 ** 53],
+      ['a bigint', 5n],
+    ])('rejects %s and keeps the current limits', (label, value) => {
+      configureMutationLimits({ maxNestedOperations: 2, maxTransactionOperations: 5 });
+
+      expect(() => configureMutationLimits({ maxTransactionOperations: value })).toThrow(invalidLimits(transactionMessage));
+
+      expect(getMaxNestedOperations()).toBe(2);
+      expect(getMaxTransactionOperations()).toBe(5);
+    });
+
+    test('validates every value before assigning any', () => {
+      configureMutationLimits({ maxNestedOperations: 2, maxTransactionOperations: 5 });
+
+      expect(() => configureMutationLimits({ maxNestedOperations: 3, maxTransactionOperations: 0 }))
+        .toThrow(invalidLimits(transactionMessage));
+      expect(getMaxNestedOperations()).toBe(2);
+      expect(getMaxTransactionOperations()).toBe(5);
+
+      expect(() => configureMutationLimits({ maxNestedOperations: -1, maxTransactionOperations: 7 }))
+        .toThrow(invalidLimits('maxNestedOperations must be null or a non-negative safe integer'));
+      expect(getMaxNestedOperations()).toBe(2);
+      expect(getMaxTransactionOperations()).toBe(5);
+    });
+
+    test('names both options in the unknown-option message and keeps the current limits', () => {
+      configureMutationLimits({ maxNestedOperations: 2, maxTransactionOperations: 5 });
+
+      expect(() => configureMutationLimits({ maxNestedOperation: 2 })).toThrow(invalidLimits(unknownMessage('maxNestedOperation')));
+      expect(() => configureMutationLimits({ maxTransactionOperation: 2 }))
+        .toThrow(invalidLimits(unknownMessage('maxTransactionOperation')));
+      expect(() => configureMutationLimits({ maxTransactionOperations: 9, maxDepth: 3 }))
+        .toThrow(invalidLimits(unknownMessage('maxDepth')));
+      expect(() => configureMutationLimits({ [Symbol('maxDepth')]: 3 }))
+        .toThrow(invalidLimits(unknownMessage('Symbol(maxDepth)')));
+
+      expect(getMaxNestedOperations()).toBe(2);
+      expect(getMaxTransactionOperations()).toBe(5);
+    });
+
+    test('is shared by every facade', () => {
+      mongo.configureMutationLimits({ maxTransactionOperations: 4 });
+
+      expect(getMaxTransactionOperations()).toBe(4);
+      expect(getMaxNestedOperations()).toBeNull();
+    });
+
+    test('does not change the nested budget of generated mutations', async () => {
+      configureMutationLimits({ maxTransactionOperations: 1 });
+      const { schema } = build();
+
+      const result = await execute(schema, addParent, { input: { name: 'p', children: { added: children(4) } } });
+
+      expect(result.errors).toBeUndefined();
+    });
+
+    test('pin: maxNestedOperations keeps its values, getter and messages', () => {
+      expect(getMaxNestedOperations()).toBeNull();
+      configureMutationLimits({ maxNestedOperations: 0 });
+      expect(getMaxNestedOperations()).toBe(0);
+      configureMutationLimits({ maxNestedOperations: 3 });
+      expect(getMaxNestedOperations()).toBe(3);
+      configureMutationLimits({ maxNestedOperations: null });
+      expect(getMaxNestedOperations()).toBeNull();
+
+      configureMutationLimits({ maxNestedOperations: 3 });
+      expect(() => configureMutationLimits({ maxNestedOperations: -1 }))
+        .toThrow(invalidLimits('maxNestedOperations must be null or a non-negative safe integer'));
+      expect(() => configureMutationLimits([])).toThrow(invalidLimits('Mutation limit options must be a plain object'));
+      expect(() => configureMutationLimits(null)).toThrow(invalidLimits('Mutation limit options must be a plain object'));
+      expect(getMaxNestedOperations()).toBe(3);
+    });
   });
 });

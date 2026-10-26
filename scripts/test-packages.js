@@ -1120,6 +1120,9 @@ const concurrentAdapter: DatabaseAdapter<Model, Session> = {
   delete(model, id, session, options) { void [model.name, id, session?.active, options?.expectedVersion]; return null; },
 };
 const plainWriteFeatures: DatabaseAdapter<Model, Session>[] = [{ ...adapter, writeFeatures: null }, { ...adapter, writeFeatures: undefined }, { ...adapter, writeFeatures: {} }];
+const transactionAdapter: DatabaseAdapter<Model, Session> = { ...adapter, assertTransactionModels(models) { void models.map((model) => model.name); } };
+// @ts-expect-error assertTransactionModels receives the models.
+const namesAffinity: DatabaseAdapter<Model, Session> = { ...adapter, assertTransactionModels(names: string) { void names; } };
 // @ts-expect-error optimisticConcurrency is a boolean.
 const textFeature: DatabaseAdapter<Model, Session> = { ...adapter, writeFeatures: { optimisticConcurrency: 'yes' } };
 // @ts-expect-error expectedVersion is a number.
@@ -1131,8 +1134,9 @@ const writeMembers: {
   update: Equals<Parameters<DatabaseAdapter<Model, Session>['update']>, [model: Model, id: any, changes: any, session?: Session, options?: { expectedVersion?: number }]>;
   delete: Equals<Parameters<DatabaseAdapter<Model, Session>['delete']>, [model: Model, id: any, session?: Session, options?: { expectedVersion?: number }]>;
   scalar: Equals<FieldDescription['scalar'], 'ID' | 'String' | 'Int' | 'Float' | 'Boolean' | 'DateTime' | 'Enum' | 'Version' | undefined>;
-} = { features: true, update: true, delete: true, scalar: true };
-void [versionScalar, versionMaximum, versionFieldScalar, versionFlag, pessimistic, falseFlag, plainWriteFeatures, textFeature, writeMembers, createRuntime(concurrentAdapter)];`;
+  affinity: Equals<DatabaseAdapter<Model, Session>['assertTransactionModels'], ((models: Model[]) => void) | undefined>;
+} = { features: true, update: true, delete: true, scalar: true, affinity: true };
+void [versionScalar, versionMaximum, versionFieldScalar, versionFlag, pessimistic, falseFlag, plainWriteFeatures, textFeature, writeMembers, createRuntime(concurrentAdapter), transactionAdapter, namesAffinity];`;
 
 // The expected type of a subpath's default export.
 const subpathDefaultType = ({ namespace, values, defaultExport, defaultExtras }) => {
@@ -2111,7 +2115,7 @@ const customQueryTypes = (name, runtimeType, singleton = false) => `import type 
 import type { CreateSchemaOptions as CoreOptions } from '@simtlix/simfinity-core';
 // @ts-expect-error RegisterQueryOptions is not exported: custom queries have no options.
 import type { RegisterQueryOptions } from '${name}';
-import { GraphQLInputObjectType, GraphQLString, type GraphQLSchema } from 'graphql';
+import { GraphQLInputObjectType, GraphQLObjectType, GraphQLString, type GraphQLSchema } from 'graphql';
 ${singleton ? `import { registerCustomQuery, createSchema } from '${name}';
 // @ts-expect-error registerQuery is not exported.
 import { registerQuery } from '${name}';` : ''}
@@ -2122,7 +2126,7 @@ void api.registerQuery;
 const input = new GraphQLInputObjectType({ name: 'CustomQueryInput', fields: { text: { type: GraphQLString } } });
 type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 const sameOptions: Equals<CreateSchemaOptions, CoreOptions> = true;
-const exactOptions: Equals<CreateSchemaOptions, { includedCustomQueries?: string[] | null }> = true;
+const exactOptions: Equals<CreateSchemaOptions, { includedCustomQueries?: string[] | null; transaction?: { name?: string; types: GraphQLObjectType[] } | null }> = true;
 const exactCallback: Equals<Parameters<typeof register>[4], (input: any, context: any) => any> = true;
 register('withInput', '', input, GraphQLString, (args, context) => \`\${args.text}\${context.text}\`);
 register('withoutInput', '', null, GraphQLString, async () => 'value');
@@ -2145,6 +2149,14 @@ api.createSchema(null, null, null, ['withInput']);
 api.createSchema(null, null, null, { includedCustomQueries: [1] });
 // @ts-expect-error createSchema() has no other options.
 api.createSchema(null, null, null, { includedCustomQuery: ['withInput'] });
+const transactionType = new GraphQLObjectType({ name: 'TransactionItem', fields: { text: { type: GraphQLString } } });
+api.createSchema(null, null, null, { transaction: { types: [transactionType] } });
+api.createSchema(null, null, null, { includedCustomQueries: [], transaction: { name: 'batch', types: [transactionType] } });
+api.createSchema(null, null, null, { transaction: null });
+// @ts-expect-error A transaction lists GraphQL object types, not their names.
+api.createSchema(null, null, null, { transaction: { types: ['TransactionItem'] } });
+// @ts-expect-error A transaction needs its types.
+api.createSchema(null, null, null, { transaction: { name: 'batch' } });
 ${singleton ? `const defaultSchema: GraphQLSchema = createSchema([], [], [], { includedCustomQueries: ['withoutInput'] });
 void [defaultSchema, registerQuery];` : ''}
 void [schema, sameOptions, exactOptions, exactCallback];`;

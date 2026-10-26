@@ -88,6 +88,48 @@ describe('execution state', () => {
 
     expect(() => detachExecutionState({}, state)).not.toThrow();
   });
+
+  test('a state attached twice to one session stays until both attachments are released', () => {
+    const runtimeToken = {};
+    const session = {};
+    const state = createExecutionState({ runtimeToken, limits: limits() });
+    attachExecutionState(session, state);
+    attachExecutionState(session, state);
+
+    detachExecutionState(session, state);
+    expect(executionStateOf(session, runtimeToken)).toBe(state);
+    detachExecutionState(session, state);
+    expect(executionStateOf(session, runtimeToken)).toBeUndefined();
+  });
+
+  test('a state attached over another gives the session back to it once released', () => {
+    const runtimeToken = {};
+    const session = {};
+    const first = createExecutionState({ runtimeToken, limits: limits() });
+    const second = createExecutionState({ runtimeToken, limits: limits() });
+    attachExecutionState(session, first);
+    attachExecutionState(session, second);
+    expect(executionStateOf(session, runtimeToken)).toBe(second);
+
+    detachExecutionState(session, second);
+    expect(executionStateOf(session, runtimeToken)).toBe(first);
+    detachExecutionState(session, first);
+    expect(executionStateOf(session, runtimeToken)).toBeUndefined();
+  });
+
+  test('releasing a replaced state keeps the latest one, and the replaced one does not come back', () => {
+    const runtimeToken = {};
+    const session = {};
+    const first = createExecutionState({ runtimeToken, limits: limits() });
+    const second = createExecutionState({ runtimeToken, limits: limits() });
+    attachExecutionState(session, first);
+    attachExecutionState(session, second);
+
+    detachExecutionState(session, first);
+    expect(executionStateOf(session, runtimeToken)).toBe(second);
+    detachExecutionState(session, second);
+    expect(executionStateOf(session, runtimeToken)).toBeUndefined();
+  });
 });
 
 describe('nested entries', () => {

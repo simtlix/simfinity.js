@@ -304,9 +304,11 @@ export function configureQueryLimits(options?: QueryLimitsOptions): void;
 
 /**
  * Process-wide limit on nested added/updated/deleted entries per generated add, update or
- * state-action mutation; unlimited by default, restored by calling it without options.
- * Invalid configuration, including an unknown or misspelled option key, throws
- * INVALID_MUTATION_LIMITS (400) and keeps the current limit; a mutation over the limit
+ * state-action mutation (`maxNestedOperations`; unlimited by default), and on the operations of
+ * one generated transaction mutation (`maxTransactionOperations`, a positive safe integer;
+ * 100 by default). Each call replaces both values, and calling it without options restores both
+ * defaults. Invalid configuration, including an unknown or misspelled option key, throws
+ * INVALID_MUTATION_LIMITS (400) and keeps the current limits; a mutation over the nested limit
  * fails with NESTED_OPERATIONS_EXCEEDED (400) before its transaction starts. `updateObject` and
  * `transitionObject` apply `maxNestedOperations` to their `input` in the same way (`null` = no limit).
  */

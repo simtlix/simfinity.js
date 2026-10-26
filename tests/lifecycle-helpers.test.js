@@ -12,22 +12,6 @@ import {
 import { configureMutationLimits, createRuntime, SimfinityError } from '@simtlix/simfinity-core';
 import { createOptimisticMemoryAdapter, transientError } from './helpers/optimistic-memory-adapter.js';
 
-// A transaction attempt (#151, deliverable B) attaches an execution state to its session; nothing public
-// creates one. The states these tests build carry TEST_TOKEN instead of the runtime's private token, and
-// this mock lets the runtime find them as well, so the helpers' use of a state can be checked before the
-// transaction exists. States of the runtime's own token are found as before.
-const { TEST_TOKEN } = vi.hoisted(() => ({ TEST_TOKEN: { owner: 'lifecycle-helpers.test.js' } }));
-vi.mock('../packages/core/src/execution-state.js', async (importOriginal) => {
-  const original = await importOriginal();
-  return {
-    ...original,
-    executionStateOf: (session, runtimeToken) => original.executionStateOf(session, runtimeToken)
-      ?? original.executionStateOf(session, TEST_TOKEN),
-  };
-});
-// Imported on use, so that every other test of this file fails on its own reason on a tree without it.
-const executionState = () => import('../packages/core/src/execution-state.js');
-
 const OPTIMISTIC = { mode: 'optimistic' };
 const LOCKED = '{"plain":true,"lock":true}';
 const STRING_KEY = 'pass the ID as a string, for example String(record._id)';
@@ -84,8 +68,10 @@ afterEach(() => {
 // endpoint, with a model for its reference), Sealed (a readOnly id) and Hollow (an empty update input,
 // #161). Every hook,
 // validator, action and middleware adds its name to `events`, and `hooks` lets a test act inside them.
-const build = ({ schema = true } = {}) => {
-  const adapter = createOptimisticMemoryAdapter();
+// With `transaction`, the schema has the generated transaction field (#151) over Producto and Pedido,
+// which `transact(operations)` runs; `adapterOptions` go to the memory adapter.
+const build = ({ schema = true, transaction = false, adapterOptions } = {}) => {
+  const adapter = createOptimisticMemoryAdapter(adapterOptions);
   const ownTransaction = adapter.withTransaction;
   adapter.withTransaction = vi.fn((session, body, Model) => ownTransaction(session, body, Model));
   adapter.saveRecord = vi.fn(adapter.saveRecord);
@@ -230,8 +216,15 @@ const build = ({ schema = true } = {}) => {
   runtime.connect(null, Hollow, 'hollow', 'hollows', {});
   runtime.connect(null, Codigo, 'codigo', 'codigos', {});
   runtime.addNoEndpointType(Nota);
-  const graphqlSchema = schema ? runtime.createSchema() : null;
+  const schemaOptions = transaction ? { transaction: { types: [Producto, Pedido] } } : undefined;
+  const graphqlSchema = schema ? runtime.createSchema(null, null, null, schemaOptions) : null;
   const run = (source) => graphql({ schema: graphqlSchema, source, contextValue: { request: 'root' } });
+  const transact = (operations) => graphql({
+    schema: graphqlSchema,
+    source: 'mutation Run($operations: [TransactionOperation!]!) { transaction(operations: $operations) { id } }',
+    variableValues: { operations },
+    contextValue: { request: 'root' },
+  });
   const updates = () => adapter.update.mock.calls
     .map(([Model, id, update, , options]) => ({ type: Model.name, id, update, options }));
   const deletes = () => adapter.delete.mock.calls.map(([Model, id, , options]) => ({ type: Model.name, id, options }));
@@ -239,7 +232,7 @@ const build = ({ schema = true } = {}) => {
   const adapterCalls = () => [adapter.withTransaction, adapter.getById, adapter.update, adapter.delete, adapter.find,
     adapter.saveRecord].reduce((total, spy) => total + spy.mock.calls.length, 0);
   return {
-    adapter, runtime, run, events, hooks, updates, deletes, adapterCalls,
+    adapter, runtime, run, transact, events, hooks, updates, deletes, adapterCalls,
   };
 };
 
@@ -848,89 +841,204 @@ describe('collections', () => {
   });
 });
 
-describe('the execution state of a transaction attempt', () => {
-  const stateWith = async ({ limit, used = 0 }) => {
-    const { createExecutionState } = await executionState();
-    const state = createExecutionState({ runtimeToken: TEST_TOKEN, limits: { maxNestedOperations: limit, maxTransactionOperations: 100 } });
-    state.nestedCount = used;
-    return state;
+// A transaction attempt (#151) attaches its execution state to its session, and a helper or saveObject
+// called on that session finds it there. These tests call them from a controller of a real transaction:
+// `inside(session, context)` runs in onUpdated of the first operation that updates Pedido 1.
+describe('inside a transaction attempt', () => {
+  const insideFirstUpdate = (fixture, inside) => {
+    let ran = false;
+    fixture.hooks['Pedido.onUpdated'] = async (record, session, context) => {
+      if (ran || String(record._id) !== '1') return;
+      ran = true;
+      await inside(session, context);
+    };
+  };
+  const failure = (result) => {
+    expect(result.errors, JSON.stringify(result.data)).toHaveLength(1);
+    const { extensions } = result.errors[0].originalError;
+    return { code: extensions.code, status: extensions.status, message: result.errors[0].message };
+  };
+  const added = (...names) => names.map((nombre) => ({ nombre }));
+  const saveTwoEntries = (fixture, session) => fixture.runtime.saveObject('Pedido', { numero: 'S', items: { added: added('a', 'b') } }, session);
+  // Resolves once opened, so that two helpers running at once take turns at fixed points.
+  const latch = () => {
+    let open;
+    const promise = new Promise((resolve) => { open = resolve; });
+    return { promise, open };
   };
 
-  test('a helper on a session with a state checks its nested entries against the remaining budget of the state, without counting them', async () => {
-    const { attachExecutionState } = await executionState();
-    const fixture = build();
-    seedOrders(fixture.adapter);
-    const session = { attempt: 'lent' };
-    const state = await stateWith({ limit: 3, used: 2 });
-    attachExecutionState(session, state);
-    // The live limit is not read inside an attempt.
-    fixture.runtime.configureMutationLimits({ maxNestedOperations: 100 });
-    expect(await thrown(fixture.runtime.updateObject('Pedido', {
-      id: '1', version: 2, items: { updated: [{ id: '11', version: 4 }], deleted: [{ id: '12', version: 7 }] },
-    }, session))).toEqual(nestedExceeded(3));
-    expect(fixture.adapterCalls()).toBe(0);
-    expect(state.nestedCount).toBe(2);
-    expect(await fixture.runtime.updateObject('Pedido', {
-      id: '1', version: 2, items: { updated: [{ id: '11', version: 4 }] },
-    }, session)).toMatchObject({ version: 3 });
+  test('a helper checks its nested entries against what the attempt has left, with the limit of its start, and counts them once', async () => {
+    const attempt = async (helperEntries) => {
+      configureMutationLimits({ maxNestedOperations: 3 });
+      const fixture = build({ transaction: true });
+      seedOrders(fixture.adapter);
+      let helperCalls;
+      insideFirstUpdate(fixture, async (session, context) => {
+        // The live limit is not read inside an attempt.
+        fixture.runtime.configureMutationLimits({ maxNestedOperations: 100 });
+        const before = fixture.adapterCalls();
+        try {
+          await fixture.runtime.updateObject('Pedido', {
+            id: '2', version: 1, items: { updated: [{ id: '21', version: 1 }], added: added(...helperEntries) },
+          }, session, context);
+        } finally {
+          helperCalls = fixture.adapterCalls() - before;
+        }
+      });
+      const result = await fixture.transact([{ updatepedido: { id: '1', version: 2, items: { updated: [{ id: '11', version: 4 }] } } }]);
+      return { fixture, result, helperCalls };
+    };
+
+    const exceeded = await attempt(['n', 'm']);
+    expect(failure(exceeded.result)).toEqual(nestedExceeded(3));
+    expect(exceeded.helperCalls).toBe(0);
+    // The operation's entry and the helper's two: exactly the limit.
+    const fits = await attempt(['n']);
+    expect(fits.result.errors).toBeUndefined();
+    expect(fits.fixture.adapter.stored('Pedido', '2')).toMatchObject({ version: 2 });
   });
 
-  test('a state without a nested limit runs no preflight, whatever the live limit', async () => {
-    const { attachExecutionState } = await executionState();
-    const fixture = build();
+  test('without a nested limit at the start of the attempt, a helper runs no preflight, whatever the live limit', async () => {
+    const fixture = build({ transaction: true });
     seedOrders(fixture.adapter);
-    const session = { attempt: 'lent' };
-    attachExecutionState(session, await stateWith({ limit: null }));
-    fixture.runtime.configureMutationLimits({ maxNestedOperations: 0 });
-    expect(await fixture.runtime.transitionObject('Pedido', 'close', {
-      id: '1', version: 2, items: { updated: [{ id: '11', version: 4 }] },
-    }, session)).toMatchObject({ state: 'CLOSED' });
+    insideFirstUpdate(fixture, async (session, context) => {
+      fixture.runtime.configureMutationLimits({ maxNestedOperations: 0 });
+      await fixture.runtime.transitionObject('Pedido', 'close', {
+        id: '2', version: 1, items: { updated: [{ id: '21', version: 1 }] },
+      }, session, context);
+    });
+    const result = await fixture.transact([{ updatepedido: { id: '1', version: 2, numero: 'X' } }]);
+
+    expect(result.errors).toBeUndefined();
+    expect(fixture.adapter.stored('Pedido', '2')).toMatchObject({ state: 'CLOSED', version: 2 });
   });
+
+  // With an adapter that hands every body of a supplied session the object `inner`, the operation's
+  // onUpdated calls a helper on the attempt's session. `during(fixture, bodySession)` runs in a hook of
+  // the helper's body, and `after(fixture, inner)` once the helper settled; a `body failure` is caught.
+  const withInnerBody = async ([, hook, sessionOf, call], { during = () => {}, after = () => {} }) => {
+    configureMutationLimits({ maxNestedOperations: 1 });
+    const inner = { attempt: 'inner' };
+    const fixture = build({ transaction: true, adapterOptions: { bodySession: () => inner } });
+    seedProduct(fixture.adapter);
+    seedOrders(fixture.adapter);
+    const seen = [];
+    fixture.hooks[hook] = (...args) => {
+      seen.push(sessionOf(...args));
+      return during(fixture, sessionOf(...args));
+    };
+    insideFirstUpdate(fixture, async (session) => {
+      try {
+        await call(fixture.runtime, session);
+      } catch (error) {
+        if (error.message !== 'body failure') throw error;
+      }
+      await after(fixture, inner);
+    });
+    const result = await fixture.transact([{ updatepedido: { id: '1', version: 2, numero: 'X' } }]);
+    return { result, seen, inner };
+  };
 
   test.each([
-    ['updateObject', 'Producto.onUpdating', (runtime, session) => runtime.updateObject('Producto', { id: '1', version: 3, name: 'b' }, session)],
-    ['transitionObject', 'Pedido close action', (runtime, session) => runtime.transitionObject('Pedido', 'close', { id: '1', version: 2 }, session)],
-    ['deleteObject', 'Producto.onDelete', (runtime, session) => runtime.deleteObject('Producto', { id: '1', version: 3 }, session)],
-    ['saveObject', 'Producto.onSaving', (runtime, session) => runtime.saveObject('Producto', { name: 'n' }, session)],
-  ])('%s follows the state to a body session the adapter hands over, for the body only', async (label, hook, call) => {
-    const { attachExecutionState, executionStateOf } = await executionState();
-    const fixture = build();
-    seedProduct(fixture.adapter);
-    seedOrders(fixture.adapter);
-    const session = { attempt: 'lent' };
-    const inner = { attempt: 'inner' };
-    const state = await stateWith({ limit: null });
-    attachExecutionState(session, state);
-    const { withTransaction } = fixture.adapter;
-    fixture.adapter.withTransaction = vi.fn((given, body, Model) => withTransaction(given === session ? inner : given, body, Model));
-    const seen = [];
-    fixture.hooks[hook] = () => { seen.push(executionStateOf(inner, TEST_TOKEN)); };
-    await call(fixture.runtime, session);
-    expect(seen).toEqual([state]);
-    expect(executionStateOf(inner, TEST_TOKEN)).toBeUndefined();
-    expect(executionStateOf(session, TEST_TOKEN)).toBe(state);
-    // It is removed from the body session when the body fails as well.
-    const error = new Error('hook failure');
-    fixture.hooks[hook] = () => { throw error; };
-    seedProduct(fixture.adapter);
-    seedOrders(fixture.adapter);
-    expect(await caught(call(fixture.runtime, session))).toBe(error);
-    expect(executionStateOf(inner, TEST_TOKEN)).toBeUndefined();
-    expect(executionStateOf(session, TEST_TOKEN)).toBe(state);
+    ['updateObject', 'Producto.onUpdating', (id, update, session) => session,
+      (runtime, session) => runtime.updateObject('Producto', { id: '1', version: 3, name: 'b' }, session)],
+    ['transitionObject', 'Pedido close action', (args, session) => session,
+      (runtime, session) => runtime.transitionObject('Pedido', 'close', { id: '2', version: 1 }, session)],
+    ['deleteObject', 'Producto.onDelete', (record, session) => session,
+      (runtime, session) => runtime.deleteObject('Producto', { id: '1', version: 3 }, session)],
+    ['saveObject', 'Producto.onSaving', (record, args, session) => session,
+      (runtime, session) => runtime.saveObject('Producto', { name: 'n' }, session)],
+  ])('%s carries the state to the body object the adapter hands over, for the body only', async (...entry) => {
+    // In the body the object carries the state, so two entries exceed the attempt's budget of one.
+    const inBody = await withInnerBody(entry, { during: saveTwoEntries });
+    expect(failure(inBody.result)).toEqual(nestedExceeded(1));
+    expect(inBody.seen).toHaveLength(1);
+    expect(inBody.seen[0]).toBe(inBody.inner);
+    // Once the helper returned, or failed, it carries none, and saveObject keeps no limit on it.
+    expect((await withInnerBody(entry, { after: saveTwoEntries })).result.errors).toBeUndefined();
+    const failed = await withInnerBody(entry, { during: () => { throw new Error('body failure'); }, after: saveTwoEntries });
+    expect(failed.result.errors).toBeUndefined();
   });
 
-  test('a body session that already carries the state keeps it after the helper returns', async () => {
-    const { attachExecutionState, executionStateOf } = await executionState();
-    const fixture = build();
-    seedProduct(fixture.adapter);
-    const session = { attempt: 'lent' };
+  test('a body object that already carries the state keeps it after a helper inside the body returns', async () => {
+    configureMutationLimits({ maxNestedOperations: 2 });
     const inner = { attempt: 'inner' };
-    const state = await stateWith({ limit: null });
-    attachExecutionState(session, state);
-    attachExecutionState(inner, state);
-    const { withTransaction } = fixture.adapter;
-    fixture.adapter.withTransaction = vi.fn((given, body, Model) => withTransaction(given === session ? inner : given, body, Model));
-    await fixture.runtime.updateObject('Producto', { id: '1', version: 3, name: 'b' }, session);
-    expect(executionStateOf(inner, TEST_TOKEN)).toBe(state);
+    const fixture = build({ transaction: true, adapterOptions: { bodySession: () => inner } });
+    seedProduct(fixture.adapter);
+    seedOrders(fixture.adapter);
+    let attemptSession;
+    // In the outer helper's body, a second helper on the attempt's session gets the same object.
+    fixture.hooks['Producto.onUpdating'] = async (id, update, bodySession) => {
+      await fixture.runtime.updateObject('Pedido', { id: '2', version: 1, numero: 'Z' }, attemptSession);
+      await fixture.runtime.saveObject('Pedido', { numero: 'S', items: { added: added('a', 'b', 'c') } }, bodySession);
+    };
+    insideFirstUpdate(fixture, async (session) => {
+      attemptSession = session;
+      await fixture.runtime.updateObject('Producto', { id: '1', version: 3, name: 'b' }, session);
+    });
+    const result = await fixture.transact([{ updatepedido: { id: '1', version: 2, numero: 'X' } }]);
+
+    expect(failure(result)).toEqual(nestedExceeded(2));
+  });
+
+  test('two helpers that run at once on one body object both keep the state until each of them ends', async () => {
+    configureMutationLimits({ maxNestedOperations: 2 });
+    const inner = { attempt: 'inner' };
+    const fixture = build({ transaction: true, adapterOptions: { bodySession: () => inner } });
+    seedProduct(fixture.adapter);
+    seedOrders(fixture.adapter);
+    const firstInBody = latch();
+    const secondInBody = latch();
+    let first;
+    // The first helper waits in its body until the second is in its own; the second then waits until the
+    // first has ended, and only then runs its nested entry.
+    fixture.hooks['Producto.onUpdating'] = async () => {
+      firstInBody.open();
+      await secondInBody.promise;
+    };
+    fixture.hooks['Pedido.onUpdating'] = async (id) => {
+      if (String(id) !== '2') return;
+      secondInBody.open();
+      await first;
+    };
+    insideFirstUpdate(fixture, async (session) => {
+      first = fixture.runtime.updateObject('Producto', { id: '1', version: 3, name: 'b' }, session);
+      await firstInBody.promise;
+      const second = fixture.runtime.updateObject('Pedido', { id: '2', version: 1, items: { updated: [{ id: '21', version: 1 }] } }, session);
+      await Promise.all([first, second]);
+    });
+    // The second helper's entry leaves one of two, so the second operation's two entries exceed it.
+    const result = await fixture.transact([
+      { updatepedido: { id: '1', version: 2, numero: 'X' } },
+      { updatepedido: { id: '1', version: 3, items: { updated: [{ id: '11', version: 4 }, { id: '12', version: 7 }] } } },
+    ]);
+
+    expect(failure(result)).toEqual(nestedExceeded(2));
+    expect(fixture.events).toContain('Item.onUpdated');
+  });
+
+  test('a session lent to another runtime finds no state there', async () => {
+    configureMutationLimits({ maxNestedOperations: 2 });
+    const fixture = build({ transaction: true });
+    const other = build();
+    seedOrders(fixture.adapter);
+    seedOrders(other.adapter);
+    insideFirstUpdate(fixture, async (session, context) => {
+      // Outside an attempt of its own, saveObject keeps no limit and updateObject has the live one.
+      await other.runtime.saveObject('Pedido', { numero: 'S', items: { added: added('a', 'b', 'c') } }, session, context);
+      await other.runtime.updateObject('Pedido', {
+        id: '1', version: 2, items: { updated: [{ id: '11', version: 4 }], deleted: [{ id: '12', version: 7 }] },
+      }, session, context);
+    });
+    // The other runtime's entries leave this attempt's budget whole for the second operation.
+    const result = await fixture.transact([
+      { updatepedido: { id: '1', version: 2, numero: 'X' } },
+      { updatepedido: { id: '1', version: 3, items: { updated: [{ id: '11', version: 4 }, { id: '12', version: 7 }] } } },
+    ]);
+
+    expect(result.errors).toBeUndefined();
+    expect(fixture.adapter.stored('Pedido', '1')).toMatchObject({ version: 4 });
+    expect(other.adapter.stored('Pedido', '1')).toMatchObject({ version: 3 });
+    expect(other.adapter.stored('Item', '12')).toBeNull();
   });
 });

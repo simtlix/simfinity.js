@@ -355,8 +355,9 @@ export interface ConcurrencyDeclaration {
 }
 
 /**
- * Process-wide limits for generated add, update and state-action mutations. Any other option,
- * such as a misspelled `maxNestedOperation`, throws `INVALID_MUTATION_LIMITS` (400).
+ * Process-wide limits for generated mutations. Each call replaces both values: an omitted or
+ * `undefined` option restores its default. Any other option, such as a misspelled
+ * `maxNestedOperation`, throws `INVALID_MUTATION_LIMITS` (400) and keeps the current limits.
  */
 export interface MutationLimitsOptions {
   /**
@@ -366,6 +367,12 @@ export interface MutationLimitsOptions {
    * `transitionObject` apply it to their `input` as the generated mutations do.
    */
   maxNestedOperations?: number | null;
+  /**
+   * Maximum number of operations in one generated transaction mutation. A positive safe integer;
+   * omitted means 100 (the default). `null`, `0`, a negative number or a non-integer throws
+   * `INVALID_MUTATION_LIMITS` (400).
+   */
+  maxTransactionOperations?: number;
 }
 
 /**
@@ -378,6 +385,21 @@ export interface CreateSchemaOptions {
    * `[]` includes none, and names that are not registered are ignored.
    */
   includedCustomQueries?: string[] | null;
+  /**
+   * Adds one mutation field that runs a list of generated mutations in order in one database
+   * transaction. `null` or omission adds none. `name` defaults to `transaction` and must be a GraphQL
+   * name that does not start with `__`; it names the field and its types (for `transaction`:
+   * `TransactionOperation`, a `@oneOf` input keyed by operation, `TransactionResult` and, for deletes
+   * of types without optimistic concurrency, `TransactionDeleteInput`). The operations are the
+   * generated add, update, delete and state machine action mutations of `types` that this schema
+   * includes; registered mutations never are. `types` is a non-empty array of distinct types registered
+   * in this runtime. An invalid option throws `INVALID_SCHEMA_OPTIONS` (500) before models are prepared,
+   * or once the generated mutations are built when the field name or a derived type name is taken or
+   * no operation remains; a type bound to another runtime throws `TYPE_BOUND_TO_OTHER_RUNTIME` (409),
+   * and an adapter without `assertTransactionModels` throws `TRANSACTION_UNSUPPORTED` (500). A failed
+   * `createSchema()` keeps no transaction field or type.
+   */
+  transaction?: { name?: string; types: GraphQLObjectType[] } | null;
 }
 
 export interface QueryLimitsOptions {
@@ -431,11 +453,12 @@ export interface Runtime<Model = any, Session = any> {
   /** The same process-wide setting as the root `configureQueryLimits`. */
   configureQueryLimits(options?: QueryLimitsOptions): void;
   /**
-   * Process-wide; calling it without options restores the unlimited default. Invalid options,
-   * including unknown or misspelled option keys, throw `INVALID_MUTATION_LIMITS` (400) and keep
-   * the current limit. A generated mutation over the limit fails with
-   * `NESTED_OPERATIONS_EXCEEDED` (400) before its transaction starts. `updateObject` and
-   * `transitionObject` apply `maxNestedOperations` to their `input` in the same way (`null` = no limit).
+   * Process-wide; calling it without options restores both defaults (`maxNestedOperations`
+   * unlimited, `maxTransactionOperations` 100). Invalid options, including unknown or misspelled
+   * option keys, throw `INVALID_MUTATION_LIMITS` (400) and keep the current limits. A generated
+   * mutation over the nested limit fails with `NESTED_OPERATIONS_EXCEEDED` (400) before its
+   * transaction starts. `updateObject` and `transitionObject` apply `maxNestedOperations` to their
+   * `input` in the same way (`null` = no limit).
    */
   configureMutationLimits(options?: MutationLimitsOptions): void;
   /**
@@ -483,7 +506,8 @@ export interface Runtime<Model = any, Session = any> {
    *
    * `options.includedCustomQueries` selects custom queries by name (see {@link CreateSchemaOptions});
    * an included custom query named like an included generated query throws `QUERY_NAME_CONFLICT`
-   * (500). A schema without mutation fields has no `Mutation` root.
+   * (500). `options.transaction` adds the generated transaction field (see {@link CreateSchemaOptions}).
+   * A schema without mutation fields has no `Mutation` root.
    */
   createSchema(includedQueryTypes?: GraphQLObjectType[] | null, includedMutationTypes?: GraphQLObjectType[] | null, includedCustomMutations?: string[] | null, options?: CreateSchemaOptions): GraphQLSchema;
   getModel(type: GraphQLObjectType | { name: string }): Model | null | undefined;
@@ -611,6 +635,16 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * contract of `update` and `delete` and to the requirements on `find` below.
    */
   writeFeatures?: { optimisticConcurrency?: boolean } | null | undefined;
+  /**
+   * Optional, and required to enable the generated transaction field (see
+   * `CreateSchemaOptions.transaction`). Receives the models one transaction of that field may
+   * write: those of the types that own its operations and of the referenced collection items their
+   * inputs declare, at any depth, without duplicates. Core calls it before each transaction of the
+   * field opens, never in `createSchema()`, so a schema can be created before the connection opens.
+   * It must be synchronous and never write, and it throws when the models cannot share one session; a
+   * returned promise fails the transaction with `TRANSACTION_UNSUPPORTED` (500).
+   */
+  assertTransactionModels?(models: Model[]): void;
   bind?(runtime: Pick<Runtime<Model, Session>, 'getModel' | 'getType' | 'getRegistrations'>): void;
   validateRegistration?(registration: RuntimeRegistration<Model, Session>): void;
   /**
@@ -824,7 +858,7 @@ export function resolveModelPath(models: ModelDescription, entityName: string, p
 export function configureQueryLimits(options?: QueryLimitsOptions): void;
 /**
  * Same process-wide setting as `Runtime.configureMutationLimits`. Unknown or misspelled options
- * throw `INVALID_MUTATION_LIMITS` (400) and keep the current limit.
+ * throw `INVALID_MUTATION_LIMITS` (400) and keep the current limits.
  */
 export function configureMutationLimits(options?: MutationLimitsOptions): void;
 export function paginationStages(pagination: { page: number; size: number } | null | undefined, withDefault: boolean): Array<{ $skip: number } | { $limit: number }>;

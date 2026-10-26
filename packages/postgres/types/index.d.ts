@@ -315,6 +315,6 @@ export function initializeDatabase(options?: InitializationOptions): Promise<Ini
 export const configureQueryLimits: Runtime['configureQueryLimits'];
 /**
  * The same process-wide setter as every runtime's configureMutationLimits. Unknown or misspelled
- * options throw INVALID_MUTATION_LIMITS (400) and keep the current limit.
+ * options throw INVALID_MUTATION_LIMITS (400) and keep the current limits.
  */
 export const configureMutationLimits: Runtime['configureMutationLimits'];
