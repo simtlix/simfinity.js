@@ -39,6 +39,10 @@ import {
   unexpectedDeleteError, versionConflictError, versionConnectionCollision, versionEmbeddedMisuse, versionExhaustedError,
   versionFieldCollision, versionManagedError,
 } from './record-version.js';
+import {
+  attachExecutionState, detachExecutionState, executionStateOf, remainingNestedBudget,
+} from './execution-state.js';
+import { readDeleteTarget, snapshotOperationInput } from './operation-input.js';
 
 // Resolvers Simfinity generates. Any other resolver on a registered type when its schema is first
 // created is application code, such as a masking resolver, recorded once per type so later
@@ -554,12 +558,19 @@ export const createRuntime = (adapter) => {
 
   const stateValue = adapter.stateValue || ((state) => state.name);
   const runtimeIdentity = {};
+  // The identity that execution states (execution-state.js) compare, so that a session lent to another
+  // runtime finds no state.
+  const runtimeToken = {};
   const typesDict = { types: {} };
   const waitingInputType = {};
   const typesDictForUpdate = { types: {} };
   // `added` item inputs of referenced collections by generated name, so collections that reach the
   // same child through the same connectionField share one input type.
   const excludedFieldInputTypes = new Map();
+  // The operation inputs of referenced collections (the types with `added`, `updated` and `deleted`
+  // that createOneToManyInputType builds). The typed input walk (operation-input.js) knows them by
+  // identity, to find the record keys inside them: `updated[].id` and each `deleted` item.
+  const collectionInputTypes = new WeakSet();
   // Self-referencing collection field name -> the types whose collection inputs were built with the
   // unqualified names OneToManyA<field> and OneToManyU<field>; type -> its self-referencing
   // collections whose inputs are named after the type instead (see claimSelfCollectionNames).
@@ -879,7 +890,7 @@ const createOneToManyInputType = (name, inputNamePrefix, itemType, connection,
       + `${itemType.name} records with a registered mutation.`,
   };
 
-  return new GraphQLInputObjectType({
+  const collectionInput = new GraphQLInputObjectType({
     name,
     fields: () => {
       const fields = {};
@@ -902,6 +913,8 @@ const createOneToManyInputType = (name, inputNamePrefix, itemType, connection,
       return fields;
     },
   });
+  collectionInputTypes.add(collectionInput);
+  return collectionInput;
 };
 
 // What graphQLListInputType returns for a list of an embedded type whose input has no fields.
@@ -1748,13 +1761,135 @@ const onSaveObject = async (Model, gqltype, controller, args, session, linkToPar
   return result;
 };
 
+// saveObject() and the lifecycle helpers look up, at entry, the execution state that a transaction
+// attempt (#151) attached to the session they were given. When the adapter's withTransaction hands the
+// body another object than that session, the state follows the body's object for as long as the body
+// runs, so every nested entry the body runs counts against the attempt's budget, whatever object the
+// adapter uses. Nothing is attached without a state, nor to an object that already carries it, so an
+// association made by someone else is never removed.
+const runInExecutionState = (state, session, bodySession, run) => {
+  if (state === undefined || bodySession === session || bodySession === null
+    || (typeof bodySession !== 'object' && typeof bodySession !== 'function')
+    || executionStateOf(bodySession, runtimeToken) === state) {
+    return run();
+  }
+  attachExecutionState(bodySession, state);
+  return (async () => {
+    try {
+      return await run();
+    } finally {
+      detachExecutionState(bodySession, state);
+    }
+  })();
+};
+
 const saveObject = async (typeName, args, session, context) => {
   const type = typesDict.types[typeName];
   assertCollectionWrites(type.gqltype, args);
   const snapshot = cloneInput(args, type.inputType);
-  return adapter.withTransaction(session, (transaction) => onSaveObject(
-    type.model, type.gqltype, type.controller, cloneInput(snapshot, type.inputType), transaction, null, context,
-  ), type.model);
+  const state = executionStateOf(session, runtimeToken);
+  return adapter.withTransaction(session, (transaction) => runInExecutionState(state, session, transaction,
+    () => onSaveObject(
+      type.model, type.gqltype, type.controller, cloneInput(snapshot, type.inputType), transaction, null, context,
+    )), type.model);
+};
+
+// The lifecycle helpers (#151): updateObject, deleteObject and transitionObject run the lifecycle of the
+// generated update, delete and state action mutations from code, through runOperation, as those roots
+// do, but without the root record's global middleware and without GraphQL. They check their target, then
+// validate the caller's input and take a snapshot of it before anything runs; every attempt of the
+// transaction works on its own copy of that snapshot, and the caller's input is never written to.
+
+// How a type or action name that is not a string appears in a message, which never shows a value.
+const operationName = (value) => (typeof value === 'string' ? value : `(${value === null ? 'null' : typeof value})`);
+const notStoredTargetError = (typeName) => new SimfinityError(
+  `Type ${operationName(typeName)} is not a stored record type registered in this runtime`, 'INVALID_OPERATION_TARGET', 500,
+);
+const noUpdateInputError = (typeName) => new SimfinityError(
+  `Type ${typeName} has no prepared update input with an id field`, 'INVALID_OPERATION_TARGET', 500,
+);
+
+// The registration a helper works on: a type registered in this runtime that stores records of its own
+// and has its model. An update or a transition also needs the type's generated update input, which only
+// createSchema() builds, with an `id` field, which a readOnly id or an input without fields (#161) lacks;
+// it gets the update registration, which holds that input. createSchema() also decides which types store
+// records, so a missing input is reported first: before createSchema(), the error names what is missing.
+const resolveOperationTarget = (typeName, { update }) => {
+  const registration = typeof typeName === 'string' && Object.hasOwn(typesDict.types, typeName)
+    ? typesDict.types[typeName] : undefined;
+  if (!registration) throw notStoredTargetError(typeName);
+  const updateRegistration = typesDictForUpdate.types[typeName];
+  if (update && !updateRegistration?.inputType) throw noUpdateInputError(typeName);
+  if (!registration.model || registration.storedIdentity !== true) throw notStoredTargetError(typeName);
+  if (update && !Object.hasOwn(updateRegistration.inputType.getFields(), 'id')) throw noUpdateInputError(typeName);
+  return update ? updateRegistration : registration;
+};
+
+// The input walk (operation-input.js) knows these inputs by identity, to find the record keys inside them:
+// `updated[].id` and each `deleted` item of the generated collection inputs, the id of a single reference
+// and the id of a versioned nested delete.
+const operationWalkOptions = { collectionInputTypes, idInputType: IdInputType, recordVersionRef: RecordVersionRef };
+
+// The nested budget of a helper call. Outside a transaction attempt, the preflight is the whole budget,
+// with the limit configured when the helper is called. Inside one, it checks the limit the attempt
+// snapshotted against what the attempt has left. Either way it only looks ahead and counts nothing.
+const assertHelperNestedBudget = (gqltype, snapshot, state) => {
+  if (state === undefined) {
+    const limit = getMaxNestedOperations();
+    if (limit !== null) assertNestedOperations(gqltype, snapshot, limit);
+    return;
+  }
+  const remaining = remainingNestedBudget(state);
+  if (remaining === null) return;
+  const limit = state.limits.maxNestedOperations;
+  assertNestedOperations(gqltype, snapshot, limit, { count: limit - remaining });
+};
+
+// The transaction of a helper: the adapter's own when no session is supplied, retries included; with a
+// session, the adapter checks it, and the helper neither commits, retries, aborts nor cleans up.
+// `attemptArgs` gives each attempt its own arguments.
+const runHelperTransaction = (type, operation, attemptArgs, session, state, context, actionField = null) => adapter
+  .withTransaction(session ?? null, (bodySession) => runInExecutionState(state, session, bodySession,
+    () => runOperation({ Model: type.model, gqltype: type.gqltype, controller: type.controller }, operation,
+      attemptArgs(), bodySession, context, actionField)), type.model);
+
+// An update or a transition: the update input checks the whole input, whose top-level id is required and
+// whose state, when a state machine manages it, only a transition changes. The nested preflight and the
+// collection check run on the snapshot, before the transaction.
+const runHelperUpdate = (type, operation, input, session, context, actionField = null) => {
+  const state = executionStateOf(session, runtimeToken);
+  const snapshot = snapshotOperationInput(input, type.inputType, {
+    ...operationWalkOptions, mode: 'programmatic', path: 'input', topLevelId: true, stateManaged: !!type.stateMachine,
+  });
+  assertHelperNestedBudget(type.gqltype, snapshot, state);
+  assertCollectionWrites(type.gqltype, snapshot);
+  const attemptArgs = () => snapshotOperationInput(snapshot, type.inputType, { ...operationWalkOptions, mode: 'copy' });
+  return runHelperTransaction(type, operation, attemptArgs, session, state, context, actionField);
+};
+
+const updateObject = async (typeName, input, session, context) => runHelperUpdate(
+  resolveOperationTarget(typeName, { update: true }), operations.UPDATE, input, session, context,
+);
+
+const transitionObject = async (typeName, actionName, input, session, context) => {
+  const type = resolveOperationTarget(typeName, { update: true });
+  const actions = type.stateMachine?.actions;
+  if (typeof actionName !== 'string' || !actions || !Object.hasOwn(actions, actionName)) {
+    throw new SimfinityError(`Type ${typeName} has no state machine action ${operationName(actionName)}`,
+      'UNKNOWN_ACTION', 500);
+  }
+  return runHelperUpdate(type, operations.STATE_CHANGED, input, session, context, actions[actionName]);
+};
+
+// The target is { id } or, for a protected type, { id, version }; the delete takes the bare ID or a new
+// { id, version } on each attempt, as the delete root passes them. A delete has no nested entries.
+const deleteObject = async (typeName, target, session, context) => {
+  const type = resolveOperationTarget(typeName, { update: false });
+  const versioned = isProtected(type.gqltype);
+  const state = executionStateOf(session, runtimeToken);
+  const { id, version } = readDeleteTarget(target, { protectedType: versioned, path: 'input' });
+  const attemptArgs = versioned ? () => ({ id, version }) : () => id;
+  return runHelperTransaction(type, operations.DELETE, attemptArgs, session, state, context);
 };
 
 // Counts the added, updated and deleted entries of referenced collections, at every nesting level that
@@ -1832,6 +1967,35 @@ const preReadTopLevel = async (Model, gqltype, { id, version }, advances, contex
   return { expectedVersion, observedVersion, record };
 };
 
+// Runs one operation on a session that already exists: for the roots, through executeOperation, and for
+// the lifecycle helpers and the generated transaction (#151). A delete takes the bare ID, or
+// { id, version } for a protected type; every other operation takes its attempt's copy of the input.
+// The runner captures the version precondition from those args: an update or delete through
+// preReadTopLevel, a transition through onStateChanged. No caller captures it a second time.
+const runOperation = async ({ Model, gqltype, controller }, operation, attemptArgs, session, context,
+  actionField = null) => {
+  switch (operation) {
+    case operations.SAVE:
+      return onSaveObject(Model, gqltype, controller, attemptArgs, session, null, context);
+    case operations.UPDATE: {
+      const precondition = isProtected(gqltype)
+        ? await preReadTopLevel(Model, gqltype, attemptArgs, true, context, session) : undefined;
+      return onUpdateSubject(Model, gqltype, controller, attemptArgs, session, null, context, false, precondition);
+    }
+    case operations.DELETE: {
+      if (!isProtected(gqltype)) return onDelete(Model, controller, attemptArgs, session, context);
+      const { expectedVersion, record } = await preReadTopLevel(Model, gqltype, attemptArgs, false, context,
+        session);
+      return onDelete(Model, controller, attemptArgs.id, session, context, record, { gqltype, expectedVersion });
+    }
+    case operations.STATE_CHANGED:
+      return onStateChanged(Model, gqltype, controller,
+        attemptArgs, session, actionField, context);
+    default:
+      return null;
+  }
+};
+
 // A delete passes the ID, or { id, version } for a protected type, which each attempt copies; every
 // other operation passes its input, which attemptInputs copies. Either way, a retry checks the version
 // the request sent.
@@ -1846,29 +2010,8 @@ const executeOperation = (Model, gqltype, controller, args, operation, actionFie
   else if (versioned) nextInput = () => ({ ...args });
   return adapter.withTransaction(
     session,
-    async (mySession) => {
-      const attemptArgs = nextInput();
-      switch (operation) {
-        case operations.SAVE:
-          return onSaveObject(Model, gqltype, controller, attemptArgs, mySession, null, context);
-        case operations.UPDATE: {
-          const precondition = versioned
-            ? await preReadTopLevel(Model, gqltype, attemptArgs, true, context, mySession) : undefined;
-          return onUpdateSubject(Model, gqltype, controller, attemptArgs, mySession, null, context, false, precondition);
-        }
-        case operations.DELETE: {
-          if (!versioned) return onDelete(Model, controller, attemptArgs, mySession, context);
-          const { expectedVersion, record } = await preReadTopLevel(Model, gqltype, attemptArgs, false, context,
-            mySession);
-          return onDelete(Model, controller, attemptArgs.id, mySession, context, record, { gqltype, expectedVersion });
-        }
-        case operations.STATE_CHANGED:
-          return onStateChanged(Model, gqltype, controller,
-            attemptArgs, mySession, actionField, context);
-        default:
-          return null;
-      }
-    },
+    async (mySession) => runOperation({ Model, gqltype, controller }, operation, nextInput(), mySession, context,
+      actionField),
     Model,
   );
 };
@@ -4224,6 +4367,9 @@ function formatArgs(argsArray) {
     registerCustomQuery,
     registerView,
     saveObject,
+    updateObject,
+    deleteObject,
+    transitionObject,
     preventCreatingCollection,
   };
 };

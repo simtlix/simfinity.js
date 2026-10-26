@@ -362,7 +362,8 @@ export interface MutationLimitsOptions {
   /**
    * Maximum number of `added`, `updated` and `deleted` entries across every nested level of
    * non-embedded collection fields in one generated mutation. A non-negative safe integer;
-   * `null` or omitted means unlimited (the default).
+   * `null` or omitted means unlimited (the default). The helpers `updateObject` and
+   * `transitionObject` apply it to their `input` as the generated mutations do.
    */
   maxNestedOperations?: number | null;
 }
@@ -433,7 +434,8 @@ export interface Runtime<Model = any, Session = any> {
    * Process-wide; calling it without options restores the unlimited default. Invalid options,
    * including unknown or misspelled option keys, throw `INVALID_MUTATION_LIMITS` (400) and keep
    * the current limit. A generated mutation over the limit fails with
-   * `NESTED_OPERATIONS_EXCEEDED` (400) before its transaction starts.
+   * `NESTED_OPERATIONS_EXCEEDED` (400) before its transaction starts. `updateObject` and
+   * `transitionObject` apply `maxNestedOperations` to their `input` in the same way (`null` = no limit).
    */
   configureMutationLimits(options?: MutationLimitsOptions): void;
   /**
@@ -522,6 +524,64 @@ export interface Runtime<Model = any, Session = any> {
   registerView(name: string, options: ViewOptions): void;
   /** Owns the full workflow transaction unless an active caller session is supplied. */
   saveObject(typeName: string, args: Record<string, any>, session?: Session, context?: any): Promise<any>;
+  /**
+   * Runs the lifecycle of the generated update mutation from code: validators, controller hooks,
+   * optimistic concurrency and the nested `added`, `updated` and `deleted` entries, in one transaction.
+   * `typeName` names a type registered in this runtime that stores records and has its update input
+   * prepared by `createSchema()`, with an `id` field. Whether a schema exposes the mutation does not
+   * matter: the helper is not an authorization boundary. Any other `typeName` rejects with
+   * `INVALID_OPERATION_TARGET` (500), before the input is read.
+   *
+   * `input` has the shape of the type's generated update input, `version` included on a type with
+   * optimistic concurrency. It is checked structurally and copied before anything runs, and the
+   * caller's object is never written to. It is not coerced like a GraphQL input: enum fields take
+   * their internal values, scalars are not parsed, a reference is its record key as a string, such as
+   * `{ id: String(record._id) }`, and the `state` of a type with a state machine changes only through
+   * `transitionObject`. A scalar field takes a primitive, a `Date` or plain data (objects and arrays,
+   * copied deeply, at most 256 levels deep); class instances such as `ObjectId`, `Buffer` or `Map` are
+   * rejected with `INVALID_INPUT`. An own `undefined` counts as omitted, and a bare value is never
+   * wrapped into a list. A missing `input`, `id` or value for a non-null field rejects with
+   * `REQUIRED_VALUE` (400); any other violation, such as an unknown field, an object that is not plain
+   * or a list that is not dense, rejects with `INVALID_INPUT` (400). The message names the path, such
+   * as `input.lines.added[1].price`, and never a value. More nested entries than `maxNestedOperations`
+   * from `configureMutationLimits()` (`null` = no limit) reject with `NESTED_OPERATIONS_EXCEEDED` (400)
+   * before the transaction starts.
+   *
+   * Without `session`, the adapter owns the transaction and its retries. A supplied `session` must have
+   * an active transaction, and the helper itself never commits, retries, aborts or cleans up a supplied
+   * session; an adapter may still abort it on a write error (for example MongoDB with transactional
+   * reference integrity). Like `saveObject`, it skips the global middleware of the record itself; nested entries keep theirs and
+   * receive `context`, which may be `undefined`.
+   *
+   * Resolves to the updated record, as the generated mutation returns it. An `id` that has no record
+   * rejects with `NOT_VALID_ID` (404), and a stale `version` with `VERSION_CONFLICT` (409).
+   */
+  updateObject(typeName: string, input: Record<string, any>, session?: Session, context?: any): Promise<any>;
+  /**
+   * Runs the lifecycle of the generated delete mutation from code. `target` is `{ id }`, the record key
+   * as a string, plus `version`, the version read, on a type with optimistic concurrency; on any other
+   * type `version` is an unknown field. The type is checked as in {@link Runtime.updateObject}, except
+   * that it needs no update input of its own; the type must still be a stored record type, which only
+   * `createSchema()` establishes. The target is checked before anything runs: a missing
+   * target, `id` or required `version` rejects with `REQUIRED_VALUE` (400), and any other violation
+   * with `INVALID_INPUT` (400). A stale `version` rejects with `VERSION_CONFLICT` (409). Sessions,
+   * `context` and middleware work as in `updateObject`.
+   *
+   * Resolves to the deleted record, or to `null` when no record has that ID.
+   */
+  deleteObject(typeName: string, target: { id: string; version?: number }, session?: Session, context?: any): Promise<any>;
+  /**
+   * Runs the state machine action `actionName` of `typeName` from code, with the lifecycle of the
+   * generated action mutation: the check of the current state, the action's callback, the update and the
+   * controller hooks, in one transaction. An `actionName` that is not an own action of the type's state
+   * machine, or a type without one, rejects with `UNKNOWN_ACTION` (500). The type, the checks of `input`,
+   * the session, `context`, the middleware and the errors are as in {@link Runtime.updateObject}. `input` has
+   * the shape of the update input and does not carry `state`. An action that does not start from the
+   * record's state rejects with `BAD_REQUEST` (400).
+   *
+   * Resolves to the updated record, with `state` set to the action's target state.
+   */
+  transitionObject(typeName: string, actionName: string, input: Record<string, any>, session?: Session, context?: any): Promise<any>;
   preventCreatingCollection(prevent: boolean): void;
 }
 

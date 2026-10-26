@@ -27,6 +27,9 @@ export const registerMutation = runtime.registerMutation;
 export const registerCustomQuery = runtime.registerCustomQuery;
 export const registerView = runtime.registerView;
 export const saveObject = runtime.saveObject;
+export const updateObject = runtime.updateObject;
+export const deleteObject = runtime.deleteObject;
+export const transitionObject = runtime.transitionObject;
 export const preventCreatingCollection = runtime.preventCreatingCollection;
 
 export const buildQuery = (...args) => mongoAdapter.buildQuery(...args);

@@ -246,6 +246,16 @@ const coreSource = `import assert from 'node:assert/strict';
   const view = await graphql({ schema, source: '{ smokeView { id } }' });
   assert.equal(view.errors, undefined);
   assert.deepEqual(view.data.smokeView, []);
+  // The lifecycle helpers (#151) are Runtime members, not root exports: the archive ships what they run on. A call
+  // checks its target and its input before anything is read, and an update of an ID that has no record fails as the
+  // generated root does.
+  for (const helper of ['updateObject', 'deleteObject', 'transitionObject']) assert.equal(typeof runtime[helper], 'function', helper);
+  await assert.rejects(() => runtime.updateObject('CoreMissing', { id: '1' }), (error) => error.getCode() === 'INVALID_OPERATION_TARGET' && error.getStatus() === 500);
+  await assert.rejects(() => runtime.updateObject('CoreBook', null), (error) => error.getCode() === 'REQUIRED_VALUE' && error.message === 'Required value input is missing');
+  await assert.rejects(() => runtime.updateObject('CoreBook', { id: '1', title: 'a' }), (error) => error.getCode() === 'NOT_VALID_ID' && error.getStatus() === 404);
+  assert.equal(await runtime.deleteObject('CoreBook', { id: '1' }), null);
+  await assert.rejects(() => runtime.deleteObject('CoreBook', '1'), (error) => error.getCode() === 'INVALID_INPUT' && error.message === 'Invalid input at input: expected a plain object');
+  await assert.rejects(() => runtime.transitionObject('CoreBook', 'close', { id: '1' }), (error) => error.getCode() === 'UNKNOWN_ACTION' && error.message === 'Type CoreBook has no state machine action close');
   const introspection = graphqlSync({
     schema,
     source: '{ __type(name: "__Field") { fields { name } } }',
@@ -473,6 +483,14 @@ const sqlSource = `import assert from 'node:assert/strict';
   assert.equal(view.errors, undefined);
   assert.deepEqual(view.data.smokeView, []);
   assert.deepEqual(calls, ['find', 'find']);
+  // The lifecycle helpers (#151) are runtime members, which the facade's spread carries. These calls fail on their
+  // target or their input, so the plugin runs no statement.
+  for (const helper of ['updateObject', 'deleteObject', 'transitionObject']) assert.equal(typeof api[helper], 'function', helper);
+  await assert.rejects(() => api.updateObject('SQLMissing', { id: '1' }), (error) => error.getCode() === 'INVALID_OPERATION_TARGET' && error.getStatus() === 500);
+  await assert.rejects(() => api.updateObject('SQLBook', null), (error) => error.getCode() === 'REQUIRED_VALUE' && error.message === 'Required value input is missing');
+  await assert.rejects(() => api.deleteObject('SQLBook', '1'), (error) => error.getCode() === 'INVALID_INPUT' && error.message === 'Invalid input at input: expected a plain object');
+  await assert.rejects(() => api.transitionObject('SQLBook', 'close', { id: '1' }), (error) => error.getCode() === 'UNKNOWN_ACTION' && error.message === 'Type SQLBook has no state machine action close');
+  assert.deepEqual(calls, ['find', 'find']);
   // A plugin without queryFeatures compiles the operators of 3.7.0; plans reject the others before compileQuery,
   // also in reads that do not go through the runtime.
   const unsupported = await graphql({ schema, source: '{ sqlBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
@@ -550,6 +568,9 @@ const postgresSource = `import assert from 'node:assert/strict';
     postgresPlugin,
     registerCustomQuery,
     registerView,
+    deleteObject,
+    transitionObject,
+    updateObject,
     plugins,
     scalars,
     validators,
@@ -676,6 +697,16 @@ const postgresSource = `import assert from 'node:assert/strict';
   assert.equal(defaultBeforeReady.errors[0].extensions.code, 'DATABASE_NOT_INITIALIZED');
   const view = await graphql({ schema: defaultSchema, source: '{ smokeView { id } }' });
   assert.equal(view.errors[0].extensions.code, 'DATABASE_NOT_INITIALIZED');
+  // The lifecycle helpers (#151): the facade's functions are the default instance's, so they know the type connected
+  // above and not the one of the instance created with createPostgres(), whose own helpers know that one. These calls
+  // fail on their target or their input, before the database is touched.
+  for (const helper of ['updateObject', 'deleteObject', 'transitionObject']) assert.equal(typeof api[helper], 'function', helper);
+  await assert.rejects(() => updateObject('DefaultPostgresBook', null), (error) => error.getCode() === 'REQUIRED_VALUE' && error.message === 'Required value input is missing');
+  await assert.rejects(() => deleteObject('DefaultPostgresBook', '1'), (error) => error.getCode() === 'INVALID_INPUT' && error.message === 'Invalid input at input: expected a plain object');
+  await assert.rejects(() => transitionObject('DefaultPostgresBook', 'close', { id: '1' }), (error) => error.getCode() === 'UNKNOWN_ACTION' && error.message === 'Type DefaultPostgresBook has no state machine action close');
+  await assert.rejects(() => updateObject('PostgresBook', { id: '1' }), (error) => error.getCode() === 'INVALID_OPERATION_TARGET' && error.message === 'Type PostgresBook is not a stored record type registered in this runtime');
+  await assert.rejects(() => api.updateObject('DefaultPostgresBook', { id: '1' }), (error) => error.getCode() === 'INVALID_OPERATION_TARGET');
+  await assert.rejects(() => api.updateObject('PostgresBook', null), (error) => error.getCode() === 'REQUIRED_VALUE');
 
   ${adapterSource}
   const coreType = new GraphQLObjectType({
@@ -721,6 +752,10 @@ const mongoSource = `import assert from 'node:assert/strict';
   assert.equal(legacyEntry.connect, simfinity.connect);
   assert.equal(legacyEntry.registerCustomQuery, simfinity.registerCustomQuery);
   assert.equal(legacyEntry.registerView, simfinity.registerView);
+  for (const helper of ['updateObject', 'deleteObject', 'transitionObject']) {
+    assert.equal(typeof simfinity[helper], 'function', helper);
+    assert.equal(legacyEntry[helper], simfinity[helper], helper);
+  }
   assert.equal(simfinity.registerQuery, undefined);
   assert.equal(legacyAuth, auth);
   assert.equal(legacyIsOwner, auth.isOwner);
@@ -750,6 +785,10 @@ const mongoSource = `import assert from 'node:assert/strict';
   });
   // The default runtime connects no type here, so an invalid declaration checks its registerView.
   assert.throws(() => simfinity.registerView('smokeView', {}), (error) => error.getCode() === 'INVALID_VIEW');
+  // The lifecycle helpers (#151) are the default runtime's, which connects no type here, so each call fails on its target.
+  await assert.rejects(() => simfinity.updateObject('MongoMissing', { id: '1' }), (error) => error.getCode() === 'INVALID_OPERATION_TARGET' && error.message === 'Type MongoMissing is not a stored record type registered in this runtime');
+  await assert.rejects(() => simfinity.deleteObject('MongoMissing', { id: '1' }), (error) => error.getCode() === 'INVALID_OPERATION_TARGET');
+  await assert.rejects(() => simfinity.transitionObject('MongoMissing', 'close', { id: '1' }), (error) => error.getCode() === 'INVALID_OPERATION_TARGET');
   const defaultSchema = simfinity.createSchema([], [], [], { includedCustomQueries: ['mongoRead'] });
   const custom = await graphql({ schema: defaultSchema, source: '{ mongoRead }' });
   assert.equal(custom.errors, undefined);
@@ -765,6 +804,8 @@ const mongoSource = `import assert from 'node:assert/strict';
   const view = await graphql({ schema, source: '{ smokeView { id } }' });
   assert.equal(view.errors, undefined);
   assert.deepEqual(view.data.smokeView, []);
+  // A runtime made with the facade's createRuntime has the helpers as well.
+  await assert.rejects(() => runtime.updateObject('RootRuntimeBook', null), (error) => error.getCode() === 'REQUIRED_VALUE' && error.message === 'Required value input is missing');
   const introspection = graphqlSync({
     schema,
     source: '{ __type(name: "__Field") { fields { name } } }',
@@ -2148,6 +2189,86 @@ register('objectWhere', { type, description: 'd', where: () => ({ conditions: []
 register('unknownOption', { type, description: 'd', where: () => [], transactional: true });
 void [sameOptions, exactRegister${singleton ? ', sameMember' : ''}];`;
 
+// The lifecycle helpers (#151): updateObject, deleteObject and transitionObject, next to saveObject. A Runtime has them as
+// members, which SQLRuntime and PostgresRuntime inherit, and the MongoDB and PostgreSQL facades export them as functions.
+// Each has exactly the declared parameters and results, so a declaration that widens to any or drops a parameter fails.
+// The session is the runtime's own session type; the MongoDB facade types it any, as it does for saveObject.
+const lifecycleHelperTypes = (name, runtimeType, { singleton = false, anySession = false } = {}) => `${singleton ? `import { deleteObject, transitionObject, updateObject } from '${name}';` : ''}
+declare const api: ${runtimeType};
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+const update = ${singleton ? 'updateObject' : 'api.updateObject'};
+const remove = ${singleton ? 'deleteObject' : 'api.deleteObject'};
+const transition = ${singleton ? 'transitionObject' : 'api.transitionObject'};
+declare const session: NonNullable<Parameters<typeof update>[2]>;
+const shapes: {
+  updateType: Equals<Parameters<typeof update>[0], string>;
+  updateInput: Equals<Parameters<typeof update>[1], Record<string, any>>;
+  updateContext: Equals<Parameters<typeof update>[3], any>;
+  updateResult: Equals<ReturnType<typeof update>, Promise<any>>;
+  deleteType: Equals<Parameters<typeof remove>[0], string>;
+  deleteTarget: Equals<Parameters<typeof remove>[1], { id: string; version?: number }>;
+  deleteSession: Equals<Parameters<typeof remove>[2], Parameters<typeof update>[2]>;
+  deleteContext: Equals<Parameters<typeof remove>[3], any>;
+  deleteResult: Equals<ReturnType<typeof remove>, Promise<any>>;
+  transitionType: Equals<Parameters<typeof transition>[0], string>;
+  transitionAction: Equals<Parameters<typeof transition>[1], string>;
+  transitionInput: Equals<Parameters<typeof transition>[2], Record<string, any>>;
+  transitionSession: Equals<Parameters<typeof transition>[3], Parameters<typeof update>[2]>;
+  transitionContext: Equals<Parameters<typeof transition>[4], any>;
+  transitionResult: Equals<ReturnType<typeof transition>, Promise<any>>;
+  ${anySession ? 'anySession: Equals<Parameters<typeof update>[2], any>;' : 'typedSession: Equals<Equals<Parameters<typeof update>[2], any>, false>;'}
+} = {
+  updateType: true, updateInput: true, updateContext: true, updateResult: true,
+  deleteType: true, deleteTarget: true, deleteSession: true, deleteContext: true, deleteResult: true,
+  transitionType: true, transitionAction: true, transitionInput: true, transitionSession: true, transitionContext: true, transitionResult: true,
+  ${anySession ? 'anySession: true' : 'typedSession: true'},
+};
+${singleton ? `const sameMembers: {
+  update: Equals<typeof api.updateObject, typeof update>;
+  delete: Equals<typeof api.deleteObject, typeof remove>;
+  transition: Equals<typeof api.transitionObject, typeof transition>;
+} = { update: true, delete: true, transition: true };` : ''}
+async function calls() {
+  const updated: { id: string } = await update('Order', { id: 'o1', note: 'n', lines: { added: [{ price: 1 }] } });
+  const withContext = await update('Order', { id: 'o1' }, undefined, { user: 'u1' });
+  const inSession = await update('Order', { id: 'o1' }, session, undefined);
+  const removed: { id: string } | null = await remove('Order', { id: 'o1' });
+  const removedProtected = await remove('Order', { id: 'o1', version: 3 }, session, { user: 'u1' });
+  const moved: { id: string } = await transition('Order', 'close', { id: 'o1', version: 3 });
+  const movedInSession = await transition('Order', 'close', { id: 'o1' }, session, { user: 'u1' });
+  void [updated, withContext, inSession, removed, removedProtected, moved, movedInSession];
+}
+// @ts-expect-error The type is named by a string.
+update(1, { id: 'o1' });
+// @ts-expect-error The input is an object.
+update('Order', 'o1');
+// @ts-expect-error The input is required.
+update('Order');
+// @ts-expect-error A delete target is an object with the ID, not the bare ID.
+remove('Order', 'o1');
+// @ts-expect-error The ID is a string, as the record keys of the inputs are.
+remove('Order', { id: 1 });
+// @ts-expect-error The version is a number.
+remove('Order', { id: 'o1', version: '2' });
+// @ts-expect-error A delete target has the ID and the version only.
+remove('Order', { id: 'o1', note: 'n' });
+// @ts-expect-error A delete target needs the ID.
+remove('Order', {});
+// @ts-expect-error The action is named by a string.
+transition('Order', 1, { id: 'o1' });
+// @ts-expect-error The input is required.
+transition('Order', 'close');
+// @ts-expect-error The action comes before the input.
+transition('Order', { id: 'o1' }, 'close');
+${anySession ? '' : `// @ts-expect-error The session is the runtime's own session type.
+update('Order', { id: 'o1' }, 'session');
+// @ts-expect-error The session is the runtime's own session type.
+remove('Order', { id: 'o1' }, 'session');
+// @ts-expect-error The session is the runtime's own session type.
+transition('Order', 'close', { id: 'o1' }, 'session');`}
+void [shapes, calls${singleton ? ', sameMembers' : ''}];
+export {};`;
+
 const cases = [
   {
     name: 'core',
@@ -2162,6 +2283,7 @@ const cases = [
       'schema-plugins.ts': coreSchemaPluginTypes,
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
       'views.ts': viewTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
+      'lifecycle-helpers.ts': lifecycleHelperTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
     },
     // NodeNext, Node16 and Bundler read the subpath declarations from the exports map; Node10, which
     // ignores exports, reads them from typesVersions.
@@ -2178,6 +2300,7 @@ const cases = [
       'barrel.ts': databaseBarrelTypes('@simtlix/simfinity-sql'),
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
       'views.ts': viewTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
+      'lifecycle-helpers.ts': lifecycleHelperTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
     },
     forbiddenPackages: ['pg', 'mongoose', 'mongodb', '@simtlix/simfinity-postgres', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
   },
@@ -2191,6 +2314,7 @@ const cases = [
       'barrel.ts': databaseBarrelTypes('@simtlix/simfinity-postgres'),
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', true),
       'views.ts': viewTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', true),
+      'lifecycle-helpers.ts': lifecycleHelperTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', { singleton: true }),
     },
     typeDependencies: ['@types/pg@8'],
     forbiddenPackages: ['mongoose', 'mongodb', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
@@ -2233,6 +2357,8 @@ const cases = [
       'legacy-custom-queries.ts': customQueryTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
       'views.ts': viewTypes('@simtlix/simfinity-js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
       'legacy-views.ts': viewTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
+      'lifecycle-helpers.ts': lifecycleHelperTypes('@simtlix/simfinity-js', 'import(\'@simtlix/simfinity-core\').Runtime', { singleton: true, anySession: true }),
+      'legacy-lifecycle-helpers.ts': lifecycleHelperTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', { singleton: true, anySession: true }),
     },
     // The legacy deep-import declarations sit next to the shims: NodeNext, Node16 and Bundler find
     // them through the exports map, Node10 by path, and their core subpath imports through core's

@@ -304,6 +304,9 @@ export const registerMutation: PostgresRuntime['registerMutation'];
 export const registerCustomQuery: PostgresRuntime['registerCustomQuery'];
 export const registerView: PostgresRuntime['registerView'];
 export const saveObject: PostgresRuntime['saveObject'];
+export const updateObject: PostgresRuntime['updateObject'];
+export const deleteObject: PostgresRuntime['deleteObject'];
+export const transitionObject: PostgresRuntime['transitionObject'];
 export const preventCreatingCollection: PostgresRuntime['preventCreatingCollection'];
 export const withTransaction: PostgresRuntime['withTransaction'];
 /** Initializes the default module instance, after configure/connect/createSchema. */

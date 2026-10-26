@@ -307,7 +307,8 @@ export function configureQueryLimits(options?: QueryLimitsOptions): void;
  * state-action mutation; unlimited by default, restored by calling it without options.
  * Invalid configuration, including an unknown or misspelled option key, throws
  * INVALID_MUTATION_LIMITS (400) and keeps the current limit; a mutation over the limit
- * fails with NESTED_OPERATIONS_EXCEEDED (400) before its transaction starts.
+ * fails with NESTED_OPERATIONS_EXCEEDED (400) before its transaction starts. `updateObject` and
+ * `transitionObject` apply `maxNestedOperations` to their `input` in the same way (`null` = no limit).
  */
 export function configureMutationLimits(options?: MutationLimitsOptions): void;
 
@@ -336,6 +337,56 @@ export function getInputType(type: GraphQLObjectType | { name: string }): GraphQ
 export function saveObject(
   typeName: string,
   args: Record<string, any>,
+  session?: any,
+  context?: any,
+): Promise<any>;
+
+/**
+ * Run the lifecycle of the generated update mutation from code, in a transaction of its own or in the
+ * active session supplied (see the core `Runtime.updateObject`). `input` has the shape of the type's
+ * update input and is checked structurally before anything runs: enum fields take their internal
+ * values, scalars are not coerced and a reference is its record key as a string. A scalar field takes a
+ * primitive, a `Date` or plain data (objects and arrays, at most 256 levels deep); class instances such
+ * as `ObjectId`, `Buffer` or `Map` are rejected with `INVALID_INPUT`, an own `undefined` counts as
+ * omitted and a bare value is never wrapped into a list. It skips the root record's global middleware,
+ * as `saveObject` does. More nested entries than `maxNestedOperations` from `configureMutationLimits()`
+ * (`null` = no limit) reject with `NESTED_OPERATIONS_EXCEEDED` (400). The helper itself never commits,
+ * retries, aborts or cleans up a supplied session; an adapter may still abort it on a write error (for
+ * example MongoDB with transactional reference integrity). Rejects with `INVALID_OPERATION_TARGET` (500)
+ * for a type that is not a stored record type of this runtime, or that has no prepared update input with
+ * an id field (before `createSchema()`, with a `readOnly` id, or with an empty update input),
+ * `REQUIRED_VALUE` or `INVALID_INPUT` (400) for an invalid input, and `NOT_VALID_ID` (404) when no
+ * record has the ID. Resolves to the updated record.
+ */
+export function updateObject(
+  typeName: string,
+  input: Record<string, any>,
+  session?: any,
+  context?: any,
+): Promise<any>;
+
+/**
+ * Run the lifecycle of the generated delete mutation from code: `target` is `{ id }`, plus `version` on
+ * a type with optimistic concurrency (see the core `Runtime.deleteObject`). Its type is checked as
+ * `updateObject` checks it, without needing an update input; its target is checked before anything runs.
+ * Resolves to the deleted record, or `null` when no record has the ID.
+ */
+export function deleteObject(
+  typeName: string,
+  target: { id: string; version?: number },
+  session?: any,
+  context?: any,
+): Promise<any>;
+
+/**
+ * Run a state machine action from code with the lifecycle of its generated mutation (see the core
+ * `Runtime.transitionObject`). It checks its type and `input` as `updateObject` does, rejects with
+ * `UNKNOWN_ACTION` (500) for an action the type does not have, and resolves to the updated record.
+ */
+export function transitionObject(
+  typeName: string,
+  actionName: string,
+  input: Record<string, any>,
   session?: any,
   context?: any,
 ): Promise<any>;
