@@ -77,7 +77,7 @@ export const isPostgresError = (error) => typeof error?.code === 'string' && /^[
 
 // A statement that folds case on a database that cannot evaluate the fold (see isCaseFoldUnsupported): the request
 // uses an operator that this database cannot run, while every other operation keeps working.
-const CASE_FOLD_UNSUPPORTED = ['ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ need a UTF8 database with the ICU collation und-x-icu', 'UNSUPPORTED_QUERY', 400];
+const CASE_FOLD_UNSUPPORTED = ['ILIKE, ISTARTS_WITH, IENDS_WITH, IEQ and IIN need a UTF8 database with the ICU collation und-x-icu', 'UNSUPPORTED_QUERY', 400];
 
 /** Maps PostgreSQL errors (and exhausted retries) without SQL details; returns every other value unchanged. */
 export const normalizeDatabaseError = (error) => {

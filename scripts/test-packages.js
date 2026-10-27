@@ -63,11 +63,11 @@ const check = (archives, name) => {
 };
 
 // Every QLOperator value, in declaration order: the ten of 3.7.0, then the literal text operators (#108, part 1),
-// then the emptiness operators (#108, part 2a). The bundled adapters list the same names in an order of their own,
-// so their checks sort both lists.
+// then the emptiness operators (#108, part 2a), then the list operators CONTAINS_ALL and IIN (#108, part 4). The
+// bundled adapters list the same names in an order of their own, so their checks sort both lists.
 const LEGACY_OPERATORS = ['EQ', 'LT', 'GT', 'LTE', 'GTE', 'BTW', 'NE', 'IN', 'NIN', 'LIKE'];
 const EMPTINESS_OPERATORS = ['IS_EMPTY', 'IS_NOT_EMPTY'];
-const QUERY_OPERATORS = [...LEGACY_OPERATORS, 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ', ...EMPTINESS_OPERATORS];
+const QUERY_OPERATORS = [...LEGACY_OPERATORS, 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ', ...EMPTINESS_OPERATORS, 'CONTAINS_ALL', 'IIN'];
 const SORTED_OPERATORS = [...QUERY_OPERATORS].sort();
 
 const adapterSource = `const adapter = {
@@ -334,6 +334,7 @@ const coreSource = `import assert from 'node:assert/strict';
   assert.deepEqual([...queryOperators.LEGACY_QUERY_OPERATORS].sort(), ${JSON.stringify([...LEGACY_OPERATORS].sort())});
   assert.equal(queryOperators.validateTextFilterValue('ILIKE', '', 'String'), '');
   assert.throws(() => queryOperators.validateTextFilterValue('ILIKE', 5, 'String'), (error) => error.getCode() === 'INVALID_FILTER_VALUE');
+  assert.deepEqual(queryOperators.validateTextListFilterValue('IIN', [], 'String'), []);
   const unsupported = await graphql({ schema, source: '{ coreBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
   assert.equal(unsupported.errors[0].extensions.code, 'UNSUPPORTED_QUERY');
   assert.equal((await graphql({ schema, source: '{ coreBooks(title: { operator: LIKE, value: "a" }) { id } }' })).errors, undefined);
@@ -1048,7 +1049,7 @@ const textOperators: readonly QueryOperator[] = ['LIKE', 'ILIKE', 'STARTS_WITH',
 const textAdapter: DatabaseAdapter<Model, Session> = { ...adapter, queryFeatures: { operators: ['EQ', ...textOperators] } };
 const legacyAdapters: DatabaseAdapter<Model, Session>[] = [{ ...adapter, queryFeatures: null }, { ...adapter, queryFeatures: undefined }];
 // Names that this version does not know, such as those of later releases, still compile.
-const laterFeatures: QueryFeatures = { operators: Object.freeze(['EQ', 'CONTAINS_ALL']) };
+const laterFeatures: QueryFeatures = { operators: Object.freeze(['EQ', 'SOUNDS_LIKE']) };
 // @ts-expect-error operators is a list of operator names.
 const oneOperator: QueryFeatures = { operators: 'ILIKE' };
 // @ts-expect-error a declaration is an object with operators, not the list itself.
@@ -1057,7 +1058,7 @@ const bareList: DatabaseAdapter<Model, Session> = { ...adapter, queryFeatures: [
 const unknownOperator: QueryOperator = 'CONTAINS';
 const featureMembers: {
   adapter: Equals<DatabaseAdapter['queryFeatures'], QueryFeatures | null | undefined>;
-  operator: Equals<QueryOperator, 'EQ' | 'NE' | 'LT' | 'LTE' | 'GT' | 'GTE' | 'BTW' | 'IN' | 'NIN' | 'LIKE' | 'ILIKE' | 'STARTS_WITH' | 'ISTARTS_WITH' | 'ENDS_WITH' | 'IENDS_WITH' | 'IEQ' | 'IS_EMPTY' | 'IS_NOT_EMPTY'>;
+  operator: Equals<QueryOperator, 'EQ' | 'NE' | 'LT' | 'LTE' | 'GT' | 'GTE' | 'BTW' | 'IN' | 'NIN' | 'LIKE' | 'ILIKE' | 'STARTS_WITH' | 'ISTARTS_WITH' | 'ENDS_WITH' | 'IENDS_WITH' | 'IEQ' | 'IS_EMPTY' | 'IS_NOT_EMPTY' | 'CONTAINS_ALL' | 'IIN'>;
 } = { adapter: true, operator: true };
 const textPlan = createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', { title: { operator: 'ISTARTS_WITH', value: 'a' } }, { mode: 'count', operators: new Set<QueryOperator>(['EQ', 'ISTARTS_WITH']) });
 const planOperators = createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', {}, { operators: textOperators });

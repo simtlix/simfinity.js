@@ -954,6 +954,8 @@ enum QLOperator {
   IEQ
   IS_EMPTY
   IS_NOT_EMPTY
+  CONTAINS_ALL
+  IIN
 }
 
 scalar QLValue

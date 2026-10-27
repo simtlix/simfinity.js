@@ -1,10 +1,11 @@
 import QLOperator from './const/QLOperator.js';
 import SimfinityError from './errors/simfinity.error.js';
 
-// Internal: the filter operators and the value rules every backend applies to them. They are shared
-// by the core runtime, the query plan and the MongoDB compiler through the
-// `./internal/query-operators` subpath, which is not public API. The emptiness operators live in
-// query-emptiness.js and are re-exported here, so the subpath stays the only one.
+// Internal: the filter operators and the value rules every backend applies to them, and the path
+// and leaf rules of the list operator CONTAINS_ALL (#108, part 4). They are shared by the core
+// runtime, the query plan and the backend compilers through the `./internal/query-operators`
+// subpath, which is not public API. The emptiness operators live in query-emptiness.js and are
+// re-exported here, so the subpath stays the only one.
 
 export {
   EMPTINESS_QUERY_OPERATORS, describeEmptiness, describeModelEmptiness, emptinessMemberPaths, emptinessScopePaths,
@@ -28,7 +29,9 @@ export const LEGACY_QUERY_OPERATORS = Object.freeze(['EQ', 'NE', 'LT', 'LTE', 'G
  * The literal text operators (#108, part 1) and what each one matches: `contains`, `prefix`,
  * `suffix` or `exact` (the whole value), respecting case or ignoring it (`ignoreCase`). Values are
  * literal: `%`, `_`, `.`, `*`, `\`, `^`, `$` and `(` match themselves. `LIKE`, the case-sensitive
- * substring of 3.7.0, keeps its own validation and compilation and is not listed here.
+ * substring of 3.7.0, keeps its own validation and compilation and is not listed here. Neither is
+ * `IIN` (#108, part 4), `IN` ignoring case: it takes a list of such values, which
+ * {@link validateTextListFilterValue} checks.
  */
 export const TEXT_QUERY_OPERATORS = Object.freeze({
   ILIKE: Object.freeze({ match: 'contains', ignoreCase: true }),
@@ -66,6 +69,85 @@ export const validateTextFilterValue = (operator, value, scalar, path) => {
   return value;
 };
 
+/** The operators whose value is an array: IN, NIN and BTW (3.7.0), CONTAINS_ALL and IIN (#108 part 4). */
+export const LIST_VALUE_OPERATORS = Object.freeze(['IN', 'NIN', 'BTW', 'CONTAINS_ALL', 'IIN']);
+
+/** Whether `operator` takes an array value. */
+export const takesListValue = (operator) => LIST_VALUE_OPERATORS.includes(operator);
+
+const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+  && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+
+/**
+ * Validates the value of CONTAINS_ALL (#108 section 3.3) before any backend compiles it: a non-empty array of
+ * non-null scalars, none of them an array or a plain object. Anything else fails with INVALID_FILTER_VALUE (400).
+ * Returns the value unchanged: the compilers cast each element as they cast IN elements, and keep duplicates.
+ */
+export const validateContainsAllValue = (value) => {
+  if (value === undefined || value === null) invalidValue('Expected a scalar filter value');
+  // Array.from reads a hole of a sparse array as undefined; `some` would skip it.
+  if (Array.isArray(value) && Array.from(value).some((item) => item == null || Array.isArray(item) || isPlainObject(item))) {
+    invalidValue('Filter lists require non-null scalar elements');
+  }
+  if (!Array.isArray(value)) invalidValue('CONTAINS_ALL requires an array value');
+  if (!value.length) invalidValue('CONTAINS_ALL requires a non-empty list');
+  return value;
+};
+
+/**
+ * Validates the value of IIN, IN ignoring case, before any backend compiles it: the field must be a `String` field
+ * or a `String` list by its effective scalar, as for IEQ, and the value an array of strings without U+0000; the
+ * empty array is valid and matches nothing. Anything else fails with INVALID_FILTER_VALUE (400). Returns the value
+ * unchanged: it is neither folded nor deduplicated.
+ */
+export const validateTextListFilterValue = (operator, value, scalar, path) => {
+  const where = path == null ? '' : ` on ${Array.isArray(path) ? path.join('.') : path}`;
+  if (scalar !== 'String') invalidValue(`${operator} requires a String field${where}`);
+  if (!Array.isArray(value)) invalidValue(`${operator} requires an array value${where}`);
+  // Array.from reads a hole of a sparse array as undefined; `some` would skip it.
+  const items = Array.from(value);
+  if (items.some((item) => typeof item !== 'string')) invalidValue(`${operator} requires non-null string elements${where}`);
+  if (items.some((item) => item.includes('\u0000'))) invalidValue(`${operator} values cannot contain U+0000${where}`);
+  return value;
+};
+
+const failPath = (message, code) => { throw new SimfinityError(message, code, 400); };
+// The validator's steps (graphqlStep, modelStep) and resolveModelPath's field descriptions, read alike.
+const stepKind = (step) => {
+  if (step.kind === 'embedded') return step.list ? 'embeddedList' : 'embedded';
+  if (step.kind === 'scalar') return step.list ? 'scalarList' : 'scalar';
+  if (step.kind === 'reference' && step.inferred) return 'scalar';
+  return step.kind;
+};
+
+/**
+ * The permanent path and leaf rules of CONTAINS_ALL (#108 section 3.3), on the steps of a path relative to its
+ * frame: the path ends at a value, as for every operator (MISSING_FILTER_PATH for one segment, INVALID_FILTER_PATH
+ * otherwise; the validator has applied this rule already, and PostgreSQL's hand-built plans get core's codes from
+ * it), no collection is crossed (INVALID_FILTER_PATH, which the shorthand's exclusion states), no reference follows
+ * an embedded list (INVALID_FILTER_PATH: that join yields one referenced record per row), and the leaf is a list: a
+ * scalar list, or a scalar reached through an embedded list (INVALID_FILTER_OPERATOR otherwise).
+ */
+export const assertContainsAllPath = (steps) => {
+  const kinds = steps.map(stepKind);
+  const names = steps.map(({ name }) => name);
+  // Core's object-end rule first (query-frames.js:420-422), so that every caller gets core's codes in core's order.
+  if (['embedded', 'embeddedList', 'reference', 'collection'].includes(kinds.at(-1))) {
+    failPath('Filter on object field requires a scalar path', steps.length > 1 ? 'INVALID_FILTER_PATH' : 'MISSING_FILTER_PATH');
+  }
+  const crossed = kinds.slice(0, -1);
+  if (crossed.includes('collection')) failPath('The shorthand excludes them; use an explicit group', 'INVALID_FILTER_PATH');
+  const list = crossed.indexOf('embeddedList');
+  const reference = list === -1 ? -1 : crossed.findIndex((kind, index) => index > list && kind === 'reference');
+  if (reference !== -1) {
+    failPath(`CONTAINS_ALL cannot cross the reference ${names.slice(0, reference + 1).join('.')} inside an embedded list, which joins one referenced record per row; combine EQ conditions on the path instead`, 'INVALID_FILTER_PATH');
+  }
+  const leaf = kinds.at(-1);
+  if (leaf !== 'scalarList' && !(leaf === 'scalar' && list !== -1)) {
+    failPath(`CONTAINS_ALL requires a list field, or a field reached through an embedded list; ${names.join('.')} is not one`, 'INVALID_FILTER_OPERATOR');
+  }
+};
+
 const invalidFeatures = (message) => {
   throw new SimfinityError(`DatabaseAdapter queryFeatures ${message}`, 'INVALID_QUERY_FEATURES', 500);
 };
@@ -76,7 +158,9 @@ const invalidFeatures = (message) => {
  * Without a declaration (undefined or null) the adapter supports {@link LEGACY_QUERY_OPERATORS}
  * and neither feature. A declaration is an object whose `operators`
  * is an array of operator names, whose names this version does not know are ignored, and whose
- * optional `referenceEmptiness` and `quantifiers` are booleans, undefined or null (false).
+ * optional `referenceEmptiness` and `quantifiers` are booleans, undefined or null (false). A name
+ * counts once this version knows it: a declaration that listed `CONTAINS_ALL` or `IIN` before
+ * #108 part 4 added them receives them on upgrade.
  * Quantifiers require reference emptiness for scoped joins. Other members are left for later
  * features. Anything else throws `INVALID_QUERY_FEATURES` (500).
  */

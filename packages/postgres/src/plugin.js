@@ -24,7 +24,7 @@ export const postgresPlugin = (options) => ({
   // declaration names the compileQuery it describes, so a copy of this plugin with another compileQuery compiles the
   // operators of 3.7.0, without reference emptiness or quantifiers, until it declares its own.
   queryFeatures: {
-    operators: ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE', 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ', 'IS_EMPTY', 'IS_NOT_EMPTY'],
+    operators: ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE', 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ', 'IS_EMPTY', 'IS_NOT_EMPTY', 'CONTAINS_ALL', 'IIN'],
     referenceEmptiness: true,
     quantifiers: true,
     compileQuery,

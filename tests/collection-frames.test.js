@@ -591,8 +591,10 @@ describe('collection frames: validator edge order and sort', () => {
     expect(errorOf(() => frames.validateQuantifiedGroups({ AND: [{ [type]: [] }] }, { ...ctx, quantifiers: false }))?.extensions.code).toBe('UNSUPPORTED_QUERY');
     expect(() => frames.validateQuantifiedGroups({ AND: [{ [type]: null }] }, { ...ctx, quantifiers: false })).not.toThrow();
   });
-  it('keeps CONTAINS_ALL unknown on own fields and gives the permanent shorthand reason through collections', () => {
+  it('rejects CONTAINS_ALL on a non-list own field and gives the permanent shorthand reason through collections', () => {
     expect(errorOf(() => frames.validateQuantifiedGroups(grouped(condition('name', 'CONTAINS_ALL', ['x'])), ctx))?.extensions.code).toBe('INVALID_FILTER_OPERATOR');
+    expect(errorOf(() => frames.validateQuantifiedGroups(grouped(condition('name', 'CONTAINS_ALL', ['x'])), ctx))?.message)
+      .toBe('CONTAINS_ALL requires a list field, or a field reached through an embedded list; name is not one');
     for (const operator of ['IS_EMPTY', 'IS_NOT_EMPTY', 'CONTAINS_ALL']) {
       const error = errorOf(() => frames.validateQuantifiedGroups(grouped(condition('reviews.author', operator, null)), ctx));
       expect(error?.extensions.code).toBe('INVALID_FILTER_PATH');
@@ -702,7 +704,7 @@ describe('collection frames: remaining validator and rewrite contracts', () => {
     expect(frames.frameCollectionPaths(grouped(first, second), treeContext)).toEqual({ AND: [{ conditions: [], ANY: [implicit('children', [condition('name'), { ...condition('n', 'EQ', 1), valuePath: 'other', customOperand: 2 }], { __scope: { scopes: { children: null } } })] }] });
   });
   it('rejects non-null J scopes on marked aggregate anchors after all value errors', () => {
-    const ctx = { ...enabled, gqltype: frameTypes.Product, J: new Set(['reviews']) };
+    const ctx = { ...enabled, gqltype: frameTypes.Product, operation: 'aggregate', J: new Set(['reviews']) };
     const bad = implicit('reviews', [condition('rating', 'GTE', 4)], {
       __anchor: ['reviews', 'product'], __scope: { scopes: { reviews: { AND: [] }, 'reviews.product.reviews': null } },
     });

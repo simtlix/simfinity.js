@@ -4,7 +4,7 @@ import { paginationStages } from './query-limits.js';
 import SimfinityError from './errors/simfinity.error.js';
 import {
   describeEmptiness, describeModelEmptiness, emptinessMemberPaths, emptinessScopeTargets, isEmptinessOperator, isQueryOperator,
-  textQueryOperator, validateTextFilterValue,
+  takesListValue, textQueryOperator, validateContainsAllValue, validateTextFilterValue, validateTextListFilterValue,
 } from './query-operators.js';
 
 const fail = (message, code = 'INVALID_FILTER_VALUE') => { throw new SimfinityError(message, code, 400); };
@@ -256,9 +256,18 @@ export const resolveModelPath = (models, entityName, path) => {
 
 /**
  * Typed paths and logical groups; neither SQL nor Mongo pipeline objects are stored here. Operators
- * and values are validated here, text operators through validateTextFilterValue. With `operators`,
+ * and values are validated here, text operators through validateTextFilterValue, CONTAINS_ALL
+ * through validateContainsAllValue and IIN through validateTextListFilterValue. With `operators`,
  * the names a compiler supports, any other QLOperator value fails with UNSUPPORTED_QUERY (400);
  * without it every QLOperator value is planned.
+ *
+ * The list operators (#108 part 4) plan `{ kind: 'predicate', path, operator, value }` with the
+ * array as validated, neither cast nor deduplicated: CONTAINS_ALL's is a non-empty array of
+ * non-null scalars, on a scalar list or a scalar reached through embedded lists; IIN's is an array
+ * of strings, possibly empty, on a String field or list. CONTAINS_ALL's path and leaf rules are the
+ * shared validator's, which runs first: through a collection or a reference inside an embedded
+ * list it fails with INVALID_FILTER_PATH, on any other leaf with INVALID_FILTER_OPERATOR. IIN
+ * through a collection becomes a correlated ANY frame like IN, and CONTAINS_ALL is never cut.
  *
  * The emptiness operators plan `{ kind: 'predicate', path, operator, value: null }`, whose path may
  * end at a scalar, a scalar list, an embedded list or an embedded object, after the checks of
@@ -339,12 +348,14 @@ export const createQueryPlan = (models, entityName, source = {}, {
     }
     if (!isQueryOperator(op)) fail(`Unknown filter operator: ${op}`, 'INVALID_FILTER_OPERATOR');
     if (allowed && !allowed.has(op)) fail(`The ${op} filter operator is not supported by this query compiler`, 'UNSUPPORTED_QUERY');
-    const collection = ['IN', 'NIN', 'BTW'].includes(op);
+    const collection = takesListValue(op);
     if (value === undefined || (!collection && Array.isArray(value)) || (value === null && !['EQ', 'NE'].includes(op))) fail('Expected a scalar filter value');
     if (collection && Array.isArray(value) && value.some((item) => item == null || Array.isArray(item))) fail('Filter lists require non-null scalar elements');
-    if (['IN', 'NIN', 'BTW'].includes(op) && !Array.isArray(value)) fail(`${op} requires an array value`);
+    if (collection && !Array.isArray(value)) fail(`${op} requires an array value`);
     if (op === 'BTW' && value.length !== 2) fail('BTW requires two values');
     if (textQueryOperator(op)) validateTextFilterValue(op, value, field.scalar, path);
+    if (op === 'CONTAINS_ALL') validateContainsAllValue(value);
+    if (op === 'IIN') validateTextListFilterValue(op, value, field.scalar, path);
     const node = { kind: 'predicate', path: Array.isArray(path) ? path : path.split('.'), operator: op, value: value === undefined ? null : value };
     if (hasMarker(construct)) {
       if (!inFrame) detached(`${op} on ${node.path.join('.')} carries a client scope marker, but is not an emptiness condition`);

@@ -351,6 +351,14 @@ export interface SQLPlugin<
    * A vector reference with null target scope keeps every target and any restricted prefix; a non-null target
    * scope inside an embedded list is FORBIDDEN_FILTER_PATH (403).
    * The flag follows the compileQuery identity rule and requires referenceEmptiness true.
+   *
+   * A plugin that declares `CONTAINS_ALL` receives `{ kind: 'predicate', path, operator: 'CONTAINS_ALL', value }` with
+   * the array as validated, a non-empty array of non-null scalars that it casts as it casts `IN` elements; one that
+   * declares `IIN` receives `{ kind: 'predicate', path, operator: 'IIN', value }` with an array of strings, possibly
+   * empty. `joins` appears only inside frames. `CONTAINS_ALL` holds when every value is among the values at `path`,
+   * the values of every item of embedded lists included, and must be two-valued under an ALL body, where a NULL list
+   * does not contain the values; `IIN` must apply the case-folding contract of the text operators and match nothing
+   * for `[]`. A copy whose `compileQuery` is another function keeps the operators of 3.7.0 and rejects both.
    */
   queryFeatures?: SQLQueryFeatures<Configuration, Description, Id> | null | undefined;
   naming: SQLNaming;

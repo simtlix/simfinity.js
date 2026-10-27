@@ -165,6 +165,17 @@ describe('MCP tool schemas and descriptions with the text operators', () => {
     expect(validate({ name: { operator: 'ilike', value: 'pal' } }).valid).toBe(false);
   });
 
+  it('accepts the list operators and rejects unknown ones in hosts that validate tool input', () => {
+    const validate = new AjvJsonSchemaValidator().getValidator(tool(tools, LIST).inputSchema);
+    for (const [operator, value] of [['CONTAINS_ALL', ['red', 'blue']], ['IIN', ['RED', 'blue']], ['IIN', []]]) {
+      expect(validate({ tags: { operator, value } }).valid, operator).toBe(true);
+      expect(validate({ AND: [{ conditions: [{ field: 'tags', operator, value }] }] }).valid, operator).toBe(true);
+      expect(validate({ owner: { terms: [{ path: 'name', operator, value }] } }).valid, operator).toBe(true);
+    }
+    expect(validate({ tags: { operator: 'CONTAINS_ANY', value: ['red'] } }).valid).toBe(false);
+    expect(validate({ name: { operator: 'iin', value: ['pal'] } }).valid).toBe(false);
+  });
+
   // The texts are the same whatever the adapter declares: generateMCPTools reads only the schema, so they say that
   // references and collections depend on the database adapter (#108, part 2b).
   it('says that IS_EMPTY and IS_NOT_EMPTY take no value, test the field itself without a path, and test references and collections where the adapter supports it', () => {
@@ -182,7 +193,7 @@ describe('MCP tool schemas and descriptions with the text operators', () => {
       + 'has no child the caller may see, and a field reached through references when it is empty by its own rule or a reference on the way '
       + 'is empty; other adapters reject these conditions with UNSUPPORTED_QUERY.');
     expect($defs.QLOperator.description).not.toContain('for now');
-    expect($defs.QLFilter.properties.value.description).toBe('Filter value. Accepts a scalar, or an array for the IN, NIN and BTW operators. Omit it, or pass null, for IS_EMPTY and IS_NOT_EMPTY.');
+    expect($defs.QLFilter.properties.value.description).toBe('Filter value. Accepts a scalar, or an array for the IN, NIN, IIN, BTW and CONTAINS_ALL operators. Omit it, or pass null, for IS_EMPTY and IS_NOT_EMPTY.');
     expect($defs.QLTypeFilter.description).toContain('With IS_EMPTY or IS_NOT_EMPTY, omit the path to test the embedded object or embedded list itself. '
       + 'Where the database adapter supports it, a reference or collection can be tested itself the same way.');
     expect($defs.QLTypeFilterExpression.description).toContain('A term with IS_EMPTY or IS_NOT_EMPTY and no path tests an embedded object or embedded list itself. '

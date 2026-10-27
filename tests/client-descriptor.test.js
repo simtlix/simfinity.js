@@ -76,6 +76,17 @@ describe('client descriptor', () => {
     expect(printSchema(schema)).toBe(sdl); expect(introspectionFromSchema(schema)).toEqual(introspection);
   });
 
+  test('lists every QLOperator value in enum order, the list operators last, whatever the adapter declares', () => {
+    const names = core.QLOperator.getValues().map((value) => value.name);
+    for (const queryFeatures of [undefined, { operators: ['EQ'] }]) {
+      const api = core.createRuntime({ createModel: (type) => ({ name: type.name }), queryFeatures });
+      api.connect(null, book(), 'book', 'books');
+      const values = describeSchema(api.createSchema()).types.QLOperator.values.map((value) => value.name);
+      expect(values).toEqual(names);
+      expect(values.slice(-3)).toEqual(['IS_NOT_EMPTY', 'CONTAINS_ALL', 'IIN']);
+    }
+  });
+
   test.each([false, true])('does not classify a custom query using an excluded entity endpoint (entity result: %s)', (entityResult) => {
     const api = runtime(); const Book = book();
     api.connect(null, Book, 'book', 'books');

@@ -16,6 +16,8 @@ const TEXT = ['ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH',
 const ALL = [...LEGACY, ...TEXT];
 // The emptiness operators (#108, part 2a) follow the text operators; tests/query-emptiness.test.js covers them.
 const EMPTINESS = ['IS_EMPTY', 'IS_NOT_EMPTY'];
+// The list operators (#108, part 4) follow the emptiness operators; tests/list-operators.test.js covers them.
+const LIST = ['CONTAINS_ALL', 'IIN'];
 
 // Loaded on use, so that only the tests of the shared module need it.
 const OPERATORS_MODULE = '@simtlix/simfinity-core/internal/query-operators';
@@ -148,16 +150,16 @@ const predicatesOf = (node) => {
 describe('QLOperator', () => {
   it('adds the six text operators after the operators of 3.7.0', () => {
     expect(QLOperator.getValues().map((entry) => entry.value)).toEqual(
-      ['EQ', 'LT', 'GT', 'LTE', 'GTE', 'BTW', 'NE', 'IN', 'NIN', 'LIKE', ...TEXT, ...EMPTINESS],
+      ['EQ', 'LT', 'GT', 'LTE', 'GTE', 'BTW', 'NE', 'IN', 'NIN', 'LIKE', ...TEXT, ...EMPTINESS, ...LIST],
     );
     expect(QLOperator.getValues().map((entry) => entry.name)).toEqual(QLOperator.getValues().map((entry) => entry.value));
   });
 
   it('publishes them in the generated SDL and in introspection', async () => {
     const { schema } = build(null);
-    expect(printSchema(schema)).toContain(`enum QLOperator {\n${['EQ', 'LT', 'GT', 'LTE', 'GTE', 'BTW', 'NE', 'IN', 'NIN', 'LIKE', ...TEXT, ...EMPTINESS].map((name) => `  ${name}`).join('\n')}\n}`);
+    expect(printSchema(schema)).toContain(`enum QLOperator {\n${['EQ', 'LT', 'GT', 'LTE', 'GTE', 'BTW', 'NE', 'IN', 'NIN', 'LIKE', ...TEXT, ...EMPTINESS, ...LIST].map((name) => `  ${name}`).join('\n')}\n}`);
     const result = await graphql({ schema, source: '{ __type(name: "QLOperator") { enumValues { name } } }' });
-    expect(result.data.__type.enumValues.map((value) => value.name).slice(-8, -2)).toEqual(TEXT);
+    expect(result.data.__type.enumValues.map((value) => value.name).slice(-10, -4)).toEqual(TEXT);
   });
 });
 
@@ -205,7 +207,7 @@ describe('shared operator module', () => {
     expect([...resolveQueryFeatures(undefined).operators]).toEqual(LEGACY);
     expect([...resolveQueryFeatures(null).operators]).toEqual(LEGACY);
     expect([...resolveQueryFeatures({ operators: ALL }).operators]).toEqual(ALL);
-    expect([...resolveQueryFeatures({ operators: ['IEQ', 'CONTAINS_ALL', 'eq'], valuePath: true }).operators]).toEqual(['IEQ']);
+    expect([...resolveQueryFeatures({ operators: ['IEQ', 'SOUNDS_LIKE', 'eq'], valuePath: true }).operators]).toEqual(['IEQ']);
     expect([...resolveQueryFeatures({ operators: [] }).operators]).toEqual([]);
     for (const invalid of ['all', true, 1, [], ['EQ'], {}, { operators: 'EQ' }, { operators: [1] }, { operators: ['EQ', null] }]) {
       expect(codeOf(() => resolveQueryFeatures(invalid)), JSON.stringify(invalid)).toBe('INVALID_QUERY_FEATURES');
@@ -546,7 +548,7 @@ describe('queryFeatures declarations', () => {
   });
 
   it('pin: ignores operator names and future feature fields this version does not know', async () => {
-    const { run } = build({ operators: [...ALL, 'CONTAINS_ALL'], futureCollectionFeature: true });
+    const { run } = build({ operators: [...ALL, 'SOUNDS_LIKE'], futureCollectionFeature: true });
     expect((await run('{ qtItems(name: { operator: IEQ, value: "alpha" }) { id } }')).data.qtItems).toEqual([{ id: 'i1' }]);
   });
 

@@ -130,7 +130,7 @@ for (const backend of backends) {
     it('publishes both operators in the operator enum of the list and aggregate tools, and states their rules', () => {
       for (const name of ['qzItems', 'qzItems_aggregate']) {
         const { description, inputSchema: { $defs, properties } } = tools.find((tool) => tool.name === name);
-        expect($defs.QLOperator.enum.slice(-2), name).toEqual(OPERATORS);
+        expect($defs.QLOperator.enum.slice(-4, -2), name).toEqual(OPERATORS);
         expect(description, name).toContain(`IEQ, IS_EMPTY, IS_NOT_EMPTY; ${NO_VALUE})`);
         expect($defs.QLOperator.description, name).toContain('IS_EMPTY and IS_NOT_EMPTY take no value (omit it or pass null), and every record matches exactly one of them');
         expect($defs.QLOperator.description, name).toContain('a path that continues inside an embedded list or a collection fails with INVALID_FILTER_PATH');

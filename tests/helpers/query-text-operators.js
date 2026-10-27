@@ -222,8 +222,9 @@ export const FOLDING_CASES = [
   ['ILIKE', 'ΔΟΣ.', ['w31']], ['IENDS_WITH', 'Σ ΑΒ', ['w30']], ['IENDS_WITH', 'Σ', ['w04', 'w05', 'w06', 'w33']],
   ['IENDS_WITH', 'ος αβ', ['w30']], ['ISTARTS_WITH', 'κασ', ['w29']], ['ISTARTS_WITH', 'ΚΑΣΤ', ['w29']],
   // The accepted difference of the dotted capital I: ICU lowers İ to i followed by U+0307 COMBINING DOT ABOVE, while
-  // MongoDB matches İ only with itself.
+  // MongoDB matches İ only with itself; İ's own PostgreSQL fold, searched, finds İ there and only itself on MongoDB.
   ['IEQ', 'İSTANBUL', ['w10', 'w13'], ['w10'], 'İ (U+0130)'],
+  ['IEQ', 'i̇stanbul', ['w10', 'w13'], ['w13'], 'İ (U+0130)'],
   ['ISTARTS_WITH', 'i', ['w10', 'w11', 'w12', 'w13'], ['w11', 'w12', 'w13'], 'İ (U+0130)'],
 ];
 /**

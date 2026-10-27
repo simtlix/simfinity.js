@@ -21,6 +21,8 @@ const QLOperator = new GraphQLEnumType({
     IEQ: { value: 'IEQ' },
     IS_EMPTY: { value: 'IS_EMPTY' },
     IS_NOT_EMPTY: { value: 'IS_NOT_EMPTY' },
+    CONTAINS_ALL: { value: 'CONTAINS_ALL' },
+    IIN: { value: 'IIN' },
   },
 });
 
