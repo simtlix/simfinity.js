@@ -207,7 +207,7 @@ describe('shared operator module', () => {
     expect([...resolveQueryFeatures(undefined).operators]).toEqual(LEGACY);
     expect([...resolveQueryFeatures(null).operators]).toEqual(LEGACY);
     expect([...resolveQueryFeatures({ operators: ALL }).operators]).toEqual(ALL);
-    expect([...resolveQueryFeatures({ operators: ['IEQ', 'SOUNDS_LIKE', 'eq'], valuePath: true }).operators]).toEqual(['IEQ']);
+    expect([...resolveQueryFeatures({ operators: ['IEQ', 'SOUNDS_LIKE', 'eq'], futureFeature: true }).operators]).toEqual(['IEQ']);
     expect([...resolveQueryFeatures({ operators: [] }).operators]).toEqual([]);
     for (const invalid of ['all', true, 1, [], ['EQ'], {}, { operators: 'EQ' }, { operators: [1] }, { operators: ['EQ', null] }]) {
       expect(codeOf(() => resolveQueryFeatures(invalid)), JSON.stringify(invalid)).toBe('INVALID_QUERY_FEATURES');

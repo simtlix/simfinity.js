@@ -77,6 +77,8 @@ export interface QLFilterCondition {
   field: string;
   operator?: QueryOperator | null;
   value?: any;
+  /** A stored field path, mutually exclusive with a supplied value; null preserves literal behavior. */
+  valuePath?: string | null;
   path?: string | null;
 }
 
@@ -101,6 +103,8 @@ export interface QLTypeFilterExpression {
   terms?: Array<{
     operator?: QueryOperator | null;
     value?: any;
+    /** A stored field path, mutually exclusive with a supplied value; null preserves literal behavior. */
+    valuePath?: string | null;
     path?: string | null;
   } | null> | null;
 }
@@ -115,6 +119,8 @@ export interface FilterCondition {
   field: string;
   operator?: QueryOperator | (string & {});
   value?: any;
+  /** A stored field path, mutually exclusive with a supplied value; null preserves literal behavior. */
+  valuePath?: string | null;
   path?: string;
 }
 
@@ -156,6 +162,8 @@ export interface QueryFeatures {
    * legacy joins. All adapters reject list sorts through collections, including count mode.
    */
   quantifiers?: boolean | null | undefined;
+  /** Field operands, including scoped references. Requires referenceEmptiness: true. */
+  valuePath?: boolean | null | undefined;
 }
 
 export interface ModelRegistration {
@@ -176,6 +184,10 @@ export interface FieldDescription {
   scalar?: 'ID' | 'String' | 'Int' | 'Float' | 'Boolean' | 'DateTime' | 'Enum' | 'Version';
   values?: string[];
   enumValues?: { name: string; value: unknown }[];
+  /** Logical GraphQL enum identity, required for field comparisons. */
+  enumName?: string;
+  /** Effective temporal base before storage normalizes Date and Time to DateTime. */
+  temporalName?: 'DateTime' | 'Date' | 'Time';
   target?: string;
   connectionField?: string;
   fields?: FieldDescription[];
@@ -897,6 +909,9 @@ export function createRuntime<Model = any, Session = any>(adapter: DatabaseAdapt
 /** Scoped single-reference joins, keyed by a dotted prefix relative to the containing frame. */
 export type QueryJoins = Record<string, QueryPredicate | null>;
 
+/** A field operand in the same frame (up: 0) or an enclosing shorthand frame. */
+export type QueryOperand = { up: number; path: string[]; joins?: QueryJoins };
+
 /**
  * `operator` is a {@link QueryOperator}; the value of a text operator is a validated string. For
  * `CONTAINS_ALL` the value is a non-empty array of non-null scalars, validated and not cast; the
@@ -918,10 +933,11 @@ export type QueryJoins = Record<string, QueryPredicate | null>;
  * A `quantified` node selects elements with `ANY`, `ALL` or `NONE`, applying `scope` before `where`;
  * both predicates use paths relative to the element, and null means no restriction. Empty elements
  * give ANY false, ALL/NONE true; scope is never negated, and frames never multiply roots. `anchor` is
- * an aggregate's legacy join chain; when present, `path` is relative to it and `joins` is absent.
+ * an aggregate's legacy join chain; when present, `path` is relative to it. Comparison-bearing
+ * anchored frames may carry full-prefix joins as visibility guards, preserving the existing J row.
  */
 export type QueryPredicate =
-  | { kind: 'predicate'; path: string[]; operator: string; value: any; scopes?: Record<string, QueryPredicate | null>; joins?: QueryJoins }
+  | { kind: 'predicate'; path: string[]; operator: string; value: any; operand?: QueryOperand; scopes?: Record<string, QueryPredicate | null>; joins?: QueryJoins }
   | { kind: 'and' | 'or'; terms: QueryPredicate[] }
   | {
       kind: 'quantified';
@@ -975,6 +991,13 @@ export interface QueryPlan {
  * `quantifiers`, a row filter on an aggregate's join prefix, a legacy join otherwise. `CONTAINS_ALL`
  * is never cut into a frame.
  *
+ * `valuePath` selects a compatible stored scalar operand instead of a literal value. It defaults
+ * like `quantifiers`; a comparison node has `value: null` and `operand: { up, path, joins? }`.
+ * Same-frame operands use the union of scoped paths in `joins`; internal shorthand outer bindings
+ * use positive `up` and their own operand joins. Public inputs do not accept outer-frame syntax.
+ * Null equality is two-valued, and a left scalar list uses null-safe EQ/NE membership.
+ * Embedded-list comparisons, right scalar lists and incompatible logical types fail explicitly.
+ *
  * `referenceEmptiness` defaults to true when `operators` is omitted and to false when it is given.
  * When it is false, an emptiness condition that crosses or ends at a reference or a collection, or
  * reads a reference or collection member, fails with `UNSUPPORTED_QUERY` where the order above has
@@ -995,7 +1018,7 @@ export interface QueryPlan {
  * checked before the path rule, the rest after it.
  * A marker not filled for every path fails with `DETACHED_CLIENT_FILTER` (500).
  */
-export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode']; operators?: Iterable<string>; referenceEmptiness?: boolean; quantifiers?: boolean }): QueryPlan;
+export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode']; operators?: Iterable<string>; referenceEmptiness?: boolean; quantifiers?: boolean; valuePath?: boolean }): QueryPlan;
 export function resolveModelPath(models: ModelDescription, entityName: string, path: string | string[]): FieldDescription[];
 
 /**

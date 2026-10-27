@@ -214,7 +214,7 @@ describe('PostgreSQL collection frame statements', () => {
   });
   it.each([false, null, undefined])('pin: leaves quantifiers undeclared for %s', (quantifiers) => {
     const plugin = postgresPlugin();
-    expect(bindPlugin({ ...plugin, queryFeatures: { ...plugin.queryFeatures, quantifiers } }).queryFeatures).toEqual({ operators: plugin.queryFeatures.operators, referenceEmptiness: true });
+    expect(bindPlugin({ ...plugin, queryFeatures: { ...plugin.queryFeatures, quantifiers } }).queryFeatures).toEqual({ operators: plugin.queryFeatures.operators, referenceEmptiness: true, valuePath: true });
   });
   it('requires referenceEmptiness and binds quantifiers only to the declared compiler', () => {
     const plugin = postgresPlugin();

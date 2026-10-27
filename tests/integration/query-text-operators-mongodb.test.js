@@ -474,7 +474,7 @@ describe('MongoDB text operator compilation', () => {
   describe('queryFeatures', () => {
     test('the adapter declares every QLOperator value, listed explicitly, and reference emptiness', () => {
       for (const adapter of [fixture.adapter, createMongoAdapter({ batchedCollections: true })]) {
-        expect(adapter.queryFeatures).toEqual({ operators: [...LEGACY, ...TEXT, ...EMPTINESS, ...LIST], referenceEmptiness: true, quantifiers: true });
+        expect(adapter.queryFeatures).toEqual({ operators: [...LEGACY, ...TEXT, ...EMPTINESS, ...LIST], referenceEmptiness: true, quantifiers: true, valuePath: true });
         expect(Object.isFrozen(adapter.queryFeatures)).toBe(true);
         expect(Object.isFrozen(adapter.queryFeatures.operators)).toBe(true);
       }

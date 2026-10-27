@@ -987,6 +987,7 @@ const coreTypes = `import {
   type QLTypeFilterExpression,
   type QueryFeatures,
   type QueryJoins,
+  type QueryOperand,
   type QueryQuantifier,
   type QueryLimitsOptions,
   type QueryOperator,
@@ -1190,6 +1191,16 @@ const referenceMembers: {
 } = { feature: true, scopes: true, limits: true, rootLimits: true, runtimeLimits: true };
 const quantifierEnum: GraphQLEnumType = QLQuantifier;
 const quantifier: QueryQuantifier = 'ALL';
+const comparisonOperand: QueryOperand = { up: 1, path: ['stock'], joins: { shop: null } };
+const comparisonFeatures: QueryFeatures = { operators: ['EQ'], referenceEmptiness: true, valuePath: true };
+const comparisonCondition: QLFilterCondition = { field: 'stock', valuePath: 'minimum' };
+const comparisonTerm: QLTypeFilterExpression = { terms: [{ path: 'stock', valuePath: 'minimum' }] };
+const comparisonPredicate: QueryPredicate = { kind: 'predicate', path: ['stock'], operator: 'LT', value: null, operand: comparisonOperand };
+const comparisonMembers: {
+  feature: Equals<QueryFeatures['valuePath'], boolean | null | undefined>;
+  operand: Equals<Extract<QueryPredicate, { kind: 'predicate' }>['operand'], QueryOperand | undefined>;
+} = { feature: true, operand: true };
+void [comparisonFeatures, comparisonCondition, comparisonTerm, comparisonPredicate, comparisonMembers];
 const frameCondition: QLFilterCondition = { field: 'rating', operator: 'GTE', value: 4 };
 const quantifiedGroup: QLQuantifiedGroup = {
   path: 'reviews', conditions: [frameCondition],
@@ -2382,7 +2393,7 @@ register('asyncItems', {
 });
 const paramType: ViewParamType = new GraphQLList(new GraphQLList(GraphQLString));
 const param: ViewParam = { type: paramType };
-const condition: FilterCondition = { field: 'name', operator: 'IS_EMPTY' };
+const condition: FilterCondition = { field: 'name', valuePath: 'alias' };
 const group: FilterGroup = { AND: [{ conditions: [condition] }], ANY: [{ path: 'reviews', ALL: [{ path: 'author', conditions: [{ field: 'name', operator: 'NE', value: 'hidden' }] }] }], NONE: [{ path: 'reviews', conditions: [{ field: 'rating', operator: 'LT', value: 1 }] }] };
 // @ts-expect-error A quantified view group requires its element path.
 const invalidFrame: FilterGroup = { ANY: [{ conditions: [] }] };

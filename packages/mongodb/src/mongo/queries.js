@@ -12,8 +12,9 @@ import { SimfinityError, QLOperator, paginationStages } from '@simtlix/simfinity
 import {
   TEXT_QUERY_OPERATORS, aggregateJoinPrefixes, crossingKeys, describeEmptiness, effectiveScalarName, emptinessScopePaths,
   frameCollectionPaths, isEmptinessOperator, validateQuantifiedGroups,
-  textQueryOperator, validateTextFilterValue, validateTextListFilterValue,
+  hasValuePath, textQueryOperator, validateComparisonTypes, validateTextFilterValue, validateTextListFilterValue,
 } from '@simtlix/simfinity-core/internal/query-operators';
+import { isVersionField } from '@simtlix/simfinity-core/internal/record-version';
 import {
   getFieldStorageName, getListShape, hasStoredIdentity, isVirtualField, normalizeConnectionField,
 } from '@simtlix/simfinity-core/internal/relation-storage';
@@ -66,7 +67,7 @@ const relationBuild = (aggregationsIncluded) => {
   let build = relationBuilds.get(aggregationsIncluded);
   if (!build) {
     build = {
-      aliases: new Map(), counts: { join: 0, frame: 0, scope: 0, serial: 0 }, scopes: new WeakMap(), serials: new WeakMap(),
+      aliases: new Map(), counts: { join: 0, frame: 0, scope: 0, serial: 0, binding: 0 }, scopes: new WeakMap(), serials: new WeakMap(),
     };
     relationBuilds.set(aggregationsIncluded, build);
   }
@@ -262,6 +263,10 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded, origin) => {
         mongoPath: mongoPath ? `${mongoPath}.${leaf}` : leaf,
         schemaType: currentModel?.schema?.path(storagePath),
         fieldType,
+        list: !!getListShape(field.type),
+        identity: leaf === '_id' && (!schemaPath || hasStoredIdentity(currentType)),
+        version: isVersionField(field),
+        model: currentModel,
         storesStateName: part === 'state' && !!getRegistrations().find((entry) => entry.gqltype.name === currentType.name)?.stateMachine,
         aggregateClauses,
       };
@@ -405,7 +410,7 @@ const compileTargetScope = async (build, scope, targetType) => {
   const compiled = build.scopes.get(scope);
   if (compiled?.has(targetType)) return compiled.get(targetType);
   const stages = [];
-  const match = await collectFiltersAndLookups(scope, targetType, stages, {}, 'find');
+  const match = await collectFiltersAndLookups(scope, targetType, stages, {});
   if (match) stages.push(match);
   const result = stages.length ? { token: `s${build.counts.scope++}`, stages } : null;
   if (!build.scopes.has(scope)) build.scopes.set(scope, new Map());
@@ -416,7 +421,7 @@ const compileTargetScope = async (build, scope, targetType) => {
 // The scopes of a client construct's filled marker, or null for a construct without one. Fails closed: a marker
 // on a construct that reads no reference or collection, or whose `scopes` lack a path the construct reads, is an
 // internal error.
-const clientScopes = (construct, label, paths) => {
+const clientScopes = (construct, label, paths, anchors = []) => {
   if (!hasScopeMarker(construct)) return null;
   if (!paths.length) throw detachedFilter(`${label} carries a client scope marker, but reads no reference or collection`);
   const scopes = construct.__scope?.scopes;
@@ -427,6 +432,7 @@ const clientScopes = (construct, label, paths) => {
     if (!Object.hasOwn(scopes, path) || scopes[path] === undefined) {
       throw detachedFilter(`${label} carries a client scope marker without the scope of ${path}`);
     }
+    if (anchors.includes(path) && scopes[path] !== null) throw detachedFilter(`${label} requires a null aggregate anchor scope for ${path}`);
   }
   return scopes;
 };
@@ -506,7 +512,10 @@ const buildEmptinessClause = async (gqltype, path, operator, value, construct, l
 
 // A build keeps one rewrite context; aggregate J paths must survive every logical-group pass.
 const rewriteContext = (gqltype, operation = 'find', aggregation) => {
-  const ctx = { gqltype, operation, quantifiers: true, referenceEmptiness: true, operators: new Set(MONGO_QUERY_OPERATORS), base: '', inFrame: false };
+  const ctx = {
+    gqltype, operation, quantifiers: true, referenceEmptiness: true, valuePath: true,
+    operators: new Set(MONGO_QUERY_OPERATORS), base: '', inFrame: false, ancestors: [], bindings: new Map(),
+  };
   // Ordinary root markers reject at the existing post-value guards, preserving native order.
   ctx.deferOrdinaryRootMarkers = true;
   ctx.J = operation === 'aggregate' ? aggregateJoinPrefixes(aggregation, ctx) : new Set();
@@ -516,11 +525,12 @@ const rewriteContext = (gqltype, operation = 'find', aggregation) => {
 // Cross references in the containing pipeline. Collection steps occur here only for an aggregate
 // anchor, or inside the prefix witness of a hand-built implicit group that crosses a collection
 // before its end: all ordinary collection crossings have already become frames in the shared rewrite.
-const crossFramePath = async (gqltype, segments, scopes, build, lookups, included) => {
+const crossFramePath = async (gqltype, segments, scopes, build, lookups, included, comparison = false, J = new Set()) => {
   let type = gqltype;
   let parent = { key: '', schemaPath: '', path: '' };
   let model = getModel(type);
   const chain = [];
+  const guards = [];
   let scoped = false;
   let vector = false;
   for (const name of segments) {
@@ -539,14 +549,26 @@ const crossFramePath = async (gqltype, segments, scopes, build, lookups, include
       const localField = joinPath(parent.key, collection ? '_id' : getFieldStorageName(name, field));
       const scope = scopes && Object.hasOwn(scopes, path) ? await compileTargetScope(build, scopes[path], targetType) : null;
       if (vector && scope) throw new SimfinityError('A reference inside an embedded list cannot apply a target scope', 'FORBIDDEN_FILTER_PATH', 403);
+      if (comparison && collection && J.has(path)) {
+        if (scope) throw detachedFilter('Aggregate J collection operands require null target scopes');
+        // The aggregate owns this multiplying row. Scoped references before it only govern
+        // visibility; traversing the collection again would bind a different child.
+        const legacy = resolveQueryPath(gqltype, `${path}.id`, included);
+        Object.assign(lookups, legacy.aggregateClauses);
+        parent = { key: legacy.mongoPath.slice(0, legacy.mongoPath.lastIndexOf('.')), schemaPath: '', path };
+        model = target;
+        type = targetType;
+        vector = false;
+        continue;
+      }
       chain.push(scope ? scope.token : '-');
       scoped ||= !!scope;
       let alias;
-      if (!scoped) {
+      if (!scoped && !(comparison && scopes)) {
         alias = allocateLookupAlias(included, path);
         lookups[alias] = buildRelationLookup({ collectionName: target.collection.collectionName, localField, foreignField, alias });
       } else {
-        alias = allocateRelationAlias(build, 'join', `${path} ${chain.join(',')}`);
+        alias = allocateRelationAlias(build, 'join', `${comparison ? 'comparison:' : ''}${path} ${chain.join(',')}`);
         // A vector with a null target scope keeps every target. The chain alias isolates it
         // from a trusted join while its local key preserves the earlier restricted reference.
         lookups[alias] = vector ? buildRelationLookup({ collectionName: target.collection.collectionName, localField, foreignField, alias }) : { stages: [
@@ -557,11 +579,12 @@ const crossFramePath = async (gqltype, segments, scopes, build, lookups, include
       if (vector) multiplyingBuilds.add(included);
       vector = false;
       parent = { key: alias, schemaPath: '', path };
+      if (comparison && scopes && !collection) guards.push({ $ne: [{ $ifNull: [`$${alias}._id`, null] }, null] });
       model = target;
     }
     type = targetType;
   }
-  return { type, parent, model, chain };
+  return { type, parent, model, chain, guards };
 };
 
 // A non-emptiness marker is legal only inside a frame, on a condition crossing references. Its
@@ -580,9 +603,13 @@ const resolveConditionPath = async (gqltype, path, construct, included, ctx) => 
   return { ...resolved, aggregateClauses: { ...aggregateClauses, ...resolved.aggregateClauses } };
 };
 
+const groupHasComparison = (group) => group.conditions?.some((condition) => hasValuePath(condition) || condition.__operand)
+  || ['AND', 'OR', 'ANY', 'ALL', 'NONE'].some((key) => group[key]?.some(groupHasComparison));
+
 const compileFrame = async (ctx, quantifier, group) => {
   const build = relationBuild(ctx.included);
   const anchor = group.__implicit === true ? group.__anchor ?? [] : [];
+  const anchoredComparison = anchor.length > 0 && groupHasComparison(group);
   const segments = [...anchor, ...group.path.split('.')];
   const paths = [];
   let type = ctx.gqltype;
@@ -596,7 +623,7 @@ const compileFrame = async (ctx, quantifier, group) => {
       if (index < segments.length - 1 && (vector || getListShape(field.type))) multiplyingPrefix = true;
       vector = false;
       if (!getModel(getNamedType(field.type))) throw filterError(`Related model is not available for ${joinPath(ctx.base, segments.join('.'))}`, 'INVALID_FILTER_PATH');
-      if (!anchor.length || index >= anchor.length || getListShape(field.type)) paths.push(segments.slice(0, index + 1).join('.'));
+      if (!anchor.length || anchoredComparison || index >= anchor.length || getListShape(field.type)) paths.push(segments.slice(0, index + 1).join('.'));
     } else {
       vector ||= !!getListShape(field.type);
     }
@@ -605,7 +632,7 @@ const compileFrame = async (ctx, quantifier, group) => {
   const scopes = clientScopes(group, `${quantifier} on ${joinPath(ctx.base, segments.join('.'))}`, paths);
   if (anchor.length && scopes) {
     for (const path of paths.filter((key) => anchor.join('.').startsWith(key))) {
-      if (scopes[path] !== null) throw detachedFilter('Aggregate anchors require null J scopes and legacy reference joins');
+      if (scopes[path] !== null && (!anchoredComparison || ctx.J.has(path))) throw detachedFilter('Aggregate anchors require null J scopes and legacy reference joins');
     }
   }
   const emptyAll = quantifier === 'ALL' && !['conditions', 'ANY', 'ALL', 'NONE', 'AND', 'OR'].some((key) => group[key]?.length);
@@ -632,7 +659,7 @@ const compileFrame = async (ctx, quantifier, group) => {
     return { [`${alias}.0`]: { $exists: quantifier === 'ANY' } };
   }
   const lookups = {};
-  const crossed = await crossFramePath(ctx.gqltype, segments.slice(0, -1), anchor.length ? null : scopes, build, lookups, ctx.included);
+  const crossed = await crossFramePath(ctx.gqltype, segments.slice(0, -1), anchor.length && !anchoredComparison ? null : scopes, build, lookups, ctx.included, anchoredComparison, ctx.J);
   const name = segments.at(-1);
   const field = crossed.type.getFields()[name];
   const targetType = getNamedType(field.type);
@@ -646,7 +673,10 @@ const compileFrame = async (ctx, quantifier, group) => {
   const stages = [];
   const included = {};
   relationBuilds.set(included, { ...relationBuild(included), counts: build.counts, scopes: build.scopes });
-  const childCtx = { ...rewriteContext(targetType), base: joinPath(ctx.base, path), inFrame: true };
+  const childCtx = {
+    ...rewriteContext(targetType), base: joinPath(ctx.base, path), inFrame: true,
+    ancestors: [...ctx.ancestors, ctx], stages, included,
+  };
   const body = await buildFilterGroupMatch(group, targetType, stages, included, 0, childCtx);
   if (quantifier === 'ALL' && body === null) return {};
   // ALL negates one truth value for the actual child. With vector joins, negating
@@ -666,9 +696,17 @@ const compileFrame = async (ctx, quantifier, group) => {
   const collection = !!getListShape(field.type);
   const localField = joinPath(crossed.parent.key, collection ? '_id' : getFieldStorageName(name, field));
   const foreignField = collection ? normalizeConnectionField(targetType, field.extensions.relation.connectionField || name).storageFieldName : '_id';
+  const visibility = [];
+  if (crossed.guards.length) {
+    const variable = `sf_v${build.counts.binding++}`;
+    childCtx.bindings.set(variable, { $and: crossed.guards });
+    visibility.push({ $match: { $expr: `$$${variable}` } });
+  }
   lookups[alias] = { stages: [{ $lookup: {
     from: getModel(targetType).collection.collectionName, localField, foreignField,
+    ...(childCtx.bindings.size ? { let: Object.fromEntries(childCtx.bindings) } : {}),
     pipeline: [
+      ...visibility,
       ...(collection && localField !== '_id' ? [{ $match: { [foreignField]: { $ne: null } } }] : []),
       ...(scope?.stages ?? []), ...bodyStages,
       ...(body === null ? [] : [{ $match: bodyMatch }]),
@@ -713,6 +751,172 @@ const castFilterValue = (value, resolved) => {
   } catch {
     throw filterError(`Invalid value for ${resolved.mongoPath}`);
   }
+};
+
+// Logical types come from the GraphQL leaf, while representation checks belong to the model.
+// In particular, a String record key remains an identity, and an enum's name is not its stored value.
+const comparisonDescription = (resolved) => {
+  const scalar = resolved.fieldType instanceof GraphQLEnumType ? 'Enum' : effectiveScalarName(resolved.fieldType);
+  return {
+    scalar, list: resolved.list, identity: resolved.identity, version: resolved.version,
+    ...(scalar === 'Enum' ? { enumName: resolved.fieldType.name } : {}),
+    ...(isGraphQLisoDate(scalar) ? { temporalName: scalar } : {}),
+  };
+};
+
+const identityRepresentation = (resolved, path) => {
+  const representation = (resolved.schemaType?.caster ?? resolved.schemaType)?.instance;
+  if (!['ObjectId', 'String', 'Number'].includes(representation)) {
+    throw filterError(`Field comparison on ${path} requires an ObjectId, String or Number identity model path`, 'UNSUPPORTED_QUERY');
+  }
+  return representation;
+};
+
+const comparisonStorage = (resolved, path) => {
+  const description = comparisonDescription(resolved);
+  const schemaType = resolved.schemaType?.caster ?? resolved.schemaType;
+  if (description.scalar !== 'Enum') return null;
+  const entries = [];
+  for (const entry of resolved.fieldType.getValues()) {
+    const value = resolved.storesStateName ? entry.name : entry.value;
+    // Object-valued enums cannot be normalized by identity after BSON serialization. Null collides
+    // with the nullable field semantics. Casting two members to the same value loses their identity.
+    if (value === null || !['string', 'number', 'boolean'].includes(typeof value)) {
+      throw filterError(`Field comparison on ${path} has an unsupported enum storage representation`, 'UNSUPPORTED_QUERY');
+    }
+    let stored;
+    try { stored = schemaType ? schemaType.cast(value) : value; }
+    catch { throw filterError(`Field comparison on ${path} cannot encode enum member ${entry.name}`, 'UNSUPPORTED_QUERY'); }
+    if (!['string', 'number', 'boolean'].includes(typeof stored)
+      || entries.some((previous) => Object.is(previous.value, stored))) {
+      throw filterError(`Field comparison on ${path} has ambiguous enum storage`, 'UNSUPPORTED_QUERY');
+    }
+    entries.push({ name: entry.name, value: stored });
+  }
+  return entries;
+};
+
+// $eq follows collection collation. Code-point indexing and lengths give exact String equality
+// even on a supplied collection with a non-simple collation, without changing literal filters.
+const exactComparison = (left, right) => {
+  // Lookup let bindings can become constants during optimization, including in an unselected
+  // branch. Keep String operators valid on numeric/null bindings before the outer guard runs.
+  const string = (value) => ({ $cond: [{ $eq: [{ $type: value }, 'string'] }, value, ''] });
+  const a = string(left);
+  const b = string(right);
+  return { $cond: [
+    { $and: [{ $eq: [{ $type: left }, 'string'] }, { $eq: [{ $type: right }, 'string'] }] },
+    { $and: [{ $eq: [{ $strLenCP: a }, { $strLenCP: b }] }, { $eq: [{ $indexOfCP: [a, b] }, 0] }] },
+    { $eq: [left, right] },
+  ] };
+};
+
+const normalizeComparisonValue = (value, enumEntries, resolved) => {
+  const schemaType = resolved?.schemaType?.caster ?? resolved?.schemaType;
+  const temporal = resolved && isGraphQLisoDate(effectiveScalarName(resolved.fieldType));
+  const nullable = temporal && schemaType && schemaType.instance !== 'Date'
+    ? { $convert: { input: value, to: 'date', onNull: null, onError: null } }
+    : { $ifNull: [value, null] };
+  if (!enumEntries) return nullable;
+  return { $switch: {
+    branches: enumEntries.map((entry, index) => ({
+      case: typeof entry.value === 'string' ? exactComparison(nullable, { $literal: entry.value }) : { $eq: [nullable, { $literal: entry.value }] },
+      then: { $literal: index },
+    })),
+    default: nullable,
+  } };
+};
+
+// Resolve the union of both current-frame paths through one filled marker. Comparisons use a
+// separate scoped alias even when its target has no restriction, so legacy joins cannot narrow it.
+const resolveComparisonPath = async (ctx, path, scopes, included, lookups) => {
+  const parts = path.split('.');
+  const crossed = await crossFramePath(ctx.gqltype, parts.slice(0, -1), scopes, relationBuild(included), lookups, included, true, ctx.J);
+  const resolved = resolveQueryPath(crossed.type, parts.at(-1), included, crossed);
+  Object.assign(lookups, resolved.aggregateClauses);
+  return { ...resolved, guards: crossed.guards };
+};
+
+const comparisonValue = (resolved) => (resolved.guards.length
+  ? { $cond: [{ $and: resolved.guards }, `$${resolved.mongoPath}`, null] } : `$${resolved.mongoPath}`);
+
+const buildComparisonClause = async (gqltype, path, rightPath, condition, included, ctx) => {
+  const lookups = {};
+  const up = condition.__operand?.up ?? 0;
+  if (!Number.isInteger(up) || up < 0 || up > ctx.ancestors.length) {
+    throw filterError('A field operand requires an available outer frame', 'INVALID_FILTER_PATH');
+  }
+  const operandPath = condition.__operand ? condition.__operand.path?.join('.') : rightPath;
+  assertValidFilterPath(operandPath);
+  const leftCrossings = crossingKeys(path.split('.'), { gqltype });
+  const rightCrossings = up ? [] : crossingKeys(operandPath.split('.'), { gqltype });
+  const anchorsFor = (owner, paths) => [...owner.J].filter((key) => paths.some((item) => item.startsWith(`${key}.`)));
+  const anchors = anchorsFor(ctx, up ? [path] : [path, operandPath]);
+  const paths = [...new Set([...leftCrossings, ...rightCrossings, ...anchors])];
+  const scopes = clientScopes(condition, `Field comparison on ${path}`, paths, anchors);
+  const left = await resolveComparisonPath(ctx, path, scopes, included, lookups);
+  let right;
+  let rightValue;
+  if (up) {
+    const ancestor = ctx.ancestors.at(-up);
+    const outerScopes = condition.__operand.scopes;
+    const outerAnchors = anchorsFor(ancestor, [operandPath]);
+    const outerPaths = [...crossingKeys(operandPath.split('.'), { gqltype: ancestor.gqltype }), ...outerAnchors];
+    if (outerScopes !== undefined) clientScopes({ __scope: { scopes: outerScopes } }, `Outer field comparison on ${operandPath}`, outerPaths, outerAnchors);
+    const outerLookups = {};
+    right = await resolveComparisonPath(ancestor, operandPath, outerScopes, ancestor.included, outerLookups);
+    appendLookups(ancestor.stages, ancestor.included, outerLookups);
+    const variable = `sf_v${relationBuild(included).counts.binding++}`;
+    const frames = [...ctx.ancestors, ctx];
+    const origin = frames.length - up - 1;
+    for (let index = origin + 1; index < frames.length; index++) {
+      frames[index].bindings.set(variable, index === origin + 1 ? comparisonValue(right) : `$$${variable}`);
+    }
+    rightValue = `$$${variable}`;
+  } else {
+    right = await resolveComparisonPath(ctx, operandPath, scopes, included, lookups);
+    rightValue = comparisonValue(right);
+  }
+  const a = comparisonDescription(left);
+  const b = comparisonDescription(right);
+  const operator = condition.operator ?? 'EQ';
+  validateComparisonTypes(a, b, operator, path, operandPath);
+  if ((a.identity || a.scalar === 'ID') && identityRepresentation(left, path) !== identityRepresentation(right, operandPath)) {
+    throw filterError(`Incompatible identity storage in field comparison: ${path} and ${operandPath}`);
+  }
+  const leftEnums = comparisonStorage(left, path);
+  const rightEnums = comparisonStorage(right, operandPath);
+  const leftValue = comparisonValue(left);
+  const l = normalizeComparisonValue(leftValue, leftEnums, left);
+  const r = normalizeComparisonValue(rightValue, rightEnums, right);
+  let expression;
+  if (operator === 'EQ' || operator === 'NE') {
+    const equality = a.list ? { $anyElementTrue: [{ $map: {
+      input: { $ifNull: [leftValue, [null]] }, as: 'sf_item',
+      in: exactComparison(normalizeComparisonValue('$$sf_item', leftEnums, left), r),
+    } }] } : exactComparison(l, r);
+    expression = operator === 'EQ' ? equality : { $not: [equality] };
+  } else if (['LIKE', 'STARTS_WITH', 'ENDS_WITH'].includes(operator)) {
+    let text;
+    if (operator === 'LIKE') text = { $gte: [{ $indexOfCP: [l, r] }, 0] };
+    else if (operator === 'STARTS_WITH') text = { $eq: [{ $indexOfCP: [l, r] }, 0] };
+    else {
+      const leftLength = { $strLenCP: l };
+      const rightLength = { $strLenCP: r };
+      text = { $cond: [
+        { $gte: [leftLength, rightLength] },
+        { $eq: [{ $indexOfCP: [{ $substrCP: [l, { $subtract: [leftLength, rightLength] }, rightLength] }, r] }, 0] },
+        false,
+      ] };
+    }
+    expression = { $cond: [{ $and: [{ $eq: [{ $type: l }, 'string'] }, { $eq: [{ $type: r }, 'string'] }] }, text, false] };
+  } else {
+    const valid = ['Int', 'Float'].includes(a.scalar)
+      ? { $and: [{ $isNumber: l }, { $isNumber: r }] }
+      : { $and: [{ $eq: [{ $type: l }, a.scalar === 'String' ? 'string' : 'date'] }, { $eq: [{ $type: r }, a.scalar === 'String' ? 'string' : 'date'] }] };
+    expression = { $cond: [valid, { [`$${operator.toLowerCase()}`]: [l, r] }, false] };
+  }
+  return { aggregateClauses: lookups, matchesClauses: [{ $expr: expression }] };
 };
 
 // `path` is the condition's GraphQL path, for messages.
@@ -803,6 +1007,13 @@ const buildQueryTerms = async (filterField, qlField, fieldName, gqltype, aggrega
     }
     if (isObject) assertValidFilterPath(term.path);
     const path = isObject ? `${fieldName}.${term.path}` : fieldName;
+    if (hasValuePath(term) || term.__operand) {
+      const rightPath = isObject ? `${fieldName}.${term.valuePath}` : term.valuePath;
+      const result = await buildComparisonClause(gqltype, path, rightPath, term, aggregationsIncluded, ctx);
+      Object.assign(aggregateClauses, result.aggregateClauses);
+      matchesClauses.push(...result.matchesClauses);
+      continue;
+    }
     const resolved = await resolveConditionPath(gqltype, path, isObject ? term : null, aggregationsIncluded, ctx);
     Object.assign(aggregateClauses, resolved.aggregateClauses);
     matchesClauses.push(buildMatchesClause(resolved, term.operator, term.value, path));
@@ -851,6 +1062,12 @@ const buildFilterGroupMatch = async (rawFilterGroup, gqltype, aggregateClauses, 
         const match = await buildEmptinessClause(gqltype, path, condition.operator, condition.value, rawCondition, lookups, aggregationsIncluded);
         appendLookups(aggregateClauses, aggregationsIncluded, lookups);
         parts.push(match);
+        continue;
+      }
+      if (hasValuePath(condition) || condition.__operand) {
+        const result = await buildComparisonClause(gqltype, path, condition.valuePath, condition, aggregationsIncluded, ctx);
+        appendLookups(aggregateClauses, aggregationsIncluded, result.aggregateClauses);
+        parts.push(...result.matchesClauses);
         continue;
       }
       const qlField = fields[condition.field];

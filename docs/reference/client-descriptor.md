@@ -339,3 +339,5 @@ A descriptor-aware reader fetches the explicitly configured metadata URL, checks
 not fall back after 401/403. Updating simfinity-js-client/simfinity-web, preserving
 their getter shapes and agreeing on discovery/fallback behavior are separate
 client changes; no client release or universal automatic retry is implied here.
+
+The generated filter inputs expose nullable `valuePath: String` on `QLFilter`, `QLTypeFilter` and `QLFilterCondition`. Descriptor traversal describes those actual input fields without a format-version change; their presence does not advertise adapter support. Check `queryFeatures.valuePath` at the server, and keep `value`/`valuePath` mutually exclusive at execution. Filter inputs remain ordinary input objects.

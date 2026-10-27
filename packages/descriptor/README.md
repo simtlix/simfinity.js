@@ -34,3 +34,5 @@ Since 3.16.0, a generated transaction field is described with
 type and reachable `@oneOf` input. Format version 1 is unchanged; clients that
 handle operation kinds exhaustively must accept `transaction`. User-registered
 mutations retain `customMutation`.
+
+The descriptor also traverses the generated nullable `valuePath: String` field on `QLFilter`, `QLTypeFilter` and `QLFilterCondition` with format version 1 unchanged. This describes input shape, not adapter capabilities; `value`/`valuePath` mutual exclusion and `queryFeatures.valuePath` support are runtime validation rules.

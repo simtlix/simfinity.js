@@ -129,7 +129,7 @@ describe('QLOperator', () => {
     expect(QLOperator.getValues().map((entry) => entry.name)).toEqual([...EARLIER, ...LIST]);
   });
 
-  it('publishes them in the generated SDL and in introspection, and changes no input type', async () => {
+  it('publishes them in the generated SDL and in introspection, and retains the literal input fields', async () => {
     const runtime = createRuntime({
       bind() {},
       prepare() {},
@@ -149,9 +149,9 @@ describe('QLOperator', () => {
     const result = await graphql({ schema, source: '{ __type(name: "QLOperator") { enumValues { name } } }' });
     expect(result.data.__type.enumValues.map((value) => value.name).slice(-2)).toEqual(LIST);
     // The operators take the existing operator and value fields.
-    expect(printType(schema.getType('QLFilter'))).toBe('input QLFilter {\n  operator: QLOperator\n  value: QLValue\n}');
+    expect(printType(schema.getType('QLFilter'))).toBe('input QLFilter {\n  operator: QLOperator\n  value: QLValue\n\n  """Compare with a stored field path; mutually exclusive with value."""\n  valuePath: String\n}');
     expect(printType(schema.getType('QLFilterCondition')))
-      .toBe('input QLFilterCondition {\n  field: String!\n  operator: QLOperator\n  value: QLValue\n  path: String\n}');
+      .toBe('input QLFilterCondition {\n  field: String!\n  operator: QLOperator\n  value: QLValue\n\n  """Compare with a stored field path; mutually exclusive with value."""\n  valuePath: String\n  path: String\n}');
   });
 });
 

@@ -340,7 +340,7 @@ describe('queryFeatures.referenceEmptiness', () => {
     // The operators are checked first, and other members are still left for later features.
     expect(errorOf(() => resolveQueryFeatures({ operators: 'EQ', referenceEmptiness: 'x' })).message)
       .toBe('DatabaseAdapter queryFeatures operators must be an array of operator names');
-    expect(resolveQueryFeatures({ operators: ['EQ'], valuePath: 'x', referenceEmptiness: true }).referenceEmptiness).toBe(true);
+    expect(resolveQueryFeatures({ operators: ['EQ'], futureFeature: 'x', referenceEmptiness: true }).referenceEmptiness).toBe(true);
     expect(() => createRuntime({ ...adapter, queryFeatures: { operators: ['EQ'], referenceEmptiness: true } })).not.toThrow();
   });
 

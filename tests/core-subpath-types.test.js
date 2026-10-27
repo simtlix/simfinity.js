@@ -142,7 +142,7 @@ describe('core root declarations', () => {
   });
 
   it('declares the collection frame options, recursive inputs and plan nodes', () => {
-    for (const name of ['QueryQuantifier', 'QueryJoins', 'QLFilterCondition', 'QLFilterGroup', 'QLQuantifiedGroup', 'QLTypeFilterExpression']) {
+    for (const name of ['QueryQuantifier', 'QueryJoins', 'QueryOperand', 'QLFilterCondition', 'QLFilterGroup', 'QLQuantifiedGroup', 'QLTypeFilterExpression']) {
       expect(rootDeclarations, name).toMatch(new RegExp(`^export (?:type|interface) ${name}\\b`, 'm'));
     }
     expect(rootDeclarations).toMatch(/quantifiers\?: boolean \| null \| undefined;/);

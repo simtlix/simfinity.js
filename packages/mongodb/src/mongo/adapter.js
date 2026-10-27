@@ -17,7 +17,7 @@ const withSession = (query, session) => (session ? query.session(session) : quer
 const WRITE_FEATURES = Object.freeze({ optimisticConcurrency: true });
 // Every filter operator the query compiler supports, and emptiness through references and collections (#108 part
 // 2b); the runtime rejects any other operator.
-const QUERY_FEATURES = Object.freeze({ operators: MONGO_QUERY_OPERATORS, referenceEmptiness: true, quantifiers: true });
+const QUERY_FEATURES = Object.freeze({ operators: MONGO_QUERY_OPERATORS, referenceEmptiness: true, quantifiers: true, valuePath: true });
 
 const assertVersionModel = ({ gqltype, model }) => {
   if (!model || !isProtectedType(gqltype)) return;
@@ -631,7 +631,9 @@ export const createMongoAdapter = (options) => {
       const commands = [];
       for (let start = 0; start < subPipelines.length; start += parentsPerCommand) {
         const [first, ...others] = subPipelines.slice(start, start + parentsPerCommand);
-        const command = Model.aggregate([...first, ...others.map((subPipeline) => ({ $unionWith: { coll, pipeline: subPipeline } }))]);
+        const command = Model.aggregate([
+          ...first, ...others.map((subPipeline) => ({ $unionWith: { coll, pipeline: subPipeline } })),
+        ]);
         // One more than the rows the command can return, so that its first batch closes the cursor.
         if (Number.isSafeInteger(limit)) command.option({ batchSize: limit * (others.length + 1) + 1 });
         commands.push(command);

@@ -933,6 +933,9 @@ type Libro {
 input QLFilter {
   operator: QLOperator
   value: QLValue
+
+  """Compare with a stored field path; mutually exclusive with value."""
+  valuePath: String
 }
 
 enum QLOperator {
@@ -1003,6 +1006,9 @@ input QLFilterCondition {
   field: String!
   operator: QLOperator
   value: QLValue
+
+  """Compare with a stored field path; mutually exclusive with value."""
+  valuePath: String
   path: String
 }
 
@@ -1014,6 +1020,9 @@ input QLTypeFilterExpression {
 input QLTypeFilter {
   operator: QLOperator
   value: QLValue
+
+  """Compare with a stored field path; mutually exclusive with value."""
+  valuePath: String
   path: String
 }
 

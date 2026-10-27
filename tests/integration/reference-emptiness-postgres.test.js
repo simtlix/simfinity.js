@@ -514,9 +514,9 @@ describe('PostgreSQL reference emptiness declaration', () => {
   it('declares referenceEmptiness in the PostgreSQL plugin, and bindPlugin copies it under the compileQuery identity rule', () => {
     expect(postgresPlugin().queryFeatures.referenceEmptiness).toBe(true);
     const bound = bindPlugin(postgresPlugin());
-    expect(bound.queryFeatures).toEqual({ operators: ALL, referenceEmptiness: true, quantifiers: true });
+    expect(bound.queryFeatures).toEqual({ operators: ALL, referenceEmptiness: true, quantifiers: true, valuePath: true });
     expect(Object.isFrozen(bound.queryFeatures)).toBe(true);
-    expect(createSQLAdapter(postgresPlugin()).queryFeatures).toEqual({ operators: ALL, referenceEmptiness: true, quantifiers: true });
+    expect(createSQLAdapter(postgresPlugin()).queryFeatures).toEqual({ operators: ALL, referenceEmptiness: true, quantifiers: true, valuePath: true });
     const custom = (...args) => compileQuery(...args);
     // A copy with another compileQuery inherits a declaration that names the bundled one: the operators of 3.7.0 and
     // no reference emptiness, until it declares its own.

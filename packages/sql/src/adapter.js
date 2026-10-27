@@ -18,10 +18,11 @@ export const createSQLAdapter = (sourcePlugin) => {
   const { driver } = plugin;
   const options = plugin.options;
   // The operators the plugin's compileQuery compiles, and whether it compiles emptiness through references and
-  // collections and quantified collection/reference frames. Plans reject the others with UNSUPPORTED_QUERY, also for reads that do not go through the runtime,
-  // such as model.find(). createQueryPlan defaults both flags to false when `operators` is given, so each flag
+  // collections, quantified collection/reference frames and field operands. Plans reject the others with
+  // UNSUPPORTED_QUERY, also for reads that do not go through the runtime, such as model.find().
+  // createQueryPlan defaults feature flags to false when `operators` is given, so each flag
   // is passed explicitly.
-  const { operators, referenceEmptiness = false, quantifiers = false } = plugin.queryFeatures;
+  const { operators, referenceEmptiness = false, quantifiers = false, valuePath = false } = plugin.queryFeatures;
   let configured = options ? Object.freeze({ ...options }) : null;
   let prepared = false;
   let ready = false;
@@ -57,7 +58,7 @@ export const createSQLAdapter = (sourcePlugin) => {
   };
   const execute = async (model, gqltype, args, session, mode, extra) => {
     const name = nameOf(model);
-    const plan = createQueryPlan(models, name, args, { mode, operators, referenceEmptiness, quantifiers });
+    const plan = createQueryPlan(models, name, args, { mode, operators, referenceEmptiness, quantifiers, valuePath });
     const compiled = plugin.compileQuery(models, database, plan, extra, configured);
     const { rows } = await query(compiled, session);
     if (mode === 'count') return Number(rows[0]?.size || 0);
@@ -109,7 +110,7 @@ export const createSQLAdapter = (sourcePlugin) => {
     const keys = parentIds.map((id) => castId(id));
     const ids = [...new Set(keys)];
     if (!ids.length) return [];
-    const plan = createQueryPlan(models, name, args, { mode: 'find', operators, referenceEmptiness, quantifiers });
+    const plan = createQueryPlan(models, name, args, { mode: 'find', operators, referenceEmptiness, quantifiers, valuePath });
     const chunks = [];
     for (let start = 0; start < ids.length; start += CHILDREN_BATCH_SIZE) {
       const chunk = ids.slice(start, start + CHILDREN_BATCH_SIZE);

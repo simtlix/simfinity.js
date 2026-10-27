@@ -226,9 +226,9 @@ describe('SQL plugin queryFeatures', () => {
     const bound = bindPlugin(plugin);
     plugin.queryFeatures.operators.push('LATER');
     // The plugin also declares reference emptiness (#108 part 2b), which bindPlugin copies with the operators.
-    expect(bound.queryFeatures).toEqual({ operators: postgresPlugin().queryFeatures.operators, referenceEmptiness: true, quantifiers: true });
+    expect(bound.queryFeatures).toEqual({ operators: postgresPlugin().queryFeatures.operators, referenceEmptiness: true, quantifiers: true, valuePath: true });
     expect(Object.isFrozen(bound.queryFeatures) && Object.isFrozen(bound.queryFeatures.operators)).toBe(true);
-    expect(createSQLAdapter(postgresPlugin()).queryFeatures).toEqual({ operators: postgresPlugin().queryFeatures.operators, referenceEmptiness: true, quantifiers: true });
+    expect(createSQLAdapter(postgresPlugin()).queryFeatures).toEqual({ operators: postgresPlugin().queryFeatures.operators, referenceEmptiness: true, quantifiers: true, valuePath: true });
   });
 
   it('gives a version 1 plugin without queryFeatures the operators of 3.7.0', () => {

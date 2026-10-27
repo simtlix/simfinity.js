@@ -108,6 +108,9 @@ Ownership IDs may be nonempty strings, finite numbers (including zero), or Mongo
 
 ## Filter, sort and aggregation paths
 
+A [`valuePath` comparison](/guide/queries#compare-stored-fields) authorizes every segment of both operands, even when the right field is not selected. For example, a Product `stock LT shop.minStock` comparison needs the read rules of `Product.stock`, `Product.shop` and `Shop.minStock`. Relation-term and quantified-body right paths use their related/element origin. Neither a simple left field nor a middleware edit can turn a forbidden client right operand into a stored read. Virtual and non-queryable client operands remain forbidden.
+
+
 Generated list, aggregate and collection-relationship fields accept field paths in their arguments: field filters and relation `terms`, `AND`/`OR` conditions, list `sort` terms, and aggregation `groupId` and fact paths. Before the resolver runs, the plugin evaluates the read rule of every field such a path names, following related types. For example, `posts(author: { terms: [{ path: "email", operator: LIKE, value: "@" }] })` needs the `Post.author` and `User.email` rules. With the permissions above, only admins can read `internalNotes`, filter by it or sort by it. Rules resolve as for reads (exact rule, `'*'`, then the default policy), so with `defaultPolicy: 'DENY'` every type a path reaches needs a rule.
 
 The same checks cover every explicit `ANY`/`ALL`/`NONE` group's `path`, a field filter's `quantifier` path, and their inner paths resolved relative to the element. Each collection/reference segment needs its read rule; an existence-only group needs no unnamed target fields. Nested quantified paths cannot bypass field permissions or `queryable` restrictions. Trusted conditions added by middleware or scopes receive structural validation but do not acquire client read checks.

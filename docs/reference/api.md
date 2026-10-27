@@ -65,6 +65,8 @@ Sets the process-wide query limits. Configure them once at startup; every runtim
 
 The call checks every option before it sets any: an invalid one throws `INVALID_QUERY_LIMITS` (400) and keeps all limits. An option that a call omits takes its default again, so `configureQueryLimits({ maxPageSize: 500 })` also restores the default `maxReferenceFrames` and `maxFrameNesting`, and calling without arguments restores all defaults. The TypeScript type of the options is `QueryLimitsOptions`.
 
+`valuePath` comparisons count scoped reads from both operands in the frame that owns each read. A generated outer binding adds no frame by itself. Core's `createQueryPlan(models, entityName, args, { valuePath, referenceEmptiness, quantifiers, operators, mode })` enables omitted feature flags when `operators` is omitted, and disables them when `operators` is supplied. Declare supported features explicitly for a custom compiler. It preserves literal predicate shapes and adds `operand?: QueryOperand` only for comparisons; see [query features](/guide/sql-plugins#query-features).
+
 ## configureMutationLimits
 
 ```javascript
