@@ -547,10 +547,11 @@ export const validateQuantifiedGroups = (args, ctx) => {
     }
     if (entry.operand && ctx.scopeMarkers !== 'pending' && (entry.operand.scopes !== undefined
       || hasMarker(entry.construct))) markers.push(() => {
-      const keys = crossingKeys(entry.operand.path, rightCurrent);
+      // An outer binding can still read a collection row owned by aggregate J.
+      const keys = comparisonKeys(rightResolved);
       const scopes = entry.operand.scopes;
       if (keys.length && (!plain(scopes) || keys.some((key) => !Object.hasOwn(scopes, key) || scopes[key] === undefined))) detached('Outer operand scope marker is not filled for every crossing');
-      if (!keys.length && scopes !== undefined) detached('Outer operand scope marker reads no reference');
+      if (!keys.length && scopes !== undefined) detached('Outer operand scope marker reads no reference or collection');
     });
     const J = entry.frames.length ? new Set() : ctx.J ?? new Set();
     const extra = entry.form === 'quantified' ? 1 : shape ? (emptinessScopePaths(shape, path).frames.length ? 1 : 0) : ctx.quantifiers === true ? steps.filter((step, index) => step.kind === 'collection'

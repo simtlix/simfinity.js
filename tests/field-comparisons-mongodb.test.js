@@ -275,6 +275,25 @@ describe.each([
       expect(await keys(comparison('reviews.replies.rating', 'LT', 'stock'))).toEqual(['01']);
     });
 
+    test('compares bound outer numbers and nulls without evaluating String operators on them', async () => {
+      expect(await keys(comparison('reviews.rating', 'EQ', 'stock'))).toEqual(['01', '02', '03']);
+      expect(await keys(comparison('reviews.replies.rating', 'EQ', 'stock'))).toEqual([]);
+      expect(await keys(comparison('reviews.replies.rating', 'NE', 'stock'))).toEqual(['01']);
+    });
+
+    test('keeps empty collection scopes on aggregate rows and outer anchored operands', async () => {
+      const aggregation = { groupId: 'reviews.id', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }] };
+      const scoped = comparison('reviews.rating', 'LT', 'reviews.maxRating', { __scope: { scopes: { reviews: null } } });
+      const pipeline = await queries.buildAggregationQuery(scoped, Product, aggregation);
+      const rows = await collection.aggregate(pipeline).toArray();
+      expect(rows.map((row) => row.groupId.toString().slice(-2)).sort()).toEqual(['21']);
+      const outer = comparison('reviews.replies.rating', 'LT', 'reviews.maxRating', { __scope: { scopes: { reviews: null, 'reviews.replies': null } } });
+      expect(await collection.aggregate(await queries.buildAggregationQuery(outer, Product, aggregation)).toArray()).toHaveLength(1);
+      for (const scopes of [{}, { reviews: {} }, { reviews: { rating: { value: 1 } } }]) {
+        await reject(queries.buildAggregationQuery(comparison('reviews.rating', 'LT', 'reviews.maxRating', { __scope: { scopes } }), Product, aggregation), 'DETACHED_CLIENT_FILTER');
+      }
+    });
+
     test('keeps ALL and NONE two-valued when a comparison has null operands', async () => {
       const group = { path: 'reviews', conditions: [{ field: 'rating', operator: 'LT', valuePath: 'maxRating' }] };
       expect(await keys({ AND: [{ ANY: [group] }] })).toEqual(['01']);

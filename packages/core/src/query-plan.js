@@ -327,15 +327,19 @@ export const createQueryPlan = (models, entityName, source = {}, {
   // The client scope marker of a construct, lifted into the predicate's `scopes`: each target scope's
   // arguments are planned on the target type, as trusted find arguments in their own frame, whatever
   // the query's mode, with the operator names already read (`operators` may be a one-time iterable).
-  const liftScopes = (marker, targets, segments, operator) => {
+  const liftScopes = (marker, targets, segments, operator, anchors = []) => {
     const label = `${operator} on ${segments.join('.')}`;
-    const paths = Object.keys(targets);
+    const paths = [...Object.keys(targets), ...anchors];
     if (!paths.length) detached(`${label} carries a client scope marker, but reads no reference or collection`);
     const scopes = marker?.scopes;
     if (!scopes || typeof scopes !== 'object' || Array.isArray(scopes)) detached(`${label} carries a client scope marker whose scopes are not filled`);
     const lifted = {};
     for (const path of paths) {
       if (!Object.hasOwn(scopes, path) || scopes[path] === undefined) detached(`${label} carries a client scope marker without the scope of ${path}`);
+      if (anchors.includes(path)) {
+        if (scopes[path] !== null) detached(`${label} requires a null aggregate anchor scope for ${path}`);
+        continue;
+      }
       if (scopes[path] !== null && (!isObject(scopes[path]) || ![Object.prototype, null].includes(Object.getPrototypeOf(scopes[path])))) detached(`${label} carries a malformed scope of ${path}`);
       lifted[path] = scopes[path] === null
         ? null
@@ -382,11 +386,16 @@ export const createQueryPlan = (models, entityName, source = {}, {
       const segments = Array.isArray(path) ? path : path.split('.');
       const node = { kind: 'predicate', path: segments, operator: op, value: null, operand: { up, path: rightPath } };
       const scopeTargets = (paths, entity) => Object.fromEntries([...new Set(paths.flatMap((item) => crossingKeys(item, { models, entity })))].map((key) => [key, resolveModelPath(models, entity, key).at(-1).target]));
+      // J collections retain their existing aggregate row. Validate their provenance, but only
+      // references become scoped joins; an empty collection scope must not lose the marker.
+      const anchors = (paths, entity) => [...new Set(paths.flatMap((parts) => resolveModelPath(models, entity, parts)
+        .flatMap((step, index) => step.kind === 'collection' ? [parts.slice(0, index + 1).join('.')] : [])))];
       if (hasMarker(construct)) {
-        node.joins = liftScopes(construct.__scope, scopeTargets(up ? [segments] : [segments, rightPath], frameEntity), segments, op);
+        const paths = up ? [segments] : [segments, rightPath];
+        node.joins = liftScopes(construct.__scope, scopeTargets(paths, frameEntity), segments, op, anchors(paths, frameEntity));
       }
       if (internal && Object.hasOwn(internal, 'scopes')) {
-        node.operand.joins = liftScopes({ scopes: internal.scopes }, scopeTargets([rightPath], rightEntity), rightPath, op);
+        node.operand.joins = liftScopes({ scopes: internal.scopes }, scopeTargets([rightPath], rightEntity), rightPath, op, anchors([rightPath], rightEntity));
       }
       return node;
     }

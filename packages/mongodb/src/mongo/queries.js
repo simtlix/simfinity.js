@@ -421,7 +421,7 @@ const compileTargetScope = async (build, scope, targetType) => {
 // The scopes of a client construct's filled marker, or null for a construct without one. Fails closed: a marker
 // on a construct that reads no reference or collection, or whose `scopes` lack a path the construct reads, is an
 // internal error.
-const clientScopes = (construct, label, paths) => {
+const clientScopes = (construct, label, paths, anchors = []) => {
   if (!hasScopeMarker(construct)) return null;
   if (!paths.length) throw detachedFilter(`${label} carries a client scope marker, but reads no reference or collection`);
   const scopes = construct.__scope?.scopes;
@@ -432,6 +432,7 @@ const clientScopes = (construct, label, paths) => {
     if (!Object.hasOwn(scopes, path) || scopes[path] === undefined) {
       throw detachedFilter(`${label} carries a client scope marker without the scope of ${path}`);
     }
+    if (anchors.includes(path) && scopes[path] !== null) throw detachedFilter(`${label} requires a null aggregate anchor scope for ${path}`);
   }
   return scopes;
 };
@@ -797,11 +798,18 @@ const comparisonStorage = (resolved, path) => {
 
 // $eq follows collection collation. Code-point indexing and lengths give exact String equality
 // even on a supplied collection with a non-simple collation, without changing literal filters.
-const exactComparison = (left, right) => ({ $cond: [
-  { $and: [{ $eq: [{ $type: left }, 'string'] }, { $eq: [{ $type: right }, 'string'] }] },
-  { $and: [{ $eq: [{ $strLenCP: left }, { $strLenCP: right }] }, { $eq: [{ $indexOfCP: [left, right] }, 0] }] },
-  { $eq: [left, right] },
-] });
+const exactComparison = (left, right) => {
+  // Lookup let bindings can become constants during optimization, including in an unselected
+  // branch. Keep String operators valid on numeric/null bindings before the outer guard runs.
+  const string = (value) => ({ $cond: [{ $eq: [{ $type: value }, 'string'] }, value, ''] });
+  const a = string(left);
+  const b = string(right);
+  return { $cond: [
+    { $and: [{ $eq: [{ $type: left }, 'string'] }, { $eq: [{ $type: right }, 'string'] }] },
+    { $and: [{ $eq: [{ $strLenCP: a }, { $strLenCP: b }] }, { $eq: [{ $indexOfCP: [a, b] }, 0] }] },
+    { $eq: [left, right] },
+  ] };
+};
 
 const normalizeComparisonValue = (value, enumEntries, resolved) => {
   const schemaType = resolved?.schemaType?.caster ?? resolved?.schemaType;
@@ -842,16 +850,19 @@ const buildComparisonClause = async (gqltype, path, rightPath, condition, includ
   assertValidFilterPath(operandPath);
   const leftCrossings = crossingKeys(path.split('.'), { gqltype });
   const rightCrossings = up ? [] : crossingKeys(operandPath.split('.'), { gqltype });
-  const paths = [...new Set([...leftCrossings, ...rightCrossings])];
-  const scopes = clientScopes(condition, `Field comparison on ${path}`, paths);
+  const anchorsFor = (owner, paths) => [...owner.J].filter((key) => paths.some((item) => item.startsWith(`${key}.`)));
+  const anchors = anchorsFor(ctx, up ? [path] : [path, operandPath]);
+  const paths = [...new Set([...leftCrossings, ...rightCrossings, ...anchors])];
+  const scopes = clientScopes(condition, `Field comparison on ${path}`, paths, anchors);
   const left = await resolveComparisonPath(ctx, path, scopes, included, lookups);
   let right;
   let rightValue;
   if (up) {
     const ancestor = ctx.ancestors.at(-up);
     const outerScopes = condition.__operand.scopes;
-    const outerPaths = crossingKeys(operandPath.split('.'), { gqltype: ancestor.gqltype });
-    if (outerScopes !== undefined && outerPaths.length) clientScopes({ __scope: { scopes: outerScopes } }, `Outer field comparison on ${operandPath}`, outerPaths);
+    const outerAnchors = anchorsFor(ancestor, [operandPath]);
+    const outerPaths = [...crossingKeys(operandPath.split('.'), { gqltype: ancestor.gqltype }), ...outerAnchors];
+    if (outerScopes !== undefined) clientScopes({ __scope: { scopes: outerScopes } }, `Outer field comparison on ${operandPath}`, outerPaths, outerAnchors);
     const outerLookups = {};
     right = await resolveComparisonPath(ancestor, operandPath, outerScopes, ancestor.included, outerLookups);
     appendLookups(ancestor.stages, ancestor.included, outerLookups);

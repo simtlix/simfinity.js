@@ -113,6 +113,19 @@ describe('field comparison walkers and plans', () => {
     expect(frameUnits(condition('reviews.votes.score', 'reviews.author.maximum'), context).count).toBe(3);
   });
 
+  it('validates null scopes on aggregate collection operands without inventing reference joins', () => {
+    const aggregation = { groupId: 'reviews.id', facts: [{ operation: 'COUNT', factName: 'n', path: 'reviews.id' }] };
+    const args = { ...condition('reviews.rating', 'reviews.maximum', { __scope: { scopes: { reviews: null } } }), aggregation };
+    expect(plan(args, { mode: 'aggregate' })).toEqual({ ...pred('reviews.rating', 'reviews.maximum'), joins: {} });
+    for (const scopes of [{}, { reviews: {} }, { reviews: { rating: { value: 1 } } }]) {
+      fault({ ...condition('reviews.rating', 'reviews.maximum', { __scope: { scopes } }), aggregation }, 'DETACHED_CLIENT_FILTER', { mode: 'aggregate' });
+    }
+    const outer = { ...condition('reviews.votes.score', 'reviews.maximum', { __scope: { scopes: { reviews: null, 'reviews.votes': null } } }), aggregation };
+    expect(plan(outer, { mode: 'aggregate' }).where).toEqual({ ...pred('score', 'reviews.maximum', 1), operand: { up: 1, path: ['reviews', 'maximum'], joins: {} } });
+    const ctx = { ...context, operation: 'aggregate', J: new Set(['reviews']) };
+    expect(() => validateQuantifiedGroups(frameCollectionPaths(outer, ctx), ctx)).not.toThrow();
+  });
+
   it('accepts undefined literal placeholders before shorthand normalization', () => {
     const args = condition('reviews.rating', 'stock', { value: undefined });
     expect(() => validateQuantifiedGroups(frameCollectionPaths(args, context), context)).not.toThrow();

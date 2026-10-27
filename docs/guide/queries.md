@@ -230,6 +230,28 @@ Equality stays exact while ordering considers these two strings equivalent. Coll
 
 Simfinity neither inspects collection collation metadata nor validates or overrides the command's collation for field comparisons. Compilation works with offline models and needs no metadata permissions; execution follows the database and application configuration. Existing literal filters retain their behavior, including when combined with `valuePath` predicates. Direct raw-driver execution uses its own operation options or the collection default, without inheriting Mongoose schema options; choose matching options explicitly when the same ordering is required through both APIs.
 
+In an aggregate, a collection used in the group or facts already supplies a joined row. A comparison on that collection tests that same row; a deeper collection used only by the filter adds an existence test without multiplying the facts. For example, with the [Barber model](../resources/barber), an administrator whose target find scopes add no restriction can aggregate matching services by city:
+
+```graphql
+query {
+  barbershops_aggregate(
+    AND: [{ conditions: [{
+      field: "services.price", operator: LT, valuePath: "services.durationMinutes"
+    }] }]
+    aggregation: {
+      groupId: "address.city"
+      facts: [
+        { operation: COUNT, factName: "services", path: "services.id" }
+        { operation: SUM, factName: "totalPrice", path: "services.price" }
+        { operation: AVG, factName: "averagePrice", path: "services.price" }
+      ]
+    }
+  ) { groupId facts }
+}
+```
+
+Existing aggregate scope restrictions still apply: a nonempty target find scope on a joined collection returns `FORBIDDEN_FILTER_PATH` (403). For a caller restricted to visible services, use `services_aggregate` as the root, compare `price` with `durationMinutes`, group by `barbershop.address.city`, and use `id`/`price` as the fact paths. This applies the service scope at the root.
+
 Field comparisons have no general ordinary-index guarantee. Combine them with selective literal filters, inspect representative database plans, and use an application-maintained derived field when a measured hot path needs its own index. No data migration or generated index is required for this feature.
 
 ## Empty values

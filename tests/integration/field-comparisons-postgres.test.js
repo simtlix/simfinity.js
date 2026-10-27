@@ -163,6 +163,19 @@ describe.skipIf(!uri)('PostgreSQL real field comparisons', () => {
     const aggregate = createQueryPlan(models, Product.name, { ...args, aggregation: { groupId: 'key', facts: [{ path: 'id', operation: 'COUNT', factName: 'n' }] } }, { mode: 'aggregate' });
     expect(await query(compileQuery(models, database, aggregate))).toEqual([{ groupId: 'a', fact_0: '1' }]);
   });
+
+  it('plans runtime collection scope markers on aggregate rows and outer operands', async () => {
+    const aggregation = { groupId: 'key', facts: [{ path: 'reviews.id', operation: 'COUNT', factName: 'n' }] };
+    const args = { AND: [{ conditions: [{ field: 'reviews.rating', operator: 'LT', valuePath: 'reviews.maxRating', __scope: { scopes: { reviews: null } } }] }], aggregation };
+    expect(await query(compileQuery(models, database, createQueryPlan(models, Product.name, args, { mode: 'aggregate' })))).toEqual([
+      { groupId: 'a', fact_0: '1' }, { groupId: 'b', fact_0: '1' },
+    ]);
+    const outer = { AND: [{ conditions: [{ field: 'reviews.product.reviews.rating', operator: 'LT', valuePath: 'reviews.maxRating',
+      __scope: { scopes: { reviews: null, 'reviews.product': null, 'reviews.product.reviews': null } } }] }], aggregation };
+    expect(await query(compileQuery(models, database, createQueryPlan(models, Product.name, outer, { mode: 'aggregate' })))).toEqual([
+      { groupId: 'a', fact_0: '2' }, { groupId: 'b', fact_0: '1' },
+    ]);
+  });
   it('executes normalized shorthand with a root RHS and a same-child RHS', async () => {
     for (const [valuePath, expected] of [['stock', ['a']], ['reviews.maxRating', ['a', 'b']]]) {
       const args = { AND: [{ conditions: [{ field: 'reviews.rating', operator: 'LT', valuePath }] }], sort: { terms: [{ field: 'key', order: 'ASC' }] } };
