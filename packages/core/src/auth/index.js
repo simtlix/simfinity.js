@@ -49,6 +49,9 @@ import { collectQueryPathEntries, walkQueryPath } from '../query-plan.js';
 import { relationFieldOwners } from '../relation-owners.js';
 import { isThenable } from './thenable.js';
 import {
+  hasOperationEntry, isGeneratedMutationRoot, OPERATION_ENTRY_PROTOCOL, recordOperationEntry,
+} from './operation-entries.js';
+import {
   resolvePath,
   requireAuth,
   requireRole,
@@ -286,6 +289,10 @@ const authorizeQueryPaths = async (permissions, defaultPolicy, schema, query, ar
 /**
  * Creates a graphql-middleware compatible authorization middleware.
  *
+ * It denies a generated transaction field (`extensions.simfinityTransaction`) with ForbiddenError
+ * before resolving it, whatever its rules: it cannot apply the rules of each operation's root, which
+ * {@link createAuthPlugin} applies.
+ *
  * @deprecated Use {@link createAuthPlugin} instead. `applyMiddleware` from graphql-middleware
  * can cause duplicate-type errors when the schema contains custom introspection extensions.
  *
@@ -314,9 +321,16 @@ export const createAuthMiddleware = (permissions, options = {}) => {
 
     log(`Checking ${typeName}.${fieldName}`);
 
+    const field = info.parentType?.getFields?.()[fieldName];
+    // The transaction field runs other roots, whose rules this middleware never sees.
+    if (field?.extensions?.simfinityTransaction != null) {
+      log(`The middleware cannot authorize the operations of ${typeName}.${fieldName}`);
+      throw new ForbiddenError(`Access denied to ${typeName}.${fieldName}`);
+    }
+
     // Get rules for this field
     const rules = getFieldRules(permissions, typeName, fieldName);
-    const query = info.parentType?.getFields?.()[fieldName]?.extensions?.simfinityQuery;
+    const query = field?.extensions?.simfinityQuery;
 
     // If no rules found, apply default policy
     if (rules === null) {
@@ -357,6 +371,7 @@ export const createAuthMiddleware = (permissions, options = {}) => {
  * It returns the same function as {@link createAuthMiddleware}. graphql-middleware applies a
  * function middleware to every field, so `'*'` rules and the default policy also apply to fields
  * the permission map does not name. A map of only the named fields would leave the others open.
+ * It denies a generated transaction field, as {@link createAuthMiddleware} does.
  *
  * @deprecated Use {@link createAuthPlugin} instead. `applyMiddleware` from graphql-middleware
  * can cause duplicate-type errors when the schema contains custom introspection extensions.
@@ -376,6 +391,12 @@ export const createFieldMiddleware = (permissions, options = {}) => createAuthMi
  *
  * `onSchemaChange` throws `TypeError` before wrapping any field when a schema type was created by
  * another copy of the graphql module, instead of leaving that type's fields unprotected.
+ *
+ * On each generated mutation root it wraps, in whatever type the field sits, the plugin also records
+ * an internal entry with the same rules, default policy and deferral, which the generated transaction
+ * field runs for each operation on that root. A root whose marker cannot take the entry (a frozen or
+ * otherwise non-extensible `extensions.simfinityMutation`) is still wrapped, and the transaction field
+ * refuses its operations with FORBIDDEN.
  *
  * @param {PermissionSchema} permissions - The permission schema object
  * @param {AuthMiddlewareOptions} [options={}] - Plugin options
@@ -413,9 +434,16 @@ export const createAuthPlugin = (permissions, options = {}) => {
 
   const log = debug ? console.log.bind(console, '[auth]') : () => {};
   const processedSchemas = new WeakSet();
-  // Schemas built from the same types share their field objects, so each field is wrapped once.
+  // Schemas built from the same types share their field objects, so each field is wrapped once. Each
+  // wrapped field keeps `{ resolver, check, key }`: its wrapper, and the check and permission key an
+  // operation entry needs.
   const wrappers = new WeakMap();
+  // Identifies this instance's entries on the generated mutation roots.
+  const instanceToken = Symbol('simfinity auth plugin instance');
   let warnedAboutQueryRoot = false;
+
+  // In a schema that only other auth plugin instances processed, their rules apply, not these.
+  const isDeferred = (schema) => authorizedSchemas.has(schema) && !processedSchemas.has(schema);
 
   const warnAboutQueryRoot = (schema) => {
     if (warnedAboutQueryRoot || !Object.hasOwn(permissions, 'Query') || schema.getType('Query')) return;
@@ -425,10 +453,49 @@ export const createAuthPlugin = (permissions, options = {}) => {
     console.warn(`[auth] Permissions for type "Query" match no type in the schema. Its query root is named "${queryRoot}"; did you mean "${queryRoot}"?`);
   };
 
-  const createFieldResolver = (schema, typeName, fieldName, rules, query, originalResolve) => {
-    const key = `${typeName}.${fieldName}`;
+  // A field's rules, or the default policy when it has none, as a check that calls `grant` once access
+  // is granted and returns its result. A denial is a rejected ForbiddenError and an error a rule throws
+  // is rejected unchanged. Rules run in order and synchronously until one returns a promise.
+  const createFieldCheck = (key, rules) => {
     const denied = () => Promise.reject(new ForbiddenError(`Access denied to ${key}`));
 
+    const deny = () => {
+      if (debug) log(`Rule denied access to ${key}`);
+      return denied();
+    };
+
+    const runRules = (index, parent, args, ctx, info, grant) => {
+      for (let current = index; current < rules.length; current++) {
+        if (debug) log(`Executing rule for ${key}`);
+        let result;
+        try {
+          result = rules[current](parent, args, ctx, info);
+        } catch (error) {
+          return Promise.reject(error);
+        }
+        if (isThenable(result)) {
+          return Promise.resolve(result).then(value => (
+            value === true || value === undefined ? runRules(current + 1, parent, args, ctx, info, grant) : deny()
+          ));
+        }
+        if (result !== true && result !== undefined) return deny();
+      }
+      if (debug) log(`Access granted to ${key}`);
+      return grant(parent, args, ctx, info);
+    };
+
+    return (parent, args, ctx, info, grant) => {
+      if (debug) log(`Checking ${key}`);
+
+      if (rules === null) {
+        if (debug) log(`No rules for ${key}, applying default policy: ${defaultPolicy}`);
+        return defaultPolicy === 'DENY' ? denied() : grant(parent, args, ctx, info);
+      }
+      return runRules(0, parent, args, ctx, info, grant);
+    };
+  };
+
+  const createFieldResolver = (schema, check, query, originalResolve) => {
     // Errors keep reaching GraphQL as rejections, as they did when the whole check was async.
     const resolveField = (parent, args, ctx, info) => {
       try {
@@ -444,44 +511,11 @@ export const createAuthPlugin = (permissions, options = {}) => {
         .then(() => resolveField(parent, args, ctx, info));
     };
 
-    // Rules run in order and synchronously until one returns a promise.
-    const runRules = (index, parent, args, ctx, info) => {
-      for (let current = index; current < rules.length; current++) {
-        if (debug) log(`Executing rule for ${key}`);
-        let result;
-        try {
-          result = rules[current](parent, args, ctx, info);
-        } catch (error) {
-          return Promise.reject(error);
-        }
-        if (isThenable(result)) {
-          return Promise.resolve(result).then(value => (
-            value === true || value === undefined ? runRules(current + 1, parent, args, ctx, info) : deny()
-          ));
-        }
-        if (result !== true && result !== undefined) return deny();
-      }
-      if (debug) log(`Access granted to ${key}`);
-      return grant(parent, args, ctx, info);
-    };
-
-    const deny = () => {
-      if (debug) log(`Rule denied access to ${key}`);
-      return denied();
-    };
-
     const resolver = (parent, args, ctx, info) => {
-      // In a schema that only other auth plugin instances processed, their rules apply, not these.
-      if (info?.schema && authorizedSchemas.has(info.schema) && !processedSchemas.has(info.schema)) {
+      if (info?.schema && isDeferred(info.schema)) {
         return originalResolve(parent, args, ctx, info);
       }
-      if (debug) log(`Checking ${key}`);
-
-      if (rules === null) {
-        if (debug) log(`No rules for ${key}, applying default policy: ${defaultPolicy}`);
-        return defaultPolicy === 'DENY' ? denied() : grant(parent, args, ctx, info);
-      }
-      return runRules(0, parent, args, ctx, info);
+      return check(parent, args, ctx, info, grant);
     };
     // The wrapper still reads through the runtime that generated a relation resolver, so a field
     // copied with it stays bound to that runtime.
@@ -489,6 +523,18 @@ export const createAuthPlugin = (permissions, options = {}) => {
     if (owner !== undefined) relationFieldOwners.set(resolver, owner);
     return resolver;
   };
+
+  // The entry of a generated mutation root: the check its wrapper runs, without resolving the root.
+  // The wrapper's grant also authorizes client query paths, but only fields with
+  // extensions.simfinityQuery have them, and generated mutation roots never do (runtime.js
+  // buildMutation), so for these roots granting resolves nothing more.
+  const createOperationEntry = (check) => Object.freeze({
+    protocol: OPERATION_ENTRY_PROTOCOL,
+    isDeferred,
+    async run(parent, args, ctx, info) {
+      await check(parent, args, ctx, info, () => undefined);
+    },
+  });
 
   const wrapSchemaResolvers = (schema) => {
     if (processedSchemas.has(schema)) return;
@@ -507,18 +553,33 @@ export const createAuthPlugin = (permissions, options = {}) => {
       const fields = type.getFields();
 
       for (const [fieldName, field] of Object.entries(fields)) {
-        // Skip fields this plugin already wraps; a resolver replaced since then is wrapped again.
-        const wrapper = wrappers.get(field);
-        if (wrapper !== undefined && wrapper === field.resolve) continue;
+        // A transaction runs the entries of each operation's root, in this schema or a copy. A generated
+        // root gets one wherever this instance wraps it, also in a type that is not the mutation root
+        // here, since the field and its wrapper can be the mutation root of another schema.
+        const isOperationRoot = isGeneratedMutationRoot(field);
+
+        // Skip fields this plugin already wraps; a resolver replaced since then is wrapped again. A
+        // wrapped root whose marker lacks this instance's entry for its key gets it again.
+        const wrapped = wrappers.get(field);
+        if (wrapped !== undefined && wrapped.resolver === field.resolve) {
+          if (isOperationRoot && !hasOperationEntry(field, instanceToken, wrapped.key)) {
+            recordOperationEntry(field, instanceToken, wrapped.key, createOperationEntry(wrapped.check));
+          }
+          continue;
+        }
 
         const rules = getFieldRules(permissions, typeName, fieldName);
         const query = field.extensions?.simfinityQuery;
         // An allowed field with no rule and no client query paths has nothing to check.
         if (rules === null && defaultPolicy === 'ALLOW' && !query && !debug) continue;
 
-        const resolver = createFieldResolver(schema, typeName, fieldName, rules, query, field.resolve || defaultFieldResolver);
+        const key = `${typeName}.${fieldName}`;
+        const check = createFieldCheck(key, rules);
+        const resolver = createFieldResolver(schema, check, query, field.resolve || defaultFieldResolver);
+        // The entry is recorded first, so a root this instance wraps always has one.
+        if (isOperationRoot) recordOperationEntry(field, instanceToken, key, createOperationEntry(check));
         field.resolve = resolver;
-        wrappers.set(field, resolver);
+        wrappers.set(field, { resolver, check, key });
       }
     }
 

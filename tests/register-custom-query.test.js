@@ -334,7 +334,7 @@ describe('registerCustomQuery', () => {
     ['a function', () => ({ includedCustomQueries: [] })],
     ['a Map', new Map([['includedCustomQueries', []]])],
     ['an object with a prototype', Object.create({ includedCustomQueries: [] })],
-    ['an unknown key', { transaction: { name: 'transaction', types: [] } }],
+    ['an unknown key', { transactions: {} }],
     ['a misspelled key', { includedCustomQuery: ['health'] }],
     ['an unknown undefined key', { includedCustomQueries: ['health'], extra: undefined }],
     ['a symbol key', { [Symbol('extra')]: true }],

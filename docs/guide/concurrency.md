@@ -95,6 +95,19 @@ MongoDB uses a plain snapshot pre-read, without a claim lock. If a competitor co
 
 With an active supplied session, its caller owns the transaction, commit and retry policy. Let a driver's `40001` or `WriteConflict` propagate so the owner can retry the whole transaction with a new snapshot; retrying at a savepoint keeps the stale snapshot. An outer `withTransaction(null, callback)` can own that retry. In default MongoDB mode the caller also owns aborts. With [transactional reference integrity](./mongodb-integrity), an adapter-detected conflict aborts even a supplied transaction; a core-detected early conflict does not. Hidden callers' version conflicts are adapter-detected. Core result diagnostics retain existing supplied-session ownership; do not assume every invalid wrapper or result automatically aborts a transaction you supplied.
 
+## Versions in helpers and transactions
+
+The lifecycle helpers and the [transaction mutation](./mutations#run-several-mutations-in-one-transaction) run the same protected lifecycle as the roots, so they need the version you read, explicitly, in the same places:
+
+- `updateObject(typeName, input)` and `transitionObject(typeName, actionName, input)` take `input.version`, as the generated update input declares it. A missing or `null` version is `REQUIRED_VALUE` (400) before anything runs, a present version that is not a safe integer from 1 up is `INVALID_VERSION` (400), and a stale one is `VERSION_CONFLICT` (409), with the same visibility rules as the roots.
+- `deleteObject(typeName, { id, version })` requires `version` on a protected type. On any other type, `version` is an unknown field and fails with `INVALID_INPUT`.
+- Nested entries of `input` follow the collection inputs: `updated` items of a protected child carry their version and `deleted` items are `{ id, version }`.
+- In a transaction, every update, state action and delete of a protected type carries its `version` in its operation, and a nested protected child carries its own, as it does in the root mutation.
+
+A helper captures the expected version from the snapshot of your input before any hook, middleware or state action runs. It carries that version to the write on every attempt of a retried transaction, and neither a hook nor the action can change it. Nothing refreshes it either: after a conflict, re-read and call again with the version you read.
+
+A transaction never infers or refreshes versions, and a `$K` reference carries an ID only. A record that a list creates starts at version 1, so an update of it later in the same list must send `version: 1`, and a state action that follows that update `version: 2`; repeating `version: 1` there fails with `VERSION_CONFLICT`, names the operation and stores nothing. Read the new versions from the selected result fields, such as `updatebook { id version }`, after the commit. A conflict in any operation rolls back the whole list. An early conflict follows the same `get_by_id` visibility rule as for the roots, and a retry of the transaction repeats the whole list with the versions you sent.
+
 ## Writes made by hooks
 
 A derived value maintained within the current revision should not create another revision. On MongoDB, use a session-bound `updateOne` without touching `version`. On PostgreSQL, use the model handle's explicit bypass:

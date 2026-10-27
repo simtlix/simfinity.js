@@ -318,6 +318,9 @@ export const registerMutation: PostgresRuntime['registerMutation'];
 export const registerCustomQuery: PostgresRuntime['registerCustomQuery'];
 export const registerView: PostgresRuntime['registerView'];
 export const saveObject: PostgresRuntime['saveObject'];
+export const updateObject: PostgresRuntime['updateObject'];
+export const deleteObject: PostgresRuntime['deleteObject'];
+export const transitionObject: PostgresRuntime['transitionObject'];
 export const preventCreatingCollection: PostgresRuntime['preventCreatingCollection'];
 export const withTransaction: PostgresRuntime['withTransaction'];
 /** Initializes the default module instance, after configure/connect/createSchema. */
@@ -326,6 +329,6 @@ export function initializeDatabase(options?: InitializationOptions): Promise<Ini
 export const configureQueryLimits: Runtime['configureQueryLimits'];
 /**
  * The same process-wide setter as every runtime's configureMutationLimits. Unknown or misspelled
- * options throw INVALID_MUTATION_LIMITS (400) and keep the current limit.
+ * options throw INVALID_MUTATION_LIMITS (400) and keep the current limits.
  */
 export const configureMutationLimits: Runtime['configureMutationLimits'];

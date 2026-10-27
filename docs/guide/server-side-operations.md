@@ -19,8 +19,9 @@ Examples use the selected runtime from [database setup](./databases#runtime-setu
 - A frequent list read with a fixed predicate and typed params, shared by web, MCP and in-process callers: a [named view](./queries#named-views).
 - A read whose result is not a stored record, such as a price preview, data from another service, a permission evaluation or an export: a [custom query](./queries#custom-queries), registered with `registerCustomQuery()`. Its callback opens its own transaction when it needs one.
 - One command that creates several records, of one type or several, in a single transaction: a [custom mutation with `saveObject()`](#create-several-records-in-one-custom-mutation).
+- Since 3.16.0, updating, deleting or running a state action on a record with its validators, controller hooks, nested writes and version checks, from a job, a hook or a custom mutation: [`updateObject()`, `deleteObject()` and `transitionObject()`](#update-delete-and-transition-from-code).
+- Since 3.16.0, a client or an agent that sends several generated writes, of several types, that must commit together: the opt-in [transaction mutation](./mutations#run-several-mutations-in-one-transaction), which server code can also execute [in-process](#execute-the-generated-schema-in-process).
 - Conditional updates, counters, upserts, leases, bulk changes and infrastructure rows without a business lifecycle: the [native model with the session](#use-the-native-model-for-atomic-operations).
-- Updates or deletes of several unrelated records in one transaction: not generated yet; see [what Simfinity does not provide](#what-simfinity-does-not-provide).
 
 ## Write a parent and its children together
 
@@ -290,7 +291,7 @@ The helper throws the first error. Errors raised by Simfinity are `SimfinityErro
 
 Select only `id` from a mutation run by server code. A generated mutation resolver returns after its transaction has committed, and GraphQL resolves the selected fields afterwards. A field that fails then, because a permission rule denies it or a relationship read fails, is reported as an error although the write is already stored, so the helper throws and a caller that retries on errors writes twice. Read whatever else you need with a separate query.
 
-Each root mutation field runs in its own transaction, and several root fields in one document are not one transaction; see [transaction boundaries](./mutations#transaction-boundaries). Do not run operations from inside a hook or a custom mutation: a query there does not see the caller's uncommitted writes, and a mutation opens another transaction, which commits on its own and can conflict with or wait for the caller's.
+Each root mutation field runs in its own transaction, and several root fields in one document are not one transaction; see [transaction boundaries](./mutations#transaction-boundaries). Since 3.16.0, an opt-in [transaction mutation](./mutations#run-several-mutations-in-one-transaction) runs a list of generated writes in one. Do not run operations from inside a hook or a custom mutation: a query there does not see the caller's uncommitted writes, and a mutation opens another transaction, which commits on its own and can conflict with or wait for the caller's.
 
 The [authorization plugin](./authorization) wraps the schema's resolvers in place when its `onSchemaChange` hook runs. When your GraphQL server applied the plugin to the same schema object, in-process operations run the same rules. In a process without a GraphQL server, such as a worker, call the hook once at startup, as the MCP package does with its `schemaPlugins` option:
 
@@ -361,9 +362,73 @@ simfinity.registerMutation(
 );
 ```
 
-The callback runs inside one transaction, which Simfinity retries on transient conflicts. `saveObject()` with the supplied session joins it, so if the invoice fails, the order and its lines are not stored either. Each `saveObject()` call runs create materialization, field and type validators, nested collection writes with the child type's middleware and ownership checks, and the create controller hooks. It skips GraphQL input coercion, field authorization, the global middleware of the record itself and the nested operations limit of `configureMutationLimits()`, which counts neither `saveObject()` nor custom mutations; the custom mutation's own `custom_mutation` middleware has already run. Bound client-supplied lists in the callback before writing, as the checkout does with `MAX_CHECKOUT_LINES`. Pass values in their stored form, such as internal enum values and `{ id }` for references, and pass the `context` so that nested children's middleware sees it. On MongoDB, the session must belong to the MongoDB client of the models you write; see [which connection the session uses](./mutations#which-connection-the-session-uses-on-mongodb). See [add a custom mutation](./mutations#add-a-custom-mutation) and [`saveObject()`](../reference/api#saveobject).
+The callback runs inside one transaction, which Simfinity retries on transient conflicts. `saveObject()` with the supplied session joins it, so if the invoice fails, the order and its lines are not stored either. Each `saveObject()` call runs create materialization, field and type validators, nested collection writes with the child type's middleware and ownership checks, and the create controller hooks. It skips GraphQL input coercion, field authorization, the global middleware of the record itself and the nested operations limit of `configureMutationLimits()`, which counts neither `saveObject()` nor custom mutations (since 3.16.0, it does count the nested entries that `saveObject()` calls made by hooks run inside a [transaction mutation](./mutations#run-several-mutations-in-one-transaction)); the custom mutation's own `custom_mutation` middleware has already run. Bound client-supplied lists in the callback before writing, as the checkout does with `MAX_CHECKOUT_LINES`. Pass values in their stored form, such as internal enum values and `{ id }` for references, and pass the `context` so that nested children's middleware sees it. On MongoDB, the session must belong to the MongoDB client of the models you write; see [which connection the session uses](./mutations#which-connection-the-session-uses-on-mongodb). See [add a custom mutation](./mutations#add-a-custom-mutation) and [`saveObject()`](../reference/api#saveobject).
 
-`saveObject()` only creates records; Simfinity has no programmatic update or delete that runs the lifecycle. Inside a custom mutation, change existing records with the [native model and the session](#use-the-native-model-for-atomic-operations), with your own checks. From a job, outside any transaction, run the generated update or delete mutation [in-process](#execute-the-generated-schema-in-process). `saveObject()` without a session owns a transaction of its own, so a job can also call it directly, with the same skipped steps.
+`saveObject()` creates records. Use [`updateObject()`, `deleteObject()` and `transitionObject()`](#update-delete-and-transition-from-code) for existing records through the lifecycle, or the [native model and the session](#use-the-native-model-for-atomic-operations) for atomic storage operations with your own checks. Jobs can also execute generated mutations [in-process](#execute-the-generated-schema-in-process) to include GraphQL coercion, root middleware and authorization. `saveObject()` without a session owns a transaction of its own, so a job can also call it directly, with the same skipped steps.
+
+## Update, delete and transition from code
+
+::: info Available since 3.16.0
+`updateObject()`, `deleteObject()` and `transitionObject()` are available since 3.16.0. They are `Runtime` methods, so SQL and PostgreSQL runtimes inherit them, and the MongoDB and PostgreSQL facades export them next to `saveObject()`.
+:::
+
+The three helpers run the lifecycle of the generated update, delete and state action mutations from server code, in one transaction, with the same code that the root mutations run:
+
+```javascript
+// The updated record: validators, onUpdating, nested entries, onUpdated and the version check all run.
+const order = await simfinity.updateObject('Order', {
+  id: String(orderId),
+  status: 'PLACED',
+  lines: { updated: [{ id: String(lineId), quantity: 3 }] },
+}, session, context);
+
+// The deleted record, or null when no record has that ID. onDelete runs first.
+const removed = await simfinity.deleteObject('Order', { id: String(orderId) }, session, context);
+
+// The updated record, in the action's target state. The type is the Season of the state machines guide.
+const season = await simfinity.transitionObject('Season', 'activate', { id: String(seasonId), year: 2026 }, session, context);
+```
+
+`session` and `context` are optional. For a type with [optimistic concurrency](./concurrency#versions-in-helpers-and-transactions), `updateObject()` and `transitionObject()` take the `version` you read in `input`, and `deleteObject()` takes it in its second argument: `{ id, version }`.
+
+### What they run
+
+Like `saveObject()`, they skip GraphQL input coercion, field authorization and the global middleware of the record itself, so authorize the caller before calling them. They run everything below that: validators, the controller hooks of the type, nested collection entries with the child type's middleware, ownership checks and hooks, the version precondition, and, for `transitionObject()`, the check of the current state and the action's callback. Nested middleware and controllers receive the `context` you pass, which may be `undefined`. The helpers are not an authorization boundary and do not depend on whether a schema exposes the matching root: `typeName` names any type that the runtime registered and stores records.
+
+The helpers also queue the corresponding [after-commit callback](./controllers#after-commit-callbacks). Without a session, they await the confirmed attempt's callbacks before returning. With a Simfinity-owned session, callbacks wait for the outer commit; an external native MongoDB transaction has no observed owner, so callbacks are skipped with a warning. A failed or retried attempt dispatches nothing, and a callback failure is reported without failing or retrying committed writes. `transitionObject()` queues `onTransitionCommitted`, not `onUpdateCommitted`; a missing delete queues no callback.
+
+### Pass the stored form
+
+The caller's input is checked structurally before any hook, middleware, read or write, and then copied. The caller's object is never written to, each attempt of a retried transaction works on its own copy, and hooks that rewrite the input they receive cannot change the original or each other's copies. The rules:
+
+- `input` has the shape of the type's generated update input (`SerieInputForUpdate`), version included on a protected type. Objects must be plain objects, or have a null prototype, with their own enumerable data properties. Accessors, symbol keys, non-enumerable properties, cycles and instances of other classes are rejected.
+- Only declared fields are accepted. A field that generated inputs leave out, such as a `readOnly` field, is an unknown field, and so is `state` on a type with a state machine, which changes only through `transitionObject()`. An own property whose value is `undefined` counts as omitted; a field you leave out stays untouched.
+- Where the input declares a list, pass a dense array. A bare value is not wrapped into a list.
+- A required value that is missing or `null` fails with `REQUIRED_VALUE`. The top-level `id` is always required, even when the type declares it nullable.
+- Values are not coerced. Enum fields take their internal values, scalars are not parsed or serialized, and `Date` values and dates in plain data are copied. A scalar accepts primitives, `Date` and plain data (objects and arrays, up to 256 levels deep); class instances such as `ObjectId`, `Buffer` or `Map` are rejected.
+- Record keys are strings: the `id` of the update, of a nested `updated` entry, of a nested `deleted` item, of a reference such as `customer: { id: ... }` and of `deleteObject()`'s target. Pass `String(record._id)`, not the `ObjectId`, and not an object such as `{ $ne: null }`. A key declared with another scalar than `ID`, such as an `Int` identifier, takes any primitive, except that `deleteObject()`'s `id` is always a string.
+
+A violation throws `INVALID_INPUT` (400) with a message that names the path, such as ``Invalid input at input.lines.added[1].price: unsupported scalar value``, and never a value.
+
+### Sessions, errors and limits
+
+Without a session, the helper owns its transaction and the adapter retries it. With one, the helper joins the active session you supply, such as the one a hook or custom mutation receives: it never commits, retries or ends it, and a failed helper leaves the rest of the transaction to its owner. An adapter can still abort a supplied session when a write fails; MongoDB does so with [transactional reference integrity](./mongodb-integrity). On MongoDB the session must belong to the MongoDB client of the model the helper writes, as for `saveObject()`; see [which connection the session uses](./mutations#which-connection-the-session-uses-on-mongodb).
+
+A helper that fails inside your session may already have written its root record and earlier nested entries there, because helpers use no savepoints, and `saveObject()` behaves the same. Errors that core raises, such as the `VERSION_CONFLICT` that the pre-read finds for a stale nested child, leave the session usable on every backend, MongoDB with transactional reference integrity included, which aborts only on its own write errors. A caller that catches such an error and commits stores a partial change, so end the transaction with the error instead: rethrow it, or abort. Native savepoints do not track the after-commit queue: rolling back lifecycle writes to a savepoint can leave their notifications queued. Let lifecycle failures propagate to the transaction owner. Statement-only savepoints remain usable when they do not undo queued lifecycle writes.
+
+| Situation | Code | Status |
+| --- | --- | --- |
+| `typeName` is not a stored record type registered in this runtime, or an update or transition target has no prepared update input with an `id` field | `INVALID_OPERATION_TARGET` | 500 |
+| `actionName` is not an action of the type's state machine | `UNKNOWN_ACTION` | 500 |
+| `input`, `id`, a required `version` or a required value is missing or `null` | `REQUIRED_VALUE` | 400 |
+| Any other violation of the input rules above | `INVALID_INPUT` | 400 |
+| A version that is present but not a safe integer from 1 up | `INVALID_VERSION` | 400 |
+| An update or transition of an ID that has no record (404), or a malformed ID (400) | `NOT_VALID_ID` | 404 or 400 |
+| A stale version | `VERSION_CONFLICT` | 409 |
+| A transition from a state other than the action's `from` | `BAD_REQUEST` | 400 |
+| More nested entries than `configureMutationLimits({ maxNestedOperations })` allows | `NESTED_OPERATIONS_EXCEEDED` | 400 |
+
+The type and input checks happen before anything runs, so a rejected call has no side effects. `updateObject()` and `transitionObject()` apply `maxNestedOperations` like the generated update and action mutations, with the limit configured when you call them; `deleteObject()` has no nested entries. Items for a collection without a `connectionField` fail with `INVALID_MODEL` (500) before anything is written. Inside a [transaction mutation](./mutations#run-several-mutations-in-one-transaction), a helper called from a hook counts its nested entries against that transaction's joint budget instead.
 
 ## Use the native model for atomic operations
 
@@ -412,12 +477,11 @@ Simfinity adds nothing to a native call. GraphQL input coercion, global middlewa
 
 Inside a hook or a custom mutation, pass the session you received. A call without it runs outside the transaction: it commits even when the operation later rolls back. A single native statement from a job needs no transaction; to make several native writes atomic, open one with `simfinity.withTransaction(null, callback)` on PostgreSQL, or with Mongoose's `connection.transaction(callback)` on MongoDB, or put them in a custom mutation.
 
-Lifecycle writes inside a registered mutation or SQL's `withTransaction(null, callback)` join the outer owner's [after-commit notification queue](./controllers#after-commit-callbacks). Sessionless `saveObject()` owns its own queue. An external native MongoDB session does not provide observable commit ownership: new callbacks are skipped, while existing hooks keep their session semantics. There is no public arbitrary-closure enqueue or manual-flush API. Keep durable delivery intents in the transaction's outbox and process them with a worker.
+Lifecycle writes inside a registered mutation or SQL's `withTransaction(null, callback)` join the outer owner's [after-commit notification queue](./controllers#after-commit-callbacks). Sessionless `saveObject()`, `updateObject()`, `deleteObject()` and `transitionObject()` each own their queue. An external native MongoDB session does not provide observable commit ownership: new callbacks are skipped, while existing hooks keep their session semantics. There is no public arbitrary-closure enqueue or manual-flush API. Keep durable delivery intents in the transaction's outbox and process them with a worker.
 
 ## What Simfinity does not provide
 
-- No generated mutation updates or deletes several unrelated records in one transaction. Each root mutation field runs in its own transaction, and nested writes only reach the children of one parent. Write a custom mutation instead: `saveObject()` for new records and the native model with the session for changes, with your own checks. A generated mutation that runs a list of operations in one transaction is proposed in [#100](https://github.com/simtlix/simfinity.js/issues/100). Simfinity provides record-level [optimistic concurrency](./concurrency); it does not add operation-list transactions.
-- No programmatic update or delete through the lifecycle. `saveObject()` creates records only.
+- Each root mutation field runs in its own transaction. To update or delete unrelated records together, use the opt-in [transaction mutation](./mutations#run-several-mutations-in-one-transaction), or a custom mutation that passes its session to the [lifecycle helpers](#update-delete-and-transition-from-code). Nested writes reach the children of one parent.
 - No generated read inside a caller's transaction. Generated queries never receive a session, so read uncommitted data through the native model. Virtual field resolvers receive no session either.
 - No custom root reads of stored records outside a [named view](./queries#named-views): a view names a list read with a fixed predicate and params and runs the type's scope; a [custom query](./queries#custom-queries) is for results that are not stored records, and its callback bypasses the generated scopes and rules. Expose a read of stored records that generated filters, scopes and aggregates cannot express as a [virtual field](./queries#virtual-fields) on the type it belongs to, and read it from server code through [in-process execution](#execute-the-generated-schema-in-process); see [reading stored records through a custom mutation](./anti-patterns#reading-stored-records-through-a-custom-mutation).
 - No IDs in nested `added` items, and no references between records added in the same mutation.

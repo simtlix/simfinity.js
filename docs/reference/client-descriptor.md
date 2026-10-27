@@ -69,9 +69,17 @@ schema transformations or schema-cloning middleware supported.
 
 Operations have `operation`, entity `type` (or `null`), `args`, `returns` and
 `description`. Kinds are `get`, `list`, `aggregate`, `add`, `update`, `delete`,
-`transition`, `customQuery` and `customMutation`. Transitions also carry `action`,
+`transition`, `transaction`, `customQuery` and `customMutation`. Transitions also carry `action`,
 `from` and `to`. Descriptions that are generated CRUD placeholders become `null`;
 custom descriptions are preserved.
+
+Since 3.16.0, the generated transaction field has `operation: 'transaction'`
+and `type: null`, because it can write several entities. Its `args` and `returns`
+describe the actual schema field, including a configured name. Its reachable
+operation input is `isOneOf: true`, and its result type is an ordinary object,
+not an entity. A user-registered mutation retains `customMutation`, even if its
+name is `transaction`. This extends format version 1; clients that exhaustively
+handle operation kinds must accept `transaction`. See the [transaction mutation](../guide/mutations#run-several-mutations-in-one-transaction).
 
 Type `kind` is `entity`, `object`, `interface`, `union`, `input`, `enum` or `scalar`.
 Entities expose the available `endpoints` and `stateMachine`. Registered types

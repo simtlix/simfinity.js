@@ -1,13 +1,17 @@
 import {
   configureQueryLimits, getQueryMaxPageSize, getQueryMaxReferenceFrames, paginationStages,
 } from './query-limits.js';
-import { configureMutationLimits, getMaxNestedOperations } from './mutation-limits.js';
+import {
+  configureMutationLimits, getMaxNestedOperations, getMaxTransactionOperations, nestedOperationsExceededError,
+  transactionOperationsExceededError,
+} from './mutation-limits.js';
 import { createAfterCommit } from './after-commit.js';
 import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
   GraphQLInt, GraphQLEnumType, GraphQLBoolean, GraphQLError, GraphQLInterfaceType, GraphQLUnionType,
-  Kind, getNamedType, isEnumType, isListType, isNonNullType, isObjectType, isOutputType, isScalarType,
+  Kind, defaultFieldResolver, getNamedType, isEnumType, isListType, isNonNullType, isObjectType, isOutputType,
+  isScalarType,
 } from 'graphql';
 
 import SimfinityError from './errors/simfinity.error.js';
@@ -27,7 +31,8 @@ import {
   assertEmptinessPath, describeEmptiness, emptinessScopeTargets, isEmptinessOperator,
 } from './query-emptiness.js';
 import { relationFieldOwners } from './relation-owners.js';
-import { isThenable } from './auth/thenable.js';
+import { discardThenable, isThenable } from './auth/thenable.js';
+import { authorizeOperation } from './auth/operation-entries.js';
 import {
   assertPlainConnectionField, getFieldStorageName, getListShape, isVirtualField, markStoredIdentity, normalizeConnectionField,
 } from './relation-storage.js';
@@ -43,6 +48,16 @@ import {
   unexpectedDeleteError, versionConflictError, versionConnectionCollision, versionEmbeddedMisuse, versionExhaustedError,
   versionFieldCollision, versionManagedError,
 } from './record-version.js';
+import {
+  attachExecutionState, countNestedEntry, createExecutionState, detachExecutionState, executionStateOf,
+  remainingNestedBudget,
+} from './execution-state.js';
+import { readDeleteTarget, snapshotOperationInput } from './operation-input.js';
+import {
+  assertTransactionSchema, buildTransactionField, collectOperationFields, invalidTransactionOption, noOperationError,
+  readTransactionOption, recordTransactionState, transactionUnsupportedError, withTransactionField,
+} from './transaction-schema.js';
+import { planReferences, resolveReferences } from './transaction-references.js';
 
 // Resolvers Simfinity generates. Any other resolver on a registered type when its schema is first
 // created is application code, such as a masking resolver, recorded once per type so later
@@ -430,14 +445,21 @@ const classifyValue = (value) => {
     : new InternalServerError('Unexpected error value');
 };
 
+// A value thrown while executing a field. graphql-js raises its own code-less GraphQLErrors there too
+// when it cannot complete a value (scalar or enum serialization, isTypeOf, abstract type resolution, a
+// non-iterable list), and some print the value. So a GraphQLError raised there is an application error
+// only with its own code or a SimfinityError cause; any other is unexpected.
+const classifyThrown = (thrown) => {
+  if (thrown instanceof GraphQLError && typeof thrown.extensions?.code !== 'string' && !simfinityCauseOf(thrown)) {
+    return new InternalServerError(thrown.message, thrown);
+  }
+  return classifyValue(thrown);
+};
+
 // Errors raised while executing a field have a path; request errors (syntax, validation, variable
 // coercion) never do. GraphQL servers pass the GraphQLError that graphql-js created around the value
 // a resolver threw, and that value is classified, without unwrapping a GraphQLError the resolver
 // threw any further. A thrown GraphQLError that already has a path is passed as is.
-// graphql-js raises its own code-less GraphQLErrors there too when it cannot complete a value (scalar
-// or enum serialization, isTypeOf, abstract type resolution, a non-iterable list), and some print the
-// value. So a GraphQLError raised there is an application error only with its own code or a
-// SimfinityError cause; any other is unexpected.
 const classifyError = (error) => {
   if (!(error instanceof GraphQLError)) return classifyValue(error);
   if (!Array.isArray(error.path)) {
@@ -447,11 +469,33 @@ const classifyError = (error) => {
     const cause = simfinityCauseOf(error);
     return cause instanceof InternalServerError ? cause : classifyValue(error);
   }
-  const thrown = isFieldErrorWrapper(error) ? thrownValueOf(error.originalError) : error;
-  if (thrown instanceof GraphQLError && typeof thrown.extensions?.code !== 'string' && !simfinityCauseOf(thrown)) {
-    return new InternalServerError(thrown.message, thrown);
+  return classifyThrown(isFieldErrorWrapper(error) ? thrownValueOf(error.originalError) : error);
+};
+
+// The error that a transaction field reports when the operation `operation`, at `operationIndex`, ended
+// it (#151): a new error with the code, status and message that buildErrorFormatter gives
+// `cause` when a root resolver throws it, and every extension of it, plus the operation's position. An
+// InternalServerError stays one, as for a root, so the callback that masks unexpected errors still hides
+// the message of a cause that is not an application error. The original is its non-enumerable `cause`,
+// out of every copy of the error, and is never changed: it may be frozen, or shared. `getCause()` of an
+// InternalServerError does not return a value that is not an Error, as for a root. Any other decoration
+// of a cause that has a `getCause()`, such as the DATABASE_ERROR and TRANSACTION_RETRY_EXCEEDED errors the
+// adapters build, keeps it: it returns what the cause's own returns, the driver error.
+const decorateOperationError = (cause, operationIndex, operation) => {
+  const classified = classifyThrown(cause);
+  const decorated = classified instanceof InternalServerError
+    ? new InternalServerError(classified.message)
+    : new SimfinityError(classified.message, classified.extensions?.code, classified.extensions?.status);
+  decorated.extensions = { ...classified.extensions, operationIndex, operation };
+  Object.defineProperty(decorated, 'cause', {
+    value: cause, writable: true, configurable: true, enumerable: false,
+  });
+  if (decorated instanceof InternalServerError) {
+    if (!(cause instanceof Error)) decorated.getCause = () => undefined;
+  } else if (typeof cause?.getCause === 'function') {
+    decorated.getCause = () => cause.getCause();
   }
-  return classifyValue(thrown);
+  return decorated;
 };
 
 export const buildErrorFormatter = (callback) => (error) => {
@@ -564,12 +608,19 @@ export const createRuntime = (adapter) => {
 
   const stateValue = adapter.stateValue || ((state) => state.name);
   const runtimeIdentity = {};
+  // The identity that execution states (execution-state.js) compare, so that a session lent to another
+  // runtime finds no state.
+  const runtimeToken = {};
   const typesDict = { types: {} };
   const waitingInputType = {};
   const typesDictForUpdate = { types: {} };
   // `added` item inputs of referenced collections by generated name, so collections that reach the
   // same child through the same connectionField share one input type.
   const excludedFieldInputTypes = new Map();
+  // The operation inputs of referenced collections (the types with `added`, `updated` and `deleted`
+  // that createOneToManyInputType builds). The typed input walk (operation-input.js) knows them by
+  // identity, to find the record keys inside them: `updated[].id` and each `deleted` item.
+  const collectionInputTypes = new WeakSet();
   // Self-referencing collection field name -> the types whose collection inputs were built with the
   // unqualified names OneToManyA<field> and OneToManyU<field>; type -> its self-referencing
   // collections whose inputs are named after the type instead (see claimSelfCollectionNames).
@@ -906,7 +957,7 @@ const createOneToManyInputType = (name, inputNamePrefix, itemType, connection,
       + `${itemType.name} records with a registered mutation.`,
   };
 
-  return new GraphQLInputObjectType({
+  const collectionInput = new GraphQLInputObjectType({
     name,
     fields: () => {
       const fields = {};
@@ -929,6 +980,8 @@ const createOneToManyInputType = (name, inputNamePrefix, itemType, connection,
       return fields;
     },
   });
+  collectionInputTypes.add(collectionInput);
+  return collectionInput;
 };
 
 // What graphQLListInputType returns for a list of an embedded type whose input has no fields.
@@ -1779,17 +1832,144 @@ const onSaveObject = async (Model, gqltype, controller, args, session, linkToPar
   return result;
 };
 
+// saveObject() and the lifecycle helpers look up, at entry, the execution state that a transaction
+// attempt (#151) attached to the session they were given. When the adapter's withTransaction hands the
+// body another object than that session, the state follows the body's object for as long as the body
+// runs, so every nested entry the body runs counts against the attempt's budget, whatever object the
+// adapter uses. Attachments are counted (execution-state.js): an object that already carries the state,
+// from an enclosing body or from a body running at the same time, keeps it until the last of them ends,
+// and one that carries another state gets that state back when this body ends, as long as the bodies on
+// that object end in the reverse order they started (nested, or one at a time). When bodies of different
+// states interleave on one object, a body that ends releases the latest attachment of its state, which
+// another body may have made, so the object can carry another state while a body of this one still runs.
+// Nothing is attached without a state, nor to an object that is not one.
+const runInExecutionState = (state, session, bodySession, run) => {
+  if (state === undefined || bodySession === session || bodySession === null
+    || (typeof bodySession !== 'object' && typeof bodySession !== 'function')) {
+    return run();
+  }
+  attachExecutionState(bodySession, state);
+  return (async () => {
+    try {
+      return await run();
+    } finally {
+      detachExecutionState(bodySession, state);
+    }
+  })();
+};
+
 const saveObject = async (typeName, args, session, context) => {
   const type = typesDict.types[typeName];
   assertCollectionWrites(type.gqltype, args);
   const snapshot = cloneInput(args, type.inputType);
-  return adapter.withTransaction(session, async (transaction) => {
-    const attemptArgs = cloneInput(snapshot, type.inputType);
-    const record = await onSaveObject(type.model, type.gqltype, type.controller, attemptArgs, transaction, null, context);
-    afterCommit.queue({ typeName, controller: type.controller, operation: operations.SAVE,
-      record, args: attemptArgs, context, session: transaction });
-    return record;
-  }, type.model);
+  const state = executionStateOf(session, runtimeToken);
+  return adapter.withTransaction(session, (transaction) => runInExecutionState(state, session, transaction,
+    () => runOperation({ Model: type.model, gqltype: type.gqltype, controller: type.controller }, operations.SAVE,
+      cloneInput(snapshot, type.inputType), transaction, context)), type.model);
+};
+
+// The lifecycle helpers (#151): updateObject, deleteObject and transitionObject run the lifecycle of the
+// generated update, delete and state action mutations from code, through runOperation, as those roots
+// do, but without the root record's global middleware and without GraphQL. They check their target, then
+// validate the caller's input and take a snapshot of it before anything runs; every attempt of the
+// transaction works on its own copy of that snapshot, and the caller's input is never written to.
+
+// How a type or action name that is not a string appears in a message, which never shows a value.
+const operationName = (value) => (typeof value === 'string' ? value : `(${value === null ? 'null' : typeof value})`);
+const notStoredTargetError = (typeName) => new SimfinityError(
+  `Type ${operationName(typeName)} is not a stored record type registered in this runtime`, 'INVALID_OPERATION_TARGET', 500,
+);
+const noUpdateInputError = (typeName) => new SimfinityError(
+  `Type ${typeName} has no prepared update input with an id field`, 'INVALID_OPERATION_TARGET', 500,
+);
+
+// The registration a helper works on: a type registered in this runtime that stores records of its own
+// and has its model. An update or a transition also needs the type's generated update input, which only
+// createSchema() builds, with an `id` field, which a readOnly id or an input without fields (#161) lacks;
+// it gets the update registration, which holds that input. createSchema() also decides which types store
+// records, so a missing input is reported first: before createSchema(), the error names what is missing.
+const resolveOperationTarget = (typeName, { update }) => {
+  const registration = typeof typeName === 'string' && Object.hasOwn(typesDict.types, typeName)
+    ? typesDict.types[typeName] : undefined;
+  if (!registration) throw notStoredTargetError(typeName);
+  const updateRegistration = typesDictForUpdate.types[typeName];
+  if (update && !updateRegistration?.inputType) throw noUpdateInputError(typeName);
+  if (!registration.model || registration.storedIdentity !== true) throw notStoredTargetError(typeName);
+  if (update && !Object.hasOwn(updateRegistration.inputType.getFields(), 'id')) throw noUpdateInputError(typeName);
+  return update ? updateRegistration : registration;
+};
+
+// The input walk (operation-input.js) knows these inputs by identity, to find the record keys inside them:
+// `updated[].id` and each `deleted` item of the generated collection inputs, the id of a single reference
+// and the id of a versioned nested delete.
+const operationWalkOptions = { collectionInputTypes, idInputType: IdInputType, recordVersionRef: RecordVersionRef };
+
+// The look-ahead of a transaction attempt (#151): the nested entries of `input` against what the attempt
+// has left of the limit it snapshotted, without counting them. No limit, no check.
+const assertRemainingNestedBudget = (gqltype, input, state) => {
+  const remaining = remainingNestedBudget(state);
+  if (remaining === null) return;
+  const limit = state.limits.maxNestedOperations;
+  assertNestedOperations(gqltype, input, limit, { count: limit - remaining });
+};
+
+// The nested budget of a helper call. Outside a transaction attempt, the preflight is the whole budget,
+// with the limit configured when the helper is called. Inside one, it is the attempt's look-ahead.
+// Either way it only looks ahead and counts nothing.
+const assertHelperNestedBudget = (gqltype, snapshot, state) => {
+  if (state !== undefined) {
+    assertRemainingNestedBudget(gqltype, snapshot, state);
+    return;
+  }
+  const limit = getMaxNestedOperations();
+  if (limit !== null) assertNestedOperations(gqltype, snapshot, limit);
+};
+
+// The transaction of a helper: the adapter's own when no session is supplied, retries included; with a
+// session, the adapter checks it, and the helper neither commits, retries, aborts nor cleans up.
+// `attemptArgs` gives each attempt its own arguments.
+const runHelperTransaction = (type, operation, attemptArgs, session, state, context, actionField = null, actionName) => adapter
+  .withTransaction(session ?? null, (bodySession) => runInExecutionState(state, session, bodySession,
+    () => runOperation({ Model: type.model, gqltype: type.gqltype, controller: type.controller }, operation,
+      attemptArgs(), bodySession, context, actionField, actionName)), type.model);
+
+// An update or a transition: the update input checks the whole input, whose top-level id is required and
+// whose state, when a state machine manages it, only a transition changes. The nested preflight and the
+// collection check run on the snapshot, before the transaction.
+const runHelperUpdate = (type, operation, input, session, context, actionField = null, actionName) => {
+  const state = executionStateOf(session, runtimeToken);
+  const snapshot = snapshotOperationInput(input, type.inputType, {
+    ...operationWalkOptions, mode: 'programmatic', path: 'input', topLevelId: true, stateManaged: !!type.stateMachine,
+  });
+  assertHelperNestedBudget(type.gqltype, snapshot, state);
+  assertCollectionWrites(type.gqltype, snapshot);
+  const attemptArgs = () => snapshotOperationInput(snapshot, type.inputType, { ...operationWalkOptions, mode: 'copy' });
+  return runHelperTransaction(type, operation, attemptArgs, session, state, context, actionField, actionName);
+};
+
+const updateObject = async (typeName, input, session, context) => runHelperUpdate(
+  resolveOperationTarget(typeName, { update: true }), operations.UPDATE, input, session, context,
+);
+
+const transitionObject = async (typeName, actionName, input, session, context) => {
+  const type = resolveOperationTarget(typeName, { update: true });
+  const actions = type.stateMachine?.actions;
+  if (typeof actionName !== 'string' || !actions || !Object.hasOwn(actions, actionName)) {
+    throw new SimfinityError(`Type ${typeName} has no state machine action ${operationName(actionName)}`,
+      'UNKNOWN_ACTION', 500);
+  }
+  return runHelperUpdate(type, operations.STATE_CHANGED, input, session, context, actions[actionName], actionName);
+};
+
+// The target is { id } or, for a protected type, { id, version }; the delete takes the bare ID or a new
+// { id, version } on each attempt, as the delete root passes them. A delete has no nested entries.
+const deleteObject = async (typeName, target, session, context) => {
+  const type = resolveOperationTarget(typeName, { update: false });
+  const versioned = isProtected(type.gqltype);
+  const state = executionStateOf(session, runtimeToken);
+  const { id, version } = readDeleteTarget(target, { protectedType: versioned, path: 'input' });
+  const attemptArgs = versioned ? () => ({ id, version }) : () => id;
+  return runHelperTransaction(type, operations.DELETE, attemptArgs, session, state, context);
 };
 
 // Counts the added, updated and deleted entries of referenced collections, at every nesting level that
@@ -1805,10 +1985,7 @@ const assertNestedOperations = (gqltype, input, limit, state = { count: 0 }) => 
     for (const key of ['added', 'updated', 'deleted']) {
       if (!Array.isArray(value[key])) continue;
       state.count += value[key].length;
-      if (state.count > limit) {
-        throw new SimfinityError(`A mutation may perform at most ${limit} nested collection operations`,
-          'NESTED_OPERATIONS_EXCEEDED', 400);
-      }
+      if (state.count > limit) throw nestedOperationsExceededError(limit);
       if (key !== 'deleted') {
         for (const item of value[key]) assertNestedOperations(listShape.itemType, item, limit, state);
       }
@@ -1867,6 +2044,44 @@ const preReadTopLevel = async (Model, gqltype, { id, version }, advances, contex
   return { expectedVersion, observedVersion, record };
 };
 
+// Runs one operation on a session that already exists: for the roots, through executeOperation, and for
+// the lifecycle helpers and the generated transaction (#151). A delete takes the bare ID, or
+// { id, version } for a protected type; every other operation takes its attempt's copy of the input.
+// The runner captures the version precondition from those args: an update or delete through
+// preReadTopLevel, a transition through onStateChanged. No caller captures it a second time.
+const runOperation = async ({ Model, gqltype, controller }, operation, attemptArgs, session, context,
+  actionField = null, actionName) => {
+  let record;
+  switch (operation) {
+    case operations.SAVE:
+      record = await onSaveObject(Model, gqltype, controller, attemptArgs, session, null, context);
+      break;
+    case operations.UPDATE: {
+      const precondition = isProtected(gqltype)
+        ? await preReadTopLevel(Model, gqltype, attemptArgs, true, context, session) : undefined;
+      record = await onUpdateSubject(Model, gqltype, controller, attemptArgs, session, null, context, false, precondition);
+      break;
+    }
+    case operations.DELETE: {
+      if (!isProtected(gqltype)) record = await onDelete(Model, controller, attemptArgs, session, context);
+      else {
+        const { expectedVersion, record: current } = await preReadTopLevel(Model, gqltype, attemptArgs, false, context,
+          session);
+        record = await onDelete(Model, controller, attemptArgs.id, session, context, current, { gqltype, expectedVersion });
+      }
+      break;
+    }
+    case operations.STATE_CHANGED:
+      record = await onStateChanged(Model, gqltype, controller, attemptArgs, session, actionField, context);
+      break;
+    default:
+      return null;
+  }
+  afterCommit.queue({ typeName: gqltype.name, controller, operation, record, args: attemptArgs,
+    context, session, action: actionName });
+  return record;
+};
+
 // A delete passes the ID, or { id, version } for a protected type, which each attempt copies; every
 // other operation passes its input, which attemptInputs copies. Either way, a retry checks the version
 // the request sent.
@@ -1881,39 +2096,8 @@ const executeOperation = (Model, gqltype, controller, args, operation, actionFie
   else if (versioned) nextInput = () => ({ ...args });
   return adapter.withTransaction(
     session,
-    async (mySession) => {
-      const attemptArgs = nextInput();
-      let record;
-      switch (operation) {
-        case operations.SAVE:
-          record = await onSaveObject(Model, gqltype, controller, attemptArgs, mySession, null, context);
-          break;
-        case operations.UPDATE: {
-          const precondition = versioned
-            ? await preReadTopLevel(Model, gqltype, attemptArgs, true, context, mySession) : undefined;
-          record = await onUpdateSubject(Model, gqltype, controller, attemptArgs, mySession, null, context, false, precondition);
-          break;
-        }
-        case operations.DELETE: {
-          if (!versioned) record = await onDelete(Model, controller, attemptArgs, mySession, context);
-          else {
-            const { expectedVersion, record: current } = await preReadTopLevel(Model, gqltype, attemptArgs, false, context,
-              mySession);
-            record = await onDelete(Model, controller, attemptArgs.id, mySession, context, current, { gqltype, expectedVersion });
-          }
-          break;
-        }
-        case operations.STATE_CHANGED:
-          record = await onStateChanged(Model, gqltype, controller,
-            attemptArgs, mySession, actionField, context);
-          break;
-        default:
-          return null;
-      }
-      afterCommit.queue({ typeName: gqltype.name, controller, operation, record, args: attemptArgs,
-        context, session: mySession, action: actionName });
-      return record;
-    },
+    async (mySession) => runOperation({ Model, gqltype, controller }, operation, nextInput(), mySession, context,
+      actionField, actionName),
     Model,
   );
 };
@@ -1942,7 +2126,11 @@ const executeItemFunction = async (gqltype, collectionField, parentKey, session,
   // A protected child is updated or deleted at the version its entry carries (#98). A deleted entry is
   // { id, version } for item middleware; one that is not an object, such as a string ID, has no version.
   const versioned = isProtected(collectionGQLType) && operationType !== operations.SAVE;
+  // On the session of a transaction attempt (#151), every entry counts against the attempt's joint
+  // budget before it runs, a null one included; elsewhere nothing is counted.
+  const executionState = executionStateOf(session, runtimeToken);
   for (const element of collectionFieldsList) {
+    if (executionState !== undefined) countNestedEntry(executionState);
     if (element === null) continue;
     let args = { input: element };
     if (operationType === operations.DELETE) {
@@ -3059,8 +3247,9 @@ const buildRegisteredOperationField = (entry, registration, operation) => {
 // classify it without guessing from its name. Extensions do not appear in SDL or introspection.
 // An input object needs a field, so a type whose create input has none gets no add mutation, and
 // one whose update input has none, which only a type without a writable id can have, gets no update
-// mutation or state machine actions either (#161).
-const buildMutation = (name, includedMutationTypes, includedCustomMutations) => {
+// mutation or state machine actions either (#161). A registered mutation replaces a generated root of
+// the same name; each replaced root is added to `shadowedRoots` as `{ entry, typeName }`.
+const buildMutation = (name, includedMutationTypes, includedCustomMutations, shadowedRoots = []) => {
   const rootQueryArgs = {};
   rootQueryArgs.name = name;
   rootQueryArgs.fields = {};
@@ -3194,6 +3383,8 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations) => 
 
   for (const [entry, registeredMutation] of Object.entries(registeredMutations)) {
     if (!shouldNotBeIncludedInSchema(includedCustomMutations, entry)) {
+      const generated = Object.hasOwn(rootQueryArgs.fields, entry) && rootQueryArgs.fields[entry].extensions?.simfinityMutation;
+      if (generated?.typeName) shadowedRoots.push({ entry, typeName: generated.typeName });
       rootQueryArgs.fields[entry] = buildRegisteredOperationField(entry, registeredMutation,
         operations.CUSTOM_MUTATION);
     }
@@ -3896,11 +4087,46 @@ const invalidSchemaOptions = (detail) => new SimfinityError(
   `createSchema options ${detail}`, 'INVALID_SCHEMA_OPTIONS', 500,
 );
 
-const SCHEMA_OPTION_KEYS = new Set(['includedCustomQueries']);
+const SCHEMA_OPTION_KEYS = new Set(['includedCustomQueries', 'transaction']);
+
+// The root names an included endpoint type's generated mutations can have, whether or not its inputs
+// leave some of them out.
+const generatedMutationNames = ({ simpleEntityEndpointName: endpoint, stateMachine }) => [
+  `add${endpoint}`, `delete${endpoint}`, `update${endpoint}`,
+  ...Object.keys(stateMachine?.actions ?? {}).map((actionName) => `${actionName}_${endpoint}`),
+];
+
+// The generated transaction field (#151), checked before anything is prepared: the option's shape, its
+// types (registered in this runtime), the adapter's support, the field name against the included
+// registered mutations and every root the included endpoint types can generate, and whether any of
+// its types is an included endpoint type, which always generates a delete root. Returns null or
+// `{ name, types }`.
+const readTransactionConfig = (option, includedMutationTypes, includedCustomMutations) => {
+  const config = readTransactionOption(option);
+  if (!config) return null;
+  for (const type of config.types) {
+    assertNotBoundElsewhere(type);
+    if (typesDict.types[type.name]?.gqltype !== type) {
+      throw invalidTransactionOption(`${type.name} is not registered in this runtime`);
+    }
+  }
+  if (typeof adapter.assertTransactionModels !== 'function') throw transactionUnsupportedError();
+  const { name, types } = config;
+  if (Object.hasOwn(registeredMutations, name) && !shouldNotBeIncludedInSchema(includedCustomMutations, name)) {
+    throw invalidTransactionOption(`name ${name} conflicts with the registered mutation ${name}`);
+  }
+  const included = Object.values(typesDict.types)
+    .filter((type) => type.endpoint && !shouldNotBeIncludedInSchema(includedMutationTypes, type.gqltype));
+  if (included.some((type) => generatedMutationNames(type).includes(name))) {
+    throw invalidTransactionOption(`name ${name} conflicts with a generated mutation`);
+  }
+  if (!included.some((type) => types.includes(type.gqltype))) throw noOperationError();
+  return config;
+};
 
 // The fourth createSchema() argument: omitted, or a plain object with known keys only.
-const readSchemaOptions = (options) => {
-  if (options === undefined) return {};
+const readSchemaOptions = (options, includedMutationTypes, includedCustomMutations) => {
+  if (options === undefined) return { transaction: null };
   if (options === null || typeof options !== 'object' || !isPlainObject(options)) {
     throw invalidSchemaOptions('must be a plain object');
   }
@@ -3913,13 +4139,410 @@ const readSchemaOptions = (options) => {
     || includedCustomQueries.some((name) => typeof name !== 'string'))) {
     throw invalidSchemaOptions('includedCustomQueries must be an array of strings, null or undefined');
   }
-  return { includedCustomQueries };
+  const transaction = readTransactionConfig(options.transaction, includedMutationTypes, includedCustomMutations);
+  return { includedCustomQueries, transaction };
+};
+
+// The types whose collections a transaction's references count (planReferences, item 4): every type
+// registered in this runtime.
+const referenceRegistry = { registeredTypes: () => Object.values(typesDict.types).map(({ gqltype }) => gqltype) };
+
+// The model affinity check (#151), before the session opens, so that models that cannot share one database
+// transaction fail before anything runs. The adapter's check is synchronous: a thenable it returns is
+// refused, once the rejection of a native promise is handled so it cannot crash the process. An error it
+// throws passes through unchanged.
+const assertTransactionModels = (models) => {
+  if (typeof adapter.assertTransactionModels !== 'function') throw transactionUnsupportedError();
+  const result = adapter.assertTransactionModels(models);
+  if (isThenable(result)) {
+    discardThenable(result);
+    throw new SimfinityError('assertTransactionModels must be synchronous', 'TRANSACTION_UNSUPPORTED', 500);
+  }
+};
+
+// An error of the input walk of one operation, as a new SimfinityError with the same message, code and
+// status that names the operation, as planReferences reports its errors. Any other error is not the
+// input's and passes through.
+const operationInputError = (error, index, key) => {
+  if (!(error instanceof SimfinityError)) return error;
+  const positioned = new SimfinityError(error.message, error.extensions.code, error.extensions.status);
+  positioned.extensions.operationIndex = index;
+  positioned.extensions.operation = key;
+  return positioned;
+};
+
+// The steps of the list GraphQL coerced, `{ index, key, entry }`, one per item. GraphQL has checked the
+// items (@oneOf), so each has exactly one of the field's operation keys.
+const transactionSteps = (transactionState, operationList) => operationList.map((item, index) => {
+  const keys = item !== null && typeof item === 'object' ? Object.keys(item) : [];
+  const entry = keys.length === 1 ? transactionState.operations.get(keys[0]) : undefined;
+  if (entry === undefined) throw new TypeError(`Item ${index} is not an operation of ${transactionState.name}`);
+  return { index, key: keys[0], entry };
+});
+
+// The input walk over the list GraphQL coerced, which applies the scalar and record-key rules, bounds the
+// nesting and requires the top-level id of an update, an action or a delete. Returns the snapshot: one
+// `{ [key]: value }` per item, which the list never shares.
+const snapshotTransaction = (steps, operationList) => steps.map(({ index, key, entry }) => {
+  try {
+    return {
+      [key]: snapshotOperationInput(operationList[index][key], entry.valueType, {
+        ...operationWalkOptions, mode: 'coerced', path: `operations[${index}].${key}`, topLevelId: entry.operation !== operations.SAVE,
+      }),
+    };
+  } catch (error) {
+    throw operationInputError(error, index, key);
+  }
+});
+
+// The nested entries of the whole list, nulls included, against the snapshotted limit; null is no limit.
+// `list` is the list GraphQL coerced, or a snapshot of it, which has the same entries. It only looks
+// ahead: the attempts count what runs. A delete has no nested entries.
+const assertTransactionNestedOperations = (steps, list, limit) => {
+  if (limit === null) return;
+  const counted = { count: 0 };
+  for (const { index, key, entry } of steps) {
+    if (entry.operation !== operations.DELETE) assertNestedOperations(entry.type.gqltype, list[index][key], limit, counted);
+  }
+};
+
+// What identifies the marker of a generated root by content: its type, operation and action, which a copy
+// of the marker (a spread or a deep clone) keeps. Anything else under the key identifies nothing.
+const rootMarkerIdentity = (marker) => {
+  if (marker === null || typeof marker !== 'object') return undefined;
+  const { typeName, operation, action } = marker;
+  if (typeof typeName !== 'string' || typeof operation !== 'string'
+    || (action !== undefined && action !== null && typeof action !== 'string')) return undefined;
+  return JSON.stringify([typeName, operation, action ?? null]);
+};
+
+// An operation whose root the Mutation type that runs the transaction does not expose, positioned as the
+// input walk and the references report their errors.
+const unexposedOperationError = (mutationType, operationIndex, operation) => {
+  const error = new ForbiddenError(`Access denied to ${mutationType.name}.${operation}`);
+  error.extensions.operationIndex = operationIndex;
+  error.extensions.operation = operation;
+  return error;
+};
+
+// Where each operation of the list may run: `mutationType`, the Mutation type that runs the
+// transaction (`info.parentType`), must expose its generated root, that is, have a field whose marker is
+// the marker of the root the field was built with, or a copy of it, under any name. A served copy of the
+// schema can drop a root, or put another field under its name, and a direct call could then not reach the
+// root there, so neither may an operation: the first operation of the list whose root is not exposed
+// fails with FORBIDDEN, `Access denied to <Mutation type>.<key>`, before the transaction.
+//
+// Returns operation key -> the roots whose checks the operation gets on every attempt: one per distinct
+// marker, by identity, among the markers of the fields that expose the root and the marker of the root the
+// field was built with. The identity field's marker comes first, then those of the other fields in field
+// order, then the built one. A copy that renames the root, aliases it or clones its markers thus runs the
+// checks of every name that reaches the root, and never fewer than the schema the field was built in: a
+// transform that clones the markers would otherwise drop the entries its copied wrappers still enforce.
+// authorizeOperation reads only a root's name, type and marker, so each root is a view of one marker with
+// the identity the rules see: the operation key as `info.fieldName`, and the type of the identity field,
+// which is the field that exposes the root under the key, or else the first field that exposes it, in field
+// order. The rules' `info.parentType` is the Mutation type that runs the transaction, whose fields they all
+// are.
+const exposedOperationRoots = (steps, mutationType) => {
+  const exposing = new Map();
+  for (const field of Object.values(mutationType.getFields())) {
+    const identity = rootMarkerIdentity(field.extensions?.simfinityMutation);
+    if (identity === undefined) continue;
+    if (!exposing.has(identity)) exposing.set(identity, []);
+    exposing.get(identity).push(field);
+  }
+  const roots = new Map();
+  for (const { index, key, entry } of steps) {
+    if (roots.has(key)) continue;
+    const builtMarker = entry.rootField.extensions.simfinityMutation;
+    const fields = exposing.get(rootMarkerIdentity(builtMarker)) ?? [];
+    if (fields.length === 0) throw unexposedOperationError(mutationType, index, key);
+    const identityField = fields.find((field) => field.name === key) ?? fields[0];
+    const markers = new Set([identityField, ...fields].map((field) => field.extensions.simfinityMutation));
+    markers.add(builtMarker);
+    roots.set(key, [...markers].map((marker) => Object.freeze({
+      name: key, type: identityField.type, extensions: Object.freeze({ simfinityMutation: marker }),
+    })));
+  }
+  return roots;
+};
+
+// The checks a direct call to an operation's root gets: the entries the auth plugin recorded
+// on each of the operation's roots (exposedOperationRoots), in order.
+const authorizeTransactionOperation = async (roots, parent, args, context, info) => {
+  for (const root of roots) await authorizeOperation(root, parent, args, context, info);
+};
+
+// Whether the error that ended the transaction is the one that ended the final attempt, `operationError`,
+// or an error an adapter made of it, such as TRANSACTION_RETRY_EXCEEDED, that keeps it in its `cause`
+// chain. Any other error, such as the failure of a begin, a commit, a rollback or a release, or one of an
+// earlier attempt, is not that operation's.
+const reachesOperationError = (error, operationError) => {
+  if (error === operationError) return true;
+  const seen = new Set();
+  let current = error;
+  while ((typeof current === 'object' && current !== null) || typeof current === 'function') {
+    if (seen.has(current)) return false;
+    seen.add(current);
+    current = current.cause;
+    if (current != null && current === operationError) return true;
+  }
+  return false;
+};
+
+// The record of each result item of a transaction that has one, with the item's operation key and the type
+// that operation's root returned when the field was built: what TransactionResult.id resolves from. The
+// item of a delete of a missing record has none.
+const transactionResultRecords = new WeakMap();
+
+// The record's type in the executing schema, whose fields a plugin applied to that schema wrapped: the
+// object type the executing result type gives the operation key, or else the executing schema's object
+// type of the name the root returned when the field was built. Undefined when it has neither: the type the
+// field was built with is never used, since a plugin applied to a copy with new type objects never wrapped it.
+const executingRecordType = (info, key, builtType) => {
+  const resultFields = info.parentType.getFields();
+  const executing = Object.hasOwn(resultFields, key) ? getNamedType(resultFields[key].type) : undefined;
+  if (isObjectType(executing)) return executing;
+  const named = info.schema.getType(builtType.name);
+  return isObjectType(named) ? named : undefined;
+};
+
+// TransactionResult.id: the id of the operation's record, resolved by the `id` field of the record's own
+// type in the executing schema (executingRecordType), with the record as parent, no arguments and that
+// field's info, as a direct call to the operation's root that selects `id` resolves it, so that a rule an
+// auth plugin put on `<Type>.id` applies here too. Without such a type the id is refused with FORBIDDEN
+// (null and the error). An item without a record, and a type without an `id` field, give null without
+// calling anything.
+const resolveTransactionResultId = (item, args, context, info) => {
+  const result = item !== null && typeof item === 'object' ? transactionResultRecords.get(item) : undefined;
+  if (result === undefined) return null;
+  const { key, record, builtType } = result;
+  const recordType = executingRecordType(info, key, builtType);
+  if (recordType === undefined) throw new ForbiddenError(`Access denied to ${info.parentType.name}.id`);
+  const recordFields = recordType.getFields();
+  if (!Object.hasOwn(recordFields, 'id')) return null;
+  const idField = recordFields.id;
+  return (idField.resolve ?? defaultFieldResolver)(record, {}, context, {
+    ...info, fieldName: 'id', parentType: recordType, returnType: idField.type,
+  });
+};
+
+// Runs a non-empty operation list of a transaction field and returns one result per operation, `{ id,
+// [key]: record }`, where the record of a delete of a missing record and its id are null. Before the
+// transaction: the limits are read once, then come the operation count, the model affinity check, the
+// nested entries of the whole list, counted on what GraphQL coerced so that a list past the limit fails as
+// a root past it does, the input walk, the references and the roots the Mutation type that runs the
+// transaction exposes. Then one owned transaction runs the list, retries included; each
+// attempt works on its own copy of the snapshot, with an execution state on its session for the limits and
+// the joint nested budget. When the error of an operation of the final attempt ends the transaction, the
+// resolver reports it with that operation's position (decorateOperationError); every other error is
+// reported as it is.
+const executeTransaction = async (transactionState, operationList, parent, context, info) => {
+  const limits = Object.freeze({
+    maxNestedOperations: getMaxNestedOperations(), maxTransactionOperations: getMaxTransactionOperations(),
+  });
+  if (operationList.length > limits.maxTransactionOperations) {
+    throw transactionOperationsExceededError(limits.maxTransactionOperations);
+  }
+  assertTransactionModels(transactionState.models);
+  const steps = transactionSteps(transactionState, operationList);
+  assertTransactionNestedOperations(steps, operationList, limits.maxNestedOperations);
+  const snapshot = snapshotTransaction(steps, operationList);
+  // Once, on the snapshot, which it changes in place: `$$` literals lose a `$` before any attempt copies them.
+  const referencePlan = planReferences(snapshot, transactionState, referenceRegistry);
+  // The plan's positions by operation index, in plan order, so that each operation reads only its own.
+  const referencesOf = new Map();
+  for (const position of referencePlan) {
+    if (!referencesOf.has(position.index)) referencesOf.set(position.index, []);
+    referencesOf.get(position.index).push(position);
+  }
+  const operationRoots = exposedOperationRoots(steps, info.parentType);
+
+  // One record per attempt that started, in order. Its `failure` is `{ error, operationIndex, operation }`
+  // for the operation whose error ended the attempt, or null: errors propagate unchanged while attempts
+  // run, so that the adapter can still recognize them, and the position of the final attempt's failure
+  // stays here for the error the resolver reports.
+  const attempts = [];
+  const runAttempt = async (session) => {
+    // The joint budget follows the attempt's session; one that cannot carry it would leave it unchecked.
+    if (session === null || (typeof session !== 'object' && typeof session !== 'function')) {
+      throw transactionUnsupportedError();
+    }
+    const attempt = { failure: null };
+    attempts.push(attempt);
+    const state = createExecutionState({ runtimeToken, limits });
+    attachExecutionState(session, state);
+    try {
+      const copies = steps.map(({ index, key, entry }) => ({
+        [key]: snapshotOperationInput(snapshot[index][key], entry.valueType, { ...operationWalkOptions, mode: 'copy' }),
+      }));
+      // `{ id }` of each operation's record in this attempt, or null, which resolveReferences reads.
+      const written = [];
+      // One operation: its references, the checks of its roots with the root's args,
+      // `{ input }` or, for a delete, `{ id }` or `{ id, version }`, the root's middleware with the same
+      // args, then, on a copy of what middleware left and before anything of it is written, the look-ahead
+      // of its nested entries and the collection check, and the operation itself on the attempt's session.
+      const runStep = async ({ index, key, entry }) => {
+        const references = referencesOf.get(index);
+        if (references !== undefined) resolveReferences(copies, references, written, index);
+        const args = entry.operation === operations.DELETE ? copies[index][key] : { input: copies[index][key] };
+        await authorizeTransactionOperation(operationRoots.get(key), parent, args, context, info);
+        await executeMiddleware(entry.operation === operations.STATE_CHANGED
+          ? {
+            type: entry.type, args, operation: entry.operation, actionName: entry.actionName, actionField: entry.actionField, context,
+          }
+          : {
+            type: entry.type, args, operation: entry.operation, context,
+          });
+        const { model: Model, gqltype, controller } = entry.type;
+        if (entry.operation === operations.DELETE) {
+          // As the delete root: a protected delete takes the version as middleware left it.
+          const target = entry.protected ? { id: args.id, version: args.version } : args.id;
+          return runOperation({ Model, gqltype, controller }, entry.operation, target, session, context);
+        }
+        // The operation gets its own copy of the input middleware left, as each attempt of a root does, so
+        // a value middleware put there, which may be shared, is never changed by it and a retry starts from it.
+        const input = cloneInput(args.input, entry.valueType);
+        // As the roots, the nested limit comes before the pre-read, so it wins over an early VERSION_CONFLICT.
+        assertRemainingNestedBudget(gqltype, input, state);
+        assertCollectionWrites(gqltype, input);
+        return runOperation({ Model, gqltype, controller }, entry.operation, input, session, context,
+          entry.actionField ?? null, entry.actionName);
+      };
+      const results = [];
+      for (const step of steps) {
+        let record;
+        try {
+          record = await runStep(step);
+        } catch (error) {
+          attempt.failure = { error, operationIndex: step.index, operation: step.key };
+          throw error;
+        }
+        const id = record == null ? null : record._id ?? record.id ?? null;
+        written[step.index] = record == null ? null : { id };
+        const item = { id, [step.key]: record ?? null };
+        if (record != null) {
+          transactionResultRecords.set(item, {
+            key: step.key, record, builtType: getNamedType(step.entry.rootField.type),
+          });
+        }
+        results.push(item);
+      }
+      return results;
+    } finally {
+      detachExecutionState(session, state);
+    }
+  };
+  try {
+    return await adapter.withTransaction(null, runAttempt, steps[0].entry.type.model);
+  } catch (error) {
+    const { failure } = attempts.at(-1) ?? {};
+    throw failure && reachesOperationError(error, failure.error)
+      ? decorateOperationError(error, failure.operationIndex, failure.operation) : error;
+  }
+};
+
+// The models one transaction of the field may write (#151): those of the types that own
+// its operations, then those of the referenced collections their inputs declare, through the items'
+// own inputs and embedded values at any depth, without null models or repeats.
+const transactionModels = (operationEntries) => {
+  const models = [];
+  const add = (model) => {
+    if (model != null && !models.includes(model)) models.push(model);
+  };
+  const owners = [...new Set([...operationEntries.values()].map(({ type }) => typesDict.types[type.gqltype.name]))];
+  owners.forEach(({ model }) => add(model));
+  const visited = new Set();
+  const visit = (gqltype) => {
+    if (visited.has(gqltype)) return;
+    visited.add(gqltype);
+    for (const field of Object.values(gqltype.getFields())) {
+      if (isReadOnlyField(field)) continue;
+      const listShape = getListShape(field.type);
+      const target = listShape ? listShape.itemType : unwrapNonNull(field.type);
+      const registration = target instanceof GraphQLObjectType ? typesDict.types[target.name] : undefined;
+      if (registration?.gqltype !== target) continue;
+      const embedded = !!field.extensions?.relation?.embedded;
+      if (listShape && !embedded) {
+        add(registration.model);
+        visit(target);
+      } else if (embedded) {
+        visit(target);
+      }
+    }
+  };
+  owners.forEach(({ gqltype }) => visit(gqltype));
+  return models;
+};
+
+// The transaction field of a schema whose generated mutations are built, from the roots of `mutation`,
+// which does not have it yet, and `query`, the final query root. Returns `{ field, state }`, where the
+// state is what executeTransaction reads: `name`, `typeNames`, `operations` (operation key ->
+// `{ type, operation, actionName?, actionField?, protected, rootField, valueType }`, with the
+// registration the root runs: the update one for updates and actions; the root field the schema was
+// built with, whose authorization entries a copy of the schema cannot drop; and the type of the
+// operation's value in the field's operation type) and `models`, frozen, which the adapter's affinity
+// check receives.
+const buildTransaction = ({ name, types }, query, mutation, shadowedRoots) => {
+  const typeNames = types.map((type) => type.name);
+  for (const { entry, typeName } of shadowedRoots) {
+    if (typeNames.includes(typeName)) {
+      warnOnce(typesDict.types[typeName].gqltype, `transactionShadowed:${name}:${entry}`, 'Configuration issue: the '
+        + `registered mutation ${entry} replaces the generated mutation of ${typeName} with that name, so the ${name} `
+        + `field has no ${entry} operation.`);
+    }
+  }
+  const operationEntries = new Map();
+  const descriptors = [];
+  for (const { key, field, marker } of collectOperationFields(mutation, typeNames)) {
+    const forUpdate = marker.operation === operations.UPDATE || marker.operation === operations.STATE_CHANGED;
+    const type = (forUpdate ? typesDictForUpdate : typesDict).types[marker.typeName];
+    const entry = {
+      type, operation: marker.operation, protected: isProtected(type.gqltype), rootField: field,
+    };
+    if (marker.operation === operations.STATE_CHANGED) {
+      entry.actionName = marker.action;
+      entry.actionField = type.stateMachine.actions[marker.action];
+    }
+    operationEntries.set(key, entry);
+    const input = field.args.find((arg) => arg.name === 'input');
+    descriptors.push({
+      key,
+      operation: marker.operation,
+      protected: entry.protected,
+      inputType: input ? unwrapNonNull(input.type) : null,
+      returnType: field.type,
+    });
+  }
+  assertTransactionSchema({
+    name, mutation, operations: descriptors, typeExists: (typeName) => findSchemaType([query, mutation], typeName) !== null,
+  });
+  const state = {
+    name, typeNames, operations: operationEntries, models: Object.freeze(transactionModels(operationEntries)),
+  };
+  const field = buildTransactionField({
+    name,
+    types,
+    operations: descriptors,
+    recordVersionRef: RecordVersionRef,
+    resolveId: resolveTransactionResultId,
+    // An empty list runs nothing: no transaction and no affinity check.
+    async resolve(parent, args, context, info) {
+      const { operations: list } = args;
+      if (list.length === 0) return [];
+      return executeTransaction(state, list, parent, context, info);
+    },
+  });
+  const valueTypes = getNamedType(field.args.operations.type).getFields();
+  for (const [key, entry] of operationEntries) entry.valueType = valueTypes[key].type;
+  return { field, state };
 };
 
 const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomMutations, options) => {
   Object.values(typesDict.types).forEach(({ controller }) => afterCommit.validate(controller));
   // Reject before models, resolvers or roots are built, so a rejected schema changes nothing.
-  const { includedCustomQueries } = readSchemaOptions(options);
+  const { includedCustomQueries, transaction } = readSchemaOptions(options, includedMutationTypes,
+    includedCustomMutations);
   assertQueryNamesAvailable(includedQueryTypes, includedCustomQueries);
   assertViewsAvailable(includedQueryTypes, includedCustomQueries);
   Object.values(typesDict.types).forEach(({ gqltype }) => validateScope(gqltype));
@@ -3995,7 +4618,8 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
       applicationResolvedFields.set(gqltype, listApplicationResolvedFields(gqltype));
     }
   });
-  const mutation = buildMutation('Mutation', includedMutationTypes, includedCustomMutations);
+  const shadowedRoots = [];
+  let mutation = buildMutation('Mutation', includedMutationTypes, includedCustomMutations, shadowedRoots);
   // An application scalar named JSON that this schema contains also types aggregation results. Any
   // other type named JSON still collides, and GraphQLSchema reports the duplicate name.
   const applicationJSON = findSchemaType([query, mutation], 'JSON', QLTypeAggregationResult);
@@ -4003,8 +4627,12 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
     query = buildRootQuery('RootQueryType', includedQueryTypes, aggregationResultTypeFor(applicationJSON),
       includedCustomQueries);
   }
+  // The transaction field's checks that need the built roots run on them before it is added (#151).
+  const built = transaction && buildTransaction(transaction, query, mutation, shadowedRoots);
+  if (built) mutation = withTransactionField(mutation, transaction.name, built.field);
 
   const schema = constructSchema(query, mutation, reserveVersionNames);
+  if (built) recordTransactionState(built.field, built.state);
   captureSchemaRegistrations(schema, Object.values(typesDict.types).map((entry) => ({
     gqltype: entry.gqltype, endpoint: entry.endpoint,
     // Only associate roots generated for this schema. Excluded endpoint names can be custom queries.
@@ -4013,7 +4641,8 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
     inputType: entry.inputType, updateInputType: typesDictForUpdate.types[entry.gqltype.name]?.inputType,
     stateMachine: entry.stateMachine,
   })), (type, field) => field.extensions?.queryable !== false
-    && (field.extensions?.queryable === true || !hasApplicationResolver(type, field.name)));
+    && (field.extensions?.queryable === true || !hasApplicationResolver(type, field.name)),
+  built ? schema.getMutationType().getFields()[transaction.name] : undefined);
   // Reserve reachable types whose relation fields still have no resolver, such as an unregistered
   // custom operation result, so another runtime cannot later generate resolvers this schema executes.
   schemaTypes.forEach((type) => {
@@ -4382,6 +5011,9 @@ function formatArgs(argsArray) {
     registerCustomQuery,
     registerView,
     saveObject,
+    updateObject,
+    deleteObject,
+    transitionObject,
     preventCreatingCollection,
   };
 };

@@ -63,10 +63,12 @@ export interface MCPTool {
    * `idempotentHint: true`. Idempotency is about the stored data: a repeat
    * runs middleware and controller hooks again, and a repeated delete calls
    * `onDelete` with `null`. Creates, state-machine transitions and custom
-   * mutations get `readOnlyHint: false` only. Mutations are recognized by core's
-   * `extensions.simfinityMutation` marker or, without it, by the placeholder
-   * description plus the matching name prefix, never by name alone.
-   * `toolOverrides` annotations are merged over these.
+   * mutations get `readOnlyHint: false` only. The transaction tool (see
+   * {@link GenerateMCPToolsOptions.transactionTools}) is always
+   * `destructiveHint: true` and `idempotentHint: false`. Mutations are
+   * recognized by core's `extensions.simfinityMutation` marker or, without it,
+   * by the placeholder description plus the matching name prefix, never by
+   * name alone. `toolOverrides` annotations are merged over these.
    */
   annotations: MCPToolAnnotations;
   kind: MCPToolKind;
@@ -207,11 +209,19 @@ export interface MCPToolOverride {
   title?: string;
   /** Merged over the generated annotations. */
   annotations?: MCPToolAnnotations;
+  /**
+   * Overrides {@link GenerateMCPToolsOptions.selectionDepth} for this tool.
+   * The transaction tool (see {@link GenerateMCPToolsOptions.transactionTools})
+   * ignores it: each of its operations is selected with the depth of that
+   * operation's own tool, and the result list takes no level.
+   */
   selectionDepth?: number;
   /**
    * Overrides {@link GenerateMCPToolsOptions.nestedCollections} for this tool;
    * ignored when `selection` is set. Validated (MCP_INVALID_OPTIONS) for
-   * every entry, whether or not its tool is published.
+   * every entry, whether or not its tool is published. The transaction tool
+   * ignores it, as it ignores `selectionDepth`: each operation uses the value
+   * of its own tool.
    */
   nestedCollections?: MCPNestedCollections;
   /**
@@ -222,7 +232,12 @@ export interface MCPToolOverride {
   /**
    * Explicit GraphQL selection set replacing the generated one. Accepts
    * `'id title'` or `'{ id title }'`. Setting it omits the tool's
-   * `outputSchema` and ignores `nestedCollections`.
+   * `outputSchema` and ignores `nestedCollections`. On the transaction tool
+   * it replaces the selection of its result list, whose items are then
+   * returned as selected instead of reduced to `id` and their own operation
+   * key. The `selection` of an operation's own tool is not reused inside the
+   * transaction tool, so fields it hides still appear in the transaction
+   * result: hide them with field authorization instead.
    */
   selection?: string;
 }
@@ -259,7 +274,11 @@ export interface MCPLimits {
    * oversized mutation result is not an error when the mutation succeeded: it
    * is replaced by a `truncated` notice (`isError: false`,
    * `_meta.truncated`) and the root id(s), which are kept only when they fit
-   * within the cap. The notice reports the cap rounded down to whole bytes.
+   * within the cap; a transaction tool keeps
+   * `[{ id, <operationKey>: { id, version? } | null }]`, where `id` is null
+   * for a delete of a missing record, and its notice says that the
+   * operations are applied all together or not at all, never in part. The
+   * notice reports the cap rounded down to whole bytes.
    * With GraphQL errors it stays MCP_RESULT_TOO_LARGE with
    * `extensions.applied` (`true`, or `'unknown'` when no root value came
    * back), `extensions.firstError` and the ids in `data` when present.
@@ -307,7 +326,11 @@ export interface MCPCallExtra {
 
 /** The mutable call descriptor handed to each tool middleware. */
 export interface MCPToolMiddlewareCall {
-  /** Published (prefixed) tool name. */
+  /**
+   * Published (prefixed) tool name. A gate by name sees the transaction
+   * tool's name only, never the operations it runs, which are in
+   * `args.operations`.
+   */
   name: string;
   /**
    * Tool arguments; middleware may mutate or replace this. An undeclared key
@@ -411,10 +434,15 @@ export interface GenerateMCPToolsOptions {
   exclude?: string | string[];
   /**
    * Only expose tools whose entity (return) type has one of these names. A
-   * virtual field tool's entity type is the type that declares the field.
+   * virtual field tool's entity type is the type that declares the field. The
+   * transaction tool has no entity type: it needs every type its operations
+   * write in this list (see `transactionTools`).
    */
   includeTypes?: string | string[];
-  /** Never expose tools whose entity (return) type has one of these names. */
+  /**
+   * Never expose tools whose entity (return) type has one of these names, nor
+   * the transaction tool when one of the types its operations write is here.
+   */
   excludeTypes?: string | string[];
   /**
    * Nesting depth for the auto-generated selection set and output schema.
@@ -438,6 +466,33 @@ export interface GenerateMCPToolsOptions {
    */
   textFormat?: MCPTextFormat;
   /**
+   * Publish the schema's generated transaction field (core's `transaction`
+   * schema option) as one multi-write tool. Unset, `null` or `false` (the
+   * default): neither that field nor any mutation shaped like it (core's
+   * `extensions.simfinityTransaction`, the description's marker sentence, or
+   * a single `operations: [X!]!` argument each of whose fields matches a
+   * mutation root of the same schema by name and input type, a generated
+   * root or any root of that name; also when some or all of those roots are
+   * missing, as long as X has at least one field, every field of X named
+   * after a remaining root matches it, and the field returns a list of an
+   * object type with a field named after each field of X) is ever published,
+   * not even as a custom tool.
+   * `true`: the field is published when its marker description, its
+   * structure and its `@oneOf` operation type are all present (rebuild a
+   * schema from `getIntrospectionQuery({ oneOf: true })` with descriptions),
+   * `include`/`exclude` accept it by its own name or 'mutation', `exclude`
+   * names none of its operation keys, and every type its operations write
+   * (their own types and nested collection targets) passes
+   * `includeTypes`/`excludeTypes`; a field shaped like one that is not
+   * recognized is omitted with a one-time warning. Each operation is
+   * selected with the `selectionDepth` and `nestedCollections` of its own
+   * tool and, below the result list, only the virtual fields with
+   * `mcp: 'select'`; each result item keeps only `id` and its own operation
+   * key, unless the tool has an explicit `selection`. Other values throw
+   * MCP_INVALID_OPTIONS at setup.
+   */
+  transactionTools?: boolean | null;
+  /**
    * @deprecated Ignored. It never changed the generated selection: every
    * scalar/enum field without required arguments, `id` included, is selected,
    * and an object type with none selects `__typename`.
@@ -455,7 +510,9 @@ export interface GenerateMCPToolsOptions {
    * Koa-style middleware run around every tool execution. A single function is
    * a one-element stack. Validated at setup (MCP_INVALID_MIDDLEWARE for a
    * non-array, a non-function entry or an empty slot in a sparse array) and
-   * copied: later changes to the array have no effect.
+   * copied: later changes to the array have no effect. Middleware that gates
+   * tools by name sees only the transaction tool's name (see
+   * `transactionTools`); its operations are in `call.args.operations`.
    */
   toolMiddleware?: MCPToolMiddleware | MCPToolMiddleware[];
   /**
@@ -585,6 +642,11 @@ export function generateMCPTools(
 /**
  * Build the MCP `inputSchema` (JSON Schema) for a single GraphQL field's
  * arguments. The arguments object is closed (`additionalProperties: false`).
+ * An input object that is `@oneOf` (`isOneOf`, which a schema rebuilt from
+ * introspection keeps only when it requested `oneOf: true`) becomes an object
+ * with exactly one property, whose value is not null (`minProperties` and
+ * `maxProperties` 1, `additionalProperties: false`, no `required`); earlier
+ * releases described it as an object whose properties were all optional.
  */
 export function graphqlArgsToJSONSchema(field: GraphQLField<any, any>): JSONSchema;
 
@@ -622,7 +684,7 @@ export function startStdioMCPServer(
  * standalone SSE stream and no session to terminate (MCP clients treat a 405
  * on GET as no server stream). The SDK and its transport load first; then
  * `transportOptions`, `execution`, `toolMiddleware`, `limits`, `textFormat`,
- * `nestedCollections` and `schemaPlugins` are validated, and asynchronous `schemaPlugins` hooks
+ * `nestedCollections`, `transactionTools` and `schemaPlugins` are validated, and asynchronous `schemaPlugins` hooks
  * awaited, before the handler is returned; `options.limits` is read again
  * for every request and call.
  */

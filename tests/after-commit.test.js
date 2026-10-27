@@ -5,7 +5,7 @@ import { createTransactions } from '../packages/sql/src/transactions.js';
 
 afterEach(() => { vi.restoreAllMocks(); });
 
-const setup = ({ supported = true, parent = {}, child = {}, build = true } = {}) => {
+const setup = ({ supported = true, parent = {}, child = {}, build = true, transaction = false } = {}) => {
   const events = [];
   const records = new Map();
   let nextId = 0;
@@ -18,6 +18,7 @@ const setup = ({ supported = true, parent = {}, child = {}, build = true } = {})
   const tx = createTransactions(() => ({}), () => {}, { driver, displayName: 'Memory' });
   const adapter = {
     createModel: (type) => ({ name: type.name }),
+    assertTransactionModels: () => {},
     castId: (id) => id, readByIdIsInert: () => true,
     stateValue: (state) => state.value,
     withTransaction: (session, body) => session?.external ? body(session) : tx.withTransaction(session, body),
@@ -49,7 +50,8 @@ const setup = ({ supported = true, parent = {}, child = {}, build = true } = {})
   });
   const input = new GraphQLInputObjectType({ name: 'CommitCustom', fields: { name: { type: GraphQLString } } });
   api.registerMutation('custom', '', input, Parent, (args, session, context) => api.saveObject(Parent.name, args, session, context));
-  const schema = build ? api.createSchema() : undefined;
+  const schema = build ? api.createSchema(undefined, undefined, undefined, transaction
+    ? { transaction: { types: [Parent] } } : {}) : undefined;
   const run = (name, input, context) => schema.getMutationType().getFields()[name].resolve(null,
     name === 'deleteparent' ? { id: input } : { input }, context);
   return { api, adapter, driver, records, events, parent, child, run, schema, tx };
@@ -248,5 +250,68 @@ describe('controller after-commit callbacks', () => {
     f.api.configureAfterCommit();
     await f.run('addparent', {});
     expect(errors).toEqual(['first']);
+  });
+});
+
+
+describe('after-commit integration with lifecycle helpers and operation lists', () => {
+  it('queues every helper once on its owned transaction with its context and action name', async () => {
+    const f = setup();
+    const notices = [];
+    const context = Object.freeze({ request: 'helpers' });
+    f.parent.onSaveCommitted = (record, args, ctx) => notices.push(['save', record.name, ctx]);
+    f.parent.onUpdateCommitted = (record, ctx) => notices.push(['update', record.name, ctx]);
+    f.parent.onTransitionCommitted = (record, action, ctx) => notices.push(['transition', action, ctx]);
+    f.parent.onDeleteCommitted = (record, ctx) => notices.push(['delete', record.name, ctx]);
+    const record = await f.api.saveObject('CommitParent', { name: 'first' }, undefined, context);
+    await f.api.updateObject('CommitParent', { id: record._id, name: 'second' }, undefined, context);
+    await f.api.transitionObject('CommitParent', 'publish', { id: record._id }, undefined, context);
+    await f.api.deleteObject('CommitParent', { id: record._id }, undefined, context);
+    await f.api.deleteObject('CommitParent', { id: record._id }, undefined, context);
+    expect(notices).toEqual([
+      ['save', 'first', context], ['update', 'second', context],
+      ['transition', 'publish', context], ['delete', 'second', context],
+    ]);
+  });
+
+  it('captures each operation result and drains the list only after the enclosing commit and cleanup', async () => {
+    const f = setup({ transaction: true });
+    f.parent.onSaveCommitted = (record) => f.events.push(['save', record.name]);
+    f.parent.onUpdateCommitted = (record) => f.events.push(['update', record.name]);
+    f.parent.onTransitionCommitted = (record, action) => f.events.push(['transition', action]);
+    f.parent.onDeleteCommitted = (record) => f.events.push(['delete', record.name]);
+    const result = await graphql({ schema: f.schema, source: `mutation { transaction(operations: [
+      { addparent: { name: "first" } },
+      { updateparent: { id: "$0", name: "second" } },
+      { publish_parent: { id: "$0" } },
+      { deleteparent: { id: "$0" } },
+      { deleteparent: { id: "missing" } }
+    ]) { id } }` });
+    expect(result.errors).toBeUndefined();
+    expect(f.events).toEqual(['commit', 'release', ['save', 'first'], ['update', 'second'],
+      ['transition', 'publish'], ['delete', 'second']]);
+  });
+
+  it.each([false, true])('discards failed attempt notifications (retry: %s)', async (retry) => {
+    const f = setup({ transaction: true });
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    let attempts = 0;
+    f.parent.onSaved = async (record, args, session) => {
+      if (record.name !== 'second') return;
+      // A helper joins the same attempt and must use its queue, not notify eagerly.
+      await f.api.saveObject('CommitParent', { name: 'from-hook' }, session);
+      if (++attempts === 1) throw Object.assign(new Error('fail attempt'), { retryable: retry });
+    };
+    f.parent.onSaveCommitted = (record) => f.events.push(record.name);
+    const result = await graphql({ schema: f.schema, source: `mutation { transaction(operations: [
+      { addparent: { name: "first" } }, { addparent: { name: "second" } }
+    ]) { id } }` });
+    if (retry) {
+      expect(result.errors).toBeUndefined();
+      expect(f.events).toEqual(['rollback', 'release', 'commit', 'release', 'first', 'from-hook', 'second']);
+    } else {
+      expect(result.errors?.[0].message).toBe('fail attempt');
+      expect(f.events).toEqual(['rollback', 'release']);
+    }
   });
 });

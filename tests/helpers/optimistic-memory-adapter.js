@@ -11,8 +11,12 @@
 //
 // Every transaction the adapter owns works on the stored records and restores them when it fails, and an
 // error labeled TransientTransactionError retries it, up to `attempts` times; `betweenAttempts` runs after
-// a failed attempt is rolled back and before the retry. A transaction the caller supplies runs once.
+// a failed attempt is rolled back and before the retry. A transaction the caller supplies runs once, and
+// its body receives that session, or what `bodySession(session)` returns, so a test can hand the body
+// another object than the session it supplied, as some adapters do.
 // getById, update, delete and find are spies, so tests read the calls and options core made.
+// assertTransactionModels, the check the generated transaction field requires (#151), is a spy that
+// accepts any models; `transactions: false` leaves it out, as an adapter without the method.
 import { vi } from 'vitest';
 import { SimfinityError } from '@simtlix/simfinity-core';
 
@@ -26,7 +30,9 @@ export const transientError = (message = 'transient failure') => Object.assign(n
   errorLabels: ['TransientTransactionError'],
 });
 
-export const createOptimisticMemoryAdapter = ({ missingVersionCountsAsOne = true, attempts = 3 } = {}) => {
+export const createOptimisticMemoryAdapter = ({
+  missingVersionCountsAsOne = true, attempts = 3, transactions = true, bodySession = null,
+} = {}) => {
   const records = new Map();
   let nextId = 1000;
   const key = (typeName, id) => `${typeName}:${id}`;
@@ -68,8 +74,9 @@ export const createOptimisticMemoryAdapter = ({ missingVersionCountsAsOne = true
     prepare() {},
     createModel: (gqltype) => ({ name: gqltype.name }),
     castId,
+    ...(transactions ? { assertTransactionModels: vi.fn() } : {}),
     async withTransaction(session, body) {
-      if (session) return body(session);
+      if (session) return body(bodySession ? bodySession(session) : session);
       for (let attempt = 1; ; attempt += 1) {
         const snapshot = new Map([...records].map(([entry, record]) => [entry, copy(record)]));
         try {

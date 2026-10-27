@@ -63,7 +63,7 @@ describe.each(modes)('after-commit on %s', (mode) => {
         expect(notices).toEqual([]);
         throw new Error('reject registered mutation after save');
       });
-      schema = api.createSchema();
+      schema = api.createSchema(undefined, undefined, undefined, { transaction: { types: [Parent] } });
       if (isMongo) {
         await parentModel.createCollection(); await childModel.createCollection();
         await childModel.createIndexes();
@@ -100,6 +100,73 @@ describe.each(modes)('after-commit on %s', (mode) => {
       const result = await add({ name: 'parent', children: { added: [{ name: 'one' }, { name: 'two' }] } });
       expect(result.errors).toBeUndefined();
       expect(notices).toEqual(['one', 'two', 'parent']);
+    });
+
+    it('notifies lifecycle helpers only after each owned write is visible independently', async () => {
+      const created = await api.saveObject(Parent.name, { name: 'first' }, undefined, context);
+      const id = String(created._id);
+      parent.onUpdateCommitted = async (record, ctx) => {
+        expect(ctx).toBe(context);
+        expect((await readParent(id)).name).toBe('second');
+        notices.push(['update', record.name]);
+      };
+      parent.onTransitionCommitted = async (record, action, ctx) => {
+        expect(ctx).toBe(context);
+        expect(await readParent(id)).not.toBeNull();
+        notices.push(['transition', action, record.state]);
+      };
+      parent.onDeleteCommitted = async (record, ctx) => {
+        expect(ctx).toBe(context);
+        expect(await readParent(id)).toBeNull();
+        notices.push(['delete', record.name]);
+      };
+      await api.updateObject(Parent.name, { id, name: 'second' }, undefined, context);
+      await api.transitionObject(Parent.name, 'publish', { id }, undefined, context);
+      await api.deleteObject(Parent.name, { id }, undefined, context);
+      await api.deleteObject(Parent.name, { id }, undefined, context);
+      expect(notices).toEqual([['update', 'second'], ['transition', 'publish', 20], ['delete', 'second']]);
+    });
+
+    it('queues list operations and helpers together, preserving snapshots until the whole list commits', async () => {
+      parent.onSaved = async (record, args, session, ctx) => {
+        await api.saveObject(Child.name, { name: 'from-hook', parent: { id: String(record._id) } }, session, ctx);
+        expect(notices).toEqual([]);
+      };
+      child.onSaveCommitted = () => notices.push(['child']);
+      parent.onSaveCommitted = async (record, args, ctx) => {
+        expect(ctx).toBe(context);
+        expect((await readParent(String(record._id))).name).toBe('second');
+        notices.push(['save', record.name]);
+      };
+      parent.onUpdateCommitted = (record) => notices.push(['update', record.name]);
+      parent.onTransitionCommitted = (record, action) => notices.push(['transition', action, record.state]);
+      const result = await run(`mutation { transaction(operations: [
+        { addparent: { name: "first" } }, { updateparent: { id: "$0", name: "second" } },
+        { publish_parent: { id: "$0" } }
+      ]) { id } }`);
+      expect(result.errors).toBeUndefined();
+      expect(notices).toEqual([['child'], ['save', 'first'], ['update', 'second'], ['transition', 'publish', 20]]);
+    });
+
+    it.each([false, true])('discards list writes and callbacks from a failed attempt (retry: %s)', async (retry) => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      let attempts = 0;
+      parent.onSaved = (record) => {
+        if (record.name === 'second' && ++attempts === 1) {
+          const error = new Error('failed list attempt');
+          if (retry) Object.assign(error, { code: '40001', severity: 'ERROR', errorLabels: ['TransientTransactionError'] });
+          throw error;
+        }
+      };
+      parent.onSaveCommitted = (record) => notices.push(record.name);
+      const result = await run(`mutation { transaction(operations: [
+        { addparent: { name: "first" } }, { addparent: { name: "second" } }
+      ]) { id } }`);
+      if (retry) expect(result.errors).toBeUndefined();
+      else expect(result.errors?.[0].message).toBe('failed list attempt');
+      expect(notices).toEqual(retry ? ['first', 'second'] : []);
+      const rows = isMongo ? await parentModel.find().lean() : await api.getModel(Parent).find({});
+      expect(rows.map((row) => row.name).sort()).toEqual(retry ? ['first', 'second'] : []);
     });
 
     it('discards nested notifications and database writes when a parent lifecycle hook rejects', async () => {

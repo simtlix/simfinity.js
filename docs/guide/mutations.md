@@ -108,13 +108,119 @@ MongoDB's optional [transactional reference integrity](./mongodb-integrity) mode
 
 On MongoDB, an `UnknownTransactionCommitResult` retries only the commit, up to five times, without repeating writes or hooks. An expired commit (`MaxTimeMSExpired`) is not retried. PostgreSQL retries confirmed serialization/deadlock aborts as complete transaction attempts. If a driver reports an uncertain outcome, reconcile it before repeating an operation. Session cleanup is awaited, and cleanup failures do not replace an earlier operation error.
 
-Multiple root mutation fields in a GraphQL request are not one shared transaction. If a later field fails, an earlier field may already have committed. Use a custom mutation when a business operation needs a single transaction spanning several writes. [Server-side operations](./server-side-operations) shows which path a job, worker or internal command should take for each kind of write.
+Multiple root mutation fields in a GraphQL request are not one shared transaction. If a later field fails, an earlier field may already have committed. Use a custom mutation when a business operation needs a single transaction spanning several writes; or the opt-in [transaction mutation](#run-several-mutations-in-one-transaction), which runs a list of generated mutations in one. [Server-side operations](./server-side-operations) shows which path a job, worker or internal command should take for each kind of write.
 
 Controllers, validators, state actions and the middleware of nested collection children can run again on a retry. Keep their database work on the supplied session and design external side effects separately from the transaction. See [controllers](./controllers#transactions-and-side-effects).
 
 For protected writes, `VERSION_CONFLICT` and `VERSION_EXHAUSTED` roll back the owned mutation without retrying those errors; a stale child also rolls back parent and sibling writes. Driver conflicts can rerun hooks before ending in a version conflict or `TRANSACTION_RETRY_EXCEEDED`. With supplied sessions preserve the caller's ownership: default MongoDB requires its caller to abort, while transactional-integrity mode aborts adapter-detected conflicts but not core-detected early conflicts. Core result diagnostics do not add a universal abort guarantee for supplied sessions. See [transactions and concurrent requests](./concurrency#transactions-and-concurrent-requests).
 
 The optional [committed controller callbacks](./controllers#after-commit-callbacks) run only after a confirmed commit, once for each completed lifecycle operation in the successful attempt, serially and before returning. Their failures are reported independently and do not fail the write. A cleanup failure after commit retains its existing rejection behavior while the confirmed callbacks still run. Calls that borrow an application-owned native transaction do not dispatch these callbacks automatically; registered mutations and SQL's public `withTransaction()` are observed owners.
+
+## Run several mutations in one transaction
+
+::: info Available since 3.16.0
+The transaction mutation is available since 3.16.0. A schema has none unless it asks for one, and schemas that do not ask are unchanged.
+:::
+
+Each root mutation field runs in its own transaction, so a client that creates a serie and its seasons, changes one record and deletes another, with nothing stored when any step fails, needs a custom mutation. Ask `createSchema()` for one `transaction` field instead: it runs a list of the generated mutations of the types you name, in order, in one database transaction. The examples use `Serie` and `Season` from the [relationships guide](./relationships#referenced-objects-and-collections), registered with `connect()` as `serie` and `season`:
+
+```javascript
+const schema = simfinity.createSchema(null, null, null, {
+  transaction: { types: [SerieType, SeasonType] },
+});
+```
+
+`types` is a non-empty array of distinct types registered in this runtime. The operations are the generated add, update, delete and state action mutations of those types that the schema includes, so `includedMutationTypes` still applies. Registered custom mutations, nested entries and controller callbacks are never operations. The optional `name` (default `transaction`) must be a GraphQL name that does not start with `__`. It names the field, and its types take it with the first letter in upper case. These are the additions for the default name, in the order that `printSchema()` prints them, where the keys follow the order of the generated mutations in the schema:
+
+```graphql
+type Mutation {
+  # …the generated mutations…
+  transaction(operations: [TransactionOperation!]!): [TransactionResult!]
+}
+
+type TransactionResult {
+  id: ID
+  addserie: Serie
+  deleteserie: Serie
+  addseason: Season
+  deleteseason: Season
+  updateserie: Serie
+  updateseason: Season
+}
+
+input TransactionOperation @oneOf {
+  addserie: SerieInput
+  deleteserie: TransactionDeleteInput
+  addseason: SeasonInput
+  deleteseason: TransactionDeleteInput
+  updateserie: SerieInputForUpdate
+  updateseason: SeasonInputForUpdate
+}
+
+input TransactionDeleteInput {
+  id: ID!
+}
+```
+
+Each item of `operations` holds exactly one key, which `@oneOf` enforces. The key is the name of a generated mutation, and the value is that mutation's `input`: `SerieInput` for `addserie`, and for a state action such as `activate_season`, the update input like its root. A delete takes an object instead of the bare ID: `{ id }` (`TransactionDeleteInput`), or `{ id, version }` (`RecordVersionRef`) for a type with [optimistic concurrency](./concurrency#versions-in-helpers-and-transactions). `TransactionDeleteInput` exists only when the field has a delete of a type without it. GraphQL validates variables, literals, scalars, enums and `@oneOf` before anything runs, so a client sends the list as a variable:
+
+```graphql
+mutation LaunchSerie($operations: [TransactionOperation!]!) {
+  transaction(operations: $operations) {
+    id
+    addserie { id name }
+    addseason { id number }
+    updateserie { id name }
+  }
+}
+```
+
+```json
+{
+  "operations": [
+    { "addserie": { "name": "Northern Lights" } },
+    { "addseason": { "number": 1, "year": 2024, "serie": { "id": "$0" } } },
+    { "addseason": { "number": 2, "year": 2025, "serie": { "id": "$0" } } },
+    { "updateserie": { "id": "$0", "name": "Northern Lights: New Chapter" } }
+  ]
+}
+```
+
+The field returns one result per operation, in order. A result has the record's `id` and one field per operation key; only the field of its own operation is set, with the type that mutation returns, and the others are `null`. A delete of a record that does not exist returns `null` for both its `id` and its field, and the list continues. An empty list returns `[]` without opening a transaction. The field is nullable, so an error nulls it and nothing is stored. As for the roots, the selected output fields are resolved after the commit, so an error there does not undo the writes.
+
+### Reference earlier results
+
+An operation can name the record that an earlier one wrote with `$K`, where `K` is the position of that operation in the list, counted from 0 and without leading zeros. The tokens are recognized only in these positions:
+
+- the `id` of an update, state action or delete operation;
+- the `id` of a single reference field, such as `serie: { id: "$0" }`;
+- the `id` of a nested `updated` entry and each nested `deleted` item;
+- a plain `ID` field of a child type that is the `connectionField` of a collection, when every collection that uses the field is declared on one type, which the referenced operation must write.
+
+Every other string keeps its text, `$` included. In a position above, a value that starts with `$$` loses one `$` and is kept as a literal, so `$$0` stores the text `$0`; any other value that starts with `$` fails with `INVALID_OPERATION_REFERENCE` (400). The source must come before the operation that uses it, must not be a delete and must write the type the position expects, or the whole list fails before the transaction starts, with a message such as `Invalid reference at operations[0].addseason.serie.id: operation 1 does not exist`. Only IDs can be referenced, never children or versions: the expected `version` of every update, action and delete stays explicit, and a record that a list creates starts at version 1, so an update of it later in the list sends `version: 1` and a state action after that update sends `version: 2`. Each attempt resolves the tokens to the IDs that attempt created, so the IDs of a rolled-back attempt are never reused.
+
+### What runs, and how often
+
+One transaction, owned by the field, runs the list; the adapter retries it on a transient conflict as it does for a root, and each attempt repeats the whole list on a fresh copy of the operations. For each operation of an attempt, Simfinity:
+
+1. resolves its `$K` references;
+2. runs the authorization checks that a direct call to its root gets, see [authorize the transaction mutation](./authorization#authorize-the-transaction-mutation);
+3. runs the root's global [middleware](./middleware) with the same parameters as for the root: `type`, `args` (`{ input }`, or `{ id }` and `{ id, version }` for deletes), `operation`, `context` and, for actions, `actionName` and `actionField`;
+4. checks the nested limit and the collection connections of the input middleware left, and runs the operation with the lifecycle of its root: validators, controller hooks, nested entries and version checks.
+
+Later operations see the writes of earlier ones through the shared session. An error in any operation rolls everything back, and the resolver returns only after the adapter confirms the commit. Middleware, validators and hooks run again on every attempt, and the `context` is the same object across operations and attempts, so changes a middleware makes to it are not undone by a retry. Keep side effects in an outbox, as described in [controllers](./controllers#transactions-and-side-effects).
+
+Controller [after-commit callbacks](./controllers#after-commit-callbacks) from every operation, nested write and helper call using the attempt's session share one queue. They run serially only after the whole list commits and cleanup is attempted, in lifecycle completion order (children before their parent), and are awaited before the field returns. A rollback or retried attempt discards its queue. Multiple writes to one record keep separate snapshots; a callback failure is reported through `configureAfterCommit` and never changes the committed result or triggers a retry.
+
+### Limits, errors and requirements
+
+A list may hold at most `maxTransactionOperations` operations, 100 by default; a longer one fails with `TRANSACTION_OPERATIONS_EXCEEDED` (400) before any adapter call. The nested limit is joint: all the operations of one attempt share one `maxNestedOperations` budget. See [limit nested collection operations](#limit-nested-collection-operations).
+
+An error of an operation carries `extensions.operationIndex` (0-based) and `extensions.operation` (the key), next to the code, status and message the same error has on its root: `VALIDATION_ERROR`, `VERSION_CONFLICT`, `NOT_VALID_ID`, `INVALID_INPUT` and the others keep them. Errors about the list as a whole (too many operations, the `NESTED_OPERATIONS_EXCEEDED` of the preflight that counts the nested entries of the whole list, models that cannot share a session) and errors of the transaction itself (begin, commit, rollback) carry no position. See [errors of the transaction mutation](../reference/errors#errors-of-the-transaction-mutation).
+
+The database adapter must implement `assertTransactionModels(models)` to enable the field. The bundled MongoDB, SQL and PostgreSQL adapters do. On MongoDB the models of every type an operation can write, nested collections included, must share one `MongoClient`, such as the models of one `mongoose.createConnection()` connection and its `useDb()` siblings; models that belong to different clients cannot share a transaction, and the list fails with `TRANSACTION_UNSUPPORTED` (500) before a session opens. An adapter without the method makes `createSchema()` fail with the same code when `transaction` is set. See the [`createSchema()` reference](../reference/api#createschema) for the option's checks.
+
+[MCP](./mcp#transaction-tool) can publish the field as one tool, and the [authorization guide](./authorization#authorize-the-transaction-mutation) explains how the rules of the operations apply.
 
 ## Limit nested collection operations
 
@@ -124,9 +230,13 @@ Each nested `added`, `updated` or `deleted` entry runs its own middleware, hooks
 simfinity.configureMutationLimits({ maxNestedOperations: 100 });
 ```
 
-Simfinity counts the `added`, `updated` and `deleted` entries of non-embedded collection fields at every nesting level of one generated add, update or state-action mutation, including `null` entries. The check runs after root middleware and before the transaction starts. A mutation over the limit fails with `NESTED_OPERATIONS_EXCEEDED` (400) and writes nothing.
+Simfinity counts the `added`, `updated` and `deleted` entries of non-embedded collection fields at every nesting level of one generated add, update or state-action mutation, including `null` entries. The check runs after root middleware and before the transaction starts. A mutation over the limit fails with `NESTED_OPERATIONS_EXCEEDED` (400) and writes nothing. Since 3.16.0, `updateObject()` and `transitionObject()` check their `input` the same way, with the limit configured when they are called.
 
-The setting is process-wide and shared by every runtime. It is unlimited by default. `0` forbids nested operations, and calling `configureMutationLimits()` without arguments restores the default. Unknown or misspelled options, such as `maxNestedOperation`, throw `INVALID_MUTATION_LIMITS` (400) and keep the current limit, so a typo cannot silently remove it. Root deletes, `saveObject()`, custom mutations and embedded lists are not counted. See the [API reference](../reference/api#configuremutationlimits).
+The setting is process-wide and shared by every runtime. It is unlimited by default. `0` forbids nested operations, and calling `configureMutationLimits()` without arguments restores the default. Unknown or misspelled options, such as `maxNestedOperation`, throw `INVALID_MUTATION_LIMITS` (400) and keep the current limits, so a typo cannot silently remove them. Root deletes, custom mutations and embedded lists are not counted, and neither is `saveObject()` outside a transaction mutation. See the [API reference](../reference/api#configuremutationlimits).
+
+Since 3.16.0, the same call also sets `maxTransactionOperations`, the most operations one [transaction mutation](#run-several-mutations-in-one-transaction) may run. It is a positive safe integer and defaults to 100; `null`, `0` or a non-integer throw `INVALID_MUTATION_LIMITS` (400) and keep both current limits. Each call replaces both values, so `configureMutationLimits({ maxNestedOperations: 100 })` also restores `maxTransactionOperations` to 100, and the error for an unknown option now reads ``Unknown mutation limit option maxNestedOperation; use maxNestedOperations or maxTransactionOperations``.
+
+Inside a transaction mutation the nested budget is joint. Every nested entry that runs in one attempt counts once against `maxNestedOperations`, whoever adds it: the operations' own inputs, entries that middleware, state actions and controller hooks add, and those of `saveObject()`, `updateObject()` and `transitionObject()` calls that hooks make with the attempt's session. The root records of operations and helper calls never count. A list that is already over the limit fails before the transaction starts, and an entry that crosses it later rolls back the writes of that attempt. A transaction mutation reads both limits once when it starts, so a later call to `configureMutationLimits()` applies from the next invocation.
 
 ## Add a custom mutation
 

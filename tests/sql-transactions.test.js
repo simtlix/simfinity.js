@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   GraphQLID, GraphQLInputObjectType, GraphQLList, GraphQLNonNull, GraphQLObjectType, GraphQLString, graphql,
 } from 'graphql';
+import { createRuntime as createCoreRuntime } from '@simtlix/simfinity-core';
 import { createTransactions } from '../packages/sql/src/transactions.js';
 import { createSQLAdapter } from '../packages/sql/src/adapter.js';
 import { bindPlugin } from '../packages/sql/src/plugin.js';
@@ -653,6 +654,114 @@ describe('SQL single-statement reads', () => {
     await expect(adapter.find(forged, Payment, {}, null)).rejects.toMatchObject({ extensions: { code: 'INVALID_MODEL' } });
     expect(await adapter.find(model, Payment, {}, null)).toEqual([]);
     expect(statements.filter((text) => text.startsWith('SELECT '))).toHaveLength(1);
+  });
+});
+
+describe('SQL transaction model affinity', () => {
+  const refusal = (first, second) => ({
+    code: 'TRANSACTION_UNSUPPORTED', status: 500, message: `Types ${first}, ${second} cannot share one database transaction`,
+  });
+  const thrownBy = (call) => {
+    try {
+      call();
+    } catch (error) {
+      expect(error).toBeInstanceOf(SimfinityError);
+      return { code: error.extensions.code, status: error.extensions.status, message: error.message };
+    }
+    return undefined;
+  };
+  // A pg.Pool stand-in that answers every statement with no rows.
+  const stubPool = () => {
+    const client = { query: vi.fn(async (text) => ({ rows: [], rowCount: 0, command: text.split(' ')[0] })), release: vi.fn() };
+    return { client, pool: { connect: vi.fn(async () => client), query: vi.fn(async () => ({ rows: [], rowCount: 0 })) } };
+  };
+  const plugin = (pool) => ({ ...postgresPlugin({ pool, schema: 'app' }), initialize: async () => ({ mode: 'validate', created: [] }) });
+  // An adapter with one type, and one model handle, per name; nothing is initialized.
+  const adapterOf = (...names) => {
+    const { client, pool } = stubPool();
+    const adapter = createSQLAdapter(plugin(pool));
+    const types = names.map((name) => new GraphQLObjectType({ name, fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } }));
+    adapter.prepare(types.map((gqltype) => ({ gqltype, endpoint: true })));
+    return { adapter, handles: types.map((type) => adapter.createModel(type)), client, pool, types };
+  };
+
+  it('accepts its own handles, an empty list and the same handle twice, before the database is initialized', () => {
+    const { adapter, handles: [alpha, beta] } = adapterOf('AffinityAlpha', 'AffinityBeta');
+
+    expect(adapter.assertTransactionModels([])).toBeUndefined();
+    expect(adapter.assertTransactionModels([beta, alpha])).toBeUndefined();
+    expect(adapter.assertTransactionModels([alpha, alpha])).toBeUndefined();
+  });
+
+  it('refuses a handle of another instance, even one for a type of the same name, and names the types sorted', () => {
+    const { adapter, handles: [alpha, beta] } = adapterOf('AffinityAlpha', 'AffinityBeta');
+    const { handles: [gamma, twin] } = adapterOf('AffinityGamma', 'AffinityAlpha');
+
+    expect(thrownBy(() => adapter.assertTransactionModels([gamma, beta]))).toEqual(refusal('AffinityBeta', 'AffinityGamma'));
+    expect(thrownBy(() => adapter.assertTransactionModels([alpha, beta, gamma]))).toEqual(refusal('AffinityAlpha', 'AffinityGamma'));
+    expect(thrownBy(() => adapter.assertTransactionModels([alpha, twin]))).toEqual(refusal('AffinityAlpha', 'AffinityAlpha'));
+    expect(thrownBy(() => adapter.assertTransactionModels([gamma]))).toEqual({
+      code: 'TRANSACTION_UNSUPPORTED', status: 500, message: 'Types AffinityGamma cannot share one database transaction',
+    });
+  });
+
+  it('refuses an object that only looks like its handle', () => {
+    const { adapter, handles: [alpha, beta], types: [alphaType] } = adapterOf('AffinityAlpha', 'AffinityBeta');
+    const forged = { name: alphaType.name, gqltype: alphaType };
+
+    expect(thrownBy(() => adapter.assertTransactionModels([beta, forged]))).toEqual(refusal('AffinityAlpha', 'AffinityBeta'));
+    expect(thrownBy(() => adapter.assertTransactionModels([alpha, { ...alpha }]))).toEqual(refusal('AffinityAlpha', 'AffinityAlpha'));
+  });
+
+  it('writes nothing and takes no connection', () => {
+    const { adapter, handles: [alpha, beta], client, pool } = adapterOf('AffinityAlpha', 'AffinityBeta');
+    const { handles: [gamma] } = adapterOf('AffinityGamma');
+
+    adapter.assertTransactionModels([alpha, beta]);
+    thrownBy(() => adapter.assertTransactionModels([alpha, gamma]));
+    expect(pool.connect).not.toHaveBeenCalled();
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(client.query).not.toHaveBeenCalled();
+  });
+
+  it('lets the generated transaction field run with the adapter, checking the models of its types once per invocation', async () => {
+    const { client, pool } = stubPool();
+    const adapter = createSQLAdapter(plugin(pool));
+    const runtime = createCoreRuntime(adapter);
+    const Payment = new GraphQLObjectType({ name: 'AffinityPayment', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+    const Receipt = new GraphQLObjectType({ name: 'AffinityReceipt', fields: { id: { type: GraphQLID }, note: { type: GraphQLString } } });
+    runtime.connect(null, Payment, 'affinitypayment', 'affinitypayments');
+    runtime.connect(null, Receipt, 'affinityreceipt', 'affinityreceipts');
+    // Records how many connections the pool had given out when the check ran.
+    const connectionsAtCheck = [];
+    const own = adapter.assertTransactionModels;
+    const check = vi.spyOn(adapter, 'assertTransactionModels').mockImplementation(function recordConnections(list) {
+      connectionsAtCheck.push(pool.connect.mock.calls.length);
+      return own.call(this, list);
+    });
+    const schema = runtime.createSchema(null, null, null, { transaction: { types: [Payment, Receipt] } });
+    await adapter.initialize();
+    const source = 'mutation Run($operations: [TransactionOperation!]!) { transaction(operations: $operations) { id } }';
+
+    expect(schema.getMutationType().getFields().transaction).toBeDefined();
+    expect(check).not.toHaveBeenCalled();
+    expect(await graphql({ schema, source, variableValues: { operations: [] } })).toEqual({ data: { transaction: [] } });
+    expect(check).not.toHaveBeenCalled();
+    // The stand-in pool finds no rows, so each delete finds no record and the list runs on.
+    const missing = '00000000-0000-4000-8000-000000000001';
+    pool.connect.mockClear();
+    const result = await graphql({
+      schema, source, variableValues: { operations: [{ deleteaffinitypayment: { id: missing } }, { deleteaffinityreceipt: { id: missing } }] },
+    });
+    expect(result.errors).toBeUndefined();
+    expect(result.data.transaction).toEqual([{ id: null }, { id: null }]);
+    expect(check).toHaveBeenCalledOnce();
+    expect(connectionsAtCheck).toEqual([0]);
+    expect(check.mock.calls[0][0]).toHaveLength(2);
+    expect(check.mock.calls[0][0]).toEqual(expect.arrayContaining([runtime.getModel(Payment), runtime.getModel(Receipt)]));
+    expect(client.query.mock.calls.map(([text]) => text).filter((text) => /^(BEGIN|COMMIT|ROLLBACK)/.test(text))).toEqual([
+      expect.stringMatching(/^BEGIN/), 'COMMIT',
+    ]);
   });
 });
 

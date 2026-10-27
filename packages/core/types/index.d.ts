@@ -434,16 +434,24 @@ export interface ConcurrencyDeclaration {
 }
 
 /**
- * Process-wide limits for generated add, update and state-action mutations. Any other option,
- * such as a misspelled `maxNestedOperation`, throws `INVALID_MUTATION_LIMITS` (400).
+ * Process-wide limits for generated mutations. Each call replaces both values: an omitted or
+ * `undefined` option restores its default. Any other option, such as a misspelled
+ * `maxNestedOperation`, throws `INVALID_MUTATION_LIMITS` (400) and keeps the current limits.
  */
 export interface MutationLimitsOptions {
   /**
    * Maximum number of `added`, `updated` and `deleted` entries across every nested level of
    * non-embedded collection fields in one generated mutation. A non-negative safe integer;
-   * `null` or omitted means unlimited (the default).
+   * `null` or omitted means unlimited (the default). The helpers `updateObject` and
+   * `transitionObject` apply it to their `input` as the generated mutations do.
    */
   maxNestedOperations?: number | null;
+  /**
+   * Maximum number of operations in one generated transaction mutation. A positive safe integer;
+   * omitted means 100 (the default). `null`, `0`, a negative number or a non-integer throws
+   * `INVALID_MUTATION_LIMITS` (400).
+   */
+  maxTransactionOperations?: number;
 }
 
 /**
@@ -456,6 +464,21 @@ export interface CreateSchemaOptions {
    * `[]` includes none, and names that are not registered are ignored.
    */
   includedCustomQueries?: string[] | null;
+  /**
+   * Adds one mutation field that runs a list of generated mutations in order in one database
+   * transaction. `null` or omission adds none. `name` defaults to `transaction` and must be a GraphQL
+   * name that does not start with `__`; it names the field and its types (for `transaction`:
+   * `TransactionOperation`, a `@oneOf` input keyed by operation, `TransactionResult` and, for deletes
+   * of types without optimistic concurrency, `TransactionDeleteInput`). The operations are the
+   * generated add, update, delete and state machine action mutations of `types` that this schema
+   * includes; registered mutations never are. `types` is a non-empty array of distinct types registered
+   * in this runtime. An invalid option throws `INVALID_SCHEMA_OPTIONS` (500) before models are prepared,
+   * or once the generated mutations are built when the field name or a derived type name is taken or
+   * no operation remains; a type bound to another runtime throws `TYPE_BOUND_TO_OTHER_RUNTIME` (409),
+   * and an adapter without `assertTransactionModels` throws `TRANSACTION_UNSUPPORTED` (500). A failed
+   * `createSchema()` keeps no transaction field or type.
+   */
+  transaction?: { name?: string; types: GraphQLObjectType[] } | null;
 }
 
 export interface QueryLimitsOptions {
@@ -517,10 +540,12 @@ export interface Runtime<Model = any, Session = any> {
   /** The same process-wide setting as the root `configureQueryLimits`. */
   configureQueryLimits(options?: QueryLimitsOptions): void;
   /**
-   * Process-wide; calling it without options restores the unlimited default. Invalid options,
-   * including unknown or misspelled option keys, throw `INVALID_MUTATION_LIMITS` (400) and keep
-   * the current limit. A generated mutation over the limit fails with
-   * `NESTED_OPERATIONS_EXCEEDED` (400) before its transaction starts.
+   * Process-wide; calling it without options restores both defaults (`maxNestedOperations`
+   * unlimited, `maxTransactionOperations` 100). Invalid options, including unknown or misspelled
+   * option keys, throw `INVALID_MUTATION_LIMITS` (400) and keep the current limits. A generated
+   * mutation over the nested limit fails with `NESTED_OPERATIONS_EXCEEDED` (400) before its
+   * transaction starts. `updateObject` and `transitionObject` apply `maxNestedOperations` to their
+   * `input` in the same way (`null` = no limit).
    */
   configureMutationLimits(options?: MutationLimitsOptions): void;
   /**
@@ -568,7 +593,8 @@ export interface Runtime<Model = any, Session = any> {
    *
    * `options.includedCustomQueries` selects custom queries by name (see {@link CreateSchemaOptions});
    * an included custom query named like an included generated query throws `QUERY_NAME_CONFLICT`
-   * (500). A schema without mutation fields has no `Mutation` root.
+   * (500). `options.transaction` adds the generated transaction field (see {@link CreateSchemaOptions}).
+   * A schema without mutation fields has no `Mutation` root.
    */
   createSchema(includedQueryTypes?: GraphQLObjectType[] | null, includedMutationTypes?: GraphQLObjectType[] | null, includedCustomMutations?: string[] | null, options?: CreateSchemaOptions): GraphQLSchema;
   getModel(type: GraphQLObjectType | { name: string }): Model | null | undefined;
@@ -609,6 +635,64 @@ export interface Runtime<Model = any, Session = any> {
   registerView(name: string, options: ViewOptions): void;
   /** Owns the full workflow transaction unless an active caller session is supplied. */
   saveObject(typeName: string, args: Record<string, any>, session?: Session, context?: any): Promise<any>;
+  /**
+   * Runs the lifecycle of the generated update mutation from code: validators, controller hooks,
+   * optimistic concurrency and the nested `added`, `updated` and `deleted` entries, in one transaction.
+   * `typeName` names a type registered in this runtime that stores records and has its update input
+   * prepared by `createSchema()`, with an `id` field. Whether a schema exposes the mutation does not
+   * matter: the helper is not an authorization boundary. Any other `typeName` rejects with
+   * `INVALID_OPERATION_TARGET` (500), before the input is read.
+   *
+   * `input` has the shape of the type's generated update input, `version` included on a type with
+   * optimistic concurrency. It is checked structurally and copied before anything runs, and the
+   * caller's object is never written to. It is not coerced like a GraphQL input: enum fields take
+   * their internal values, scalars are not parsed, a reference is its record key as a string, such as
+   * `{ id: String(record._id) }`, and the `state` of a type with a state machine changes only through
+   * `transitionObject`. A scalar field takes a primitive, a `Date` or plain data (objects and arrays,
+   * copied deeply, at most 256 levels deep); class instances such as `ObjectId`, `Buffer` or `Map` are
+   * rejected with `INVALID_INPUT`. An own `undefined` counts as omitted, and a bare value is never
+   * wrapped into a list. A missing `input`, `id` or value for a non-null field rejects with
+   * `REQUIRED_VALUE` (400); any other violation, such as an unknown field, an object that is not plain
+   * or a list that is not dense, rejects with `INVALID_INPUT` (400). The message names the path, such
+   * as `input.lines.added[1].price`, and never a value. More nested entries than `maxNestedOperations`
+   * from `configureMutationLimits()` (`null` = no limit) reject with `NESTED_OPERATIONS_EXCEEDED` (400)
+   * before the transaction starts.
+   *
+   * Without `session`, the adapter owns the transaction and its retries. A supplied `session` must have
+   * an active transaction, and the helper itself never commits, retries, aborts or cleans up a supplied
+   * session; an adapter may still abort it on a write error (for example MongoDB with transactional
+   * reference integrity). Like `saveObject`, it skips the global middleware of the record itself; nested entries keep theirs and
+   * receive `context`, which may be `undefined`.
+   *
+   * Resolves to the updated record, as the generated mutation returns it. An `id` that has no record
+   * rejects with `NOT_VALID_ID` (404), and a stale `version` with `VERSION_CONFLICT` (409).
+   */
+  updateObject(typeName: string, input: Record<string, any>, session?: Session, context?: any): Promise<any>;
+  /**
+   * Runs the lifecycle of the generated delete mutation from code. `target` is `{ id }`, the record key
+   * as a string, plus `version`, the version read, on a type with optimistic concurrency; on any other
+   * type `version` is an unknown field. The type is checked as in {@link Runtime.updateObject}, except
+   * that it needs no update input of its own; the type must still be a stored record type, which only
+   * `createSchema()` establishes. The target is checked before anything runs: a missing
+   * target, `id` or required `version` rejects with `REQUIRED_VALUE` (400), and any other violation
+   * with `INVALID_INPUT` (400). A stale `version` rejects with `VERSION_CONFLICT` (409). Sessions,
+   * `context` and middleware work as in `updateObject`.
+   *
+   * Resolves to the deleted record, or to `null` when no record has that ID.
+   */
+  deleteObject(typeName: string, target: { id: string; version?: number }, session?: Session, context?: any): Promise<any>;
+  /**
+   * Runs the state machine action `actionName` of `typeName` from code, with the lifecycle of the
+   * generated action mutation: the check of the current state, the action's callback, the update and the
+   * controller hooks, in one transaction. An `actionName` that is not an own action of the type's state
+   * machine, or a type without one, rejects with `UNKNOWN_ACTION` (500). The type, the checks of `input`,
+   * the session, `context`, the middleware and the errors are as in {@link Runtime.updateObject}. `input` has
+   * the shape of the update input and does not carry `state`. An action that does not start from the
+   * record's state rejects with `BAD_REQUEST` (400).
+   *
+   * Resolves to the updated record, with `state` set to the action's target state.
+   */
+  transitionObject(typeName: string, actionName: string, input: Record<string, any>, session?: Session, context?: any): Promise<any>;
   preventCreatingCollection(prevent: boolean): void;
 }
 
@@ -645,6 +729,16 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * contract of `update` and `delete` and to the requirements on `find` below.
    */
   writeFeatures?: { optimisticConcurrency?: boolean } | null | undefined;
+  /**
+   * Optional, and required to enable the generated transaction field (see
+   * `CreateSchemaOptions.transaction`). Receives the models one transaction of that field may
+   * write: those of the types that own its operations and of the referenced collection items their
+   * inputs declare, at any depth, without duplicates. Core calls it before each transaction of the
+   * field opens, never in `createSchema()`, so a schema can be created before the connection opens.
+   * It must be synchronous and never write, and it throws when the models cannot share one session; a
+   * returned promise fails the transaction with `TRANSACTION_UNSUPPORTED` (500).
+   */
+  assertTransactionModels?(models: Model[]): void;
   bind?(runtime: Pick<Runtime<Model, Session>, 'getModel' | 'getType' | 'getRegistrations'>): void;
   validateRegistration?(registration: RuntimeRegistration<Model, Session>): void;
   /**
@@ -915,7 +1009,7 @@ export function resolveModelPath(models: ModelDescription, entityName: string, p
 export function configureQueryLimits(options?: QueryLimitsOptions): void;
 /**
  * Same process-wide setting as `Runtime.configureMutationLimits`. Unknown or misspelled options
- * throw `INVALID_MUTATION_LIMITS` (400) and keep the current limit.
+ * throw `INVALID_MUTATION_LIMITS` (400) and keep the current limits.
  */
 export function configureMutationLimits(options?: MutationLimitsOptions): void;
 export function paginationStages(pagination: { page: number; size: number } | null | undefined, withDefault: boolean): Array<{ $skip: number } | { $limit: number }>;

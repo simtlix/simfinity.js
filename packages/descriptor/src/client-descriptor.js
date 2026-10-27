@@ -3,7 +3,7 @@ import {
   isObjectType, isScalarType, isUnionType, print,
 } from 'graphql';
 import SimfinityError from '@simtlix/simfinity-core/internal/errors';
-import { schemaRegistrations } from '@simtlix/simfinity-core/internal/schema-registrations';
+import { schemaRegistrations, schemaTransaction } from '@simtlix/simfinity-core/internal/schema-registrations';
 import { getFieldStorageName, getListShape, isVirtualField, normalizeConnectionField, virtualFieldOptions } from '@simtlix/simfinity-core/internal/relation-storage';
 import { packageInfo } from './package-info.js';
 
@@ -118,9 +118,10 @@ const createDescriptor = (schema, registrations) => {
       ...(marker?.view ? { view: marker.view.name } : {}) }];
   });
   const mutationKinds = { save: 'add', update: 'update', delete: 'delete', state_changed: 'transition', custom_mutation: 'customMutation' };
+  const transaction = schemaTransaction(schema);
   const mutationEntries = Object.entries(schema.getMutationType()?.getFields() || {}).map(([name, field]) => {
     const marker = field.extensions?.simfinityMutation;
-    const kind = mutationKinds[marker?.operation] || 'customMutation';
+    const kind = field === transaction ? 'transaction' : mutationKinds[marker?.operation] || 'customMutation';
     const result = { ...operation(field), type: marker?.typeName || null, operation: kind };
     if (['add', 'update', 'delete'].includes(kind) && result.description === kind) result.description = null;
     if (kind === 'transition') Object.assign(result, { action: marker.action, from: textOrNull(marker.from), to: textOrNull(marker.to) });
@@ -161,8 +162,10 @@ const createDescriptor = (schema, registrations) => {
         } : null;
       }
     }
-    if (isInputObjectType(type)) result.fields = Object.values(type.getFields()).map(input);
-    else if (isObjectType(type) || isInterfaceType(type)) {
+    if (isInputObjectType(type)) {
+      result.fields = Object.values(type.getFields()).map(input);
+      if (type.isOneOf === true) result.isOneOf = true;
+    } else if (isObjectType(type) || isInterfaceType(type)) {
       result.interfaces = type.getInterfaces().map((item) => item.name);
       result.fields = Object.values(type.getFields()).map((field) => {
         const relation = relationOf(type, field);

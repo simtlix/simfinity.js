@@ -248,6 +248,27 @@ const coreSource = `import assert from 'node:assert/strict';
   const view = await graphql({ schema, source: '{ smokeView { id } }' });
   assert.equal(view.errors, undefined);
   assert.deepEqual(view.data.smokeView, []);
+  // The lifecycle helpers (#151) are Runtime members, not root exports: the archive ships what they run on. A call
+  // checks its target and its input before anything is read, and an update of an ID that has no record fails as the
+  // generated root does.
+  for (const helper of ['updateObject', 'deleteObject', 'transitionObject']) assert.equal(typeof runtime[helper], 'function', helper);
+  await assert.rejects(() => runtime.updateObject('CoreMissing', { id: '1' }), (error) => error.getCode() === 'INVALID_OPERATION_TARGET' && error.getStatus() === 500);
+  await assert.rejects(() => runtime.updateObject('CoreBook', null), (error) => error.getCode() === 'REQUIRED_VALUE' && error.message === 'Required value input is missing');
+  await assert.rejects(() => runtime.updateObject('CoreBook', { id: '1', title: 'a' }), (error) => error.getCode() === 'NOT_VALID_ID' && error.getStatus() === 404);
+  assert.equal(await runtime.deleteObject('CoreBook', { id: '1' }), null);
+  await assert.rejects(() => runtime.deleteObject('CoreBook', '1'), (error) => error.getCode() === 'INVALID_INPUT' && error.message === 'Invalid input at input: expected a plain object');
+  await assert.rejects(() => runtime.transitionObject('CoreBook', 'close', { id: '1' }), (error) => error.getCode() === 'UNKNOWN_ACTION' && error.message === 'Type CoreBook has no state machine action close');
+  // The generated transaction field (#151): the option needs an adapter that implements assertTransactionModels, which
+  // is optional for core, and the field it adds carries the marker sentence.
+  const bareBook = new GraphQLObjectType({ name: 'CoreBareTxBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+  const bareRuntime = createRuntime(adapter);
+  bareRuntime.connect(null, bareBook, 'coreBareTxBook', 'coreBareTxBooks');
+  assert.throws(() => bareRuntime.createSchema(null, null, null, { transaction: { types: [bareBook] } }), (error) => error.getCode() === 'TRANSACTION_UNSUPPORTED' && error.getStatus() === 500 && error.message === 'The database adapter does not support generated transactions');
+  const affinityBook = new GraphQLObjectType({ name: 'CoreAffinityTxBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+  const affinityRuntime = createRuntime({ ...adapter, assertTransactionModels() {} });
+  affinityRuntime.connect(null, affinityBook, 'coreAffinityTxBook', 'coreAffinityTxBooks');
+  const affinitySchema = affinityRuntime.createSchema(null, null, null, { transaction: { types: [affinityBook] } });
+  assert(affinitySchema.getMutationType().getFields().transaction.description.startsWith('Simfinity transaction: runs the listed generated mutations in order in one database transaction.'));
   const introspection = graphqlSync({
     schema,
     source: '{ __type(name: "__Field") { fields { name } } }',
@@ -301,6 +322,9 @@ const coreSource = `import assert from 'node:assert/strict';
   configureMutationLimits({ maxNestedOperations: 10 });
   assert.throws(() => configureMutationLimits({ maxNestedOperations: -1 }), (error) => error.getCode() === 'INVALID_MUTATION_LIMITS');
   assert.throws(() => configureMutationLimits({ maxNestedOperation: 10 }), (error) => error.getCode() === 'INVALID_MUTATION_LIMITS');
+  // The cap of one generated transaction (#151) is a positive safe integer.
+  configureMutationLimits({ maxTransactionOperations: 5 });
+  assert.throws(() => configureMutationLimits({ maxTransactionOperations: 0 }), (error) => error.getCode() === 'INVALID_MUTATION_LIMITS' && error.getStatus() === 400 && error.message === 'maxTransactionOperations must be a positive safe integer');
   configureMutationLimits();
   const masking = buildErrorFormatter((error) => (error instanceof InternalServerError ? new InternalServerError('Unexpected error') : undefined));
   assert.equal(masking(new Error('secret')).message, 'Unexpected error');
@@ -496,6 +520,14 @@ const sqlSource = `import assert from 'node:assert/strict';
   assert.equal(view.errors, undefined);
   assert.deepEqual(view.data.smokeView, []);
   assert.deepEqual(calls, ['find', 'find']);
+  // The lifecycle helpers (#151) are runtime members, which the facade's spread carries. These calls fail on their
+  // target or their input, so the plugin runs no statement.
+  for (const helper of ['updateObject', 'deleteObject', 'transitionObject']) assert.equal(typeof api[helper], 'function', helper);
+  await assert.rejects(() => api.updateObject('SQLMissing', { id: '1' }), (error) => error.getCode() === 'INVALID_OPERATION_TARGET' && error.getStatus() === 500);
+  await assert.rejects(() => api.updateObject('SQLBook', null), (error) => error.getCode() === 'REQUIRED_VALUE' && error.message === 'Required value input is missing');
+  await assert.rejects(() => api.deleteObject('SQLBook', '1'), (error) => error.getCode() === 'INVALID_INPUT' && error.message === 'Invalid input at input: expected a plain object');
+  await assert.rejects(() => api.transitionObject('SQLBook', 'close', { id: '1' }), (error) => error.getCode() === 'UNKNOWN_ACTION' && error.message === 'Type SQLBook has no state machine action close');
+  assert.deepEqual(calls, ['find', 'find']);
   // A plugin without queryFeatures compiles the operators of 3.7.0; plans reject the others before compileQuery,
   // also in reads that do not go through the runtime.
   const unsupported = await graphql({ schema, source: '{ sqlBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
@@ -554,7 +586,17 @@ const sqlSource = `import assert from 'node:assert/strict';
   assert.equal(undeclaredResult.errors[0].extensions.code, 'UNSUPPORTED_QUERY');
   assert.equal(undeclaredResult.errors[0].message, 'IS_EMPTY on shop ends at the reference shop: the database adapter does not support emptiness through references and collections');
   await assert.rejects(() => undeclared.instance.getModel(undeclared.book).find({ shop: { terms: [{ operator: 'IS_EMPTY' }] } }), (error) => error.getCode() === 'UNSUPPORTED_QUERY');
-  assert.equal(plans.length, 1);`;
+  assert.equal(plans.length, 1);
+  // The generated transaction field (#151): the packed adapter implements assertTransactionModels, so createSchema takes
+  // the option, and the instance's mutation limits take the cap of one transaction.
+  const statementsBefore = calls.length;
+  const transactionBook = new GraphQLObjectType({ name: 'SQLTxBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+  const transactionApi = createSQL({ plugin });
+  transactionApi.connect(null, transactionBook, 'sqlTxBook', 'sqlTxBooks');
+  const transactionSchema = transactionApi.createSchema(null, null, null, { transaction: { types: [transactionBook] } });
+  assert(transactionSchema.getMutationType().getFields().transaction.description.startsWith('Simfinity transaction: runs the listed generated mutations in order in one database transaction.'));
+  assert.throws(() => api.configureMutationLimits({ maxTransactionOperations: 0 }), (error) => error.getCode() === 'INVALID_MUTATION_LIMITS' && error.message === 'maxTransactionOperations must be a positive safe integer');
+  assert.equal(calls.length, statementsBefore);`;
 
 const postgresSource = `import assert from 'node:assert/strict';
   import {
@@ -573,6 +615,9 @@ const postgresSource = `import assert from 'node:assert/strict';
     postgresPlugin,
     registerCustomQuery,
     registerView,
+    deleteObject,
+    transitionObject,
+    updateObject,
     plugins,
     scalars,
     validators,
@@ -704,6 +749,16 @@ const postgresSource = `import assert from 'node:assert/strict';
   assert.equal(defaultBeforeReady.errors[0].extensions.code, 'DATABASE_NOT_INITIALIZED');
   const view = await graphql({ schema: defaultSchema, source: '{ smokeView { id } }' });
   assert.equal(view.errors[0].extensions.code, 'DATABASE_NOT_INITIALIZED');
+  // The lifecycle helpers (#151): the facade's functions are the default instance's, so they know the type connected
+  // above and not the one of the instance created with createPostgres(), whose own helpers know that one. These calls
+  // fail on their target or their input, before the database is touched.
+  for (const helper of ['updateObject', 'deleteObject', 'transitionObject']) assert.equal(typeof api[helper], 'function', helper);
+  await assert.rejects(() => updateObject('DefaultPostgresBook', null), (error) => error.getCode() === 'REQUIRED_VALUE' && error.message === 'Required value input is missing');
+  await assert.rejects(() => deleteObject('DefaultPostgresBook', '1'), (error) => error.getCode() === 'INVALID_INPUT' && error.message === 'Invalid input at input: expected a plain object');
+  await assert.rejects(() => transitionObject('DefaultPostgresBook', 'close', { id: '1' }), (error) => error.getCode() === 'UNKNOWN_ACTION' && error.message === 'Type DefaultPostgresBook has no state machine action close');
+  await assert.rejects(() => updateObject('PostgresBook', { id: '1' }), (error) => error.getCode() === 'INVALID_OPERATION_TARGET' && error.message === 'Type PostgresBook is not a stored record type registered in this runtime');
+  await assert.rejects(() => api.updateObject('DefaultPostgresBook', { id: '1' }), (error) => error.getCode() === 'INVALID_OPERATION_TARGET');
+  await assert.rejects(() => api.updateObject('PostgresBook', null), (error) => error.getCode() === 'REQUIRED_VALUE');
 
   ${adapterSource}
   const coreType = new GraphQLObjectType({
@@ -726,7 +781,15 @@ const postgresSource = `import assert from 'node:assert/strict';
   assert(formatted.originalError instanceof SimfinityError);
   // The facade re-exports core's scalar and maximum, not copies.
   assert.equal(RecordVersion, coreRecordVersion);
-  assert.equal(MAX_RECORD_VERSION, coreMaxRecordVersion);`;
+  assert.equal(MAX_RECORD_VERSION, coreMaxRecordVersion);
+  // The generated transaction field (#151): the packed adapter implements assertTransactionModels, so createSchema takes
+  // the option, and the shared mutation limits take the cap of one transaction.
+  const transactionType = new GraphQLObjectType({ name: 'PostgresTxBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+  const transactionApi = createPostgres({ pool, schema: 'transaction_app' });
+  transactionApi.connect(null, transactionType, 'postgresTxBook', 'postgresTxBooks');
+  const transactionSchema = transactionApi.createSchema(null, null, null, { transaction: { types: [transactionType] } });
+  assert(transactionSchema.getMutationType().getFields().transaction.description.startsWith('Simfinity transaction: runs the listed generated mutations in order in one database transaction.'));
+  assert.throws(() => configureMutationLimits({ maxTransactionOperations: 0 }), (error) => error.getCode() === 'INVALID_MUTATION_LIMITS' && error.message === 'maxTransactionOperations must be a positive safe integer');`;
 
 const mongoSource = `import assert from 'node:assert/strict';
   import * as legacyEntry from '@simtlix/simfinity-js/src/index.js';
@@ -749,6 +812,10 @@ const mongoSource = `import assert from 'node:assert/strict';
   assert.equal(legacyEntry.connect, simfinity.connect);
   assert.equal(legacyEntry.registerCustomQuery, simfinity.registerCustomQuery);
   assert.equal(legacyEntry.registerView, simfinity.registerView);
+  for (const helper of ['updateObject', 'deleteObject', 'transitionObject']) {
+    assert.equal(typeof simfinity[helper], 'function', helper);
+    assert.equal(legacyEntry[helper], simfinity[helper], helper);
+  }
   assert.equal(typeof simfinity.configureAfterCommit, 'function');
   assert.equal(legacyEntry.configureAfterCommit, simfinity.configureAfterCommit);
   assert.throws(() => simfinity.configureAfterCommit({ onError: 42 }), (error) => error.getCode() === 'INVALID_AFTER_COMMIT_OPTIONS');
@@ -783,6 +850,10 @@ const mongoSource = `import assert from 'node:assert/strict';
   });
   // The default runtime connects no type here, so an invalid declaration checks its registerView.
   assert.throws(() => simfinity.registerView('smokeView', {}), (error) => error.getCode() === 'INVALID_VIEW');
+  // The lifecycle helpers (#151) are the default runtime's, which connects no type here, so each call fails on its target.
+  await assert.rejects(() => simfinity.updateObject('MongoMissing', { id: '1' }), (error) => error.getCode() === 'INVALID_OPERATION_TARGET' && error.message === 'Type MongoMissing is not a stored record type registered in this runtime');
+  await assert.rejects(() => simfinity.deleteObject('MongoMissing', { id: '1' }), (error) => error.getCode() === 'INVALID_OPERATION_TARGET');
+  await assert.rejects(() => simfinity.transitionObject('MongoMissing', 'close', { id: '1' }), (error) => error.getCode() === 'INVALID_OPERATION_TARGET');
   const defaultSchema = simfinity.createSchema([], [], [], { includedCustomQueries: ['mongoRead'] });
   const custom = await graphql({ schema: defaultSchema, source: '{ mongoRead }' });
   assert.equal(custom.errors, undefined);
@@ -799,6 +870,8 @@ const mongoSource = `import assert from 'node:assert/strict';
   const view = await graphql({ schema, source: '{ smokeView { id } }' });
   assert.equal(view.errors, undefined);
   assert.deepEqual(view.data.smokeView, []);
+  // A runtime made with the facade's createRuntime has the helpers as well.
+  await assert.rejects(() => runtime.updateObject('RootRuntimeBook', null), (error) => error.getCode() === 'REQUIRED_VALUE' && error.message === 'Required value input is missing');
   const introspection = graphqlSync({
     schema,
     source: '{ __type(name: "__Field") { fields { name } } }',
@@ -807,6 +880,15 @@ const mongoSource = `import assert from 'node:assert/strict';
   assert(introspection.data.__type.fields.some((field) => field.name === 'extensions'));
   assert(simfinity.buildErrorFormatter()(new Error('root')).originalError instanceof simfinity.InternalServerError);
   assert.equal(simfinity.configureMutationLimits, runtime.configureMutationLimits);
+  // The generated transaction field (#151): the packed MongoDB adapter implements assertTransactionModels, so
+  // createSchema takes the option, and the shared mutation limits take the cap of one transaction.
+  assert.equal(typeof simfinity.createMongoAdapter().assertTransactionModels, 'function');
+  const transactionType = new GraphQLObjectType({ name: 'MongoTxBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+  const transactionRuntime = simfinity.createRuntime(simfinity.createMongoAdapter());
+  transactionRuntime.connect(null, transactionType, 'mongoTxBook', 'mongoTxBooks');
+  const transactionSchema = transactionRuntime.createSchema(null, null, null, { transaction: { types: [transactionType] } });
+  assert(transactionSchema.getMutationType().getFields().transaction.description.startsWith('Simfinity transaction: runs the listed generated mutations in order in one database transaction.'));
+  assert.throws(() => simfinity.configureMutationLimits({ maxTransactionOperations: 0 }), (error) => error.getCode() === 'INVALID_MUTATION_LIMITS' && error.message === 'maxTransactionOperations must be a positive safe integer');
   // The legacy deep imports of the core subpaths re-export them unchanged, as their declarations do.
   const legacySubpaths = ${JSON.stringify(Object.fromEntries(Object.entries(mongoLegacySubpaths).map(([path, subpath]) => [path, [subpath, coreSubpaths[subpath].values]])))};
   for (const [path, [subpath, names]] of Object.entries(legacySubpaths)) {
@@ -846,7 +928,9 @@ const mcpSource = `import assert from 'node:assert/strict';
   );
   const compact = await generateMCPTools(schema, { textFormat: 'compact', nestedCollections: 'none' }).callTool('greeting');
   assert.equal(compact.content[0].text, '{"greeting":"hello"}');
-  for (const options of [{ textFormat: 'json' }, { nestedCollections: 'bounded' }, { toolOverrides: { greeting: { nestedCollections: 'some' } } }]) {
+  // The transaction tool is an opt-in boolean (#151): a schema without the field publishes the same tools with it on.
+  assert.deepEqual(generateMCPTools(schema, { transactionTools: true }).tools.map((tool) => tool.name), ['greeting']);
+  for (const options of [{ textFormat: 'json' }, { nestedCollections: 'bounded' }, { toolOverrides: { greeting: { nestedCollections: 'some' } } }, { transactionTools: 'yes' }]) {
     assert.throws(
       () => generateMCPTools(schema, options),
       (error) => error.getCode() === 'MCP_INVALID_OPTIONS',
@@ -992,9 +1076,14 @@ const limits: MutationLimitsOptions = { maxNestedOperations: 100 };
 configureMutationLimits(limits);
 runtime.configureMutationLimits({ maxNestedOperations: null });
 runtime.configureMutationLimits();
+// The cap of one generated transaction (#151) is a number.
+configureMutationLimits({ maxTransactionOperations: 5 });
+runtime.configureMutationLimits({ maxNestedOperations: null, maxTransactionOperations: 100 });
 // @ts-expect-error The limit is a number or null.
 configureMutationLimits({ maxNestedOperations: '100' });
-// @ts-expect-error The only option is maxNestedOperations.
+// @ts-expect-error The transaction cap is a number.
+configureMutationLimits({ maxTransactionOperations: '5' });
+// @ts-expect-error The options are maxNestedOperations and maxTransactionOperations.
 configureMutationLimits({ maxNestedOperation: 100 });
 const formatError = buildErrorFormatter((error) => {
   if (error instanceof InternalServerError) {
@@ -1166,6 +1255,9 @@ const concurrentAdapter: DatabaseAdapter<Model, Session> = {
   delete(model, id, session, options) { void [model.name, id, session?.active, options?.expectedVersion]; return null; },
 };
 const plainWriteFeatures: DatabaseAdapter<Model, Session>[] = [{ ...adapter, writeFeatures: null }, { ...adapter, writeFeatures: undefined }, { ...adapter, writeFeatures: {} }];
+const transactionAdapter: DatabaseAdapter<Model, Session> = { ...adapter, assertTransactionModels(models) { void models.map((model) => model.name); } };
+// @ts-expect-error assertTransactionModels receives the models.
+const namesAffinity: DatabaseAdapter<Model, Session> = { ...adapter, assertTransactionModels(names: string) { void names; } };
 // @ts-expect-error optimisticConcurrency is a boolean.
 const textFeature: DatabaseAdapter<Model, Session> = { ...adapter, writeFeatures: { optimisticConcurrency: 'yes' } };
 // @ts-expect-error expectedVersion is a number.
@@ -1177,8 +1269,9 @@ const writeMembers: {
   update: Equals<Parameters<DatabaseAdapter<Model, Session>['update']>, [model: Model, id: any, changes: any, session?: Session, options?: { expectedVersion?: number }]>;
   delete: Equals<Parameters<DatabaseAdapter<Model, Session>['delete']>, [model: Model, id: any, session?: Session, options?: { expectedVersion?: number }]>;
   scalar: Equals<FieldDescription['scalar'], 'ID' | 'String' | 'Int' | 'Float' | 'Boolean' | 'DateTime' | 'Enum' | 'Version' | undefined>;
-} = { features: true, update: true, delete: true, scalar: true };
-void [versionScalar, versionMaximum, versionFieldScalar, versionFlag, pessimistic, falseFlag, plainWriteFeatures, textFeature, writeMembers, createRuntime(concurrentAdapter)];`;
+  affinity: Equals<DatabaseAdapter<Model, Session>['assertTransactionModels'], ((models: Model[]) => void) | undefined>;
+} = { features: true, update: true, delete: true, scalar: true, affinity: true };
+void [versionScalar, versionMaximum, versionFieldScalar, versionFlag, pessimistic, falseFlag, plainWriteFeatures, textFeature, writeMembers, createRuntime(concurrentAdapter), transactionAdapter, namesAffinity];`;
 
 // The expected type of a subpath's default export.
 const subpathDefaultType = ({ namespace, values, defaultExport, defaultExtras }) => {
@@ -1855,6 +1948,13 @@ type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B
 const itemRules: ItemValidators = [validators.maxLength('Tag', 20), null];
 const tagRules = validators.arrayLength('Tags', 10, itemRules);
 const sameItemValidators: Equals<ItemValidators, CoreItemValidators> = true;
+// The MongoDB adapter implements the affinity check of the generated transaction field (#151), so it is a required
+// member there, and the cap of a transaction is a limit of the facade.
+const mongoAffinity: Equals<MongoAdapter['assertTransactionModels'], (models: any[]) => void> = true;
+configureMutationLimits({ maxTransactionOperations: 5 });
+// @ts-expect-error The transaction cap is a number.
+configureMutationLimits({ maxTransactionOperations: '5' });
+void mongoAffinity;
 const sameSchemaPlugins: {
   envelop: Equals<EnvelopSchemaPlugin, CoreEnvelopSchemaPlugin>;
   auth: Equals<AuthSchemaPlugin, CoreAuthSchemaPlugin>;
@@ -2068,6 +2168,12 @@ const politeRetry = createHTTPMCPHandler(schema, {
     mode: 'remote', endpoint, retry: { attempts: 3, backoffMs: 250, retryAfter: true, maxRetryAfterMs: 30000, jitter: true },
   },
 });
+// The transaction tool is an opt-in boolean or null (#151).
+const transactional: GeneratedMCPTools = generateMCPTools(schema, { transactionTools: true });
+generateMCPTools(schema, { transactionTools: null });
+createHTTPMCPHandler(schema, { transactionTools: false });
+// @ts-expect-error transactionTools is a boolean or null.
+generateMCPTools(schema, { transactionTools: 'yes' });
 // @ts-expect-error Bounded nested collections are not an option.
 generateMCPTools(schema, { nestedCollections: 'bounded' });
 // @ts-expect-error A tool's nested collections are 'all' or 'none'.
@@ -2105,7 +2211,7 @@ const readBack = [
 ];
 void [generated, server, sameGenerator, singleMiddleware, optionalPlugins, handler, sharedPlugins, memberPlugins];
 void [headerForms, fromEnvironment, stdio, fallible, unlimited, maxPageSize, maxResultBytes, defaultSize, readBack];
-void [shaped, politeRetry, nestedCollections, toolNestedCollections, textFormat];`;
+void [shaped, politeRetry, nestedCollections, toolNestedCollections, textFormat, transactional];`;
 
 // The legacy deep imports of /auth and /plugins re-export them unchanged, so they can be
 // re-exported together too.
@@ -2206,7 +2312,7 @@ const customQueryTypes = (name, runtimeType, singleton = false) => `import type 
 import type { CreateSchemaOptions as CoreOptions } from '@simtlix/simfinity-core';
 // @ts-expect-error RegisterQueryOptions is not exported: custom queries have no options.
 import type { RegisterQueryOptions } from '${name}';
-import { GraphQLInputObjectType, GraphQLString, type GraphQLSchema } from 'graphql';
+import { GraphQLInputObjectType, GraphQLObjectType, GraphQLString, type GraphQLSchema } from 'graphql';
 ${singleton ? `import { registerCustomQuery, createSchema } from '${name}';
 // @ts-expect-error registerQuery is not exported.
 import { registerQuery } from '${name}';` : ''}
@@ -2217,7 +2323,7 @@ void api.registerQuery;
 const input = new GraphQLInputObjectType({ name: 'CustomQueryInput', fields: { text: { type: GraphQLString } } });
 type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 const sameOptions: Equals<CreateSchemaOptions, CoreOptions> = true;
-const exactOptions: Equals<CreateSchemaOptions, { includedCustomQueries?: string[] | null }> = true;
+const exactOptions: Equals<CreateSchemaOptions, { includedCustomQueries?: string[] | null; transaction?: { name?: string; types: GraphQLObjectType[] } | null }> = true;
 const exactCallback: Equals<Parameters<typeof register>[4], (input: any, context: any) => any> = true;
 register('withInput', '', input, GraphQLString, (args, context) => \`\${args.text}\${context.text}\`);
 register('withoutInput', '', null, GraphQLString, async () => 'value');
@@ -2240,6 +2346,14 @@ api.createSchema(null, null, null, ['withInput']);
 api.createSchema(null, null, null, { includedCustomQueries: [1] });
 // @ts-expect-error createSchema() has no other options.
 api.createSchema(null, null, null, { includedCustomQuery: ['withInput'] });
+const transactionType = new GraphQLObjectType({ name: 'TransactionItem', fields: { text: { type: GraphQLString } } });
+api.createSchema(null, null, null, { transaction: { types: [transactionType] } });
+api.createSchema(null, null, null, { includedCustomQueries: [], transaction: { name: 'batch', types: [transactionType] } });
+api.createSchema(null, null, null, { transaction: null });
+// @ts-expect-error A transaction lists GraphQL object types, not their names.
+api.createSchema(null, null, null, { transaction: { types: ['TransactionItem'] } });
+// @ts-expect-error A transaction needs its types.
+api.createSchema(null, null, null, { transaction: { name: 'batch' } });
 ${singleton ? `const defaultSchema: GraphQLSchema = createSchema([], [], [], { includedCustomQueries: ['withoutInput'] });
 void [defaultSchema, registerQuery];` : ''}
 void [schema, sameOptions, exactOptions, exactCallback];`;
@@ -2287,6 +2401,85 @@ register('objectWhere', { type, description: 'd', where: () => ({ conditions: []
 register('unknownOption', { type, description: 'd', where: () => [], transactional: true });
 void [sameOptions, exactRegister${singleton ? ', sameMember' : ''}];`;
 
+// The lifecycle helpers (#151): updateObject, deleteObject and transitionObject, next to saveObject. A Runtime has them as
+// members, which SQLRuntime and PostgresRuntime inherit, and the MongoDB and PostgreSQL facades export them as functions.
+// Each has exactly the declared parameters and results, so a declaration that widens to any or drops a parameter fails.
+// The session is the runtime's own session type; the MongoDB facade types it any, as it does for saveObject.
+const lifecycleHelperTypes = (name, runtimeType, { singleton = false, anySession = false } = {}) => `${singleton ? `import { deleteObject, transitionObject, updateObject } from '${name}';` : ''}
+declare const api: ${runtimeType};
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+const update = ${singleton ? 'updateObject' : 'api.updateObject'};
+const remove = ${singleton ? 'deleteObject' : 'api.deleteObject'};
+const transition = ${singleton ? 'transitionObject' : 'api.transitionObject'};
+declare const session: NonNullable<Parameters<typeof update>[2]>;
+const shapes: {
+  updateType: Equals<Parameters<typeof update>[0], string>;
+  updateInput: Equals<Parameters<typeof update>[1], Record<string, any>>;
+  updateContext: Equals<Parameters<typeof update>[3], any>;
+  updateResult: Equals<ReturnType<typeof update>, Promise<any>>;
+  deleteType: Equals<Parameters<typeof remove>[0], string>;
+  deleteTarget: Equals<Parameters<typeof remove>[1], { id: string; version?: number }>;
+  deleteSession: Equals<Parameters<typeof remove>[2], Parameters<typeof update>[2]>;
+  deleteContext: Equals<Parameters<typeof remove>[3], any>;
+  deleteResult: Equals<ReturnType<typeof remove>, Promise<any>>;
+  transitionType: Equals<Parameters<typeof transition>[0], string>;
+  transitionAction: Equals<Parameters<typeof transition>[1], string>;
+  transitionInput: Equals<Parameters<typeof transition>[2], Record<string, any>>;
+  transitionSession: Equals<Parameters<typeof transition>[3], Parameters<typeof update>[2]>;
+  transitionContext: Equals<Parameters<typeof transition>[4], any>;
+  transitionResult: Equals<ReturnType<typeof transition>, Promise<any>>;
+  ${anySession ? 'anySession: Equals<Parameters<typeof update>[2], any>;' : 'typedSession: Equals<Equals<Parameters<typeof update>[2], any>, false>;'}
+} = {
+  updateType: true, updateInput: true, updateContext: true, updateResult: true,
+  deleteType: true, deleteTarget: true, deleteSession: true, deleteContext: true, deleteResult: true,
+  transitionType: true, transitionAction: true, transitionInput: true, transitionSession: true, transitionContext: true, transitionResult: true,
+  ${anySession ? 'anySession: true' : 'typedSession: true'},
+};
+${singleton ? `const sameMembers: {
+  update: Equals<typeof api.updateObject, typeof update>;
+  delete: Equals<typeof api.deleteObject, typeof remove>;
+  transition: Equals<typeof api.transitionObject, typeof transition>;
+} = { update: true, delete: true, transition: true };` : ''}
+async function calls() {
+  const updated: { id: string } = await update('Order', { id: 'o1', note: 'n', lines: { added: [{ price: 1 }] } });
+  const withContext = await update('Order', { id: 'o1' }, undefined, { user: 'u1' });
+  const inSession = await update('Order', { id: 'o1' }, session, undefined);
+  const removed: { id: string } | null = await remove('Order', { id: 'o1' });
+  const removedProtected = await remove('Order', { id: 'o1', version: 3 }, session, { user: 'u1' });
+  const moved: { id: string } = await transition('Order', 'close', { id: 'o1', version: 3 });
+  const movedInSession = await transition('Order', 'close', { id: 'o1' }, session, { user: 'u1' });
+  void [updated, withContext, inSession, removed, removedProtected, moved, movedInSession];
+}
+// @ts-expect-error The type is named by a string.
+update(1, { id: 'o1' });
+// @ts-expect-error The input is an object.
+update('Order', 'o1');
+// @ts-expect-error The input is required.
+update('Order');
+// @ts-expect-error A delete target is an object with the ID, not the bare ID.
+remove('Order', 'o1');
+// @ts-expect-error The ID is a string, as the record keys of the inputs are.
+remove('Order', { id: 1 });
+// @ts-expect-error The version is a number.
+remove('Order', { id: 'o1', version: '2' });
+// @ts-expect-error A delete target has the ID and the version only.
+remove('Order', { id: 'o1', note: 'n' });
+// @ts-expect-error A delete target needs the ID.
+remove('Order', {});
+// @ts-expect-error The action is named by a string.
+transition('Order', 1, { id: 'o1' });
+// @ts-expect-error The input is required.
+transition('Order', 'close');
+// @ts-expect-error The action comes before the input.
+transition('Order', { id: 'o1' }, 'close');
+${anySession ? '' : `// @ts-expect-error The session is the runtime's own session type.
+update('Order', { id: 'o1' }, 'session');
+// @ts-expect-error The session is the runtime's own session type.
+remove('Order', { id: 'o1' }, 'session');
+// @ts-expect-error The session is the runtime's own session type.
+transition('Order', 'close', { id: 'o1' }, 'session');`}
+void [shapes, calls${singleton ? ', sameMembers' : ''}];
+export {};`;
 const descriptorSource = `import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { __Field, GraphQLObjectType, GraphQLString } from 'graphql';
@@ -2324,8 +2517,10 @@ field.rootInputUsage!.add = 'optional';
 declare const relation: Descriptor.ClientDescriptorRelation;
 declare const machine: Descriptor.ClientDescriptorStateMachine;
 declare const operation: Descriptor.ClientDescriptorOperation;
+const transactionOperation: Descriptor.ClientDescriptorOperation['operation'] = 'transaction';
 declare const input: Descriptor.ClientDescriptorInputValue;
 declare const type: Descriptor.ClientDescriptorType;
+const isOneOf: boolean | undefined = type.isOneOf;
 const handler = createClientDescriptorHandler<{ user: string }>(schema, {
   context: async () => ({ user: 'reader' }), authorize: (_req, ctx) => ctx.user === 'reader',
 });
@@ -2337,7 +2532,7 @@ createClientDescriptorHandler(schema, { authorize: 'public', cacheControl: 'publ
 declare const request: Descriptor.DescriptorRequest;
 declare const response: Descriptor.DescriptorResponse;
 void handler(request, response);
-void [keys, version, name, usage, relation, machine, operation, input, type, options];`;
+void [keys, version, name, usage, relation, machine, operation, transactionOperation, input, type, isOneOf, options];`;
 
 const cases = [
   {
@@ -2370,6 +2565,7 @@ createServer(createClientDescriptorHandler(schema, { authorize: 'public' }));`,
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
       'after-commit.ts': afterCommitTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
       'views.ts': viewTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
+      'lifecycle-helpers.ts': lifecycleHelperTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
     },
     // NodeNext, Node16 and Bundler read the subpath declarations from the exports map; Node10, which
     // ignores exports, reads them from typesVersions.
@@ -2387,6 +2583,7 @@ createServer(createClientDescriptorHandler(schema, { authorize: 'public' }));`,
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
       'after-commit.ts': afterCommitTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
       'views.ts': viewTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
+      'lifecycle-helpers.ts': lifecycleHelperTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
     },
     forbiddenPackages: ['pg', 'mongoose', 'mongodb', '@simtlix/simfinity-postgres', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
   },
@@ -2401,6 +2598,7 @@ createServer(createClientDescriptorHandler(schema, { authorize: 'public' }));`,
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', true),
       'after-commit.ts': afterCommitTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', true),
       'views.ts': viewTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', true),
+      'lifecycle-helpers.ts': lifecycleHelperTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', { singleton: true }),
     },
     typeDependencies: ['@types/pg@8'],
     forbiddenPackages: ['mongoose', 'mongodb', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
@@ -2445,6 +2643,8 @@ createServer(createClientDescriptorHandler(schema, { authorize: 'public' }));`,
       'legacy-after-commit.ts': afterCommitTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
       'views.ts': viewTypes('@simtlix/simfinity-js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
       'legacy-views.ts': viewTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
+      'lifecycle-helpers.ts': lifecycleHelperTypes('@simtlix/simfinity-js', 'import(\'@simtlix/simfinity-core\').Runtime', { singleton: true, anySession: true }),
+      'legacy-lifecycle-helpers.ts': lifecycleHelperTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', { singleton: true, anySession: true }),
     },
     // The legacy deep-import declarations sit next to the shims: NodeNext, Node16 and Bundler find
     // them through the exports map, Node10 by path, and their core subpath imports through core's

@@ -28,3 +28,9 @@ types. Directly importing `@simtlix/simfinity-core/introspection` requires core 
 a direct dependency pinned to the facade's version. The 3.x introspection default
 remains enabled, and clients selecting `__Field.extensions` must migrate before
 using the early opt-out.
+
+Since 3.16.0, a generated transaction field is described with
+`operation: 'transaction'` and `type: null`, with its actual arguments, result
+type and reachable `@oneOf` input. Format version 1 is unchanged; clients that
+handle operation kinds exhaustively must accept `transaction`. User-registered
+mutations retain `customMutation`.
