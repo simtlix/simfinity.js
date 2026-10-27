@@ -173,11 +173,12 @@ describe('the transaction field and its types', () => {
     expect(printSchema(build({ options: () => ({ transaction: undefined }) }).create())).toBe(without);
   });
 
-  // The SDL hash of this fixture's schema without the option, as created before the option existed.
+  // The SDL hash before transaction support, verified against PR160's runtime (a52e3ea).
+  // Its QLOperator includes CONTAINS_ALL and IIN; no transaction types or fields are added by default.
   test('pin: a schema without the option is byte-identical in SDL', () => {
     const schema = build().create();
     const sdl = printSchema(schema);
-    expect(createHash('sha256').update(sdl).digest('hex')).toBe('b4516dfe64275698da07fca8bc8378c7fb452000bbfd977bf443f5591d7efd3c');
+    expect(createHash('sha256').update(sdl).digest('hex')).toBe('622711658aae4c7d061cf96bedf0f7fc56736a9958716562efe780c7032d548d');
     expect(schema.getMutationType().getFields().transaction).toBeUndefined();
     expect(Object.keys(schema.getTypeMap()).filter((name) => name.startsWith('Transaction'))).toEqual([]);
   });
