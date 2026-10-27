@@ -10,8 +10,9 @@ import mongoose from 'mongoose';
 
 import { SimfinityError, QLOperator, paginationStages } from '@simtlix/simfinity-core';
 import {
-  TEXT_QUERY_OPERATORS, describeEmptiness, effectiveScalarName, emptinessScopePaths, isEmptinessOperator,
-  textQueryOperator, validateTextFilterValue,
+  TEXT_QUERY_OPERATORS, aggregateJoinPrefixes, crossingKeys, describeEmptiness, effectiveScalarName, emptinessScopePaths,
+  frameCollectionPaths, isEmptinessOperator, validateQuantifiedGroups,
+  textQueryOperator, validateTextFilterValue, validateTextListFilterValue,
 } from '@simtlix/simfinity-core/internal/query-operators';
 import {
   getFieldStorageName, getListShape, hasStoredIdentity, isVirtualField, normalizeConnectionField,
@@ -38,11 +39,14 @@ export const MONGO_QUERY_OPERATORS = Object.freeze([
   'EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE',
   'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ',
   'IS_EMPTY', 'IS_NOT_EMPTY',
+  'CONTAINS_ALL', 'IIN',
 ]);
 
 export const createMongoQueries = ({ getModel, getRegistrations }) => {
 // One alias per relation path for each query build, keyed by the build's `included` accumulator.
 const lookupAliases = new WeakMap();
+// Only actual reference joins reached through embedded lists multiply a body's candidates.
+const multiplyingBuilds = new WeakSet();
 
 const allocateLookupAlias = (aggregationsIncluded, relationPath) => {
   let aliases = lookupAliases.get(aggregationsIncluded);
@@ -62,7 +66,7 @@ const relationBuild = (aggregationsIncluded) => {
   let build = relationBuilds.get(aggregationsIncluded);
   if (!build) {
     build = {
-      aliases: new Map(), counts: { join: 0, frame: 0 }, scopes: new WeakMap(), scopeCount: 0,
+      aliases: new Map(), counts: { join: 0, frame: 0, scope: 0, serial: 0 }, scopes: new WeakMap(), serials: new WeakMap(),
     };
     relationBuilds.set(aggregationsIncluded, build);
   }
@@ -92,6 +96,7 @@ const buildRelationLookup = ({
     {
       $lookup: {
         from: collectionName, foreignField, localField, as: alias,
+        ...(foreignField !== '_id' && localField !== '_id' ? { pipeline: [{ $match: { [foreignField]: { $ne: null } } }] } : {}),
       },
     },
     { $unwind: { path: `$${alias}`, preserveNullAndEmptyArrays: true } },
@@ -104,14 +109,18 @@ const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // which would report a client's long value as an internal error. Escaping adds a byte to each
 // metacharacter and the operators add their anchors, so the limit applies to the compiled pattern.
 const MAX_REGEX_PATTERN_BYTES = 32764;
-// A $regex match, rejected with INVALID_FILTER_VALUE before the query runs when MongoDB would reject
-// its pattern. `path` is the condition's GraphQL path, for the message.
-const regexMatch = (operator, pattern, ignoreCase, path) => {
+// MongoDB rejects a regular expression longer than 32,764 UTF-8 bytes on the server (Location51091). `path` is the
+// condition's GraphQL path, for the message. Returns the pattern.
+const assertPatternBytes = (operator, pattern, path) => {
   const bytes = Buffer.byteLength(pattern, 'utf8');
   if (bytes > MAX_REGEX_PATTERN_BYTES) {
     const where = path == null ? '' : ` on ${path}`;
     throw filterError(`${operator} value${where} is too long: MongoDB accepts regular expressions of at most ${MAX_REGEX_PATTERN_BYTES} bytes, and this one has ${bytes}`);
   }
+  return pattern;
+};
+const regexMatch = (operator, pattern, ignoreCase, path) => {
+  assertPatternBytes(operator, pattern, path);
   return ignoreCase ? { $regex: pattern, $options: 'i' } : { $regex: pattern };
 };
 
@@ -195,13 +204,14 @@ const identifierLeaf = (model, schemaPath, gqltype) => {
 };
 
 // Resolve GraphQL paths and storage paths together; supplied models own ID casting.
-const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
+const resolveQueryPath = (gqltype, path, aggregationsIncluded, origin) => {
   assertValidFilterPath(path);
   const parts = path.split('.');
   let currentType = gqltype;
-  let currentModel = getModel(gqltype);
-  let mongoPath = '';
-  let schemaPath = '';
+  let currentModel = origin?.model ?? getModel(gqltype);
+  let mongoPath = origin?.parent.key ?? '';
+  let schemaPath = origin?.parent.schemaPath ?? '';
+  let vector = false;
   const aggregateClauses = {};
 
   for (const [index, part] of parts.entries()) {
@@ -218,6 +228,7 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
     if (fieldType instanceof GraphQLObjectType) {
       if (index === parts.length - 1) throw filterError(`Query path must end in a scalar field: ${path}`, 'INVALID_FILTER_PATH');
       if (!relation || relation.embedded) {
+        vector ||= !!getListShape(field.type);
         mongoPath = mongoPath ? `${mongoPath}.${part}` : part;
         schemaPath = schemaPath ? `${schemaPath}.${part}` : part;
       } else {
@@ -229,6 +240,8 @@ const resolveQueryPath = (gqltype, path, aggregationsIncluded) => {
           ? normalizeConnectionField(fieldType, relation.connectionField || part).storageFieldName
           : getFieldStorageName(part, field);
         const localLeaf = isList ? '_id' : connField;
+        if (vector) multiplyingBuilds.add(aggregationsIncluded);
+        vector = false;
         const alias = allocateLookupAlias(aggregationsIncluded, parts.slice(0, index + 1).join('.'));
         aggregateClauses[alias] = buildRelationLookup({
           collectionName: relatedModel.collection.collectionName,
@@ -394,7 +407,7 @@ const compileTargetScope = async (build, scope, targetType) => {
   const stages = [];
   const match = await collectFiltersAndLookups(scope, targetType, stages, {}, 'find');
   if (match) stages.push(match);
-  const result = stages.length ? { token: `s${build.scopeCount++}`, stages } : null;
+  const result = stages.length ? { token: `s${build.counts.scope++}`, stages } : null;
   if (!build.scopes.has(scope)) build.scopes.set(scope, new Map());
   build.scopes.get(scope).set(targetType, result);
   return result;
@@ -491,6 +504,182 @@ const buildEmptinessClause = async (gqltype, path, operator, value, construct, l
   return form(ctx, shape, parent, type, segments.at(-1));
 };
 
+// A build keeps one rewrite context; aggregate J paths must survive every logical-group pass.
+const rewriteContext = (gqltype, operation = 'find', aggregation) => {
+  const ctx = { gqltype, operation, quantifiers: true, referenceEmptiness: true, operators: new Set(MONGO_QUERY_OPERATORS), base: '', inFrame: false };
+  // Ordinary root markers reject at the existing post-value guards, preserving native order.
+  ctx.deferOrdinaryRootMarkers = true;
+  ctx.J = operation === 'aggregate' ? aggregateJoinPrefixes(aggregation, ctx) : new Set();
+  return ctx;
+};
+
+// Cross references in the containing pipeline. Collection steps occur here only for an aggregate
+// anchor, or inside the prefix witness of a hand-built implicit group that crosses a collection
+// before its end: all ordinary collection crossings have already become frames in the shared rewrite.
+const crossFramePath = async (gqltype, segments, scopes, build, lookups, included) => {
+  let type = gqltype;
+  let parent = { key: '', schemaPath: '', path: '' };
+  let model = getModel(type);
+  const chain = [];
+  let scoped = false;
+  let vector = false;
+  for (const name of segments) {
+    const field = type.getFields()[name];
+    const targetType = getNamedType(field.type);
+    const path = joinPath(parent.path, name);
+    const relation = field.extensions?.relation;
+    if (!relation || relation.embedded) {
+      vector ||= !!getListShape(field.type);
+      parent = { key: joinPath(parent.key, name), schemaPath: joinPath(parent.schemaPath, name), path };
+    } else {
+      const target = getModel(targetType);
+      if (!target) throw filterError(`Related model is not available for ${path}`, 'INVALID_FILTER_PATH');
+      const collection = !!getListShape(field.type);
+      const foreignField = collection ? normalizeConnectionField(targetType, relation.connectionField || name).storageFieldName : '_id';
+      const localField = joinPath(parent.key, collection ? '_id' : getFieldStorageName(name, field));
+      const scope = scopes && Object.hasOwn(scopes, path) ? await compileTargetScope(build, scopes[path], targetType) : null;
+      if (vector && scope) throw new SimfinityError('A reference inside an embedded list cannot apply a target scope', 'FORBIDDEN_FILTER_PATH', 403);
+      chain.push(scope ? scope.token : '-');
+      scoped ||= !!scope;
+      let alias;
+      if (!scoped) {
+        alias = allocateLookupAlias(included, path);
+        lookups[alias] = buildRelationLookup({ collectionName: target.collection.collectionName, localField, foreignField, alias });
+      } else {
+        alias = allocateRelationAlias(build, 'join', `${path} ${chain.join(',')}`);
+        // A vector with a null target scope keeps every target. The chain alias isolates it
+        // from a trusted join while its local key preserves the earlier restricted reference.
+        lookups[alias] = vector ? buildRelationLookup({ collectionName: target.collection.collectionName, localField, foreignField, alias }) : { stages: [
+          { $lookup: { from: target.collection.collectionName, localField, foreignField, pipeline: [...(scope?.stages ?? []), { $limit: 1 }], as: alias } },
+          { $unwind: { path: `$${alias}`, preserveNullAndEmptyArrays: true } },
+        ] };
+      }
+      if (vector) multiplyingBuilds.add(included);
+      vector = false;
+      parent = { key: alias, schemaPath: '', path };
+      model = target;
+    }
+    type = targetType;
+  }
+  return { type, parent, model, chain };
+};
+
+// A non-emptiness marker is legal only inside a frame, on a condition crossing references. Its
+// keys are relative to the element, just like 2b emptiness keys in the same sub-build.
+const resolveConditionPath = async (gqltype, path, construct, included, ctx) => {
+  if (!hasScopeMarker(construct)) return resolveQueryPath(gqltype, path, included);
+  // buildQueryTerms rejects the marker immediately after buildMatchesClause; group conditions
+  // also retain their raw-condition guard. No accepted path parses or casts a value twice.
+  if (!ctx?.inFrame && ctx?.deferOrdinaryRootMarkers === true) return resolveQueryPath(gqltype, path, included);
+  if (!ctx?.inFrame) throw detachedFilter(`${construct.operator ?? 'EQ'} on ${joinPath(ctx?.base, path)} carries a client scope marker, but is not an emptiness condition`);
+  const paths = crossingKeys(path.split('.'), { gqltype });
+  const scopes = clientScopes(construct, `${construct.operator ?? 'EQ'} on ${joinPath(ctx.base, path)}`, paths);
+  const aggregateClauses = {};
+  const crossed = await crossFramePath(gqltype, path.split('.').slice(0, -1), scopes, relationBuild(included), aggregateClauses, included);
+  const resolved = resolveQueryPath(crossed.type, path.split('.').at(-1), included, crossed);
+  return { ...resolved, aggregateClauses: { ...aggregateClauses, ...resolved.aggregateClauses } };
+};
+
+const compileFrame = async (ctx, quantifier, group) => {
+  const build = relationBuild(ctx.included);
+  const anchor = group.__implicit === true ? group.__anchor ?? [] : [];
+  const segments = [...anchor, ...group.path.split('.')];
+  const paths = [];
+  let type = ctx.gqltype;
+  let vector = false;
+  let multiplyingPrefix = false;
+  for (const [index, name] of segments.entries()) {
+    const field = type.getFields()[name];
+    if (field.extensions?.relation && !field.extensions.relation.embedded) {
+      // A collection crossed before the end multiplies the prefix as an embedded-list vector does (#108 part 4): only a
+      // hand-built implicit group crosses one outside an anchor, and anchored groups skip the witness below.
+      if (index < segments.length - 1 && (vector || getListShape(field.type))) multiplyingPrefix = true;
+      vector = false;
+      if (!getModel(getNamedType(field.type))) throw filterError(`Related model is not available for ${joinPath(ctx.base, segments.join('.'))}`, 'INVALID_FILTER_PATH');
+      if (!anchor.length || index >= anchor.length || getListShape(field.type)) paths.push(segments.slice(0, index + 1).join('.'));
+    } else {
+      vector ||= !!getListShape(field.type);
+    }
+    type = getNamedType(field.type);
+  }
+  const scopes = clientScopes(group, `${quantifier} on ${joinPath(ctx.base, segments.join('.'))}`, paths);
+  if (anchor.length && scopes) {
+    for (const path of paths.filter((key) => anchor.join('.').startsWith(key))) {
+      if (scopes[path] !== null) throw detachedFilter('Aggregate anchors require null J scopes and legacy reference joins');
+    }
+  }
+  const emptyAll = quantifier === 'ALL' && !['conditions', 'ANY', 'ALL', 'NONE', 'AND', 'OR'].some((key) => group[key]?.length);
+  // A vector or collection prefix belongs to this predicate, not to the containing result set. A
+  // self-correlated witness keeps its joins local without discarding any target. Aggregate
+  // anchors retain their intentional expansion. NONE tests the positive ANY witness; ALL
+  // looks for a prefix whose complete ALL test fails, including vacuous empty prefixes.
+  if (multiplyingPrefix && !anchor.length && !ctx.prefixIsolated && !emptyAll) {
+    const model = getModel(ctx.gqltype);
+    if (!model) throw filterError(`Related model is not available for ${ctx.gqltype.name}`, 'INVALID_FILTER_PATH');
+    if (!build.serials.has(group)) build.serials.set(group, build.counts.serial++);
+    const alias = allocateRelationAlias(build, 'frame', `prefix:${build.serials.get(group)}`);
+    const stages = [];
+    const included = {};
+    relationBuilds.set(included, { ...relationBuild(included), counts: build.counts, scopes: build.scopes });
+    const positive = await compileFrame({ ...ctx, stages, included, prefixIsolated: true }, quantifier === 'NONE' ? 'ANY' : quantifier, group);
+    if (quantifier === 'ALL' && !Object.keys(positive).length) return {};
+    ctx.stages.push({ $lookup: {
+      from: model.collection.collectionName, localField: '_id', foreignField: '_id',
+      pipeline: [...stages, { $match: quantifier === 'ALL' ? { $nor: [positive] } : positive }, { $limit: 1 }, { $project: { _id: 1 } }],
+      as: alias,
+    } });
+    ctx.included[alias] = true;
+    return { [`${alias}.0`]: { $exists: quantifier === 'ANY' } };
+  }
+  const lookups = {};
+  const crossed = await crossFramePath(ctx.gqltype, segments.slice(0, -1), anchor.length ? null : scopes, build, lookups, ctx.included);
+  const name = segments.at(-1);
+  const field = crossed.type.getFields()[name];
+  const targetType = getNamedType(field.type);
+  const path = segments.join('.');
+  const scope = scopes ? await compileTargetScope(build, scopes[path], targetType) : null;
+  if (emptyAll) return {};
+  // Allocate before compiling the body: descendants follow their parent's serial even though
+  // their lookups live inside its pipeline. No quantified frame shares a 2b emptiness frame.
+  if (!build.serials.has(group)) build.serials.set(group, build.counts.serial++);
+  const alias = allocateRelationAlias(build, 'frame', `group:${build.serials.get(group)} ${path} ${[...crossed.chain, scope ? scope.token : '-'].join(',')}`);
+  const stages = [];
+  const included = {};
+  relationBuilds.set(included, { ...relationBuild(included), counts: build.counts, scopes: build.scopes });
+  const childCtx = { ...rewriteContext(targetType), base: joinPath(ctx.base, path), inFrame: true };
+  const body = await buildFilterGroupMatch(group, targetType, stages, included, 0, childCtx);
+  if (quantifier === 'ALL' && body === null) return {};
+  // ALL negates one truth value for the actual child. With vector joins, negating
+  // individual expanded rows would incorrectly turn a bad sibling target into a failing
+  // child. Keep the complete positive body together, with its scope admission outside.
+  let bodyStages = stages;
+  let bodyMatch = quantifier === 'ALL' ? { $nor: [body] } : body;
+  if (quantifier === 'ALL' && multiplyingBuilds.has(included)) {
+    const witness = allocateRelationAlias(build, 'frame', `body:${build.serials.get(group)}`);
+    bodyStages = [{ $lookup: {
+      from: getModel(targetType).collection.collectionName, localField: '_id', foreignField: '_id',
+      pipeline: [...stages, { $match: body }, { $limit: 1 }, { $project: { _id: 1 } }],
+      as: witness,
+    } }];
+    bodyMatch = { [`${witness}.0`]: { $exists: false } };
+  }
+  const collection = !!getListShape(field.type);
+  const localField = joinPath(crossed.parent.key, collection ? '_id' : getFieldStorageName(name, field));
+  const foreignField = collection ? normalizeConnectionField(targetType, field.extensions.relation.connectionField || name).storageFieldName : '_id';
+  lookups[alias] = { stages: [{ $lookup: {
+    from: getModel(targetType).collection.collectionName, localField, foreignField,
+    pipeline: [
+      ...(collection && localField !== '_id' ? [{ $match: { [foreignField]: { $ne: null } } }] : []),
+      ...(scope?.stages ?? []), ...bodyStages,
+      ...(body === null ? [] : [{ $match: bodyMatch }]),
+      { $limit: 1 }, { $project: { _id: 1 } },
+    ],
+    as: alias,
+  } }] };
+  appendLookups(ctx.stages, ctx.included, lookups);
+  return { [`${alias}.0`]: { $exists: quantifier === 'ANY' } };
+};
+
 const castFilterValue = (value, resolved) => {
   if (value === null) return null;
   if (value === undefined || Array.isArray(value)
@@ -538,7 +727,14 @@ const buildMatchesClause = (resolved, operator, value, path) => {
     const text = validateTextFilterValue(op, value, effectiveScalarName(resolved.fieldType), path);
     return { [resolved.mongoPath]: OP_TO_MONGO[op](text, path) };
   }
-  const collectionOperator = op === 'IN' || op === 'NIN' || op === 'BTW';
+  // IIN, IN ignoring case (#108 part 4): one anchored, escaped, case-insensitive regular expression per value inside
+  // $in, as a BSON regular expression, so the server receives exactly the pattern checked against its limit. Values
+  // are never cast; core's rule has accepted them.
+  if (op === 'IIN') {
+    const values = validateTextListFilterValue(op, value, effectiveScalarName(resolved.fieldType), path);
+    return { [resolved.mongoPath]: { $in: values.map((item) => new mongoose.mongo.BSONRegExp(assertPatternBytes(op, TEXT_PATTERNS.exact(escapeRegex(item)), path), 'i')) } };
+  }
+  const collectionOperator = op === 'IN' || op === 'NIN' || op === 'BTW' || op === 'CONTAINS_ALL';
   if (collectionOperator && (!Array.isArray(value) || (op === 'BTW' && value.length !== 2))) {
     throw filterError(`${op} requires ${op === 'BTW' ? 'exactly two values' : 'an array value'}`);
   }
@@ -553,10 +749,11 @@ const buildMatchesClause = (resolved, operator, value, path) => {
   const coerced = collectionOperator ? value.map(cast) : op === 'LIKE' ? value : cast(value);
   if (op === 'EQ') return { [resolved.mongoPath]: coerced };
   if (op === 'IN' || op === 'NIN') return { [resolved.mongoPath]: { [op === 'IN' ? '$in' : '$nin']: coerced } };
+  if (op === 'CONTAINS_ALL') return { [resolved.mongoPath]: { $all: coerced } };
   return { [resolved.mongoPath]: OP_TO_MONGO[op](coerced, path) };
 };
 
-const buildQueryTerms = async (filterField, qlField, fieldName, gqltype, aggregationsIncluded) => {
+const buildQueryTerms = async (filterField, qlField, fieldName, gqltype, aggregationsIncluded, ctx) => {
   const aggregateClauses = {};
   const matchesClauses = [];
   if (!qlField) throw filterError(`Unknown filter field: ${fieldName}`, 'INVALID_FILTER_FIELD');
@@ -606,10 +803,10 @@ const buildQueryTerms = async (filterField, qlField, fieldName, gqltype, aggrega
     }
     if (isObject) assertValidFilterPath(term.path);
     const path = isObject ? `${fieldName}.${term.path}` : fieldName;
-    const resolved = resolveQueryPath(gqltype, path, aggregationsIncluded);
+    const resolved = await resolveConditionPath(gqltype, path, isObject ? term : null, aggregationsIncluded, ctx);
     Object.assign(aggregateClauses, resolved.aggregateClauses);
     matchesClauses.push(buildMatchesClause(resolved, term.operator, term.value, path));
-    if (isObject && hasScopeMarker(term)) {
+    if (isObject && hasScopeMarker(term) && !ctx?.inFrame) {
       throw detachedFilter(`${term.operator ?? 'EQ'} on ${path} carries a client scope marker, but is not an emptiness condition`);
     }
   }
@@ -625,7 +822,15 @@ const validateLogicalLists = (group, keys = ['AND', 'OR', 'conditions']) => {
   }
 };
 
-const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, aggregationsIncluded, depth = 0) => {
+const buildFilterGroupMatch = async (rawFilterGroup, gqltype, aggregateClauses, aggregationsIncluded, depth = 0, rewriteCtx) => {
+  let filterGroup = rawFilterGroup;
+  let ctx = rewriteCtx;
+  if (!ctx) {
+    ctx = rewriteContext(gqltype);
+    const input = { AND: [filterGroup] };
+    validateQuantifiedGroups(input, ctx);
+    filterGroup = frameCollectionPaths(input, ctx).AND[0];
+  }
   if (depth > MAX_FILTER_GROUP_DEPTH) {
     throw new SimfinityError('Filter nesting too deep', 'FILTER_DEPTH_EXCEEDED', 400);
   }
@@ -661,15 +866,15 @@ const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, agg
           throw new SimfinityError(`Filter on object field "${condition.field}" requires a path`, 'MISSING_FILTER_PATH', 400);
         }
         filterInput = {
-          terms: [{ path: condition.path, operator: condition.operator, value: condition.value }],
+          terms: [{ ...rawCondition, field: undefined, path: condition.path, operator: condition.operator, value: condition.value }],
         };
       } else {
         if (condition.path != null && condition.path !== '') throw filterError(`Cannot traverse scalar field ${condition.field}`, 'INVALID_FILTER_PATH');
         filterInput = { operator: condition.operator, value: condition.value };
       }
 
-      const result = await buildQueryTerms(filterInput, qlField, condition.field, gqltype, aggregationsIncluded);
-      if (hasScopeMarker(rawCondition)) {
+      const result = await buildQueryTerms(filterInput, qlField, condition.field, gqltype, aggregationsIncluded, ctx);
+      if (hasScopeMarker(rawCondition) && !ctx.inFrame) {
         throw detachedFilter(`${condition.operator ?? 'EQ'} on ${path} carries a client scope marker, but is not an emptiness condition`);
       }
       appendLookups(aggregateClauses, aggregationsIncluded, result.aggregateClauses);
@@ -681,9 +886,13 @@ const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, agg
     }
   }
 
+  for (const quantifier of ['ANY', 'ALL', 'NONE']) {
+    for (const group of filterGroup[quantifier] ?? []) parts.push(await compileFrame({ ...ctx, stages: aggregateClauses, included: aggregationsIncluded }, quantifier, group));
+  }
+
   if (filterGroup.AND?.length > 0) {
     for (const subGroup of filterGroup.AND) {
-      const subMatch = await buildFilterGroupMatch(subGroup, gqltype, aggregateClauses, aggregationsIncluded, depth + 1);
+      const subMatch = await buildFilterGroupMatch(subGroup, gqltype, aggregateClauses, aggregationsIncluded, depth + (subGroup.__implicit === true ? 0 : 1), ctx);
       if (subMatch) parts.push(subMatch);
     }
   }
@@ -691,7 +900,7 @@ const buildFilterGroupMatch = async (filterGroup, gqltype, aggregateClauses, agg
   if (filterGroup.OR?.length > 0) {
     const orParts = [];
     for (const subGroup of filterGroup.OR) {
-      const subMatch = await buildFilterGroupMatch(subGroup, gqltype, aggregateClauses, aggregationsIncluded, depth + 1);
+      const subMatch = await buildFilterGroupMatch(subGroup, gqltype, aggregateClauses, aggregationsIncluded, depth + (subGroup.__implicit === true ? 0 : 1), ctx);
       if (subMatch) orParts.push(subMatch);
     }
     if (orParts.length === 1) {
@@ -710,7 +919,10 @@ const FIND_CONTROL_KEYS = new Set(['pagination', 'sort', 'AND', 'OR']);
 // `aggregation` is the expression argument only on aggregate queries; elsewhere it names a field.
 const AGGREGATE_CONTROL_KEYS = new Set([...FIND_CONTROL_KEYS, 'aggregation']);
 
-const collectFiltersAndLookups = async (input, gqltype, aggregateClauses, aggregationsIncluded, operation = 'find') => {
+const collectFiltersAndLookups = async (rawInput, gqltype, aggregateClauses, aggregationsIncluded, operation = 'find', aggregation) => {
+  const ctx = rewriteContext(gqltype, operation, aggregation);
+  validateQuantifiedGroups(rawInput, ctx);
+  const input = frameCollectionPaths(rawInput, ctx);
   // Top-level arguments are field filters plus AND/OR groups; `conditions` is a key only inside groups.
   validateLogicalLists(input, ['AND', 'OR']);
   const controlKeys = operation === 'aggregate' ? AGGREGATE_CONTROL_KEYS : FIND_CONTROL_KEYS;
@@ -722,7 +934,7 @@ const collectFiltersAndLookups = async (input, gqltype, aggregateClauses, aggreg
   for (const [key, filterField] of Object.entries(input)) {
     if (controlKeys.has(key)) continue;
     const qlField = fields[key];
-    const result = await buildQueryTerms(filterField, qlField, key, gqltype, aggregationsIncluded);
+    const result = await buildQueryTerms(filterField, qlField, key, gqltype, aggregationsIncluded, ctx);
     appendLookups(aggregateClauses, aggregationsIncluded, result.aggregateClauses);
     for (const matchClause of Object.values(result.matchesClauses)) {
       for (const [matchKey, match] of Object.entries(matchClause)) {
@@ -742,7 +954,7 @@ const collectFiltersAndLookups = async (input, gqltype, aggregateClauses, aggreg
 
   if (input.AND?.length > 0) {
     for (const group of input.AND) {
-      const groupMatch = await buildFilterGroupMatch(group, gqltype, aggregateClauses, aggregationsIncluded);
+      const groupMatch = await buildFilterGroupMatch(group, gqltype, aggregateClauses, aggregationsIncluded, 0, ctx);
       if (groupMatch) topLevelAndParts.push(groupMatch);
     }
   }
@@ -750,7 +962,7 @@ const collectFiltersAndLookups = async (input, gqltype, aggregateClauses, aggreg
   if (input.OR?.length > 0) {
     const orParts = [];
     for (const group of input.OR) {
-      const groupMatch = await buildFilterGroupMatch(group, gqltype, aggregateClauses, aggregationsIncluded);
+      const groupMatch = await buildFilterGroupMatch(group, gqltype, aggregateClauses, aggregationsIncluded, 0, ctx);
       if (groupMatch) orParts.push(groupMatch);
     }
     if (orParts.length === 1) {
@@ -777,6 +989,15 @@ const validateSortTerms = (sort) => {
 const buildSortClause = (sortTerms, gqltype, aggregateClauses, aggregationsIncluded) => {
   const sortExpressions = {};
   for (const sort of sortTerms) {
+    let type = gqltype;
+    for (const name of sort.field.split('.')) {
+      const field = type.getFields?.()[name];
+      if (!field) break;
+      if (field.extensions?.relation && !field.extensions.relation.embedded && getListShape(field.type)) {
+        throw filterError(`Sort path ${sort.field} crosses the collection ${type.name}.${name}; a record has no single value there`, 'INVALID_FILTER_PATH');
+      }
+      type = getNamedType(field.type);
+    }
     const resolved = resolveQueryPath(gqltype, sort.field, aggregationsIncluded);
     appendLookups(aggregateClauses, aggregationsIncluded, resolved.aggregateClauses);
     sortExpressions[resolved.mongoPath] = sort.order === 'ASC' ? 1 : -1;
@@ -817,7 +1038,7 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
   const aggregationsIncluded = {};
   const paging = paginationStages(input.pagination, false);
 
-  const matchStage = await collectFiltersAndLookups(input, gqltype, aggregateClauses, aggregationsIncluded, 'aggregate');
+  const matchStage = await collectFiltersAndLookups(input, gqltype, aggregateClauses, aggregationsIncluded, 'aggregate', aggregationExpression);
   if (matchStage) aggregateClauses.push(matchStage);
 
   const { groupId, facts } = aggregationExpression ?? {};

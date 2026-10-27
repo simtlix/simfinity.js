@@ -2,7 +2,8 @@
 // QLOperator value, and list, count and aggregate calls pass text conditions to an adapter that declares them in
 // queryFeatures. An adapter without the declaration rejects them before it runs, as GraphQL requests do. The
 // descriptions also state the value and path rules of the emptiness operators (#108, part 2a), and that their tests of
-// references and collections depend on the database adapter (part 2b).
+// references and collections depend on the database adapter (part 2b). Recursive quantified inputs and descriptions
+// are unconditional, while executing them requires queryFeatures.quantifiers (#108, part 3).
 import { describe, expect, it } from 'vitest';
 import {
   GraphQLID, GraphQLList, GraphQLObjectType, GraphQLString,
@@ -62,6 +63,64 @@ const names = (text, operator) => new RegExp(`\\b${operator}\\b`).test(text);
 describe('MCP tool schemas and descriptions with the text operators', () => {
   const { tools } = createTools({ operators: OPERATORS });
 
+  it('publishes recursive quantified inputs on list and aggregate tools even without adapter capabilities', () => {
+    for (const features of [undefined, { operators: OPERATORS, referenceEmptiness: true, quantifiers: true }]) {
+      const generated = createTools(features);
+      for (const name of [LIST, AGGREGATE]) {
+        const { inputSchema } = tool(generated.tools, name);
+        const { $defs } = inputSchema;
+        expect($defs.QLQuantifier, name).toMatchObject({ type: 'string', enum: ['ANY', 'ALL', 'NONE'] });
+        expect($defs.QLTypeFilterExpression.properties.quantifier).toMatchObject({ anyOf: [{ $ref: '#/$defs/QLQuantifier' }, { type: 'null' }] });
+        expect($defs.QLQuantifiedGroup.required).toEqual(['path']);
+        expect($defs.QLQuantifiedGroup.properties.path).toMatchObject({ type: 'string' });
+        for (const type of ['QLFilterGroup', 'QLQuantifiedGroup']) {
+          for (const quantifier of ['ANY', 'ALL', 'NONE']) {
+            expect($defs[type].properties[quantifier], `${name} ${type}.${quantifier}`).toMatchObject({
+              type: ['array', 'null'], items: { anyOf: [{ $ref: '#/$defs/QLQuantifiedGroup' }, { type: 'null' }] },
+            });
+          }
+          for (const logical of ['AND', 'OR']) {
+            expect($defs[type].properties[logical]).toMatchObject({
+              type: ['array', 'null'], items: { anyOf: [{ $ref: '#/$defs/QLFilterGroup' }, { type: 'null' }] },
+            });
+          }
+        }
+        const validate = new AjvJsonSchemaValidator().getValidator(inputSchema);
+        const args = {
+          owner: { quantifier: 'NONE', terms: [{ path: 'name', operator: 'EQ', value: 'Ana' }] },
+          AND: [{ ANY: [{ path: 'owner', OR: [{ ALL: [{ path: 'owner', NONE: [{ path: 'owner' }] }] }] }] }],
+          ...(name === AGGREGATE ? { aggregation: { groupId: 'name', facts: [] } } : {}),
+        };
+        expect(validate(args).valid, name).toBe(true);
+        expect(validate({ ...args, owner: { quantifier: 'SOME' } }).valid).toBe(false);
+        expect(validate({ ...args, AND: [{ ANY: [{}] }] }).valid).toBe(false);
+      }
+    }
+  });
+
+  it('explains quantified paths, correlation, empty sets, visibility and adapter support on both tools', () => {
+    for (const name of [LIST, AGGREGATE]) {
+      const { inputSchema: { $defs, properties }, description } = tool(tools, name);
+      expect($defs.QLQuantifier.description).toContain('ANY');
+      expect($defs.QLQuantifier.description).toContain('ALL and NONE hold when there are no visible elements');
+      expect($defs.QLQuantifiedGroup.description).toContain('same element');
+      expect($defs.QLQuantifiedGroup.properties.path.description).toContain('relative to the containing element');
+      for (const quantifier of ['ANY', 'ALL', 'NONE']) {
+        expect($defs.QLFilterGroup.properties[quantifier].description, quantifier).toContain(quantifier);
+      }
+      expect($defs.QLTypeFilterExpression.properties.quantifier.description).toContain('terms are ANDed on the same element');
+      expect($defs.QLTypeFilterExpression.description).toContain('quantifier');
+      expect($defs.QLTypeFilter.description).toContain('same collection prefix in one group');
+      expect($defs.QLOperator.description).toContain('Use ANY, ALL or NONE with a relative inner condition');
+      expect(properties.owner.description).toContain('quantifier: ANY | ALL | NONE');
+      expect(properties.AND.description).toContain('ANY/ALL/NONE');
+      expect(properties.OR.description).toContain('ANY/ALL/NONE');
+      expect(description).toContain('collection filter path returns each record once');
+      expect(description).toContain('queryFeatures.quantifiers');
+      expect(description).toContain('UNSUPPORTED_QUERY');
+    }
+  });
+
   it('lists every QLOperator value, the text operators included, in the operator enum of list and aggregate tools', () => {
     expect(OPERATORS).toEqual(expect.arrayContaining(TEXT));
     for (const name of [LIST, AGGREGATE]) {
@@ -106,6 +165,17 @@ describe('MCP tool schemas and descriptions with the text operators', () => {
     expect(validate({ name: { operator: 'ilike', value: 'pal' } }).valid).toBe(false);
   });
 
+  it('accepts the list operators and rejects unknown ones in hosts that validate tool input', () => {
+    const validate = new AjvJsonSchemaValidator().getValidator(tool(tools, LIST).inputSchema);
+    for (const [operator, value] of [['CONTAINS_ALL', ['red', 'blue']], ['IIN', ['RED', 'blue']], ['IIN', []]]) {
+      expect(validate({ tags: { operator, value } }).valid, operator).toBe(true);
+      expect(validate({ AND: [{ conditions: [{ field: 'tags', operator, value }] }] }).valid, operator).toBe(true);
+      expect(validate({ owner: { terms: [{ path: 'name', operator, value }] } }).valid, operator).toBe(true);
+    }
+    expect(validate({ tags: { operator: 'CONTAINS_ANY', value: ['red'] } }).valid).toBe(false);
+    expect(validate({ name: { operator: 'iin', value: ['pal'] } }).valid).toBe(false);
+  });
+
   // The texts are the same whatever the adapter declares: generateMCPTools reads only the schema, so they say that
   // references and collections depend on the database adapter (#108, part 2b).
   it('says that IS_EMPTY and IS_NOT_EMPTY take no value, test the field itself without a path, and test references and collections where the adapter supports it', () => {
@@ -117,12 +187,13 @@ describe('MCP tool schemas and descriptions with the text operators', () => {
     expect($defs.QLOperator.description).toContain('so EQ null also matches [null] and never []');
     // A path that goes on past a collection keeps the permanent INVALID_FILTER_PATH on every adapter.
     expect($defs.QLOperator.description).toContain('For IS_EMPTY and IS_NOT_EMPTY, a path that continues inside an embedded list or a collection '
-      + 'fails with INVALID_FILTER_PATH. Where the database adapter supports it, they also test references and collections, and read a record '
+      + 'fails with INVALID_FILTER_PATH: this shorthand does not quantify elements. Use ANY, ALL or NONE with a relative inner condition '
+      + 'to test a collection element. Where the database adapter supports it, they also test references and collections, and read a record '
       + 'the caller may not see as a missing one: a reference is empty when it points to no record the caller may see, a collection when it '
       + 'has no child the caller may see, and a field reached through references when it is empty by its own rule or a reference on the way '
       + 'is empty; other adapters reject these conditions with UNSUPPORTED_QUERY.');
     expect($defs.QLOperator.description).not.toContain('for now');
-    expect($defs.QLFilter.properties.value.description).toBe('Filter value. Accepts a scalar, or an array for the IN, NIN and BTW operators. Omit it, or pass null, for IS_EMPTY and IS_NOT_EMPTY.');
+    expect($defs.QLFilter.properties.value.description).toBe('Filter value. Accepts a scalar, or an array for the IN, NIN, IIN, BTW and CONTAINS_ALL operators. Omit it, or pass null, for IS_EMPTY and IS_NOT_EMPTY.');
     expect($defs.QLTypeFilter.description).toContain('With IS_EMPTY or IS_NOT_EMPTY, omit the path to test the embedded object or embedded list itself. '
       + 'Where the database adapter supports it, a reference or collection can be tested itself the same way.');
     expect($defs.QLTypeFilterExpression.description).toContain('A term with IS_EMPTY or IS_NOT_EMPTY and no path tests an embedded object or embedded list itself. '
@@ -130,7 +201,7 @@ describe('MCP tool schemas and descriptions with the text operators', () => {
     expect($defs.QLFilterCondition.description).toContain('test an embedded object or embedded list field itself when the path is omitted, '
       + `and a reference or collection field itself ${ADAPTER}.`);
     expect(properties.name.description).toBe(`Filter on \`name\` using { operator, value }; ${NO_VALUE}.`);
-    expect(properties.owner.description).toBe('Filter on the related entity or embedded value `owner` using { terms: [{ path, operator, value }] }; '
+    expect(properties.owner.description).toContain('Filter on the related entity or embedded value `owner` using { terms: [{ path, operator, value }] }; '
       + `a term { operator: IS_EMPTY } or { operator: IS_NOT_EMPTY } without path tests the field itself, on a reference or collection only ${ADAPTER}.`);
     for (const name of [LIST, AGGREGATE]) {
       expect(tool(tools, name).description, name).toContain(`; ${NO_VALUE}, and a term or group condition without path applies them to the field `
@@ -140,6 +211,22 @@ describe('MCP tool schemas and descriptions with the text operators', () => {
 });
 
 describe('MCP tool calls with the text operators', () => {
+  it('returns UNSUPPORTED_QUERY for quantified list and aggregate calls before an undeclared adapter runs', async () => {
+    const { calls, callTool } = createTools({ operators: OPERATORS });
+    for (const [name, args] of [
+      [LIST, { owner: { quantifier: 'NONE', terms: [{ path: 'name', operator: 'EQ', value: 'Ana' }] } }],
+      [AGGREGATE, {
+        AND: [{ ANY: [{ path: 'owner', conditions: [{ field: 'name', operator: 'EQ', value: 'Ana' }] }] }],
+        aggregation: { groupId: 'name', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }] },
+      }],
+    ]) {
+      const result = await callTool(name, args);
+      expect(result.isError, name).toBe(true);
+      expect(firstError(result).extensions?.code, name).toBe('UNSUPPORTED_QUERY');
+    }
+    expect(calls).toEqual([]);
+  });
+
   it('passes the text conditions of a counted list call to an adapter that declares them', async () => {
     const { calls, callTool } = createTools({ operators: OPERATORS });
     const args = {

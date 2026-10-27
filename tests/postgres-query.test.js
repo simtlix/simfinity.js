@@ -15,13 +15,13 @@ const compile = (args, options) => {
   return compileQuery(models, describeDatabase(registrations, { schema: 'app' }), createQueryPlan(models, 'ContractSerie', args, options));
 };
 describe('PostgreSQL query compilation', () => {
-  it('binds every value and reuses correlated relation joins without distinct', () => {
+  it('binds every value and correlates collection terms in one frame without distinct', () => {
     const result = compile({ tenant: { value: '\'; DROP TABLE test; --' }, seasons: { terms: [
       { path: 'year', operator: 'GTE', value: 2000 }, { path: 'year', operator: 'LTE', value: 2030 },
     ] } });
     expect(result.text).not.toContain('DROP TABLE');
     expect(result.values).toContain('\'; DROP TABLE test; --');
-    expect(result.text.match(/LEFT JOIN "app"\."ContractSeason"/g)).toHaveLength(1);
+    expect(result.text.match(/EXISTS \(SELECT 1 FROM "app"\."ContractSeason"/g)).toHaveLength(1);
     expect(result.text).not.toContain('SELECT DISTINCT');
   });
   it('expresses Mongo null/array/LIKE semantics explicitly', () => {
@@ -40,8 +40,8 @@ describe('PostgreSQL query compilation', () => {
     const membership = where({ title: { operator: 'IN', value: ['a', 'b'] } });
     expect(membership.sql).toBe(`(${title} = ANY ($1::text[]))`);
     expect(membership.values[0]).toEqual(['a', 'b']);
-    expect(where({ seasons: { terms: [{ path: 'year', operator: 'GTE', value: 2000 }] } }).sql).toBe('(t1."year" >= $1::integer)');
-    expect(where({ seasons: { terms: [{ path: 'year', operator: 'BTW', value: [2000, 2030] }] } }).sql).toBe('((t1."year" >= $1::integer AND t1."year" <= $2::integer))');
+    expect(where({ seasons: { terms: [{ path: 'year', operator: 'GTE', value: 2000 }] } }).sql).toBe('(EXISTS (SELECT 1 FROM "app"."ContractSeason" t1 WHERE t1."serie" = t0."id" AND (t1."year" >= $1::integer)))');
+    expect(where({ seasons: { terms: [{ path: 'year', operator: 'BTW', value: [2000, 2030] }] } }).sql).toBe('(EXISTS (SELECT 1 FROM "app"."ContractSeason" t1 WHERE t1."serie" = t0."id" AND ((t1."year" >= $1::integer AND t1."year" <= $2::integer))))');
     expect(where({ title: { operator: 'LIKE', value: 'x' } }).sql).toBe(`(strpos(${title}, $1::text) > 0)`);
     expect(where({ title: { operator: 'NE', value: 'a' } }).sql).toBe(`(${title} IS DISTINCT FROM $1::text)`);
     const exclusion = where({ title: { operator: 'NIN', value: ['a', 'b'] } });

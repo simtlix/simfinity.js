@@ -167,14 +167,39 @@ await check('aggregate groups through a reference and an embedded path', async (
   const result = await execute(`{services_aggregate(${rootFilter},aggregation:{groupId:"barbershop.address.city",facts:${facts}},sort:{terms:[{field:"groupId",order:ASC}]}){groupId facts}}`, {}, admin.accessToken);
   assert.deepEqual(result.data.services_aggregate, [{ groupId: 'Cordoba', facts: expectedFacts(['A', 'B', 'C', 'F']) }, { groupId: 'Rosario', facts: expectedFacts(['D', 'E']) }]);
 });
-await check('one-to-many filter preserves joined rows and count', async () => {
+await check('one-to-many filter returns each matching shop once and counts roots', async () => {
   const result = await execute(`{barbershops(${shopFilter},services:{terms:[{path:"price",operator:GTE,value:20}]},sort:{terms:[{field:"slug",order:ASC}]},pagination:{page:1,size:10,count:true}){slug}}`, {}, admin.accessToken);
-  assert.deepEqual(result.data.barbershops.map((row) => row.slug.slice(prefix.length + 1)), ['shop-0', 'shop-0', 'shop-1', 'shop-2']);
-  assert.equal(result.extensions.count, 4);
+  assert.deepEqual(result.data.barbershops.map((row) => row.slug.slice(prefix.length + 1)), ['shop-0', 'shop-1', 'shop-2']);
+  assert.equal(result.extensions.count, 3);
+});
+await check('one-to-many filter paginates distinct shops', async () => {
+  const result = await execute(`{barbershops(${shopFilter},services:{terms:[{path:"price",operator:GTE,value:20}]},sort:{terms:[{field:"slug",order:ASC}]},pagination:{page:2,size:1,count:true}){slug}}`, {}, admin.accessToken);
+  assert.deepEqual(result.data.barbershops.map((row) => row.slug.slice(prefix.length + 1)), ['shop-1']);
+  assert.equal(result.extensions.count, 3);
+});
+await check('one-to-many terms must match the same service', async () => {
+  // Shop 0 has a cheap short service and an expensive long service, but no expensive short service.
+  const result = await execute(`{barbershops(${shopFilter},services:{terms:[{path:"price",operator:GTE,value:40},{path:"durationMinutes",operator:LTE,value:30}]}){id}}`, {}, admin.accessToken);
+  assert.deepEqual(result.data.barbershops, []);
+});
+await check('filter-only collection aggregation counts shops once', async () => {
+  const result = await execute(`{barbershops_aggregate(${shopFilter},services:{terms:[{path:"price",operator:GTE,value:20}]},aggregation:{groupId:"address.city",facts:[{operation:COUNT,factName:"total",path:"id"}]},sort:{terms:[{field:"groupId",order:ASC}]}){groupId facts}}`, {}, admin.accessToken);
+  assert.deepEqual(result.data.barbershops_aggregate, [{ groupId: 'Cordoba', facts: { total: 2 } }, { groupId: 'Rosario', facts: { total: 1 } }]);
 });
 await check('one-to-many aggregation filters before grouping', async () => {
   const result = await execute(`{barbershops_aggregate(${shopFilter},services:{terms:[{path:"price",operator:GTE,value:20}]},aggregation:{groupId:"address.city",facts:[{operation:COUNT,factName:"total",path:"services.id"},{operation:SUM,factName:"sum",path:"services.price"}]},sort:{terms:[{field:"groupId",order:ASC}]}){groupId facts}}`, {}, admin.accessToken);
   assert.deepEqual(result.data.barbershops_aggregate, [{ groupId: 'Cordoba', facts: { total: 3, sum: 159 } }, { groupId: 'Rosario', facts: { total: 1, sum: 30 } }]);
+});
+for (const [role, token, expected] of [
+  ['anonymous', null, ['shop-0', 'shop-1']],
+  ['client', client.accessToken, ['shop-0', 'shop-1']],
+  ['owner', owner.accessToken, ['shop-0', 'shop-1']],
+  ['other owner', outsider.accessToken, ['shop-2']],
+  ['admin', admin.accessToken, ['shop-0', 'shop-1', 'shop-2']],
+]) await check(`collection filter intersects shop and service visibility: ${role}`, async () => {
+  // The other owner can see approved shops, but their service scope exposes only their own catalog.
+  const result = await execute(`{barbershops(${shopFilter},services:{terms:[{path:"price",operator:GTE,value:20}]},sort:{terms:[{field:"slug",order:ASC}]}){slug}}`, {}, token);
+  assert.deepEqual(result.data.barbershops.map((row) => row.slug.slice(prefix.length + 1)), expected);
 });
 for (const [role, token, keys] of [['anonymous', null, ['A', 'B', 'C', 'D', 'E']], ['client', client.accessToken, ['A', 'B', 'C', 'D', 'E']], ['owner', owner.accessToken, ['A', 'B', 'C', 'D', 'E']], ['other owner', outsider.accessToken, ['F']]]) {
   await check(`scope + scalar/logical filters: ${role}`, async () => {

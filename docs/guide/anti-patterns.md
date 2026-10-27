@@ -63,7 +63,7 @@ await updateorder.resolve(null, { input: { id, status: 'PLACED' } }, context, un
 
 **Why it hurts.** A generated root mutation resolver passes no session to the runtime, so it always opens and commits its own transaction; called inside another transaction, it cannot join it. Its arguments skip GraphQL coercion: an enum value arrives as its name instead of its internal value, defaults are not applied and scalars are not validated, so a record can be stored in a form that the schema then reads back as `null`. Resolvers are also an implementation detail of the GraphQL contract: the [authorization plugin](./authorization) replaces them in place, so a resolver captured before the plugin ran skips its rules.
 
-**Do this instead.** [Execute the generated schema in-process](./server-side-operations#execute-the-generated-schema-in-process) with graphql-js, which coerces variables and runs the same pipeline as a client request. For several writes in one transaction, use a [custom mutation with `saveObject()`](./server-side-operations#create-several-records-in-one-custom-mutation); next release: its session also takes [`updateObject()`, `deleteObject()` and `transitionObject()`](./server-side-operations#update-delete-and-transition-from-code-next-release), and a schema can opt into a [transaction mutation](./mutations#run-several-mutations-in-one-transaction-next-release) that runs a list of generated mutations in one.
+**Do this instead.** [Execute the generated schema in-process](./server-side-operations#execute-the-generated-schema-in-process) with graphql-js, which coerces variables and runs the same pipeline as a client request. For several writes in one transaction, use a [custom mutation with `saveObject()`](./server-side-operations#create-several-records-in-one-custom-mutation); since 3.16.0, its session also takes [`updateObject()`, `deleteObject()` and `transitionObject()`](./server-side-operations#update-delete-and-transition-from-code), and a schema can opt into a [transaction mutation](./mutations#run-several-mutations-in-one-transaction) that runs a list of generated mutations in one.
 
 ## Passing sessions and filters through AsyncLocalStorage
 
@@ -211,7 +211,7 @@ simfinity.registerMutation('sendinvoiceemail', 'Email an invoice.', SendInvoiceI
 
 **Why it hurts.** A custom mutation's callback runs inside a database transaction, which Simfinity retries up to five times on transient errors, running the callback again each time. The email can therefore be sent twice, and an email sent before a later failure is not taken back by the rollback. The transaction also stays open for the duration of a network call, and adds nothing to work that touches no data.
 
-**Do this instead.** Inside the mutation that changes the data, write an outbox record with the session, and deliver it from a worker after commit; see [transactions and side effects](./controllers#transactions-and-side-effects). Work that touches no data does not need a Simfinity operation: run it in your own service code or endpoint.
+**Do this instead.** Use [after-commit callbacks](./controllers#after-commit-callbacks) for best-effort external notifications. When delivery must survive a process failure, write an outbox record with the mutation's session and deliver it from a worker after commit; see [transactions and side effects](./controllers#transactions-and-side-effects). Work that touches no data does not need a Simfinity operation: run it in your own service code or endpoint.
 
 ## Reading stored records through a custom mutation
 

@@ -5,7 +5,7 @@ description: MongoDB and PostgreSQL editions of Simfinity, shared GraphQL APIs, 
 
 # Choose a database
 
-Simfinity 3.12.0 supports **MongoDB and PostgreSQL** through separate packages. Choose one when creating your application. The database adapter stays fixed for that deployment; this is not a runtime database switch or a MongoDB-to-PostgreSQL data migration tool.
+Simfinity 3.15.0 supports **MongoDB and PostgreSQL** through separate packages. Choose one when creating your application. The database adapter stays fixed for that deployment; this is not a runtime database switch or a MongoDB-to-PostgreSQL data migration tool.
 
 Both adapters generate the same GraphQL operation names and input shapes from the same type registrations and relationship metadata. Validation, authorization, query scopes, controllers, state machines, and optional MCP use the shared API. Native database access and physical storage have the differences below.
 
@@ -32,21 +32,21 @@ Version 3.3.0 also exposes a [driver-free SQL core and PostgreSQL plugin](./sql-
 
 ## Install from npm
 
-Both adapters are released at **v3.12.0**. Choose one package in your application:
+Both adapters are released at **v3.15.0**. Choose one package in your application:
 
 ::: code-group
 
 ```sh [MongoDB]
-npm install @simtlix/simfinity-js@3.12.0 graphql@^16.11.0 mongoose@^8.24.2
+npm install @simtlix/simfinity-js@3.16.0 graphql@^16.11.0 mongoose@^8.24.2
 ```
 
 ```sh [PostgreSQL]
-npm install @simtlix/simfinity-postgres@3.12.0 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-postgres@3.16.0 graphql@^16.11.0 pg@^8.16.3
 ```
 
 :::
 
-Shared core dependencies install automatically. Add `@simtlix/simfinity-mcp@3.12.0` only when your PostgreSQL application exposes MCP tools; transport factories also require `@modelcontextprotocol/sdk`. See the [MCP guide](./mcp).
+Shared core dependencies install automatically. Add `@simtlix/simfinity-mcp@3.16.0` only when your PostgreSQL application exposes MCP tools; transport factories also require `@modelcontextprotocol/sdk`. See the [MCP guide](./mcp).
 
 <span id="download-the-preview"></span>
 
@@ -74,7 +74,7 @@ npm start
 
 :::
 
-These starters require Node.js 22.15.0 or newer and pin all Simfinity packages to 3.11.0 on npm. Upgrade all their Simfinity dependencies together to 3.12.0 before using named views. Their manifests override `@graphql-tools/utils` to the patched `^12.0.1` range for Yoga; retain that override when copying the starter setup. Both manifests declare `@simtlix/simfinity-core` directly for shared helpers. MongoDB keeps reference integrity off by default; enable the [transactional adapter](./mongodb-integrity) when needed. PostgreSQL installs neither Mongoose nor MCP by default. For an existing application, review the [upgrade notes](../resources/compatibility#upgrade-to-3-12-0) before updating its dependencies.
+These starters require Node.js 22.15.0 or newer and pin all Simfinity packages to 3.11.0 on npm. Upgrade all their Simfinity dependencies together to 3.15.0 before using named views, optimistic concurrency, collection frames, committed controller callbacks or client descriptors. Their manifests override `@graphql-tools/utils` to the patched `^12.0.1` range for Yoga; retain that override when copying the starter setup. Both manifests declare `@simtlix/simfinity-core` directly for shared helpers. MongoDB keeps reference integrity off by default; enable the [transactional adapter](./mongodb-integrity) when needed. PostgreSQL installs neither Mongoose nor MCP by default. For an existing application, review the [upgrade notes](../resources/compatibility#upgrade-to-3-15-0) before updating its dependencies.
 
 The MongoDB example uses embedded seasons. The PostgreSQL example uses a one-to-many relation to demonstrate real generated FKs. That example choice accounts for their different nested inputs; both adapters support both relationship shapes. Use the operation shown in the corresponding quick start.
 
@@ -86,7 +86,7 @@ Download the [ZIP SHA-256 checksum](/releases/simfinity-3.11.0-starters.zip.sha2
 shasum -a 256 -c simfinity-3.11.0-starters.zip.sha256.txt
 ```
 
-The [v3.12.0 GitHub release](https://github.com/simtlix/simfinity.js/releases/tag/v3.12.0) contains the tagged source, package archives and integrity manifest. Keep installed Simfinity packages at the same version.
+The [v3.15.0 GitHub release](https://github.com/simtlix/simfinity.js/releases/tag/v3.15.0) contains the tagged source, package archives and integrity manifest. Keep installed Simfinity packages at the same version.
 
 ## Runtime setup for shared examples
 
@@ -136,7 +136,7 @@ The [v3.5.2 starters](/releases/simfinity-3.5.2-starters.zip) ([checksum](/relea
 
 The [v3.3.0 starters](/releases/simfinity-3.3.0-starters.zip) ([checksum](/releases/simfinity-3.3.0-starters.zip.sha256.txt)) and [v3.2.0 starters](/releases/simfinity-3.2.0-starters.zip) ([checksum](/releases/simfinity-3.2.0-starters.zip.sha256.txt)) remain available as historical snapshots with their original dependency pins. New applications should use the current starters above.
 
-For an application using the published 3.0.1 MongoDB release, the [original MongoDB starter](/simfinity-series-starter.zip) remains available. It pins `@simtlix/simfinity-js` to `3.0.1` and supports the MongoDB quick start's operations. The wider API reference documents v3.12.0 and may include APIs or fixes absent from 3.0.1.
+For an application using the published 3.0.1 MongoDB release, the [original MongoDB starter](/simfinity-series-starter.zip) remains available. It pins `@simtlix/simfinity-js` to `3.0.1` and supports the MongoDB quick start's operations. The wider API reference documents v3.15.0 and may include APIs or fixes absent from 3.0.1.
 
 Check [compatibility and releases](../resources/compatibility) before upgrading an existing application. The [Series Sample Project](https://github.com/simtlix/series-sample) is a separate MongoDB application; it is not a PostgreSQL starter.
 

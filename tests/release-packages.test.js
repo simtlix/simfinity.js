@@ -34,12 +34,22 @@ const committedFixture = () => {
 const sha256 = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
 
 describe('workspace release preparation', () => {
+  it('keeps the descriptor generator version aligned and rejects drift', () => {
+    const root = fixture();
+    const info = join(root, 'packages/descriptor/src/package-info.js');
+    copyFileSync(new URL('../packages/descriptor/src/package-info.js', import.meta.url), info);
+    setReleaseVersion(root, '3.2.0');
+    expect(readFileSync(info, 'utf8')).toContain('version: \'3.2.0\'');
+    writeFileSync(info, readFileSync(info, 'utf8').replace('3.2.0', '3.1.0'));
+    expect(() => readRelease(root)).toThrow(/descriptor generator/);
+  });
+
   it('updates every internal package and v2 lock dependency together without changing external resolutions', () => {
     const root = fixture();
     setReleaseVersion(root, '3.2.0');
     const release = readRelease(root);
     expect(release.version).toBe('3.2.0');
-    expect(release.packages.map((item) => item.name)).toEqual(['@simtlix/simfinity-core', '@simtlix/simfinity-sql', '@simtlix/simfinity-mcp', '@simtlix/simfinity-postgres', '@simtlix/simfinity-js']);
+    expect(release.packages.map((item) => item.name)).toEqual(['@simtlix/simfinity-core', '@simtlix/simfinity-sql', '@simtlix/simfinity-mcp', '@simtlix/simfinity-descriptor', '@simtlix/simfinity-postgres', '@simtlix/simfinity-js']);
     for (const item of release.packages) expect(json(join(root, item.directory, 'package.json')).version).toBe('3.2.0');
     const lock = json(join(root, 'package-lock.json'));
     expect(lock.version).toBe('3.2.0');
@@ -48,7 +58,7 @@ describe('workspace release preparation', () => {
     expect(lock.packages['node_modules/pg']).toEqual({ version: '8.16.3', integrity: 'preserve-external-entry' });
     expect(json(join(root, 'package.json')).private).toBe(true);
     expect(lock.packages[''].version).toBe('3.2.0');
-    expect(release.packages.map((item) => item.directory)).toEqual(['packages/core', 'packages/sql', 'packages/mcp', 'packages/postgres', 'packages/mongodb']);
+    expect(release.packages.map((item) => item.directory)).toEqual(['packages/core', 'packages/sql', 'packages/mcp', 'packages/descriptor', 'packages/postgres', 'packages/mongodb']);
     expect(readFileSync(join(root, 'package.json'), 'utf8').replaceAll('\r\n', '')).not.toContain('\n');
   });
 
@@ -66,7 +76,7 @@ describe('workspace release preparation', () => {
   it('prepares releases without documentation dependencies or lockfiles', () => {
     const root = fixture();
     expect(() => setReleaseVersion(root, '3.2.0')).not.toThrow();
-    expect(readRelease(root).packages).toHaveLength(5);
+    expect(readRelease(root).packages).toHaveLength(6);
   });
 
   it.each(['../3.2.0', '3.2', 'v3.2.0', '03.2.0', '3.2.0-01', '3.2.0\n', '3.2.0\r'])('rejects unsafe or invalid release version %j before writing files', (version) => {
@@ -134,7 +144,7 @@ describe('workspace release preparation', () => {
     expect(readdirSync(root)).not.toContain('artifacts');
   });
 
-  it('packs all five actual archives in install order, skips lifecycle scripts, and verifies provenance and integrity', () => {
+  it('packs all six actual archives in install order, skips lifecycle scripts, and verifies provenance and integrity', () => {
     const root = fixture();
     setReleaseVersion(root, '3.2.0-rc.1');
     const destination = join(root, 'artifacts');

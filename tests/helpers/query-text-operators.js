@@ -183,9 +183,9 @@ export const ITEM_CASES = [
   // A reference and its String list.
   ['shop.name', 'ILIKE', 'open', ['A', 'C']], ['shop.name', 'ISTARTS_WITH', 'closed', ['B']], ['shop.name', 'ENDS_WITH', 'Market', ['A']],
   ['shop.tags', 'IEQ', 'FRESH', ['A']], ['shop.tags', 'ILIKE', 'UL', ['B']],
-  // A collection: each matching child repeats its record, as for every other operator.
+  // A collection: matching children return each parent record once.
   ['reviews.author', 'ISTARTS_WITH', 'ana', ['A', 'B']], ['reviews.author', 'IEQ', 'ana', ['A']], ['reviews.author', 'ILIKE', 'O', ['A']],
-  ['reviews.author', 'ILIKE', '', ['A', 'A', 'B']],
+  ['reviews.author', 'ILIKE', '', ['A', 'B']],
 ].map(([path, operator, value, keys]) => ({ name: `${path} ${operator} ${JSON.stringify(value)}`, args: filter(path, operator, value), keys }));
 ITEM_CASES.push(
   { name: 'OR of IEQ and ENDS_WITH', args: { OR: [{ conditions: [{ field: 'name', operator: 'IEQ', value: 'palermo soho' }] }, { conditions: [{ field: 'tags', operator: 'ENDS_WITH', value: '%' }] }] }, keys: ['A', 'C'] },
@@ -222,8 +222,9 @@ export const FOLDING_CASES = [
   ['ILIKE', 'ΔΟΣ.', ['w31']], ['IENDS_WITH', 'Σ ΑΒ', ['w30']], ['IENDS_WITH', 'Σ', ['w04', 'w05', 'w06', 'w33']],
   ['IENDS_WITH', 'ος αβ', ['w30']], ['ISTARTS_WITH', 'κασ', ['w29']], ['ISTARTS_WITH', 'ΚΑΣΤ', ['w29']],
   // The accepted difference of the dotted capital I: ICU lowers İ to i followed by U+0307 COMBINING DOT ABOVE, while
-  // MongoDB matches İ only with itself.
+  // MongoDB matches İ only with itself; İ's own PostgreSQL fold, searched, finds İ there and only itself on MongoDB.
   ['IEQ', 'İSTANBUL', ['w10', 'w13'], ['w10'], 'İ (U+0130)'],
+  ['IEQ', 'i̇stanbul', ['w10', 'w13'], ['w13'], 'İ (U+0130)'],
   ['ISTARTS_WITH', 'i', ['w10', 'w11', 'w12', 'w13'], ['w11', 'w12', 'w13'], 'İ (U+0130)'],
 ];
 /**

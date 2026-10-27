@@ -77,6 +77,10 @@ configuration objects and primitive constants. Duplicate literal properties use
 the last value. Spreads, computed keys, getters, mutable configuration objects,
 imported permission maps and unknown values are skipped.
 
+Calling the known runtime member `configureAfterCommit` preserves tracking for
+subsequent schema and relation checks. The plugin does not validate its options
+or certify callback delivery or transaction ownership.
+
 Authorization checks cover `createAuthPlugin`, not the deprecated middleware
 factories. Maps and rule/claim arrays must be inline to inspect their entries;
 constructor/call results and mutable object/array aliases remain unknown.

@@ -12,6 +12,7 @@ const rootDeclarations = readFileSync(join(root, 'types/index.d.ts'), 'utf8');
 
 // Each public subpath: its runtime module, its declaration file and the root types it re-exports.
 const publicSubpaths = {
+  './introspection': { target: './src/introspection-config.js', types: './types/introspection.d.ts', rootTypes: ['IntrospectionOptions'] },
   './auth': {
     target: './src/auth/index.js',
     types: './types/auth/index.d.ts',
@@ -41,6 +42,7 @@ const publicSubpaths = {
 };
 // Static imports, so the bundler resolves each subpath through the export map.
 const load = {
+  './introspection': () => import('@simtlix/simfinity-core/introspection'),
   './auth': () => import('@simtlix/simfinity-core/auth'),
   './auth/errors': () => import('@simtlix/simfinity-core/auth/errors'),
   './auth/expressions': () => import('@simtlix/simfinity-core/auth/expressions'),
@@ -54,7 +56,7 @@ const declarationOf = (subpath) => readFileSync(join(root, publicSubpaths[subpat
 // Value exports a declaration file declares: `export const`, `export default`, and the names of
 // `export { ... } from` lists. Type-only `export type { ... }` lists are skipped.
 const declaredValues = (text) => {
-  const names = new Set([...text.matchAll(/^export const (\w+)/gm)].map((match) => match[1]));
+  const names = new Set([...text.matchAll(/^export (?:const|function) (\w+)/gm)].map((match) => match[1]));
   for (const [, list] of text.matchAll(/^export \{([^}]*)\}/gm)) {
     for (const name of list.split(',').map((item) => item.trim()).filter(Boolean)) names.add(name);
   }
@@ -78,6 +80,8 @@ describe('core subpath type declarations', () => {
   });
 
   it('keeps the internal subpaths untyped and unchanged', () => {
+    expect(manifest.exports['./internal/errors']).toBe('./src/errors/simfinity.error.js');
+    expect(manifest.exports['./internal/schema-registrations']).toBe('./src/schema-registrations.js');
     expect(manifest.exports['./internal/object-id']).toBe('./src/auth/object-id.js');
     expect(manifest.exports['./internal/relation-storage']).toBe('./src/relation-storage.js');
     expect(manifest.exports['./internal/query-operators']).toBe('./src/query-operators.js');
@@ -129,6 +133,25 @@ const explicitRootValues = (text) => [...new Set(
 )].sort();
 
 describe('core root declarations', () => {
+  it('exports the quantifier enum as the same value the core runtime uses', async () => {
+    const core = await import('@simtlix/simfinity-core');
+    expect(core.QLQuantifier?.name).toBe('QLQuantifier');
+    const modulePath = '../packages/core/src/const/QLQuantifier.js';
+    expect(core.QLQuantifier).toBe((await import(/* @vite-ignore */ modulePath)).default);
+    expect(rootDeclarations).toMatch(/^export const QLQuantifier: GraphQLEnumType;$/m);
+  });
+
+  it('declares the collection frame options, recursive inputs and plan nodes', () => {
+    for (const name of ['QueryQuantifier', 'QueryJoins', 'QLFilterCondition', 'QLFilterGroup', 'QLQuantifiedGroup', 'QLTypeFilterExpression']) {
+      expect(rootDeclarations, name).toMatch(new RegExp(`^export (?:type|interface) ${name}\\b`, 'm'));
+    }
+    expect(rootDeclarations).toMatch(/quantifiers\?: boolean \| null \| undefined;/);
+    expect(rootDeclarations).toMatch(/maxFrameNesting\?: number;/);
+    expect(rootDeclarations).toMatch(/kind: 'quantified';/);
+    expect(rootDeclarations).toMatch(/joins\?: QueryJoins/);
+    expect(rootDeclarations).toMatch(/export function createQueryPlan\([^\n]*quantifiers\?: boolean/);
+  });
+
   it('exports the root error classes its declarations declare, as the auth namespace classes', async () => {
     const core = await import('@simtlix/simfinity-core');
     const errors = await load['./auth/errors']();

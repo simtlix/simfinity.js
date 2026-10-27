@@ -81,7 +81,7 @@ export default defineConfig({
         { text: 'Relationships', link: '/guide/relationships' },
         { text: 'Queries & filtering', link: '/guide/queries' },
         { text: 'Mutations', link: '/guide/mutations' },
-        { text: 'Optimistic concurrency (next release)', link: '/guide/concurrency' },
+        { text: 'Optimistic concurrency', link: '/guide/concurrency' },
         { text: 'Validation', link: '/guide/validation' },
         { text: 'Controllers & hooks', link: '/guide/controllers' },
         { text: 'State machines', link: '/guide/state-machines' },
@@ -99,6 +99,7 @@ export default defineConfig({
       { text: 'Reference', collapsed: false, items: [
         { text: 'Core API', link: '/reference/api' },
         { text: 'Field extensions', link: '/reference/extensions' },
+        { text: 'Client descriptor', link: '/reference/client-descriptor' },
         { text: 'Scalars', link: '/reference/scalars' },
         { text: 'Aggregation', link: '/reference/aggregation' },
         { text: 'Plugins', link: '/reference/plugins' },

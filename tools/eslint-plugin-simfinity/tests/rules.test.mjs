@@ -105,6 +105,7 @@ tester.run('no-schema-cloning', plugin.rules['no-schema-cloning'], {
   ],
   invalid: [
     invalid(cloning + mongo + 'clone(sf.createSchema(), {});'),
+    ...[mongo, pg].map(runtime => invalid(cloning + runtime + 'sf.configureAfterCommit({ onError() {} }); clone(sf.createSchema(), {});')),
     invalid(cloning + pg + 'const schema = sf.createSchema(); const alias = schema; wrap(alias, middleware);'),
     invalid(cloning + 'import { createSchema as make } from "@simtlix/simfinity-js/src/index.js"; wrap(make(), middleware);'),
     invalid(cloning + 'import { createRuntime as runtime } from "@simtlix/simfinity-core"; const sf = runtime(adapter); const schema = sf.createSchema(); clone(schema, {});'),
@@ -134,6 +135,7 @@ tester.run('valid-connection-field', plugin.rules['valid-connection-field'], {
   ],
   invalid: [
     ...['"author.id"', '42', 'false', '[]', '{}'].map(value => invalid(mongo + gql + `const Book = ${relation(value)}; sf.connect(model, Book, "book", "books");`)),
+    ...[mongo, pg].map(runtime => invalid(runtime + gql + `sf.configureAfterCommit({ onError() {} }); const Book = ${relation('"author.id"')}; sf.connect(null, Book, "book", "books");`)),
     invalid(pg + gql + `const Book = ${relation('"author.id"')}; sf.connect(null, Book, "book", "books");`),
     invalid(mongo + gql + `const Book = ${relation('"author.id"')}; sf.addNoEndpointType(Book);`),
     invalid(pg + gql + `const Book = ${relation('"author.id"')}; sf.registerCustomQuery("pick", "", null, Book, () => null); sf.connect(null, Book, "book", "books");`),

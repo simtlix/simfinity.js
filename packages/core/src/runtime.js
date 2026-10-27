@@ -5,6 +5,7 @@ import {
   configureMutationLimits, getMaxNestedOperations, getMaxTransactionOperations, nestedOperationsExceededError,
   transactionOperationsExceededError,
 } from './mutation-limits.js';
+import { createAfterCommit } from './after-commit.js';
 import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
@@ -14,17 +15,20 @@ import {
 } from 'graphql';
 
 import SimfinityError from './errors/simfinity.error.js';
+import { captureSchemaRegistrations } from './schema-registrations.js';
 import InternalServerError from './errors/internal-server.error.js';
 import { ForbiddenError } from './auth/errors.js';
 import QLOperator from './const/QLOperator.js';
+import QLQuantifier, { QUANTIFIED_LISTS } from './const/QLQuantifier.js';
+import { aggregateJoinPrefixes, assertSortSyntax, frameUnits, validateQuantifiedGroups } from './query-frames.js';
 import QLValue from './const/QLValue.js';
 import QLSort from './const/QLSort.js';
 import {
-  collectQueryOperators, collectQueryPathEntries, collectQueryPaths, walkQueryPath,
+  collectQueryOperators, collectQueryPathEntries, walkQueryPath,
 } from './query-plan.js';
 import { QUERY_OPERATORS, isQueryOperator, resolveQueryFeatures } from './query-operators.js';
 import {
-  assertEmptinessPath, describeEmptiness, emptinessScopePaths, emptinessScopeTargets, isEmptinessOperator,
+  assertEmptinessPath, describeEmptiness, emptinessScopeTargets, isEmptinessOperator,
 } from './query-emptiness.js';
 import { relationFieldOwners } from './relation-owners.js';
 import { discardThenable, isThenable } from './auth/thenable.js';
@@ -196,7 +200,7 @@ const assertScopeControlArg = (name, value) => {
 };
 
 // Moves a joined type's scope group below the relation path that entered it.
-const prefixScopeGroup = (group, prefix) => {
+const prefixScopeGroup = (group, prefix, copyQuantifiedGroup) => {
   if (!group || typeof group !== 'object' || Array.isArray(group)) {
     throw new SimfinityError('Expected a scope filter group object', 'INVALID_FILTER_VALUE', 400);
   }
@@ -208,12 +212,15 @@ const prefixScopeGroup = (group, prefix) => {
       value: condition?.value,
     }));
   }
-  if (group.AND != null) prefixed.AND = [].concat(group.AND).map((item) => prefixScopeGroup(item, prefix));
-  if (group.OR != null) prefixed.OR = [].concat(group.OR).map((item) => prefixScopeGroup(item, prefix));
+  if (group.AND != null) prefixed.AND = [].concat(group.AND).map((item) => prefixScopeGroup(item, prefix, copyQuantifiedGroup));
+  if (group.OR != null) prefixed.OR = [].concat(group.OR).map((item) => prefixScopeGroup(item, prefix, copyQuantifiedGroup));
+  for (const key of QUANTIFIED_LISTS) if (group[key] != null) {
+    prefixed[key] = group[key].map((item) => ({ ...copyQuantifiedGroup(item), path: `${prefix}.${item.path}` }));
+  }
   return prefixed;
 };
 
-const prefixScopeArgs = (scopeArgs, prefix, typeName) => {
+const prefixScopeArgs = (scopeArgs, prefix, typeName, copyQuantifiedGroup) => {
   const conditions = [];
   const groups = [];
   for (const [name, value] of Object.entries(scopeArgs)) {
@@ -222,10 +229,12 @@ const prefixScopeArgs = (scopeArgs, prefix, typeName) => {
       assertScopeControlArg(name, value);
       continue;
     }
-    if (name === 'AND') groups.push(...[].concat(value).map((group) => prefixScopeGroup(group, prefix)));
+    if (name === 'AND') groups.push(...[].concat(value).map((group) => prefixScopeGroup(group, prefix, copyQuantifiedGroup)));
     else if (name === 'OR') {
       const branches = [].concat(value);
-      if (branches.length) groups.push({ OR: branches.map((group) => prefixScopeGroup(group, prefix)) });
+      if (branches.length) groups.push({ OR: branches.map((group) => prefixScopeGroup(group, prefix, copyQuantifiedGroup)) });
+    } else if (value.quantifier != null) {
+      groups.push({ [value.quantifier]: [{ path: `${prefix}.${name}`, conditions: (value.terms ?? []).map(({ path, ...term }) => ({ field: path, ...term })) }] });
     } else if (Object.hasOwn(value, 'terms')) {
       if (!Array.isArray(value.terms) || !value.terms.length) {
         throw new SimfinityError(`Scope filter ${typeName}.${name} requires non-empty terms`, 'MISSING_FILTER_PATH', 400);
@@ -581,6 +590,7 @@ const attemptInputs = (input, type) => {
 };
 
 export const createRuntime = (adapter) => {
+  const afterCommit = createAfterCommit(adapter);
   if (!adapter) {
     throw new SimfinityError('A database adapter is required', 'ADAPTER_REQUIRED', 500);
   }
@@ -589,7 +599,7 @@ export const createRuntime = (adapter) => {
   // IS_EMPTY and IS_NOT_EMPTY through references and collections (#108 part 2b), and a client's
   // conditions of that kind carry a scope marker from the runtime (see markClientConstructs).
   const {
-    operators: supportedOperators, referenceEmptiness: supportsReferenceEmptiness,
+    operators: supportedOperators, referenceEmptiness: supportsReferenceEmptiness, quantifiers: supportsQuantifiers,
   } = resolveQueryFeatures(adapter.queryFeatures);
   const supportsEveryOperator = QUERY_OPERATORS.every((operator) => supportedOperators.has(operator));
   // The write features the adapter implements, read once: with optimisticConcurrency, schemas may
@@ -748,6 +758,7 @@ const QLTypeFilterExpression = new GraphQLInputObjectType({
   name: 'QLTypeFilterExpression',
   fields: () => ({
     terms: { type: new GraphQLList(QLTypeFilter) },
+    quantifier: { type: QLQuantifier },
   }),
 });
 
@@ -761,9 +772,25 @@ const QLFilterCondition = new GraphQLInputObjectType({
   }),
 });
 
+const QLQuantifiedGroup = new GraphQLInputObjectType({
+  name: 'QLQuantifiedGroup',
+  fields: () => ({
+    path: { type: new GraphQLNonNull(GraphQLString) },
+    AND: { type: new GraphQLList(QLFilterGroup) },
+    OR: { type: new GraphQLList(QLFilterGroup) },
+    ANY: { type: new GraphQLList(QLQuantifiedGroup) },
+    ALL: { type: new GraphQLList(QLQuantifiedGroup) },
+    NONE: { type: new GraphQLList(QLQuantifiedGroup) },
+    conditions: { type: new GraphQLList(QLFilterCondition) },
+  }),
+});
+
 const QLFilterGroup = new GraphQLInputObjectType({
   name: 'QLFilterGroup',
   fields: () => ({
+    ANY: { type: new GraphQLList(QLQuantifiedGroup) },
+    ALL: { type: new GraphQLList(QLQuantifiedGroup) },
+    NONE: { type: new GraphQLList(QLQuantifiedGroup) },
     AND: { type: new GraphQLList(QLFilterGroup) },
     OR: { type: new GraphQLList(QLFilterGroup) },
     conditions: { type: new GraphQLList(QLFilterCondition) },
@@ -1536,6 +1563,7 @@ const assertRecordVersion = async (gqltype, id, record, expectedVersion, advance
 // deletes it only at that version, and a record it deleted at another one, which an adapter wrapper
 // that drops the options would delete, fails with DATABASE_ERROR and rolls back with the transaction.
 const onDelete = async (Model, controller, id, session, context, current, precondition = null) => {
+  afterCommit.validate(controller);
   const hasHook = !!(controller && controller.onDelete);
   let currentObject = current;
   if (currentObject === undefined && (hasHook || !readByIdIsInert(Model))) {
@@ -1654,6 +1682,7 @@ const setsVersion = (update) => [update, ...Object.entries(update)
 // cannot set the version, and a result that did not advance it fails with DATABASE_ERROR.
 const onUpdateSubject = async (Model, gqltype, controller, args, session, linkToParent, context,
   recordChecked = false, { expectedVersion, observedVersion, record } = {}) => {
+  afterCommit.validate(controller);
   const versioned = isProtected(gqltype);
   const materializedModel = await materializeModel(args, gqltype, linkToParent, 'UPDATE', session);
   const objectId = args.id;
@@ -1741,6 +1770,7 @@ const onUpdateSubject = async (Model, gqltype, controller, args, session, linkTo
 // A protected type's version is captured before the action can change `args`, and checked on the
 // plain pre-read record before the from-state check, which reads `state` from that record (#98).
 const onStateChanged = async (Model, gqltype, controller, args, session, actionField, context) => {
+  afterCommit.validate(controller);
   const versioned = isProtected(gqltype);
   const expectedVersion = versioned ? assertVersionInput(args.version) : undefined;
   const storedModel = versioned
@@ -1767,6 +1797,7 @@ const onStateChanged = async (Model, gqltype, controller, args, session, actionF
 };
 
 const onSaveObject = async (Model, gqltype, controller, args, session, linkToParent, context) => {
+  afterCommit.validate(controller);
   const materializedModel = await materializeModel(args, gqltype, linkToParent, 'CREATE', session);
   if (typesDict.types[gqltype.name].stateMachine) {
     materializedModel.modelArgs.state = stateValue(
@@ -1833,9 +1864,8 @@ const saveObject = async (typeName, args, session, context) => {
   const snapshot = cloneInput(args, type.inputType);
   const state = executionStateOf(session, runtimeToken);
   return adapter.withTransaction(session, (transaction) => runInExecutionState(state, session, transaction,
-    () => onSaveObject(
-      type.model, type.gqltype, type.controller, cloneInput(snapshot, type.inputType), transaction, null, context,
-    )), type.model);
+    () => runOperation({ Model: type.model, gqltype: type.gqltype, controller: type.controller }, operations.SAVE,
+      cloneInput(snapshot, type.inputType), transaction, context)), type.model);
 };
 
 // The lifecycle helpers (#151): updateObject, deleteObject and transitionObject run the lifecycle of the
@@ -1898,15 +1928,15 @@ const assertHelperNestedBudget = (gqltype, snapshot, state) => {
 // The transaction of a helper: the adapter's own when no session is supplied, retries included; with a
 // session, the adapter checks it, and the helper neither commits, retries, aborts nor cleans up.
 // `attemptArgs` gives each attempt its own arguments.
-const runHelperTransaction = (type, operation, attemptArgs, session, state, context, actionField = null) => adapter
+const runHelperTransaction = (type, operation, attemptArgs, session, state, context, actionField = null, actionName) => adapter
   .withTransaction(session ?? null, (bodySession) => runInExecutionState(state, session, bodySession,
     () => runOperation({ Model: type.model, gqltype: type.gqltype, controller: type.controller }, operation,
-      attemptArgs(), bodySession, context, actionField)), type.model);
+      attemptArgs(), bodySession, context, actionField, actionName)), type.model);
 
 // An update or a transition: the update input checks the whole input, whose top-level id is required and
 // whose state, when a state machine manages it, only a transition changes. The nested preflight and the
 // collection check run on the snapshot, before the transaction.
-const runHelperUpdate = (type, operation, input, session, context, actionField = null) => {
+const runHelperUpdate = (type, operation, input, session, context, actionField = null, actionName) => {
   const state = executionStateOf(session, runtimeToken);
   const snapshot = snapshotOperationInput(input, type.inputType, {
     ...operationWalkOptions, mode: 'programmatic', path: 'input', topLevelId: true, stateManaged: !!type.stateMachine,
@@ -1914,7 +1944,7 @@ const runHelperUpdate = (type, operation, input, session, context, actionField =
   assertHelperNestedBudget(type.gqltype, snapshot, state);
   assertCollectionWrites(type.gqltype, snapshot);
   const attemptArgs = () => snapshotOperationInput(snapshot, type.inputType, { ...operationWalkOptions, mode: 'copy' });
-  return runHelperTransaction(type, operation, attemptArgs, session, state, context, actionField);
+  return runHelperTransaction(type, operation, attemptArgs, session, state, context, actionField, actionName);
 };
 
 const updateObject = async (typeName, input, session, context) => runHelperUpdate(
@@ -1928,7 +1958,7 @@ const transitionObject = async (typeName, actionName, input, session, context) =
     throw new SimfinityError(`Type ${typeName} has no state machine action ${operationName(actionName)}`,
       'UNKNOWN_ACTION', 500);
   }
-  return runHelperUpdate(type, operations.STATE_CHANGED, input, session, context, actions[actionName]);
+  return runHelperUpdate(type, operations.STATE_CHANGED, input, session, context, actions[actionName], actionName);
 };
 
 // The target is { id } or, for a protected type, { id, version }; the delete takes the bare ID or a new
@@ -2020,34 +2050,43 @@ const preReadTopLevel = async (Model, gqltype, { id, version }, advances, contex
 // The runner captures the version precondition from those args: an update or delete through
 // preReadTopLevel, a transition through onStateChanged. No caller captures it a second time.
 const runOperation = async ({ Model, gqltype, controller }, operation, attemptArgs, session, context,
-  actionField = null) => {
+  actionField = null, actionName) => {
+  let record;
   switch (operation) {
     case operations.SAVE:
-      return onSaveObject(Model, gqltype, controller, attemptArgs, session, null, context);
+      record = await onSaveObject(Model, gqltype, controller, attemptArgs, session, null, context);
+      break;
     case operations.UPDATE: {
       const precondition = isProtected(gqltype)
         ? await preReadTopLevel(Model, gqltype, attemptArgs, true, context, session) : undefined;
-      return onUpdateSubject(Model, gqltype, controller, attemptArgs, session, null, context, false, precondition);
+      record = await onUpdateSubject(Model, gqltype, controller, attemptArgs, session, null, context, false, precondition);
+      break;
     }
     case operations.DELETE: {
-      if (!isProtected(gqltype)) return onDelete(Model, controller, attemptArgs, session, context);
-      const { expectedVersion, record } = await preReadTopLevel(Model, gqltype, attemptArgs, false, context,
-        session);
-      return onDelete(Model, controller, attemptArgs.id, session, context, record, { gqltype, expectedVersion });
+      if (!isProtected(gqltype)) record = await onDelete(Model, controller, attemptArgs, session, context);
+      else {
+        const { expectedVersion, record: current } = await preReadTopLevel(Model, gqltype, attemptArgs, false, context,
+          session);
+        record = await onDelete(Model, controller, attemptArgs.id, session, context, current, { gqltype, expectedVersion });
+      }
+      break;
     }
     case operations.STATE_CHANGED:
-      return onStateChanged(Model, gqltype, controller,
-        attemptArgs, session, actionField, context);
+      record = await onStateChanged(Model, gqltype, controller, attemptArgs, session, actionField, context);
+      break;
     default:
       return null;
   }
+  afterCommit.queue({ typeName: gqltype.name, controller, operation, record, args: attemptArgs,
+    context, session, action: actionName });
+  return record;
 };
 
 // A delete passes the ID, or { id, version } for a protected type, which each attempt copies; every
 // other operation passes its input, which attemptInputs copies. Either way, a retry checks the version
 // the request sent.
 const executeOperation = (Model, gqltype, controller, args, operation, actionField,
-  session, context, inputType) => {
+  session, context, inputType, actionName) => {
   const limit = getMaxNestedOperations();
   if (limit !== null && operation !== operations.DELETE) assertNestedOperations(gqltype, args, limit);
   if (operation !== operations.DELETE) assertCollectionWrites(gqltype, args);
@@ -2058,7 +2097,7 @@ const executeOperation = (Model, gqltype, controller, args, operation, actionFie
   return adapter.withTransaction(
     session,
     async (mySession) => runOperation({ Model, gqltype, controller }, operation, nextInput(), mySession, context,
-      actionField),
+      actionField, actionName),
     Model,
   );
 };
@@ -2126,19 +2165,22 @@ const executeItemFunction = async (gqltype, collectionField, parentKey, session,
       }
     }
 
+    let record;
     switch (operationType) {
       case operations.SAVE:
-        await onSaveObject(type.model, collectionGQLType, type.controller,
+        record = await onSaveObject(type.model, collectionGQLType, type.controller,
           args.input, session, linkToParent, context);
         break;
       case operations.UPDATE:
-        await onUpdateSubject(type.model, collectionGQLType, type.controller,
+        record = await onUpdateSubject(type.model, collectionGQLType, type.controller,
           args.input, session, linkToParent, context, true, versioned ? { expectedVersion, observedVersion, record: child } : undefined);
         break;
       case operations.DELETE:
-        await onDelete(type.model, type.controller, args.id, session, context, child,
+        record = await onDelete(type.model, type.controller, args.id, session, context, child,
           versioned ? { gqltype: collectionGQLType, expectedVersion } : null);
     }
+    afterCommit.queue({ typeName: collectionGQLType.name, controller: type.controller,
+      operation: operationType, record, args: args.input, context, session });
   }
 };
 
@@ -2204,8 +2246,10 @@ const copyFilterGroup = (group) => {
   if (Array.isArray(group.conditions)) copy.conditions = group.conditions.map(copyFilterCondition);
   if (Array.isArray(group.AND)) copy.AND = group.AND.map(copyFilterGroup);
   if (Array.isArray(group.OR)) copy.OR = group.OR.map(copyFilterGroup);
+  for (const key of QUANTIFIED_LISTS) if (Array.isArray(group[key])) copy[key] = group[key].map(copyQuantifiedGroup);
   return copy;
 };
+const copyQuantifiedGroup = (group) => copyFilterGroup(group);
 const copyFieldFilter = (filter) => {
   const copy = copyFilterCondition(filter);
   if (isFilterObject(filter) && Array.isArray(filter.terms)) copy.terms = filter.terms.map(copyFilterCondition);
@@ -2242,12 +2286,19 @@ const copyClientFilters = (args, operation) => {
 // non-queryable field is not rejected; a virtual one still is.
 const inspectClientPaths = (gqltype, args, operation, { checkQueryable = true } = {}) => {
   copyClientFilters(args, operation);
+  assertSortSyntax(args.sort);
   const joinedScopes = new Map();
+  const J = operation === 'aggregate' ? aggregateJoinPrefixes(args.aggregation, { gqltype }) : new Set();
   const entries = collectQueryPathEntries(args, operation, { gqltype, expandMembers: true });
   for (const {
-    segments, group, member, operator,
+    segments, group, member, operator, use, frames, quantifier,
   } of entries) {
-    const joins = !member && !(supportsReferenceEmptiness && isEmptinessOperator(operator));
+    const filter = use === 'filter';
+    const relations = filter && supportsQuantifiers ? pathRelations(gqltype, segments) : [];
+    const cut = relations.find((relation) => relation.collection && !J.has(relation.path));
+    const anchored = cut && relations.some((relation) => relation.collection && J.has(relation.path));
+    const joins = !member && !(supportsReferenceEmptiness && isEmptinessOperator(operator))
+      && !(filter && (frames.length || quantifier || (cut && !anchored)));
     walkQueryPath(gqltype, segments, ({ type, fieldName, field, index }) => {
       const path = segments.slice(0, index + 1).join('.');
       if (isVirtualField(field)) {
@@ -2257,8 +2308,11 @@ const inspectClientPaths = (gqltype, args, operation, { checkQueryable = true } 
       if (checkQueryable && (queryable === false || (queryable !== true && hasApplicationResolver(type, fieldName)))) {
         throw forbiddenPath(`Query path ${path} uses the non-queryable field ${type.name}.${fieldName}`);
       }
-      if (!joins) return;
       const relation = field.extensions?.relation;
+      if (use === 'sort' && operation !== 'aggregate' && relation && !relation.embedded && getListShape(field.type)) {
+        throw new SimfinityError(`Sort path ${segments.join('.')} crosses the collection ${type.name}.${fieldName}; a record has no single value there`, 'INVALID_FILTER_PATH', 400);
+      }
+      if (!joins || (cut && index >= cut.index)) return;
       if (!relation || relation.embedded) return;
       const target = typesDict.types[unwrapListAndNonNull(field.type).name];
       if (!getScope(target?.gqltype, 'find')) return;
@@ -2340,31 +2394,43 @@ const assertEmptinessForm = (gqltype, {
   return true;
 };
 
-// Rejects a QLOperator value that the adapter does not declare in queryFeatures, with
-// UNSUPPORTED_QUERY (400), so an adapter never drops or misreads a condition it does not compile,
-// and applies to every IS_EMPTY or IS_NOT_EMPTY condition the order of checks of #108 part 2a,
-// whatever the adapter declares, rule 6 only when it does not declare reference emptiness. Runs on
-// the client's arguments before middleware and on the final arguments before the adapter call,
-// which covers what middleware, scopes and joined scopes added, so that an emptiness condition gets
-// the code that a direct createQueryPlan call gives, whoever wrote it and whatever the caller may
-// read. Operators that QLOperator does not list are left to the adapter, which reports them as before.
-// Returns every condition as `{ entry, shape }`: its collectQueryOperators entry, and the shape of an
-// emptiness condition that the backends read as one, or null.
+// Every runtime gate validates the received language, before rewriting or filling any markers.
+// Legacy adapters keep the detailed 2b diagnostics; quantified adapters use the shared validator's
+// frame-relative checks first. The separate operator inspection includes ignored beside-terms
+// carriers, which do not become predicates but must not use known undeclared capabilities.
+const queryFrameContext = (gqltype, args, operation) => ({
+  gqltype, operation, quantifiers: supportsQuantifiers, referenceEmptiness: supportsReferenceEmptiness,
+  operators: supportedOperators,
+  J: operation === 'aggregate' ? aggregateJoinPrefixes(args.aggregation, { gqltype }) : new Set(),
+  scopeMarkers: 'pending',
+});
+
+const entryType = (gqltype, entry) => {
+  let type = gqltype;
+  const prefix = entry.segments.slice(0, entry.segments.length - entry.relative.length);
+  if (prefix.length) walkQueryPath(gqltype, prefix, ({ field }) => { type = getNamedType(field.type); });
+  return type;
+};
+
 const assertQueryConditions = (gqltype, args, operation) => {
-  const checked = [];
+  if (supportsQuantifiers) validateQuantifiedGroups(args, queryFrameContext(gqltype, args, operation));
+  const conditions = [];
   for (const entry of collectQueryOperators(args, operation)) {
     const { operator, path } = entry;
+    const type = entryType(gqltype, entry);
     let shape = null;
     if (isEmptinessOperator(operator)) {
-      if (assertEmptinessForm(gqltype, entry)) {
-        shape = describeEmptiness(gqltype, entry.segments, {
-          operator, value: entry.value, path, referenceEmptiness: supportsReferenceEmptiness,
+      // The validator owns quantified term forms; old top-frame forms retain their diagnostics.
+      if (entry.frames.length || assertEmptinessForm(gqltype, entry)) {
+        if (entry.relative.length) shape = describeEmptiness(type, entry.relative, {
+          operator, value: entry.value, path: entry.relative.join('.'), referenceEmptiness: supportsReferenceEmptiness,
         });
       }
     } else if (!supportsEveryOperator && isQueryOperator(operator)) assertDeclaredOperator(gqltype, operator, path);
-    checked.push({ entry, shape });
+    conditions.push({ entry, shape, type });
   }
-  return checked;
+  if (!supportsQuantifiers) validateQuantifiedGroups(args, queryFrameContext(gqltype, args, operation));
+  return { conditions, gqltype, args, operation };
 };
 
 // Decision 3 of #108 part 2a: a target find scope with an emptiness condition is not applied below a
@@ -2381,9 +2447,8 @@ const assertQueryConditions = (gqltype, args, operation) => {
 // the prefixed conditions are applied as trusted ones, which read stored data.
 const assertJoinedScopeConditions = (rootType, scopeArgs, groups, prefix, target) => {
   const { gqltype } = target;
-  const entries = collectQueryOperators(scopeArgs, 'find').filter(({ operator }) => isEmptinessOperator(operator));
+  const entries = collectQueryOperators(scopeArgs, 'find').filter(({ operator, frames }) => !frames.length && isEmptinessOperator(operator));
   if (!entries.length) return;
-  assertStoredQueryPaths(gqltype, scopeArgs, 'find');
   let throughList = false;
   walkQueryPath(rootType, prefix.split('.'), ({ field }) => { throughList ||= !!getListShape(field.type); });
   // Rule 6, here or on the target's own endpoint, is the rejection thrown below.
@@ -2411,20 +2476,28 @@ const assertJoinedScopeConditions = (rootType, scopeArgs, groups, prefix, target
     + `use EQ null in the ${gqltype.name} find scope`, 'UNSUPPORTED_QUERY', 400);
 };
 
-// A joined scope must not repeat the rows it restricts: its paths may not cross a collection, nor
-// reach a non-embedded relation inside an embedded list, which is joined once per list item.
-const assertJoinedScopePaths = (groups, prefix, target) => {
+// Declared collection frames preserve cardinality. A legacy adapter, or a prefix through an
+// embedded list, still cannot lift collection scopes; vector reference scopes remain forbidden.
+const assertJoinedScopePaths = (rootType, groups, prefix, target) => {
+  let embeddedPrefix = false;
+  walkQueryPath(rootType, prefix.split('.'), ({ field }) => {
+    embeddedPrefix ||= !!(field.extensions?.relation?.embedded && getListShape(field.type));
+  });
   const depth = prefix.split('.').length;
-  for (const segments of collectQueryPaths({ AND: groups })) {
+  for (const { segments, quantifier } of collectQueryPathEntries({ AND: groups })) {
     let inList = false;
-    walkQueryPath(target.gqltype, segments.slice(depth), ({ type, fieldName, field }) => {
+    walkQueryPath(target.gqltype, segments.slice(depth), ({ type, fieldName, field, index }) => {
       const relation = field.extensions?.relation;
       const list = !!getListShape(field.type);
-      if (relation && !relation.embedded && (list || inList)) {
+      if (relation && !relation.embedded && (inList || (list && (!supportsQuantifiers || embeddedPrefix)))) {
         throw forbiddenPath(`Query path ${prefix} enters ${target.gqltype.name}, whose find scope filters through `
           + `${list ? 'the collection' : 'the relation'} ${type.name}.${fieldName}${list ? '' : ' inside a list'}`);
       }
-      inList ||= list;
+      if (relation && !relation.embedded && quantifier && embeddedPrefix && index === segments.length - depth - 1) {
+        throw forbiddenPath(`Query path ${prefix} enters ${target.gqltype.name}, whose find scope tests `
+          + `the quantified reference ${type.name}.${fieldName} under an embedded-list prefix`);
+      }
+      inList = relation && !relation.embedded ? false : inList || list;
     });
   }
 };
@@ -2438,7 +2511,7 @@ const appendAndGroups = (owner, groups) => {
 
 // The deepest AND/OR group nesting the backends accept; groups listed in args.AND/OR are at depth 0.
 const MAX_FILTER_GROUP_DEPTH = 5;
-const nestedGroups = (group) => [...[].concat(group.AND ?? []), ...[].concat(group.OR ?? [])];
+const nestedGroups = (group) => ['AND', 'OR', ...QUANTIFIED_LISTS].flatMap((key) => [].concat(group[key] ?? []));
 const groupDepth = (group) => Math.max(0, ...nestedGroups(group)
   .filter((item) => item && typeof item === 'object').map((item) => groupDepth(item) + 1));
 
@@ -2465,10 +2538,13 @@ const applyJoinedScopes = async (joinedScopes, params) => {
   }] of joinedScopes) {
     const scopeArgs = {};
     await executeScope({ type: target, args: scopeArgs, operation: 'find', context: params.context });
-    const groups = prefixScopeArgs(scopeArgs, prefix, target.gqltype.name);
+    const kept = scopeFilterArgs(scopeArgs);
+    assertStoredQueryPaths(target.gqltype, kept, 'find');
+    assertQueryConditions(target.gqltype, kept, 'find');
+    const groups = prefixScopeArgs(kept, prefix, target.gqltype.name, copyQuantifiedGroup);
     if (!groups.length) continue;
     if (collection) throw forbiddenPath(`Query path ${prefix} enters the scoped collection ${collection}`);
-    assertJoinedScopePaths(groups, prefix, target);
+    assertJoinedScopePaths(params.type.gqltype, groups, prefix, target);
     assertJoinedScopeConditions(params.type.gqltype, scopeArgs, groups, prefix, target);
     queryGroups ??= collectFilterGroups(params.args);
     const addedDepth = 1 + Math.max(...groups.map(groupDepth));
@@ -2478,60 +2554,93 @@ const applyJoinedScopes = async (joinedScopes, params) => {
   }
 };
 
-// Client scope markers (#108 part 2b). When the adapter compiles reference emptiness, each IS_EMPTY or
-// IS_NOT_EMPTY term or group condition that a client sends and that crosses or ends at a reference or a
-// collection, or reads one as a member, gets `__scope: { id }` on this call's copy, before middleware.
-// After middleware, the query's own scope and joined scopes, the runtime checks that every marker it
-// issued is still there and that no other one is, gates the final arguments, then fills each marker
-// with the raw find scope arguments of every type the construct reads through, `__scope: { id, scopes:
-// { [path]: args | null } }`, which the compilers apply as scoped joins and frames, so that a record
-// those scopes hide reads as missing. Constructs without a marker are trusted and read stored data.
-// Markers live only on the terms and group conditions collectQueryOperators returns; a `__scope`
-// anywhere else, inside a value for one, is never read.
+// Client scope provenance is carried by terms, conditions and explicit frames, never by plain
+// logical groups or values. Only reads of registered scoped targets are marked. Middleware sees
+// ordinal IDs; after detach and final validation, fill adds relative target-scope arguments. The
+// planner/compiler rewrite, not the runtime, splits those keys across implicit collection frames.
 const SCOPE_MARKER = '__scope';
 const DETACHED_ADVICE = 'middleware and scopes must keep the client\'s filter objects: copy them instead of rebuilding '
   + 'them, and append restrictions instead of assigning over them (docs/guide/middleware.md)';
 const detachedClientFilter = (message) => new SimfinityError(`${message}; ${DETACHED_ADVICE}`, 'DETACHED_CLIENT_FILTER', 500);
 const hasScopeMarker = (construct) => construct != null && Object.hasOwn(construct, SCOPE_MARKER);
 
-// Marks the client's constructs that read references or collections, from the gate's conditions on the
-// client's arguments, then applies maxReferenceFrames to the distinct (kind, path) pairs of their
-// scoped joins and frames in these conditions, so every 2a code comes first. Returns the issued
-// markers, as id -> the client's operator and path, or null when the adapter does not compile
-// reference emptiness. Ids are ordinals in the order of the conditions, so identical arguments get
-// identical markers and sibling collection reads keep one batch key. With `issued`, the markers of
-// the call so far, the ids continue on that map, so that a view's `where`, marked after the client's
-// arguments, shares them; the limit still applies to each set of conditions on its own.
-const markClientConstructs = (checked, issued) => {
-  if (!supportsReferenceEmptiness) return null;
-  const markers = issued ?? new Map();
-  const pairs = new Set();
-  for (const { entry, shape } of checked) {
-    const { construct } = entry;
-    if (!shape || !construct || hasScopeMarker(construct)) continue;
-    const { joins, frames } = emptinessScopePaths(shape, entry.segments);
-    if (!joins.length && !frames.length) continue;
-    const id = markers.size;
-    construct[SCOPE_MARKER] = { id };
-    markers.set(id, { operator: entry.operator, path: entry.path });
-    for (const path of joins) pairs.add(`join ${path}`);
-    for (const path of frames) pairs.add(`frame ${path}`);
-  }
-  const limit = getQueryMaxReferenceFrames();
-  if (pairs.size > limit) {
-    throw new SimfinityError(`Emptiness conditions through references and collections need ${pairs.size} scoped joins and `
-      + 'frames in one set of conditions (the client\'s arguments of a query field, or a view\'s where), more than the limit '
-      + `of ${limit} (maxReferenceFrames)`, 'FILTER_DEPTH_EXCEEDED', 400);
-  }
-  return markers;
+// Relation metadata is position-relative when used for fill and absolute for eligibility/recording.
+const pathRelations = (gqltype, segments) => {
+  const found = [];
+  let insideList = false;
+  walkQueryPath(gqltype, segments, ({ type, fieldName, field, index }) => {
+    const relation = field.extensions?.relation;
+    const list = !!getListShape(field.type);
+    if (relation && !relation.embedded) found.push({
+      path: segments.slice(0, index + 1).join('.'), index,
+      typeName: getNamedType(field.type).name, collection: list, insideList, owner: type.name, fieldName,
+    });
+    // A collection enters an element frame; only embedded lists make vector reference joins.
+    if (relation && !relation.embedded && list) insideList = false;
+    else if (!relation || relation.embedded) insideList ||= list;
+  });
+  return found;
 };
 
-// The detach check: every marker issued in this call sits, well formed (an object whose only own key
-// is its id), on a term or group condition of the final arguments, possibly on several when middleware
-// copied or duplicated the construct; no other marker sits on one.
-const assertClientMarkers = (args, operation, issued) => {
+// The walker retains scalar-filter terms for capability/auth inspection, but no compiler consumes
+// them. Such positions cannot establish client provenance, including when aliased with a predicate.
+const ignoredScalarTerm = (gqltype, entry) => {
+  if (entry.form !== 'term' || entry.frames.length || typeof entry.field !== 'string') return false;
+  const segments = entry.field.split('.');
+  let scalar = false;
+  walkQueryPath(gqltype, segments, ({ field, index }) => {
+    if (index === segments.length - 1) scalar = !isObjectType(getNamedType(field.type));
+  });
+  return scalar;
+};
+
+const ordinaryFrameCarrier = (gqltype, entry, J) => supportsQuantifiers && entry.construct
+  && !ignoredScalarTerm(gqltype, entry)
+  && entry.form !== 'beside-terms' && (entry.frames.length || pathRelations(gqltype, entry.segments)
+    .some(({ path, collection }) => collection && !J.has(path)));
+
+// Eligibility is per carrier: ordinary legacy reference-only/all-J predicates keep joined scopes.
+// Enclosing explicit frames inherit provenance from marked descendants, independently of unit counts.
+// A view continues issuance on the same map, but checks its own compiled-unit budget (as in 3.12.0).
+const markClientConstructs = (checked, { aggregation, issued = new Map() } = {}) => {
+  const { gqltype, args, operation, conditions } = checked;
+  const clientJ = operation === 'aggregate' ? aggregateJoinPrefixes(aggregation, { gqltype }) : new Set();
+  if (!supportsReferenceEmptiness) return { issued: null, clientJ };
+  const mark = (construct, origin) => {
+    if (!construct || hasScopeMarker(construct)) return;
+    const id = issued.size;
+    construct[SCOPE_MARKER] = { id };
+    issued.set(id, origin);
+  };
+  for (const { entry, shape } of conditions) {
+    const { construct } = entry;
+    if (!construct || !(shape || entry.form === 'quantified' || ordinaryFrameCarrier(gqltype, entry, clientJ))) continue;
+    const targets = pathRelations(gqltype, entry.segments).map(({ typeName }) => typeName);
+    if (shape) targets.push(...Object.values(emptinessScopeTargets(shape, entry.relative)));
+    if (!targets.some((name) => getScope(typesDict.types[name]?.gqltype, 'find'))) continue;
+    const origin = { operator: entry.operator ?? entry.quantifier, path: entry.path };
+    mark(construct, origin);
+    const prefix = [];
+    for (const frame of entry.frames) {
+      prefix.push(...frame.path.split('.'));
+      mark(frame.construct, { operator: frame.type, path: prefix.join('.') });
+    }
+  }
+  const { count } = frameUnits(args, queryFrameContext(gqltype, args, operation));
+  const limit = getQueryMaxReferenceFrames();
+  if (count > limit) {
+    throw new SimfinityError(`The client's conditions need ${count} frames and scoped joins in one query field, more than the limit of ${limit} (maxReferenceFrames)`, 'FILTER_DEPTH_EXCEEDED', 400);
+  }
+  return { issued, clientJ };
+};
+
+// Every issued ID must survive on a valid carrier, with no forged or prefilled marker. Marked
+// descendants may only live inside marked client frames; top-frame collection prefixes keep J.
+const assertClientMarkers = (gqltype, args, operation, issued, clientJ) => {
+  const J = operation === 'aggregate' ? aggregateJoinPrefixes(args.aggregation, { gqltype }) : new Set();
   const found = new Set();
-  for (const { construct, operator, path } of collectQueryOperators(args, operation)) {
+  for (const entry of collectQueryOperators(args, operation)) {
+    const { construct, operator, path } = entry;
     if (!hasScopeMarker(construct)) continue;
     const marker = construct[SCOPE_MARKER];
     const origin = isFilterObject(marker) ? issued.get(marker.id) : undefined;
@@ -2541,6 +2650,17 @@ const assertClientMarkers = (args, operation, issued) => {
     }
     if (!origin) {
       throw detachedClientFilter(`The ${operator} condition on ${path} carries a client scope marker that this query field did not issue`);
+    }
+    if (ignoredScalarTerm(gqltype, entry)) {
+      throw detachedClientFilter(`The client's ${origin.operator} condition on ${origin.path} is in ignored scalar filter terms`);
+    }
+    if (entry.frames.some((frame) => !hasScopeMarker(frame.construct))) {
+      throw detachedClientFilter(`The client's ${origin.operator} condition on ${origin.path} is inside a trusted frame`);
+    }
+    if (supportsQuantifiers && !entry.frames.length && entry.form !== 'quantified' && !isEmptinessOperator(operator)) {
+      for (const relation of pathRelations(gqltype, entry.segments)) if (relation.collection && clientJ.has(relation.path) !== J.has(relation.path)) {
+        throw detachedClientFilter(`The client's ${origin.operator} condition on ${origin.path} changed aggregate join prefixes`);
+      }
     }
     found.add(marker.id);
   }
@@ -2562,6 +2682,15 @@ const relationOnPath = (gqltype, segments) => {
   return found;
 };
 
+const scopeFilterArgs = (scopeArgs) => {
+  const kept = {};
+  for (const [name, value] of Object.entries(scopeArgs)) {
+    if (!SCOPE_IGNORED_ARGS.has(name)) kept[name] = value;
+    else if (value != null) assertScopeControlArg(name, value);
+  }
+  return kept;
+};
+
 // The find scope arguments of a type that a client's constructs read through, once per call and type
 // (`cache`): its find scope runs with empty arguments, operation 'find' and the request context, as
 // joined scopes do; its sort and pagination are checked for shape and dropped; the rest gets the final
@@ -2574,11 +2703,7 @@ const clientScopeArgs = async (typeName, context, cache) => {
   if (getScope(target?.gqltype, 'find')) {
     const scopeArgs = {};
     await executeScope({ type: target, args: scopeArgs, operation: 'find', context });
-    const kept = {};
-    for (const [name, value] of Object.entries(scopeArgs)) {
-      if (!SCOPE_IGNORED_ARGS.has(name)) kept[name] = value;
-      else if (value != null) assertScopeControlArg(name, value);
-    }
+    const kept = scopeFilterArgs(scopeArgs);
     assertStoredQueryPaths(target.gqltype, kept, 'find');
     assertQueryConditions(target.gqltype, kept, 'find');
     if (Object.values(kept).some((value) => value != null && !(Array.isArray(value) && !value.length))) result = kept;
@@ -2587,19 +2712,15 @@ const clientScopeArgs = async (typeName, context, cache) => {
   return result;
 };
 
-// The fill, on the final arguments the gate passed (`checked`). Each marked object is read at each of
-// its final positions, with its final operator and path:
-// - an emptiness condition that crosses, ends at or has as members references or collections gets a
-//   fresh `__scope: { id, scopes }`, one key per scoped join and frame path, with the union of the
-//   keys of every position when middleware placed the object at several;
-// - an emptiness condition narrowed to the record's own fields loses its marker, and is trusted;
-// - another operator loses it too, unless its path still crosses or ends at a reference or a
-//   collection: no joined scope was recorded for it, so it fails with DETACHED_CLIENT_FILTER.
-// An object that reads references at one position and none at another fails the same way, since one
-// marker cannot serve both. Every check comes before any target scope runs.
+// Preflight every final position before running target scopes: union relative keys, reject target
+// collisions and mixed reads, and retain the compiler's rejection of marked legacy predicates.
+// J collection keys are null; anchor references remain legacy joins. Keyless carriers lose their
+// marker. One per-call type cache serves all remaining keys, separately from joined-scope execution.
 const fillClientScopes = async (gqltype, checked, context, issued) => {
+  const { conditions, args, operation } = checked;
+  const J = operation === 'aggregate' ? aggregateJoinPrefixes(args.aggregation, { gqltype }) : new Set();
   const marked = new Map();
-  for (const item of checked) {
+  for (const item of conditions) {
     const { construct } = item.entry;
     if (!hasScopeMarker(construct)) continue;
     if (!marked.has(construct)) marked.set(construct, []);
@@ -2611,18 +2732,29 @@ const fillClientScopes = async (gqltype, checked, context, issued) => {
     const origin = issued.get(id);
     const targets = {};
     const unread = [];
-    for (const { entry, shape } of positions) {
-      if (!entry.emptiness) {
+    const vectors = [];
+    for (const { entry, shape, type } of positions) {
+      const relations = pathRelations(type, entry.relative);
+      if (!shape && entry.form !== 'quantified' && !ordinaryFrameCarrier(gqltype, entry, J)) {
         const relation = relationOnPath(gqltype, entry.segments);
-        if (relation) {
-          throw detachedClientFilter(`The client's ${origin.operator} condition on ${origin.path} now uses ${entry.operator} on `
-            + `${entry.path}, which reads through ${relation} without its scope`);
+        if (relation) throw detachedClientFilter(`The client's ${origin.operator} condition on ${origin.path} now uses ${entry.operator} on `
+          + `${entry.path}, which reads through ${relation} without its scope`);
+      }
+      const rootShorthand = !entry.frames.length && entry.form !== 'quantified' && !shape;
+      const anchored = rootShorthand && relations.some(({ collection, path }) => collection && J.has(path));
+      const cut = anchored ? relations.find(({ collection, path }) => collection && !J.has(path)) : null;
+      const keys = shape ? emptinessScopeTargets(shape, entry.relative) : Object.fromEntries(relations
+        .filter((relation) => !anchored || relation.collection || (cut && relation.index >= cut.index))
+        .map(({ path, typeName, collection }) => [path, rootShorthand && collection && J.has(path) ? null : typeName]));
+      for (const [key, target] of Object.entries(keys)) {
+        if (Object.hasOwn(targets, key) && targets[key] !== target) {
+          throw detachedClientFilter(`The client's ${origin.operator} condition on ${origin.path} uses ${key} for different scope targets`);
         }
-        unread.push(entry.path);
-      } else {
-        const keys = shape ? emptinessScopeTargets(shape, entry.segments) : {};
-        if (Object.keys(keys).length) Object.assign(targets, keys);
-        else unread.push(entry.path);
+        targets[key] = target;
+      }
+      if (!Object.keys(keys).length) unread.push(entry.path);
+      for (const relation of relations) if (!relation.collection && relation.insideList && Object.hasOwn(keys, relation.path)) {
+        vectors.push({ ...relation, absolute: [...entry.segments.slice(0, -entry.relative.length), ...relation.path.split('.')].join('.') });
       }
     }
     const paths = Object.keys(targets);
@@ -2630,16 +2762,16 @@ const fillClientScopes = async (gqltype, checked, context, issued) => {
       throw detachedClientFilter(`The client's ${origin.operator} condition on ${origin.path} is used where it reads `
         + `references or collections and where it reads none (${unread.join(', ')})`);
     }
-    fills.push({ construct, id, targets: paths.length ? targets : null });
+    fills.push({ construct, id, targets: paths.length ? targets : null, vectors });
   }
   const cache = new Map();
-  for (const { construct, id, targets } of fills) {
-    if (!targets) {
-      delete construct[SCOPE_MARKER];
-      continue;
-    }
+  for (const { construct, id, targets, vectors } of fills) {
+    if (!targets) { delete construct[SCOPE_MARKER]; continue; }
     const scopes = {};
-    for (const [path, typeName] of Object.entries(targets)) scopes[path] = await clientScopeArgs(typeName, context, cache);
+    for (const [path, typeName] of Object.entries(targets)) scopes[path] = typeName === null ? null : await clientScopeArgs(typeName, context, cache);
+    for (const relation of vectors) if (scopes[relation.path] !== null) {
+      throw forbiddenPath(`Query path ${relation.absolute} enters ${relation.typeName}, whose find scope restricts the relation ${relation.owner}.${relation.fieldName} inside a list`);
+    }
     construct[SCOPE_MARKER] = { id, scopes };
   }
 };
@@ -2649,8 +2781,8 @@ const fillClientScopes = async (gqltype, checked, context, issued) => {
 // the adapter compiles reference emptiness. get_by_id builds its own arguments and never runs it.
 // Returns the fill's promise, or null when no marker was issued, so that a call without one reaches
 // the adapter after as many promise jobs as before.
-const settleClientArgs = (gqltype, params, operation, issued) => {
-  if (issued) assertClientMarkers(params.args, operation, issued);
+const settleClientArgs = (gqltype, params, operation, { issued, clientJ }) => {
+  if (issued) assertClientMarkers(gqltype, params.args, operation, issued, clientJ);
   assertStoredQueryPaths(gqltype, params.args, operation);
   const checked = assertQueryConditions(gqltype, params.args, operation);
   return issued?.size ? fillClientScopes(gqltype, checked, params.context, issued) : null;
@@ -3239,7 +3371,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations, sha
                   await executeMiddleware(params);
                   return executeOperation(type.model, type.gqltype, type.controller,
                     args.input, operations.STATE_CHANGED, actionField,
-                    null, context, type.inputType);
+                    null, context, type.inputType, actionName);
                 },
               };
             }
@@ -3270,7 +3402,7 @@ const buildMutation = (name, includedMutationTypes, includedCustomMutations, sha
 // without one still reaches the adapter after as many promise jobs as before it was shared.
 const prepareRead = async (type, args, context, operation, { entry, extend } = {}) => {
   const joinedScopes = inspectClientPaths(type.gqltype, args, operation);
-  const issued = markClientConstructs(assertQueryConditions(type.gqltype, args, operation));
+  const issued = markClientConstructs(assertQueryConditions(type.gqltype, args, operation), { aggregation: args.aggregation });
   const params = entry === undefined
     ? { type, args, operation, context }
     : { type, args, operation, entry, context };
@@ -3319,13 +3451,13 @@ const splitViewArgs = (paramNames, args) => {
 
 const invalidWhere = (view, detail) => new SimfinityError(`View ${view.name} where ${detail}`, 'INVALID_VIEW', 500);
 
-// The groups a view's `where` returned are plain objects whose `conditions`, `AND` and `OR`, when set,
+// The groups a view's `where` returned are plain objects whose condition and Boolean/quantified lists, when set,
 // are arrays: of plain objects with a field name, and of groups like these. collectQueryPathEntries
 // skips anything else silently, so this comes before their paths are read. Only the GraphQL input
-// fields are structural keys; condition values stay opaque. A condition never carries a client scope
-// marker key: only the runtime writes one. Active ancestors reject cycles without rejecting reuse.
-const assertViewGroupShapes = (view, groups, ancestors = new Set()) => {
-  const groupFields = QLFilterGroup.getFields();
+// fields are structural keys; condition values stay opaque. Conditions and quantified groups never
+// carry a client scope marker key: only the runtime writes one. Active ancestors reject cycles without rejecting reuse.
+const assertViewGroupShapes = (view, groups, ancestors = new Set(), quantified = false) => {
+  const groupFields = (quantified ? QLQuantifiedGroup : QLFilterGroup).getFields();
   const conditionFields = QLFilterCondition.getFields();
   for (const group of groups) {
     if (!isNonNullPlainObject(group)) throw invalidWhere(view, 'returned a group that is not a plain object');
@@ -3333,7 +3465,11 @@ const assertViewGroupShapes = (view, groups, ancestors = new Set()) => {
     for (const key of Object.keys(group)) {
       if (!Object.hasOwn(groupFields, key)) throw invalidWhere(view, `returned a group with unknown key ${key}`);
     }
+    if (quantified && (typeof group.path !== 'string' || group.path.length === 0)) {
+      throw invalidWhere(view, 'returned a quantified group without a non-empty path');
+    }
     for (const key of Object.keys(groupFields)) {
+      if (key === 'path') continue;
       if (group[key] != null && !Array.isArray(group[key])) throw invalidWhere(view, `returned a group whose ${key} is not an array`);
     }
     for (const condition of group.conditions ?? []) {
@@ -3349,6 +3485,7 @@ const assertViewGroupShapes = (view, groups, ancestors = new Set()) => {
     }
     ancestors.add(group);
     assertViewGroupShapes(view, [...(group.AND ?? []), ...(group.OR ?? [])], ancestors);
+    for (const key of QUANTIFIED_LISTS) assertViewGroupShapes(view, group[key] ?? [], ancestors, true);
     ancestors.delete(group);
   }
 };
@@ -3795,16 +3932,20 @@ const assertConcurrencyDeclarations = (applicationTypes) => {
   const protectedTypes = registrations.filter(({ gqltype }) => concurrencyDeclared(gqltype));
   // Generated inputs, models and stored data follow the protection a type had when the first schema
   // containing it was created, and an injected field is never removed, so neither can change later.
-  // Inputs or a model that an earlier createSchema() built without the field, even one that failed
-  // afterwards, count as such a schema; a model supplied to connect() does not.
+  // Inputs or a model that an earlier createSchema() built without the field also fix protection,
+  // even if the call failed afterwards; a model supplied to connect() does not.
   for (const registration of registrations) {
     const { gqltype } = registration;
     const declared = protectedTypes.includes(registration);
     const builtWithoutField = !isProtected(gqltype)
       && (!!registration.inputType || generatedModels.has(registration.model));
-    if (declared && (protectionStatus.get(gqltype) === false || builtWithoutField)) {
+    if (declared && protectionStatus.get(gqltype) === false) {
       throw invalidModel(`${gqltype.name} declares optimistic concurrency after a schema was created without it; `
         + `declare it before the first createSchema() that contains ${gqltype.name}`);
+    }
+    if (declared && builtWithoutField) {
+      throw invalidModel(`${gqltype.name} declares optimistic concurrency after its inputs or generated model were built without it; `
+        + `declare it before the first createSchema() attempt that builds ${gqltype.name}`);
     }
     if (!declared && isProtected(gqltype)) {
       throw invalidModel(`${gqltype.name} no longer declares optimistic concurrency, but Simfinity already added its `
@@ -4266,7 +4407,7 @@ const executeTransaction = async (transactionState, operationList, parent, conte
         assertRemainingNestedBudget(gqltype, input, state);
         assertCollectionWrites(gqltype, input);
         return runOperation({ Model, gqltype, controller }, entry.operation, input, session, context,
-          entry.actionField ?? null);
+          entry.actionField ?? null, entry.actionName);
       };
       const results = [];
       for (const step of steps) {
@@ -4398,6 +4539,7 @@ const buildTransaction = ({ name, types }, query, mutation, shadowedRoots) => {
 };
 
 const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomMutations, options) => {
+  Object.values(typesDict.types).forEach(({ controller }) => afterCommit.validate(controller));
   // Reject before models, resolvers or roots are built, so a rejected schema changes nothing.
   const { includedCustomQueries, transaction } = readSchemaOptions(options, includedMutationTypes,
     includedCustomMutations);
@@ -4491,6 +4633,16 @@ const createSchema = (includedQueryTypes, includedMutationTypes, includedCustomM
 
   const schema = constructSchema(query, mutation, reserveVersionNames);
   if (built) recordTransactionState(built.field, built.state);
+  captureSchemaRegistrations(schema, Object.values(typesDict.types).map((entry) => ({
+    gqltype: entry.gqltype, endpoint: entry.endpoint,
+    // Only associate roots generated for this schema. Excluded endpoint names can be custom queries.
+    simpleEntityEndpointName: shouldNotBeIncludedInSchema(includedQueryTypes, entry.gqltype)
+      ? null : entry.simpleEntityEndpointName,
+    inputType: entry.inputType, updateInputType: typesDictForUpdate.types[entry.gqltype.name]?.inputType,
+    stateMachine: entry.stateMachine,
+  })), (type, field) => field.extensions?.queryable !== false
+    && (field.extensions?.queryable === true || !hasApplicationResolver(type, field.name)),
+  built ? schema.getMutationType().getFields()[transaction.name] : undefined);
   // Reserve reachable types whose relation fields still have no resolver, such as an unregistered
   // custom operation result, so another runtime cannot later generate resolvers this schema executes.
   schemaTypes.forEach((type) => {
@@ -4846,6 +4998,7 @@ function formatArgs(argsArray) {
   return {
     configureQueryLimits,
     configureMutationLimits,
+    configureAfterCommit: afterCommit.configure,
     connect,
     addNoEndpointType,
     createSchema,

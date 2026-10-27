@@ -167,7 +167,7 @@ describe.skipIf(!mongoUri || !postgresUri)('MongoDB/PostgreSQL GraphQL parity', 
     'credits:{terms:[{path:"role",operator:IN,value:["First","Second"]}]}',
     'credits:{terms:[{path:"star.name",value:"Lead"}]}',
     'OR:[{conditions:[{field:"seasons.year",value:2030}]},{conditions:[{field:"title",value:"Gamma"}]}]',
-  ])('preserves joined rows and counts for %s', async (filter) => {
+  ])('returns collection-filter rows and counts alike for %s', async (filter) => {
     const counts = [];
     const results = [];
     for (const backend of backends) {

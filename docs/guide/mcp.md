@@ -16,7 +16,7 @@ The MongoDB facade retains MCP compatibility exports. For either database, the d
 The following examples import `@simtlix/simfinity-mcp`, which works with either adapter. In either application, install it from npm:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.12.0
+npm install @simtlix/simfinity-mcp@3.16.0
 ```
 
 Keep it at the same version as your other Simfinity packages. The archived MongoDB starter already includes its matching version for compatibility. The published MongoDB 3.0.1 release instead exports these functions from `@simtlix/simfinity-js`.
@@ -62,7 +62,7 @@ Generated inputs distinguish omission from explicit null: defaulted arguments us
 
 `maxResultBytes` also covers errors and partial data. Oversized query results are replaced by an actionable limit error. An oversized mutation result is not an error when the mutation succeeded, because the write already ran: the tool returns a `truncated` notice telling the agent whether calling it again would repeat the change, with the record's id when the id fits within the cap. Limit diagnostics and that notice are exempt from the cap. `limits` is validated when the tools are created; see [limits](/reference/mcp#limits).
 
-`limits` bound reads, not writes. Generated add and update tools accept nested collection inputs, and each nested `added`, `updated` or `deleted` entry runs inside the parent's transaction. On servers exposed to MCP clients, cap them with [`configureMutationLimits({ maxNestedOperations })`](/guide/mutations#limit-nested-collection-operations) at startup. Next release: the [transaction tool](#transaction-tool-next-release) takes a list of operations, which `maxTransactionOperations` caps (100 by default) in the same call.
+`limits` bound reads, not writes. Generated add and update tools accept nested collection inputs, and each nested `added`, `updated` or `deleted` entry runs inside the parent's transaction. On servers exposed to MCP clients, cap them with [`configureMutationLimits({ maxNestedOperations })`](/guide/mutations#limit-nested-collection-operations) at startup. Since 3.16.0, the [transaction tool](#transaction-tool) takes a list of operations, which `maxTransactionOperations` caps (100 by default) in the same call.
 
 ## Custom query tools
 
@@ -218,17 +218,17 @@ const lean = mcp.generateMCPTools(schema, {
 
 [Virtual fields](./queries#virtual-fields) cost a resolver call each, so list tools select one only when it sets `extensions: { virtual: { mcp: 'select' } }`, while get-by-id and mutation tools select every virtual field without required arguments, except inside the items of a nested collection or embedded list, where the same `mcp: 'select'` rule applies. A virtual field with a required argument, which no generated selection can include, gets its own read tool instead, named `<byIdQuery>_<field>`, such as `barbershop_busyRanges`: it takes the record's `id` and the field's arguments and returns the field under its record. Set `mcp: false` on the field to leave that tool out; see [virtual field tools](/reference/mcp#virtual-field-tools).
 
-An explicit selection omits that tool's generated `outputSchema`, because the generator can no longer promise a matching output contract. Tool annotations describe behavior to clients; they do not grant or restrict access. Generated unprotected updates are marked idempotent unless their input can add collection items, and deletes are marked destructive and idempotent; in the next release protected updates keep the idempotent hint even with added items; see [annotations](/reference/mcp#annotations).
+An explicit selection omits that tool's generated `outputSchema`, because the generator can no longer promise a matching output contract. Tool annotations describe behavior to clients; they do not grant or restrict access. Generated unprotected updates are marked idempotent unless their input can add collection items, and deletes are marked destructive and idempotent; protected updates keep the idempotent hint even with added items; see [annotations](/reference/mcp#annotations).
 
 See the [MCP reference](/reference/mcp) for all options, remote execution, middleware, and error behavior.
 
-## Transaction tool (next release)
+## Transaction tool
 
-::: warning Next release
-The transaction tool needs the schema's `transaction` field, which is a next-release feature, and an MCP package of the same release.
+::: info Available since 3.16.0
+The transaction tool requires the schema's `transaction` field and an MCP package of the same release, 3.16.0 or later.
 :::
 
-A schema that opts into the [transaction mutation](./mutations#run-several-mutations-in-one-transaction-next-release) can publish it as one tool, so an agent can apply several generated writes together or not at all. It is off by default:
+A schema that opts into the [transaction mutation](./mutations#run-several-mutations-in-one-transaction) can publish it as one tool, so an agent can apply several generated writes together or not at all. It is off by default:
 
 ```javascript
 const { tools, callTool } = mcp.generateMCPTools(schema, {
@@ -249,7 +249,7 @@ The input schema is closed like every tool's: each item of `operations` is an ob
 
 Each operation field of the result is selected with the `selectionDepth` and `nestedCollections` of that operation's own tool; as below any list position, only virtual fields with `mcp: 'select'` are selected. The result list takes no level of `selectionDepth`. Each result item keeps only `id` and its own operation's key, so the result does not grow with the number of generated mutations the field accepts. A `toolOverrides` entry for the transaction tool changes its title, description and annotations, and an explicit `selection` on it replaces the selection of the result list and drops its `outputSchema`, as for any tool; its items are then returned as selected. Its `selectionDepth` and `nestedCollections` are ignored, and the overrides of an operation's own tool apply to that operation, except that an explicit `selection` there is not reused inside the batch: fields that selection hides still appear in the transaction result, so hide fields with [field authorization](./authorization) instead. When the result exceeds `maxResultBytes`, the compact value keeps one `{ id, <operationKey>: { id, version? } | null }` per operation, with `null` for a delete of a missing record, and the notice says that the operations were applied all together or not at all, never in part. If errors leave no root value, the outcome remains unknown: errors can occur after a successful commit, including during session cleanup, result serialization or a remote request. Check the current state before retrying; repeating the call can repeat committed changes.
 
-The tool executes the `transaction` mutation, so the [authorization rules](./authorization#authorize-the-transaction-mutation-next-release) of the field and of each operation apply in-process, through `schemaPlugins`, and remotely, on the server. A [`toolMiddleware`](/reference/mcp#tool-middleware) that gates tools by name sees only the transaction tool; the operations it runs are in `call.args.operations`.
+The tool executes the `transaction` mutation, so the [authorization rules](./authorization#authorize-the-transaction-mutation) of the field and of each operation apply in-process, through `schemaPlugins`, and remotely, on the server. A [`toolMiddleware`](/reference/mcp#tool-middleware) that gates tools by name sees only the transaction tool; the operations it runs are in `call.args.operations`.
 
 ### Rebuilt and remote schemas
 
@@ -268,8 +268,8 @@ A rebuild that removes generated mutations must also remove the transaction fiel
 
 A server that enables `transaction` exposes the field as a custom mutation tool to an earlier MCP package, including MCP processes in remote mode that no package pin aligns. Upgrade those processes first, or add the field to their `exclude`. See the [upgrade notes](/resources/compatibility#lifecycle-helpers-and-the-generated-transaction).
 
-## Protected records (next release)
+## Protected records
 
 For [optimistic concurrency](./concurrency), generated selections include `version`, and `RecordVersion` becomes an integer from 1 to `9007199254740991` in tool input/output schemas. Send the observed version on updates, state actions and deletes; nested protected children also need their own versions. Protected update/delete hints remain idempotent for stored data, including updates with `added` items, because the same version cannot apply another revision. Hooks may still run again. Re-read and reapply on `VERSION_CONFLICT` or `TRANSACTION_RETRY_EXCEEDED`; an earlier call may already have applied the change. Transition hints are unchanged.
 
-If an oversized protected mutation result is compacted, MCP keeps `{ id, version }` when it fits within the configured cap. Keep `version` in any `toolOverrides.selection` so subsequent edits use the new revision. The compact-result and retry messages explain what was applied; avoid a blind repeat. Version 3.12.0 does not include this next-release behavior.
+If an oversized protected mutation result is compacted, MCP keeps `{ id, version }` when it fits within the configured cap. Keep `version` in any `toolOverrides.selection` so subsequent edits use the new revision. The compact-result and retry messages explain what was applied; avoid a blind repeat.

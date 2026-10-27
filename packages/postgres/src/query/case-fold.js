@@ -1,4 +1,4 @@
-// The case fold of the case-insensitive text operators (ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ), the shared
+// The case fold of the case-insensitive operators (ILIKE, ISTARTS_WITH, IENDS_WITH, IEQ and IIN), the shared
 // contract of #108 section 3.1: the Unicode simple case foldings that MongoDB's case-insensitive regular expressions
 // apply. lower() under ICU's root collation applies them to every script the same way on every server, whatever the
 // database's default collation (text paths are `C` columns, under which lower() folds ASCII only), except for the
@@ -47,9 +47,9 @@ const FROM = `'${CASE_FOLD_MAPPINGS.map(([from]) => from).join('')}'`;
 const TO = `'${CASE_FOLD_MAPPINGS.map(([, to]) => to).join('')}'`;
 
 /**
- * The SQL text that folds `sqlExpression` for the case-insensitive text operators, exactly as the compiler writes it on
- * both sides of each comparison: `translate(lower((<expression>) COLLATE "pg_catalog"."und-x-icu"), '<22 characters>',
- * '<their simple case foldings>')`. Applications build their expression indexes with it, such as
+ * The SQL text that folds `sqlExpression` for the case-insensitive text operators and IIN, exactly as the compiler
+ * writes it on both sides of each comparison: `translate(lower((<expression>) COLLATE "pg_catalog"."und-x-icu"),
+ * '<22 characters>', '<their simple case foldings>')`. Applications build their expression indexes with it, such as
  * `CREATE INDEX ... (${caseFoldExpression('"name"')} text_pattern_ops)`. The expression is trusted SQL, inserted as
  * given: quote identifiers yourself and never pass request input. It goes in parentheses, because COLLATE binds more
  * tightly than `->>` and every other binary operator: without them, `"details" ->> 'label'` would collate only

@@ -48,7 +48,7 @@ For create hooks, `args` is the inner mutation input. For update hooks, `changes
 
 The parent update completes before collection writes. A malformed ID fails with `NOT_VALID_ID` (400) before anything is written. In an update of an unprotected type without embedded fields, `onUpdating` runs before that check and receives the raw ID; the error then rolls back the hook's session writes. If no parent matches, the mutation throws `NOT_VALID_ID` (404) before processing children or calling `onUpdated`. The hook receives the updated record, so it can read its fields or perform additional session-bound database work without executing the update query again. MongoDB supplies a Mongoose document; PostgreSQL supplies a plain record.
 
-Next release: protected writes pre-read before validators and controller hooks, so malformed IDs fail before `onUpdating`. Hook signatures stay unchanged: `onSaving` sees a record initialized to version 1, `onUpdating` sees changes without `version`, `onSaved`/`onUpdated` see the new version, and `onDelete` sees the stored version normalized to a number (or `null` for a missing record). Changing the managed key in `onSaving` or `onUpdating`, including through a `$` operator, raises `VERSION_MANAGED`. Native Mongoose save middleware must separately preserve initialization and the returned managed value; there is no post-save guard.
+Protected writes pre-read before validators and controller hooks, so malformed IDs fail before `onUpdating`. Hook signatures stay unchanged: `onSaving` sees a record initialized to version 1, `onUpdating` sees changes without `version`, `onSaved`/`onUpdated` see the new version, and `onDelete` sees the stored version normalized to a number (or `null` for a missing record). Changing the managed key in `onSaving` or `onUpdating`, including through a `$` operator, raises `VERSION_MANAGED`. Native Mongoose save middleware must separately preserve initialization and the returned managed value; there is no post-save guard.
 
 ## Check request context
 
@@ -90,7 +90,7 @@ Because `onUpdating` can receive a malformed ID, a hook that looks the record up
 
 Define `ownerId` as a server-managed field and set it from trusted context during creation. Add equivalent checks for other write paths, including deletion and custom mutations, according to your policy. [Query scope](./query-scope) governs read filtering; it does not automatically authorize writes.
 
-When enabling next-release protection on the example above, keep its write authorization and express the same record visibility in `extensions.scope.get_by_id` if unauthorized callers must not receive early version conflicts. Only that scope controls early stale/exhausted-version reporting; a root query permission alone does not. Hidden callers still run the usual validators and `onUpdating`/`onDelete` before an adapter conflict, so these hooks remain necessary. Malformed stored versions can raise `DATABASE_ERROR` before hooks, after root mutation authorization/middleware. See [hooks, scopes and authorization](./concurrency#hooks-scopes-and-authorization).
+When enabling protection on the example above, keep its write authorization and express the same record visibility in `extensions.scope.get_by_id` if unauthorized callers must not receive early version conflicts. Only that scope controls early stale/exhausted-version reporting; a root query permission alone does not. Hidden callers still run the usual validators and `onUpdating`/`onDelete` before an adapter conflict, so these hooks remain necessary. Malformed stored versions can raise `DATABASE_ERROR` before hooks, after root mutation authorization/middleware. See [hooks, scopes and authorization](./concurrency#hooks-scopes-and-authorization).
 
 ## Enforce a deletion policy
 
@@ -146,12 +146,62 @@ try {
 
 `session.query()` rejects with the `pg` error itself, so the hook can inspect its `code` before deciding to continue. Errors that a hook throws propagate unchanged, as on MongoDB.
 
-Transaction retries can execute hooks, and the middleware of nested collection children, more than once, up to five retries after the initial attempt. Each complete retry first waits a short random delay. On MongoDB, an uncertain commit result retries only the commit without repeating hooks; PostgreSQL retries confirmed serialization/deadlock aborts as complete attempts. When a concurrent write still conflicts after the retries, the mutation fails with `TRANSACTION_RETRY_EXCEEDED` (409) and its hooks' database work is rolled back; see [transaction boundaries](./mutations#transaction-boundaries). If an outcome remains uncertain, reconcile it before repeating the mutation. For email, webhooks, or other irreversible external actions, store an outbox event within the transaction and process it after commit. Calling an external service inside a hook does not make that call transactional.
+Transaction retries can execute hooks, and the middleware of nested collection children, more than once, up to five retries after the initial attempt. Each complete retry first waits a short random delay. On MongoDB, an uncertain commit result retries only the commit without repeating hooks; PostgreSQL retries confirmed serialization/deadlock aborts as complete attempts. When a concurrent write still conflicts after the retries, the mutation fails with `TRANSACTION_RETRY_EXCEEDED` (409) and its hooks' database work is rolled back; see [transaction boundaries](./mutations#transaction-boundaries). If an outcome remains uncertain, reconcile it before repeating the mutation. For best-effort email, webhooks or other external actions, use an [after-commit callback](#after-commit-callbacks). When delivery must survive a process failure, store an outbox event within the transaction and have a worker process it after commit. Calling an external service inside a hook does not make that call transactional.
 
-Next release: a MongoDB competitor can make validators and `onUpdating`/`onDelete` run and repeat before the losing write reports `VERSION_CONFLICT`; `onUpdated` never runs for a rejected edit. A stale nested child can fail after parent and earlier sibling hooks. Their database writes roll back, but external effects cannot. Use an outbox; the after-commit callbacks proposed in [#143](https://github.com/simtlix/simfinity.js/issues/143) are not part of this feature. PostgreSQL holds the protected row lock throughout validators and `onUpdating`, so hooks that lock other rows can encounter retryable deadlocks. Derived-value maintenance in the same revision uses a session-bound MongoDB `updateOne` without version changes or a PostgreSQL handle with `{ session, version: false }`; versioned writes from hooks belong only to other records that no later mutation entry writes. See [writes made by hooks](./concurrency#writes-made-by-hooks).
+A MongoDB competitor can make validators and `onUpdating`/`onDelete` run and repeat before the losing write reports `VERSION_CONFLICT`; `onUpdated` never runs for a rejected edit. A stale nested child can fail after parent and earlier sibling hooks. Their database writes roll back, but external effects cannot. Use [after-commit callbacks](#after-commit-callbacks) for best-effort external effects, or an outbox and worker for durable delivery. PostgreSQL holds the protected row lock throughout validators and `onUpdating`, so hooks that lock other rows can encounter retryable deadlocks. Derived-value maintenance in the same revision uses a session-bound MongoDB `updateOne` without version changes or a PostgreSQL handle with `{ session, version: false }`; versioned writes from hooks belong only to other records that no later mutation entry writes. See [writes made by hooks](./concurrency#writes-made-by-hooks).
+
+## After-commit callbacks
+
+Controllers can also declare optional callbacks for work that should run only after the owning transaction has committed:
+
+| Callback | Arguments | Operation |
+| --- | --- | --- |
+| `onSaveCommitted` | `record, args, context` | Creation, including initialization of a state machine |
+| `onUpdateCommitted` | `record, context` | Ordinary update |
+| `onDeleteCommitted` | `record, context` | Actual deletion; not a missing record |
+| `onTransitionCommitted` | `record, action, context` | State action; `action` is the registered name |
+
+These callbacks receive no session. A state action calls only `onTransitionCommitted` as its committed notification, while its existing `onUpdating` and `onUpdated` hooks still run inside the transaction.
+
+```javascript
+const controller = {
+  onUpdateCommitted: async (record, context) => {
+    await notifications.sendUpdated(String(record._id ?? record.id), context?.requestId);
+  },
+  onTransitionCommitted: async (record, action, context) => {
+    await notifications.sendTransition(String(record._id ?? record.id), action, context?.requestId);
+  },
+};
+
+simfinity.configureAfterCommit({
+  onError: async (error, details) => {
+    await monitoring.report(error, {
+      typeName: details.typeName,
+      operation: details.operation,
+      committed: details.committed,
+    });
+  },
+});
+```
+
+`notifications` and `monitoring` are application services. Register the controller with `connect()` as above. Configuration belongs to the selected runtime; it does not configure other instances. Call `configureAfterCommit()` to restore default reporting. The reporter receives the original thrown value and `{ committed: true, typeName, operation, callbackName, context }`; `operation` is `save`, `update`, `delete`, or `state_changed`. Default reporting logs only static operation metadata. Reporter and logger failures are guarded too.
+
+**Ordering and completion.** Notifications queue when each lifecycle operation completes. Collection children precede their parent; within each collection, existing traversal processes `added`, `updated`, then `deleted`, in item order. Callbacks run serially after commit and after cleanup is attempted, and are awaited before the owning call returns. An error is reported and later callbacks continue; the callback error does not fail the committed mutation, become a GraphQL error, or retry the transaction. Bound external I/O in the application: Simfinity adds no callback timeout or background delivery. Separate transactions have no shared notification order.
+
+**Retries and rollback.** Every attempt has its own queue. Aborted attempts dispatch nothing. Only the successful attempt dispatches; an uncertain MongoDB commit retains its queue through commit-only retries and dispatches only upon confirmation. If uncertainty remains, nothing dispatches, although the write might have committed. An existing cleanup failure after a confirmed commit still rejects the owning call under the existing cleanup contract; its confirmed queue nevertheless runs. Such a rejection is not a rollback and must not prompt blind write retries.
+
+**Values.** `record` is a detached plain representation of the operation result, captured after its lifecycle hooks and state normalization. It is not a GraphQL selection, does not re-read the database, and retains backend ID, scalar and storage-field representations. Creation `args` is the successful attempt's inner input at completion. Ordinary objects, arrays and Dates are copied; opaque custom scalar instances retain identity and must be treated as immutable. The original context reference, possibly `undefined`, is passed unchanged. Multiple operations on one record produce separate notifications with their respective results, not the transaction's final record image. Embedded values and native cascades do not invent child controller events.
+
+**Ownership.** Generated mutations (including the generated transaction field), sessionless `saveObject()`, `updateObject()`, `deleteObject()` and `transitionObject()`, registered mutations, and SQL's `withTransaction(null, callback)` have a Simfinity owner. A lifecycle write using that owner's supplied session joins its queue and waits for the outer commit. A native MongoDB transaction supplied by the application has no observed owner: new callbacks are skipped, with one warning per runtime/type. Simfinity does not watch or patch external `commitTransaction()`, adopt another adapter instance's queue, or offer a manual notification-flush API. SQL keeps rejecting foreign/native clients as sessions. Direct native writes invoke no controller callbacks.
+
+The owner must control transaction completion. Manual commits/aborts, restarting its transaction, or rolling back successful lifecycle operations to native savepoints cannot synchronize this queue. Statement-only savepoints that do not undo queued lifecycle writes remain usable. Let lifecycle failures propagate to the owner; catching one and committing does not give its partial writes nested atomicity.
+
+Callbacks are best-effort process-local effects. A process can exit after commit and before delivery; a caller can submit the same write again. Use a transactional outbox and delivery worker for durable intent, idempotency and delivery retries. These callbacks provide neither exactly-once delivery nor a replacement for workers.
+
+Custom database adapters must implement the optional `DatabaseAdapter.enqueueAfterCommit(session, run)` contract to support these callbacks. Configuring them against an unsupported adapter throws `UNSUPPORTED_AFTER_COMMIT` (500), including when a controller is changed after schema creation. Non-function callback members throw `INVALID_CONTROLLER` (400).
 
 ## Nested writes and direct model access
 
 Referenced collection changes call the child type's controller with the same session and request context. Direct calls to a Mongoose or PostgreSQL native model bypass Simfinity's controller and validation pipeline.
 
-Use [`saveObject()`](../reference/api#saveobject) when you need Simfinity's creation pipeline programmatically. Pass the supplied active session inside a hook or custom mutation to share its transaction; without a session, `saveObject()` owns a separate transaction. On MongoDB the session must come from the MongoDB client of the model that `saveObject()` writes, which a custom mutation's session may not; see [which connection the session uses](./mutations#which-connection-the-session-uses-on-mongodb). Pass the hook's `context` as the fourth argument as well, so that nested collection children's middleware sees the request context. Next release: `updateObject()`, `deleteObject()` and `transitionObject()` do the same for updates, deletes and state actions, with the same session and `context` rules; see [update, delete and transition from code](./server-side-operations#update-delete-and-transition-from-code-next-release). Use [custom mutations](./mutations#add-a-custom-mutation) when you need to coordinate an explicit sequence of operations.
+Use [`saveObject()`](../reference/api#saveobject) when you need Simfinity's creation pipeline programmatically. Pass the supplied active session inside a hook or custom mutation to share its transaction; without a session, `saveObject()` owns a separate transaction. On MongoDB the session must come from the MongoDB client of the model that `saveObject()` writes, which a custom mutation's session may not; see [which connection the session uses](./mutations#which-connection-the-session-uses-on-mongodb). Pass the hook's `context` as the fourth argument as well, so that nested collection children's middleware sees the request context. Since 3.16.0, `updateObject()`, `deleteObject()` and `transitionObject()` do the same for updates, deletes and state actions, with the same session and `context` rules; see [update, delete and transition from code](./server-side-operations#update-delete-and-transition-from-code). Use [custom mutations](./mutations#add-a-custom-mutation) when you need to coordinate an explicit sequence of operations.

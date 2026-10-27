@@ -171,7 +171,9 @@ Apply these Simfinity contracts:
   configuration are missing, keep protected access denied and report the gap.
 - Controller hooks run inside transactions. Pass the supplied session to
   related database work. onSaved/onUpdated are not after-commit notifications.
-  Use a transactional outbox for external side effects when required.
+  Use after-commit callbacks for best-effort external effects; see
+  docs/guide/controllers.md#after-commit-callbacks. Keep a transactional outbox
+  and worker when delivery must survive a process failure.
 - simfinity.use middleware is pre-execution: code after await next() still
   precedes database execution. Do not use it for after-save behavior.
 

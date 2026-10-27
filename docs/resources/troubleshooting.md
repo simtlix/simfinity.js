@@ -40,9 +40,17 @@ On MongoDB, a custom mutation that fails with `Connection operation buffering ti
 
 ## Duplicate introspection types
 
-Do not wrap a Simfinity schema with `graphql-middleware`'s `applyMiddleware` or rebuild it with `mapSchema`. Simfinity extends GraphQL introspection globally; rebuilding a schema can introduce duplicate introspection type names.
+Do not wrap a Simfinity schema with `graphql-middleware`'s `applyMiddleware` or rebuild it with `mapSchema`. By default in 3.x, Simfinity extends GraphQL introspection globally; rebuilding a schema can introduce duplicate introspection type names.
 
-The same limitation affects `buildClientSchema()` on a post-import schema's introspection when called in a process that has imported Simfinity. Repeated Simfinity module evaluation with a shared GraphQL peer is safe and reuses its introspection types; it does not provide schema-cloning support. See [introspection metadata](../reference/extensions#introspection-metadata) for schemas created before import and their type-map limitations.
+With the default extension installed, the same limitation affects `buildClientSchema()` on a post-import schema's introspection when called in a process that has imported Simfinity. Repeated Simfinity module evaluation with a shared GraphQL peer is safe and reuses its introspection types; it does not provide schema-cloning support. See [introspection metadata](../reference/extensions#introspection-metadata) for schemas created before import and their type-map limitations.
+
+The 3.15.0 [early introspection opt-out](../reference/client-descriptor#disable-the-legacy-extension-explicitly)
+avoids this particular duplicate-type failure in standard introspection and
+`buildClientSchema()`. Configure it before importing the runtime and migrate
+legacy metadata clients first. It does not make arbitrary schema transforms or
+cloning middleware compatible. The descriptor accepts only original Simfinity
+schemas. In production you can disable GraphQL introspection independently and
+serve an explicitly gated descriptor, or deliberately make that endpoint public.
 
 Use the [Envelop authorization plugin](../guide/authorization) with GraphQL Yoga, or wrap existing resolvers in place. Register application types once at startup and reuse the resulting schema.
 

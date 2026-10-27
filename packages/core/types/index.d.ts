@@ -12,6 +12,8 @@ import type {
 
 /** The filter operator enum; its values are the {@link QueryOperator} names. */
 export const QLOperator: GraphQLEnumType;
+/** The collection and reference quantifier enum. */
+export const QLQuantifier: GraphQLEnumType;
 export const QLSort: GraphQLInputObjectType;
 export const QLValue: GraphQLScalarType<unknown, unknown>;
 
@@ -45,18 +47,63 @@ export const MAX_RECORD_VERSION: number;
  * embedded object or one whose stored members are all empty by these rules; the record identity is
  * never empty. The target's `id` right after a reference is empty exactly when the reference is,
  * including when the target is missing or hidden by its `find` scope. A path that continues inside an
- * embedded list or a collection fails with `INVALID_FILTER_PATH`. With an adapter that declares
+ * embedded list fails with `INVALID_FILTER_PATH`; shorthand through a collection excludes emptiness
+ * on a leaf, so use an explicit group. With an adapter that declares
  * `queryFeatures.referenceEmptiness: true`, a path may also cross single references and end at a
  * reference or a collection, and an embedded object may have reference and collection members: a
  * reference is empty when no record it points to exists that the target's `find` scope admits for
  * the caller, a collection when no such child exists, and a hidden record on the way reads as
  * missing; constructs that middleware and scopes add read stored data. With any other adapter they
- * fail with `UNSUPPORTED_QUERY`. A term or group condition without a path tests the field itself.
+ * fail with `UNSUPPORTED_QUERY`. A term or group condition without a path tests the field itself, except that every term
+ * of a quantified relation filter needs a non-empty element-relative path.
+ *
+ * `IIN` is `IN` ignoring case: an array of non-null strings without U+0000, possibly empty, on a `String` field or
+ * `String` list by its effective scalar; it matches where `IEQ` matches one of them, and `[]` matches nothing.
+ * `CONTAINS_ALL` takes a non-empty array of non-null scalars, cast like `IN` elements; it applies to a scalar list or a
+ * field reached through embedded lists, where it holds when every value is among the values of all items, and fails
+ * with `INVALID_FILTER_OPERATOR` on other leaves and with `INVALID_FILTER_PATH` through a collection or a reference
+ * inside an embedded list. Neither has a negated form.
  */
 export type QueryOperator =
   | 'EQ' | 'NE' | 'LT' | 'LTE' | 'GT' | 'GTE' | 'BTW' | 'IN' | 'NIN' | 'LIKE'
   | 'ILIKE' | 'STARTS_WITH' | 'ISTARTS_WITH' | 'ENDS_WITH' | 'IENDS_WITH' | 'IEQ'
-  | 'IS_EMPTY' | 'IS_NOT_EMPTY';
+  | 'IS_EMPTY' | 'IS_NOT_EMPTY' | 'CONTAINS_ALL' | 'IIN';
+
+/** The quantifier applied to the elements visible in a collection or reference frame. */
+export type QueryQuantifier = 'ANY' | 'ALL' | 'NONE';
+
+/** A condition inside a filter group, with paths relative to the current frame. */
+export interface QLFilterCondition {
+  field: string;
+  operator?: QueryOperator | null;
+  value?: any;
+  path?: string | null;
+}
+
+/** Recursive Boolean groups and quantified frames. */
+export interface QLFilterGroup {
+  conditions?: Array<QLFilterCondition | null> | null;
+  AND?: Array<QLFilterGroup | null> | null;
+  OR?: Array<QLFilterGroup | null> | null;
+  ANY?: Array<QLQuantifiedGroup | null> | null;
+  ALL?: Array<QLQuantifiedGroup | null> | null;
+  NONE?: Array<QLQuantifiedGroup | null> | null;
+}
+
+/** A frame path ends at a collection or single reference without crossing a list; inner paths are element-relative. */
+export interface QLQuantifiedGroup extends QLFilterGroup {
+  path: string;
+}
+
+/** A quantified field filter may omit terms; every supplied term needs a non-empty element-relative path. */
+export interface QLTypeFilterExpression {
+  quantifier?: QueryQuantifier | null;
+  terms?: Array<{
+    operator?: QueryOperator | null;
+    value?: any;
+    path?: string | null;
+  } | null> | null;
+}
 
 /**
  * A condition of a {@link FilterGroup}, as the `QLFilterCondition` input takes it: the field it
@@ -71,8 +118,11 @@ export interface FilterCondition {
   path?: string;
 }
 
-/** A `QLFilterGroup` value: flat conditions plus nested `AND` and `OR` groups. */
+/** A `QLFilterGroup` value: flat conditions, Boolean groups and element-relative quantified groups. */
 export interface FilterGroup {
+  ANY?: QLQuantifiedGroup[];
+  ALL?: QLQuantifiedGroup[];
+  NONE?: QLQuantifiedGroup[];
   AND?: FilterGroup[];
   OR?: FilterGroup[];
   conditions?: FilterCondition[];
@@ -97,6 +147,15 @@ export interface QueryFeatures {
    * must apply each target scope in `scopes`; constructs without a marker read stored data.
    */
   referenceEmptiness?: boolean | null | undefined;
+  /**
+   * Whether the adapter compiles quantified frames and their scoped joins. Requires
+   * `referenceEmptiness: true`; undefined or null means false. Invalid declarations fail with
+   * `INVALID_QUERY_FEATURES` (500). Client markers have frame-relative scope keys; compilers must
+   * apply frame scopes before quantification and honour scoped joins/aggregate anchors. Without
+   * this flag explicit quantified forms fail with `UNSUPPORTED_QUERY`; collection filters keep
+   * legacy joins. All adapters reject list sorts through collections, including count mode.
+   */
+  quantifiers?: boolean | null | undefined;
 }
 
 export interface ModelRegistration {
@@ -281,7 +340,27 @@ export class InternalServerError extends SimfinityError {
  */
 export function buildErrorFormatter(callback?: (error: SimfinityError) => Error | void): (error: unknown) => GraphQLError;
 
-export interface EntityController<Session = any> {
+export interface AfterCommitErrorDetails {
+  committed: true;
+  typeName: string;
+  operation: 'save' | 'update' | 'delete' | 'state_changed';
+  callbackName: 'onSaveCommitted' | 'onUpdateCommitted' | 'onDeleteCommitted' | 'onTransitionCommitted';
+  context: any;
+}
+export interface AfterCommitOptions {
+  /** Operational reporting only. Rejections are caught and never fail the committed write. */
+  onError?: (error: unknown, details: AfterCommitErrorDetails) => void | Promise<void>;
+}
+export interface CommittedControllerCallbacks {
+  /** After the owning transaction commits; a detached result and the successful attempt's input. */
+  onSaveCommitted?(record: any, args: any, context: any): void | Promise<void>;
+  onUpdateCommitted?(record: any, context: any): void | Promise<void>;
+  /** Called only when a record was actually deleted. */
+  onDeleteCommitted?(record: any, context: any): void | Promise<void>;
+  /** Exclusive notification for a state action; action is its registered name. */
+  onTransitionCommitted?(record: any, action: string, context: any): void | Promise<void>;
+}
+export interface EntityController<Session = any> extends CommittedControllerCallbacks {
   onSaving?(record: any, args: any, session: Session | undefined, context: any): void | Promise<void>;
   onSaved?(record: any, args: any, session: Session | undefined, context: any): void | Promise<void>;
   onUpdating?(id: any, update: any, session: Session | undefined, context: any): void | Promise<void>;
@@ -406,11 +485,17 @@ export interface QueryLimitsOptions {
   /** Positive safe integer; defaults to 1000. Unpaged lists use min(100, maxPageSize). */
   maxPageSize?: number;
   /**
-   * Positive safe integer; defaults to 10. The most distinct scoped joins and frames that the
-   * client's reference and collection emptiness may need in one list, aggregate or collection-field
-   * call; more fail with `FILTER_DEPTH_EXCEEDED` (400).
+   * Positive safe integer; defaults to 10. The most compiled frames and scoped joins that the
+   * client's conditions may need in one list, aggregate or collection-field call; more fail with
+   * `FILTER_DEPTH_EXCEEDED` (400), after every client 400 check and before middleware. Units count
+   * independently of markers: shorthand per group/prefix, explicit frames separately, scoped joins
+   * per containing frame/path/scope chain and emptiness frames per path/shape. Trusted units do
+   * not count toward this total. Named views check client arguments and their `where` groups
+   * against separate budgets of the same size; the `where` budget runs after middleware.
    */
   maxReferenceFrames?: number;
+  /** Positive safe integer; defaults to 3. Maximum client/trusted collection or reference frames on one chain. */
+  maxFrameNesting?: number;
 }
 
 /**
@@ -450,6 +535,8 @@ export interface ViewOptions {
 }
 
 export interface Runtime<Model = any, Session = any> {
+  /** Per runtime. No arguments resets to safe default logging; invalid options leave it unchanged. */
+  configureAfterCommit(options?: AfterCommitOptions): void;
   /** The same process-wide setting as the root `configureQueryLimits`. */
   configureQueryLimits(options?: QueryLimitsOptions): void;
   /**
@@ -620,10 +707,17 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * by-ID read through a `get_by_id` scope, whose arguments use a `QLOperator` value the adapter
    * does not support fails with `UNSUPPORTED_QUERY` (400), before middleware runs for the client's
    * arguments and before `find`, `count`, `aggregate`, `findChildren` or `findChildrenBatch` for
-   * conditions that middleware, scopes and joined scopes added. Operators outside `QLOperator` still
-   * reach the adapter, which reports them as before. Declaring `IS_EMPTY` and `IS_NOT_EMPTY` means
-   * compiling their semantics on the record's own fields; emptiness through references and
-   * collections also needs `referenceEmptiness: true`, and fails with `UNSUPPORTED_QUERY` without it.
+   * conditions that middleware, scopes and joined scopes added. Operators outside `QLOperator`, which
+   * only trusted code can write, fail with `INVALID_FILTER_OPERATOR` (400) before the adapter is
+   * called, except in the forms the compilers ignore: an operator beside the `terms` of an object
+   * filter, and the `terms` of a scalar, scalar-list, interface or union field's filter. Those reach
+   * the adapter, which ignores them. Declaring `IS_EMPTY` and `IS_NOT_EMPTY` means compiling their
+   * semantics on the record's own fields; emptiness through references and collections also needs
+   * `referenceEmptiness: true`, and fails with `UNSUPPORTED_QUERY` without it.
+   * Declaring `CONTAINS_ALL` means compiling set containment over the leaf's values, including the
+   * values of every item of embedded lists, two-valued under negation; declaring `IIN` means
+   * compiling case-insensitive membership under the case-folding contract of the text operators.
+   * Names that an older version ignored are honored once this version knows them.
    */
   queryFeatures?: QueryFeatures | null | undefined;
   /**
@@ -674,6 +768,15 @@ export interface DatabaseAdapter<Model = any, Session = any> {
   castId(value: any): any;
   stateValue?(state: { name: string; value: any }): any;
   withTransaction<T>(session: Session | null | undefined, callback: (session: Session) => Promise<T> | T, model?: Model): Promise<T>;
+  /**
+   * Optional capability for controller callbacks. Accept only into an active attempt owned by this
+   * adapter; false means the supplied session has no owned attempt. A new queue is required per
+   * retry, including retries on the same native session. Seal before commit, discard on abort or
+   * unresolved uncertainty, and drain once, serially, after confirmed commit and cleanup attempt.
+   * Callback failures must never enter transaction retry/rollback paths or fail a committed write.
+   * Borrowed operations join the owning attempt; this method does not observe external commits.
+   */
+  enqueueAfterCommit?(session: Session, run: () => void | Promise<void>): boolean;
   newRecord(model: Model, data: any, session?: Session): any;
   saveRecord(model: Model, record: any, session?: Session): any;
   toObject(record: any): any;
@@ -791,25 +894,44 @@ export interface DatabaseAdapter<Model = any, Session = any> {
 }
 export function createRuntime<Model = any, Session = any>(adapter: DatabaseAdapter<Model, Session>): Runtime<Model, Session>;
 
+/** Scoped single-reference joins, keyed by a dotted prefix relative to the containing frame. */
+export type QueryJoins = Record<string, QueryPredicate | null>;
+
 /**
  * `operator` is a {@link QueryOperator}; the value of a text operator is a validated string. For
+ * `CONTAINS_ALL` the value is a non-empty array of non-null scalars, validated and not cast; the
+ * compiler casts each element as for `IN`. For `IIN` it is an array of strings, possibly empty. For
  * `IS_EMPTY` and `IS_NOT_EMPTY` the value is null, and `path` may end at an embedded object, an
  * embedded list or a scalar list as well as at a scalar; `IS_NOT_EMPTY` is the exact complement,
  * which the compiler builds. With `referenceEmptiness: true`, their `path` may also cross single
  * references and end at a reference or a collection.
  *
  * `scopes` exists only on such an emptiness predicate from a client, and only for a compiler that
- * declares `referenceEmptiness: true`. It has one key per dotted path from the queried record: each
+ * declares `referenceEmptiness: true`. It has one key per dotted path relative to its frame: each
  * single reference the path crosses (a scoped join, which admits the target only where the scope
  * admits it), the end when it is a reference or a collection, and each reference and collection
  * member of an embedded object (frames, which keep only the records the scope admits). Each value is
  * the target's `find` scope as a predicate in the target's own frame, or null when the scope added
  * nothing; after a scoped crossing, a null hop still correlates through that scoped join. Without
- * `scopes` the predicate reads stored data, through plain joins.
+ * `scopes` the predicate reads stored data, through plain joins. `joins` carries the scopes of
+ * single references crossed inside a client frame, with keys relative to the containing frame.
+ * A `quantified` node selects elements with `ANY`, `ALL` or `NONE`, applying `scope` before `where`;
+ * both predicates use paths relative to the element, and null means no restriction. Empty elements
+ * give ANY false, ALL/NONE true; scope is never negated, and frames never multiply roots. `anchor` is
+ * an aggregate's legacy join chain; when present, `path` is relative to it and `joins` is absent.
  */
 export type QueryPredicate =
-  | { kind: 'predicate'; path: string[]; operator: string; value: any; scopes?: Record<string, QueryPredicate | null> }
-  | { kind: 'and' | 'or'; terms: QueryPredicate[] };
+  | { kind: 'predicate'; path: string[]; operator: string; value: any; scopes?: Record<string, QueryPredicate | null>; joins?: QueryJoins }
+  | { kind: 'and' | 'or'; terms: QueryPredicate[] }
+  | {
+      kind: 'quantified';
+      quantifier: QueryQuantifier;
+      path: string[];
+      where: QueryPredicate | null;
+      scope: QueryPredicate | null;
+      joins?: QueryJoins;
+      anchor?: string[];
+    };
 export interface QueryPlan {
   entity: string;
   where: QueryPredicate | null;
@@ -832,28 +954,57 @@ export interface QueryPlan {
  * value inside an embedded list or a collection, `INVALID_FILTER_OPERATOR` for an embedded type that
  * reaches itself through single embedded members, `INVALID_FILTER_VALUE` for a value that is not
  * omitted or null, and `UNSUPPORTED_QUERY` for a reference or collection on the path or among the
- * members. A term without a path (omitted, null or `""`) and a group condition without a path test
- * the field itself. For other operators, a filter path of more than one segment that ends at an
+ * members. A nonquantified emptiness term without a path (omitted, null or `""`) and a group
+ * condition without a path test the field itself; quantified filter terms always need a path. For other operators, a filter path of more than one segment that ends at an
  * object fails with `INVALID_FILTER_PATH`, as on MongoDB; a bare object field keeps
  * `MISSING_FILTER_PATH`.
+ *
+ * `CONTAINS_ALL` and `IIN` are checked in this order: the path (`AMBIGUOUS_FILTER_FIELD`,
+ * `INVALID_FILTER_PATH`, `INVALID_FILTER_FIELD`) and the object-end rule above, then an unknown name
+ * (`INVALID_FILTER_OPERATOR`) and `operators` (`UNSUPPORTED_QUERY`), then, for `CONTAINS_ALL` only,
+ * `INVALID_FILTER_PATH` through a collection, aggregate join prefixes included
+ * (`The shorthand excludes them; use an explicit group`), `INVALID_FILTER_PATH` through a reference
+ * inside an embedded list, and `INVALID_FILTER_OPERATOR` on a leaf that is neither a scalar list nor
+ * a scalar reached through an embedded list, and the values last, with `INVALID_FILTER_VALUE`.
+ * `CONTAINS_ALL` takes a non-empty array of non-null scalars, none of them an array or a plain
+ * object; `IIN` takes an array of strings without U+0000, possibly empty, on a `String` field or list
+ * by its effective scalar. A hole of a sparse array fails for both, while `IN`, `NIN` and `BTW` keep
+ * skipping holes.
+ * Both plan `{ kind: 'predicate', path, operator, value }` with the array as validated, neither cast
+ * nor deduplicated. `IIN` through a collection plans as `IN` does: an implicit `ANY` frame with
+ * `quantifiers`, a row filter on an aggregate's join prefix, a legacy join otherwise. `CONTAINS_ALL`
+ * is never cut into a frame.
  *
  * `referenceEmptiness` defaults to true when `operators` is omitted and to false when it is given.
  * When it is false, an emptiness condition that crosses or ends at a reference or a collection, or
  * reads a reference or collection member, fails with `UNSUPPORTED_QUERY` where the order above has
  * `UNSUPPORTED_QUERY` for references; when it is true, such a condition plans with stored semantics,
  * unless its term or group condition carries a client scope marker that the runtime filled, which
- * becomes the predicate's `scopes`. A marker that is not filled for every path of the condition fails
- * with `DETACHED_CLIENT_FILTER` (500).
+ * becomes the predicate's `scopes`. `quantifiers` has the same default rule and requires reference
+ * emptiness; enabled collection filters emit quantified nodes, with per-group/prefix correlation,
+ * element-relative scopes/joins and aggregate anchors beyond legacy J joins. `__scope`, `__implicit`
+ * and `__anchor` are reserved internal input metadata. A group that trusted code writes with
+ * `__implicit: true` must, after its `__anchor`, end at a collection, or at a reference without
+ * crossing a list, and its `__anchor`, when present, must have exactly the shape the collection
+ * shorthand writes: in an aggregate, on a group at the root, a non-empty array of field names without
+ * dots that crosses at least one collection, each a join prefix, followed by a `path` of one
+ * collection. Otherwise the group fails with `INVALID_FILTER_PATH` (400), whatever operators it holds
+ * and before its conditions are checked, with the message
+ * `An implicit quantified path must end at a collection, or at a reference without crossing a list` or
+ * `An implicit quantified anchor must name the aggregate's join prefixes`; the anchor's form is
+ * checked before the path rule, the rest after it.
+ * A marker not filled for every path fails with `DETACHED_CLIENT_FILTER` (500).
  */
-export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode']; operators?: Iterable<string>; referenceEmptiness?: boolean }): QueryPlan;
+export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode']; operators?: Iterable<string>; referenceEmptiness?: boolean; quantifiers?: boolean }): QueryPlan;
 export function resolveModelPath(models: ModelDescription, entityName: string, path: string | string[]): FieldDescription[];
 
 /**
  * Process-wide. `maxPageSize` (default 1000) caps page sizes. `maxReferenceFrames` (default 10) caps,
- * per list, aggregate or collection-field call, the distinct scoped joins and frames that a client's
- * reference and collection emptiness needs; more fail with `FILTER_DEPTH_EXCEEDED` (400). Each must be
- * a positive safe integer, or the call throws `INVALID_QUERY_LIMITS` (400) and keeps both limits; an
- * omitted option takes its default again.
+ * per list, aggregate or collection-field call, the compiled frames and scoped joins a client's
+ * conditions need. Named views check client arguments and `where` groups separately. `maxFrameNesting` (default 3) caps nested frames along one chain in client and
+ * trusted constructs. Exceeding either frame limit fails with `FILTER_DEPTH_EXCEEDED` (400). Each
+ * option must be a positive safe integer, or the call throws `INVALID_QUERY_LIMITS` (400) and keeps
+ * every current limit; an omitted option takes its default again.
  */
 export function configureQueryLimits(options?: QueryLimitsOptions): void;
 /**
@@ -1108,3 +1259,6 @@ export const plugins: {
     };
   };
 };
+
+/** Early opt-out. Import its function from /introspection before loading the runtime. */
+export interface IntrospectionOptions { fieldExtensions: false; }

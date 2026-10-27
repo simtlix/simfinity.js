@@ -210,6 +210,24 @@ describe.skipIf(!uri)('Mongo optimistic concurrency writes', () => {
       } finally { spy.mockRestore(); await finishSession(session); }
     });
 
+    test.each([true, 'throw'])('applies a versioned update pipeline with strict %s', async (strict) => {
+      const f = await fixture(mode, { schemaOptions: { strict } });
+      const id = await insert(f.Model, 6);
+      const pipeline = [
+        { $set: { name: { $concat: ['$name', ' pipeline'] } } },
+        { $set: { version: 99 } },
+      ];
+      const original = structuredClone(pipeline);
+      const session = await startSession();
+      try {
+        const result = await f.adapter.update(f.Model, id, pipeline, session, { expectedVersion: 6 });
+        expect(result).toMatchObject({ name: 'original pipeline', version: 7 });
+        expect(pipeline).toEqual(original);
+        await session.commitTransaction();
+        expect(await f.Model.collection.findOne({ _id: id })).toMatchObject({ name: 'original pipeline', version: 7 });
+      } finally { await finishSession(session); }
+    });
+
     test('a middleware no-match keeps equal versions null and reports stale versions directly', async () => {
       const f = await fixture(mode, { configure(schema) {
         schema.pre('findOneAndUpdate', function () { this.where({ hidden: false }); });

@@ -296,6 +296,37 @@ describe('transactionTools: true', () => {
 });
 
 describe('type filters', () => {
+  test.each([false, true])('embedded added/updated/deleted lists are values, not collection writes (list: %s)', (list) => {
+    const runtime = createRuntime(createOptimisticMemoryAdapter());
+    const Audit = new GraphQLObjectType({
+      name: 'Audit',
+      fields: {
+        id: { type: GraphQLID, extensions: { readOnly: true } },
+        added: { type: new GraphQLList(GraphQLString) },
+        updated: { type: new GraphQLList(GraphQLString) },
+        deleted: { type: new GraphQLList(GraphQLString) },
+      },
+    });
+    const Thing = new GraphQLObjectType({
+      name: 'Thing',
+      fields: {
+        id: { type: GraphQLID },
+        audit: {
+          type: list ? new GraphQLList(new GraphQLNonNull(Audit)) : new GraphQLNonNull(Audit),
+          extensions: { relation: { embedded: true } },
+        },
+      },
+    });
+    runtime.addNoEndpointType(Audit);
+    runtime.connect(null, Thing, 'thing', 'things');
+    const schema = runtime.createSchema(null, null, null, { transaction: { types: [Thing] } });
+    for (const candidate of [schema, fromSDL(schema)]) {
+      expect(toolNames(candidate, { transactionTools: true, includeTypes: ['Thing'] })).toContain('transaction');
+      expect(toolNames(candidate, { transactionTools: true, excludeTypes: ['Audit', 'Unrelated'] })).toContain('transaction');
+      expect(toolNames(candidate, { transactionTools: true, excludeTypes: ['Thing'] })).not.toContain('transaction');
+    }
+  });
+
   test('excludeTypes omits it when it names a type an operation writes, nested collection targets included', () => {
     const { schema } = build();
     for (const typeName of REACHED) {
@@ -326,6 +357,11 @@ describe('type filters', () => {
     expect(toolNames(unresolved, { transactionTools: true, includeTypes: REACHED })).not.toContain('transaction');
     // Pin: without type filters, the unresolved target is never looked up, and the tool is published.
     expect(toolNames(unresolved, { transactionTools: true })).toContain('transaction');
+    for (const outputType of ['String', 'Nota']) {
+      const mismatched = fromSDL(schema);
+      mismatched.getType('Item').getFields().notas.type = mismatched.getType(outputType);
+      expect(toolNames(mismatched, { transactionTools: true, excludeTypes: ['Nota'] })).not.toContain('transaction');
+    }
     expect(mcpWarnings()).toEqual([]);
   });
 });

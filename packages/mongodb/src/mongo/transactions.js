@@ -46,7 +46,7 @@ const endOwnedSession = async (session, failed) => {
   }
 };
 
-export const withMongoTransaction = async (session, body, model, transactionOptions) => {
+export const withMongoTransaction = async (session, body, model, transactionOptions, callbacks) => {
   const connection = model?.db || mongoose.connection;
   if (session) {
     if (!session.inTransaction()) {
@@ -61,15 +61,21 @@ export const withMongoTransaction = async (session, body, model, transactionOpti
   const mySession = connection === mongoose.connection
     ? await mongoose.startSession() : await connection.startSession();
   let failed = false;
+  let confirmed;
   try {
     for (let attempt = 0; ; attempt++) {
       if (transactionOptions) await mySession.startTransaction(transactionOptions);
       else await mySession.startTransaction();
+      const effects = callbacks?.begin(mySession);
       try {
         const result = await body(mySession);
+        effects?.seal();
         await commitWithRetry(mySession);
+        effects?.confirm();
+        confirmed = effects;
         return result;
       } catch (error) {
+        effects?.discard();
         if (error?.errorLabels?.includes('UnknownTransactionCommitResult')) {
           throw error;
         }
@@ -96,6 +102,7 @@ export const withMongoTransaction = async (session, body, model, transactionOpti
     failed = true;
     throw error;
   } finally {
-    await endOwnedSession(mySession, failed);
+    // Cleanup can reject after commit. The confirmed effects still run, outside every retry catch.
+    try { await endOwnedSession(mySession, failed); } finally { await confirmed?.drain(); }
   }
 };

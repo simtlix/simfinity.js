@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const readJSON = (path) => JSON.parse(readFileSync(`${root}${path}`, 'utf8'));
-const directories = ['packages/core', 'packages/sql', 'packages/mcp', 'packages/postgres', 'packages/mongodb'];
+const directories = ['packages/core', 'packages/sql', 'packages/mcp', 'packages/descriptor', 'packages/postgres', 'packages/mongodb'];
 const installedGroups = ['dependencies', 'optionalDependencies'];
 
 describe('published dependency declarations', () => {

@@ -726,6 +726,9 @@ for (const backend of backends) describe.skipIf(!backend.enabled)(`optimistic co
           expect((await f.raw(String(id))).version).toBe('2');
         } else {
           expect(ok(read).version).toBe(1);
+          const stored = await f.raw(String(id));
+          if (version === null) expect(stored).toHaveProperty('version', null);
+          else expect(stored).not.toHaveProperty('version');
           expect(ok(await f.update({ id: String(id), version: 1 })).version).toBe(2);
           await f.model.collection.updateOne({ _id: id }, version === null ? { $set: { version: null } } : { $unset: { version: '' } });
           let observed;
@@ -772,6 +775,34 @@ for (const backend of backends) describe.skipIf(!backend.enabled)(`optimistic co
       expect(stored.find((row) => row.name === 'decimal').version).toBeInstanceOf(Decimal128);
       expect(stored.find((row) => row.name === 'long-two').version).toBe(2);
     });
+
+    if (backend.name === 'mongo-transactional') test.each(['update', 'delete'])(
+      '5: readable caller early %s conflict preserves the supplied session and earlier writes', async (operation) => {
+        const f = await fixture(backend, { scoped: true });
+        const parent = ok(await f.add());
+        await f.set(parent.id, { version: 2 });
+        f.events.length = 0;
+        const session = await mongoose.startSession();
+        session.startTransaction({ readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } });
+        try {
+          const marker = new mongoose.Types.ObjectId();
+          await f.model.collection.insertOne({ _id: marker, name: 'earlier', version: 1 }, { session });
+          const withTransaction = f.adapter.withTransaction;
+          const supplied = vi.spyOn(f.adapter, 'withTransaction').mockImplementation((_session, callback, ...rest) => withTransaction(session, callback, ...rest));
+          try {
+            const result = operation === 'update'
+              ? await f.update({ id: parent.id, version: 1, name: 'rejected' })
+              : await f.remove(parent.id, 1);
+            expect(code(result)).toBe('VERSION_CONFLICT');
+            expect(f.events).toEqual([]);
+          } finally { supplied.mockRestore(); }
+          expect(session.inTransaction()).toBe(true);
+          expect(await f.model.collection.findOne({ _id: marker }, { session })).toMatchObject({ name: 'earlier', version: 1 });
+          expect(await f.raw(String(marker))).toBeNull();
+          expect(await f.raw(parent.id)).toMatchObject({ name: 'original', version: 2 });
+        } finally { if (session.inTransaction()) await session.abortTransaction(); await session.endSession(); }
+      },
+    );
 
     if (backend.name === 'mongo-transactional') test('5: hidden caller adapter conflict aborts the supplied session and earlier writes', async () => {
       const f = await fixture(backend, { scoped: true });

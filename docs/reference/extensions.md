@@ -48,7 +48,7 @@ Scalar lists do not need relationship metadata. Object fields and object lists d
 
 ### readOnly
 
-In the next release, the injected `RecordVersion` field is a managed exception: clients send it in update and delete preconditions despite `readOnly: true`; see [concurrency](#concurrency).
+The injected `RecordVersion` field is a managed exception: clients send it in update and delete preconditions despite `readOnly: true`; see [concurrency](#concurrency).
 
 ```javascript
 createdBy: {
@@ -168,16 +168,16 @@ The field-level shape is `{ CREATE: [validator], UPDATE: [validator] }`. Each va
 | --- | --- | --- |
 | `validations` | `{ CREATE, UPDATE }` validator arrays | Validates the full input and materialized model after field validation. |
 | `scope` | Plain object with optional `find`, `get_by_id` and `aggregate` functions | Adds filters to generated root reads. Any other shape throws `INVALID_SCOPE`. |
-| `concurrency` | `{ mode: 'optimistic' }` | Next release: opts an entity into managed record versions; declare before its first schema. |
+| `concurrency` | `{ mode: 'optimistic' }` | Opts an entity into managed record versions; declare before its first schema. |
 | `indexes` | `{ fields: string[], unique?: boolean }[]` | Declares PostgreSQL composite indexes over stored scalar/reference fields; MongoDB uses its model index configuration. |
 
 Type validators receive `(typeName, args, modelArgs, session)`. Scope callbacks receive `{ type, args, operation, context }` and mutate `args` in place. Omit a key to leave an operation unscoped; misspelled keys, non-function values, arrays and `scope: undefined` or `null` throw `INVALID_SCOPE` (500) at registration and `createSchema()`, and on reads if the scope is changed later. A type's `find` scope also restricts the referenced records that client filter, sort and aggregation paths reach. See [query scope](/guide/query-scope) for supported operations, [relationship paths](/guide/query-scope#relationship-paths-in-filters-sorts-and-aggregations) and their authorization boundaries.
 
 ### concurrency
 
-Next release only: set `extensions: { concurrency: { mode: 'optimistic' } }` on an entity before its first successful schema. Simfinity injects `version: RecordVersion!`, initializes it at 1, requires the observed version on updates, state actions and deletes, and advances it atomically on updates. Protection cannot change after schema creation. Protected types must be registered in every runtime whose schema reaches them, cannot be embedded, and cannot collide with `version` as a field or storage name; other stored fields cannot use `RecordVersion`. An adapter must declare optimistic-concurrency support. See [optimistic concurrency](/guide/concurrency) for startup checks, nested inputs, visibility, storage migration and native-write obligations.
+Set `extensions: { concurrency: { mode: 'optimistic' } }` on an entity before its first `createSchema()`. Simfinity injects `version: RecordVersion!`, initializes it at 1, requires the observed version on updates, state actions and deletes, and advances it atomically on updates. Protection cannot change after schema creation; a failed call that already built inputs or a generated model without the managed field also prevents enabling it later. Protected types must be registered in every runtime whose schema reaches them, cannot be embedded, and cannot collide with `version` as a field or storage name; other stored fields cannot use `RecordVersion`. An adapter must declare optimistic-concurrency support. See [optimistic concurrency](/guide/concurrency) for startup checks, nested inputs, visibility, storage migration and native-write obligations.
 
-The managed version is the exception to the usual `readOnly` input rule: introspection reports `readOnly: true` and the create input excludes it, but update inputs require it as `version: RecordVersion!`. Clients recognize the `RecordVersion` type and send the value back unchanged. The field is also `queryable: false`: no direct filter argument is generated, and client conditions, sorts, grouping and facts cannot name it. Middleware and scope conditions on it are unsupported too.
+The managed version is the exception to the usual `readOnly` input rule: introspection reports `readOnly: true` and the create input excludes it, but update inputs require it as `version: RecordVersion!`. Clients recognize the `RecordVersion` type and send the value back unchanged. The field is also `queryable: false`: no direct filter argument is generated, and client conditions, sorts, grouping and facts cannot name it. Conditions on it from middleware, scopes or a named view's `where` are unsupported too.
 
 ## Automatic MongoDB indexes
 
@@ -227,7 +227,7 @@ query SerieMetadata {
 }
 ```
 
-This is a Simfinity introspection extension, not a field in standard GraphQL introspection. It does not expose arbitrary extensions such as validator functions. A virtual field reads `readOnly: true`, whether it declares `virtual: true` or an options object, so generic clients leave it out of their forms; it has no filter arguments. The metadata types have no `virtual` field, so schemas without virtual fields introspect exactly as before; describing virtual fields to clients belongs to the client descriptor proposed in [#101](https://github.com/simtlix/simfinity.js/issues/101). Avoid schema-cloning middleware; use [Envelop plugins](/reference/plugins) and in-place resolver wrapping.
+This is a Simfinity introspection extension, not a field in standard GraphQL introspection. It does not expose arbitrary extensions such as validator functions. A virtual field reads `readOnly: true`, whether it declares `virtual: true` or an options object, so generic clients leave it out of their forms; it has no filter arguments. The metadata types have no `virtual` field, so schemas without virtual fields introspect exactly as before; the [client descriptor](/reference/client-descriptor) describes virtual fields explicitly. Avoid schema-cloning middleware; use [Envelop plugins](/reference/plugins) and in-place resolver wrapping.
 
 Initialization supports GraphQL fields that have already been materialized and schemas that already exist. Repeated evaluation of Simfinity with the same GraphQL peer preserves the existing extension field and metadata type identities, with one exception: when the first Simfinity schema of the process has an application type named `FieldExtensionsType` or `RelationType`, Simfinity replaces the metadata types once with renamed ones, described below, and every evaluation follows the shared extension field to them. Your application field's `extensions` metadata remains intact.
 
@@ -236,3 +236,7 @@ The extension is global to that GraphQL peer, including unrelated schemas. Simfi
 When the first Simfinity schema of a process has an application type named `FieldExtensionsType` or `RelationType`, Simfinity names its metadata types `SimfinityFieldExtensionsType` and `SimfinityRelationType` instead, with a number appended when those names are taken too, in every schema the process constructs from then on, Simfinity's or not, and logs a `Configuration issue` warning. Selections by field name, such as the query above, are unaffected; named fragments and permission maps use the new names. The first Simfinity schema of the process fixes the names, so a later schema with an application type of a current name fails with `RESERVED_TYPE_NAME`. A schema constructed before the rename keeps the old types, like a schema constructed before import. See [what gets generated](/guide/schema#what-gets-generated).
 
 In a process that has imported Simfinity, passing a post-import schema's introspection result to `buildClientSchema()` can still fail with duplicate `FieldExtensionsType` names, or duplicates of whichever metadata names are current. This is the same retained global-type limitation that affects schema-cloning middleware; import-order safety does not make schema cloning supported.
+
+## Separate client descriptor
+
+Use [the client descriptor](./client-descriptor.md) to expose schema-owned JSON metadata without relying on `__Field.extensions`. It describes actual roots and input shapes, with virtual, relation and state hints. The 3.x legacy extension remains on by default. The public early opt-out must execute before runtime import, and clients that still query the extension require migration. Descriptor metadata does not serialize validators or evaluate per-caller auth rules.

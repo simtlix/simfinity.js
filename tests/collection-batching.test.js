@@ -858,26 +858,27 @@ describe('batched collection reads (#165)', () => {
       expect(batched.adapter.calls.findChildrenBatch.map((call) => call.parentIds)).toEqual([['a0', 'a1', 'a2']]);
     });
 
+    // Opaque grouping metadata lives on a valid filter; unknown top-level arguments are rejected by the runtime gate.
     test('dates batch by value; functions, class instances, symbols and per-call values read per parent', async () => {
       const date = await expectEquivalent('{ lcauthors { books { id } } }', {
-        fixture: { middleware: async (params) => { params.args.hint = new Date(0); } },
+        fixture: { middleware: async (params) => { params.args.id = { operator: 'NE', value: '__batch_hint_no_record__', hint: new Date(0) }; } },
       });
       expect(counts(date.batched.adapter)).toEqual({ findChildren: 0, findChildrenBatch: 1 });
-      expect(date.batched.adapter.calls.findChildrenBatch[0].argsRef.hint).toEqual(new Date(0));
+      expect(date.batched.adapter.calls.findChildrenBatch[0].argsRef.id.hint).toEqual(new Date(0));
 
       const instance = new (class Hint {})();
       for (const hint of [() => 1, instance, Symbol('hint')]) {
-        const fixture = createFixture(createRows(), { middleware: async (params) => { params.args.hint = hint; } });
+        const fixture = createFixture(createRows(), { middleware: async (params) => { params.args.id = { operator: 'NE', value: '__batch_hint_no_record__', hint }; } });
         const result = await fixture.execute('{ lcauthors { books { id } } }');
         expect(result.errors).toBeUndefined();
         expect(counts(fixture.adapter)).toEqual({ findChildren: 10, findChildrenBatch: 0 });
         // Read at once, with the object the middleware left.
-        expect(fixture.adapter.calls.findChildren.every((call) => call.argsRef.hint === hint)).toBe(true);
+        expect(fixture.adapter.calls.findChildren.every((call) => call.argsRef.id.hint === hint)).toBe(true);
       }
 
       let counter = 0;
       const differing = createFixture(createRows(), {
-        middleware: async (params) => { if (params.operation === 'find') params.args.hint = counter++; },
+        middleware: async (params) => { if (params.operation === 'find') params.args.id = { operator: 'NE', value: '__batch_hint_no_record__', hint: counter++ }; },
       });
       expect((await differing.execute('{ lcauthors { books { id } } }')).errors).toBeUndefined();
       // Each parent's arguments differ, so each read is alone.
@@ -894,7 +895,7 @@ describe('batched collection reads (#165)', () => {
       const fixture = createFixture(createRows(), {
         middleware: async (params) => {
           if (params.type.gqltype.name !== 'LCBook') return;
-          params.args.hint = variants[call % variants.length]();
+          params.args.id = { operator: 'NE', value: '__batch_hint_no_record__', hint: variants[call % variants.length]() };
           call += 1;
         },
       });
@@ -925,7 +926,7 @@ describe('batched collection reads (#165)', () => {
         () => Object.create(Date.prototype),
       ];
       for (const make of makers) {
-        const fixture = createFixture(createRows(), { middleware: async (params) => { params.args.hint = make(); } });
+        const fixture = createFixture(createRows(), { middleware: async (params) => { params.args.id = { operator: 'NE', value: '__batch_hint_no_record__', hint: make() }; } });
         await fixture.execute('{ lcauthors { books { id } } }');
         expect(counts(fixture.adapter)).toEqual({ findChildren: 10, findChildrenBatch: 0 });
       }
@@ -938,7 +939,7 @@ describe('batched collection reads (#165)', () => {
         const fixture = createFixture(createRows(), {
           middleware: async (params) => {
             if (params.type.gqltype.name !== 'LCBook') return;
-            params.args.hint = hint;
+            params.args.id = { operator: 'NE', value: '__batch_hint_no_record__', hint };
             seen.push(params.args);
           },
         });
@@ -964,7 +965,7 @@ describe('batched collection reads (#165)', () => {
         });
         const fixture = createFixture(createRows(), {
           ...options,
-          middleware: async (params) => { if (params.type.gqltype.name === 'LCBook') params.args.hint = hint; },
+          middleware: async (params) => { if (params.type.gqltype.name === 'LCBook') params.args.id = { operator: 'NE', value: '__batch_hint_no_record__', hint }; },
         });
         await fixture.execute('{ lcauthors { books { id } } }');
         const argsObjects = [
@@ -983,7 +984,7 @@ describe('batched collection reads (#165)', () => {
       expect(failed.traps).toEqual({ ownKeys: 11, get: 1 });
       // Each adapter call has its own copy.
       expect(new Set(failed.argsObjects).size).toBe(11);
-      expect(failed.argsObjects.every((args) => !types.isProxy(args.hint) && Array.isArray(args.hint.ids))).toBe(true);
+      expect(failed.argsObjects.every((args) => !types.isProxy(args.id.hint) && Array.isArray(args.id.hint.ids))).toBe(true);
     });
   });
 

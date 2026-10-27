@@ -1,0 +1,41 @@
+{
+  "name": "@simtlix/simfinity-descriptor",
+  "version": "3.15.0",
+  "description": "Schema-owned client metadata and an explicitly authorized HTTP endpoint for Simfinity",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "types",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/simtlix/simfinity.js",
+    "directory": "packages/descriptor"
+  },
+  "dependencies": {
+    "@simtlix/simfinity-core": "3.15.0"
+  },
+  "peerDependencies": {
+    "graphql": "^16.11.0"
+  },
+  "keywords": [
+    "simfinity",
+    "graphql",
+    "metadata",
+    "descriptor"
+  ]
+}

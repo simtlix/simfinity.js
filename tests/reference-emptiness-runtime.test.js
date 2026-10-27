@@ -7,13 +7,15 @@ import {
 import mongoose from 'mongoose';
 
 import {
-  QLOperator, configureQueryLimits, createQueryPlan, createRuntime, describeModels,
+  QLOperator, configureQueryLimits, createRuntime,
 } from '../packages/core/src/index.js';
 import * as auth from '../packages/core/src/auth/index.js';
 import {
   REFERENCE_CASES, REFERENCE_DATA, REFERENCE_SHAPES, createReferenceEmptinessTypes, expectedReferenceRows, referenceCaseArgs,
   referenceQuery, registerReferenceEmptinessTypes,
 } from './helpers/query-emptiness.js';
+
+import { createMemoryAdapter, referenceStore } from './helpers/collection-frames.js';
 
 // #108 part 2b: the runtime half of reference and collection emptiness. For an adapter that declares
 // queryFeatures.referenceEmptiness, the runtime copies each call's filter arguments, marks the client's emptiness
@@ -24,8 +26,8 @@ import {
 // are in reference-emptiness.test.js, and each backend's forms with that backend.
 
 const OPERATORS = QLOperator.getValues().map((entry) => entry.value);
-const LEGACY = ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE'];
 const DECLARED = { operators: OPERATORS, referenceEmptiness: true };
+const QUANTIFIED = { ...DECLARED, quantifiers: true };
 const UNDECLARED = { operators: OPERATORS };
 const NOT_SUPPORTED = 'the database adapter does not support emptiness through references and collections';
 const ADVICE = 'middleware and scopes must keep the client\'s filter objects: copy them instead of rebuilding them, and append '
@@ -44,172 +46,9 @@ const predicate = (path, operator, value = null) => ({
 const scoped = (path, operator, scopes) => ({ ...predicate(path, operator), scopes });
 const predicatesOf = (node) => {
   if (!node) return [];
-  return node.kind === 'predicate' ? [node] : node.terms.flatMap(predicatesOf);
+  if (node.kind === 'quantified') return [node.where, node.scope, ...Object.values(node.joins ?? {})].flatMap(predicatesOf);
+  return node.kind === 'predicate' ? [node, ...Object.values(node.joins ?? {}).flatMap(predicatesOf)] : node.terms.flatMap(predicatesOf);
 };
-const safeClone = (value) => {
-  try {
-    return structuredClone(value);
-  } catch {
-    return value;
-  }
-};
-
-// The records of REFERENCE_DATA as the backends store them: each identity is the record's key, and each reference
-// holds the target's key under its storage name (Review.product as productId). `dangling` adds MongoDB's dangling
-// product Dg, whose references point to no record.
-const storedRecord = (fields, value) => Object.fromEntries(fields.filter((field) => Object.hasOwn(value, field.name)).map((field) => {
-  const item = value[field.name];
-  if (field.kind !== 'embedded' || item == null) return [field.storageName, item];
-  return [field.storageName, field.list ? item.map((entry) => storedRecord(field.fields, entry)) : storedRecord(field.fields, item)];
-}));
-const referenceStore = (prefix, { dangling = false } = {}) => (models) => {
-  const store = {};
-  for (const [typeKey, records] of Object.entries(REFERENCE_DATA)) {
-    const entity = models.entities.find((item) => item.name === `${prefix}${typeKey.charAt(0).toUpperCase()}${typeKey.slice(1)}`);
-    store[entity.name] = records.map((record) => ({ ...storedRecord(entity.fields, record), _id: record.key }));
-  }
-  if (dangling) {
-    store[`${prefix}Product`].push({
-      _id: 'Dg', key: 'Dg', name: 'Dg', stock: 1, shop: 'ghost', pro: 'ghost', odim: { shop: 'ghost' }, olines: [{ qty: 1, shop: 'ghost' }],
-    });
-  }
-  return store;
-};
-
-// An evaluator of query plans over a store, written from the definitions. A predicate without `scopes` is trusted and
-// reads stored records through plain joins; an emptiness predicate with `scopes` admits a target only when its scope
-// (a plan of the target type) holds for it, so a hidden record reads as missing. Plain joins give one value per list
-// item or child, and undefined where a hop is missing; a condition holds when one of its values matches.
-const createEvaluator = (models, store) => {
-  const fieldsOf = (name) => models.entities.find((item) => item.name === name).fields;
-  const fieldOf = (fields, name) => {
-    const field = fields.find((item) => item.name === name);
-    if (!field) throw new Error(`The evaluator has no field ${name}`);
-    return field;
-  };
-  const deref = (target, key) => (key == null ? undefined : store[target]?.find((record) => record._id === key));
-  const children = (field, holder) => (store[field.target] ?? []).filter((child) => child[field.connectionField] === holder._id);
-  const isIdentity = (entityLevel, name) => entityLevel && (name === 'id' || name === '_id');
-  const values = (fields, record, segments, entityLevel) => {
-    if (record == null) return [undefined];
-    const [name, ...rest] = segments;
-    if (isIdentity(entityLevel, name) && !rest.length) return [record._id];
-    const field = fieldOf(fields, name);
-    const value = record[field.storageName];
-    if (!rest.length) return [value];
-    if (field.kind === 'reference') return values(fieldsOf(field.target), deref(field.target, value), rest, true);
-    if (field.kind === 'collection') {
-      const found = children(field, record);
-      return found.length ? found.flatMap((child) => values(fieldsOf(field.target), child, rest, true)) : [undefined];
-    }
-    if (field.list) return value?.length ? value.flatMap((item) => values(field.fields, item, rest, false)) : [undefined];
-    return values(field.fields, value, rest, false);
-  };
-  const compare = (actual, operator, expected) => {
-    switch (operator) {
-      case 'EQ': return expected === null ? actual == null : actual === expected;
-      case 'NE': return expected === null ? actual != null : actual !== expected;
-      case 'IN': return expected.includes(actual);
-      case 'NIN': return !expected.includes(actual);
-      default: throw new Error(`The evaluator has no operator ${operator}`);
-    }
-  };
-  // `holds`, defined below, is only called once both exist.
-  const empty = (fields, record, segments, entityLevel, base, scopes) => {
-    const [name, ...rest] = segments;
-    if (isIdentity(entityLevel, name) && !rest.length) return false;
-    const field = fieldOf(fields, name);
-    const path = [...base, name];
-    const value = record[field.storageName];
-    const admits = (target, candidate) => {
-      if (scopes == null) return true;
-      const key = path.join('.');
-      if (!Object.hasOwn(scopes, key)) throw new Error(`The plan has no scope for ${key}`);
-      return scopes[key] === null || holds(target, candidate, scopes[key]);
-    };
-    if (field.kind === 'reference') {
-      const target = deref(field.target, value);
-      const seen = target && admits(field.target, target) ? target : undefined;
-      if (!rest.length || !seen) return !seen;
-      return empty(fieldsOf(field.target), seen, rest, true, path, scopes);
-    }
-    if (field.kind === 'collection') return !children(field, record).some((child) => admits(field.target, child));
-    if (field.kind === 'embedded' && !field.list) {
-      if (value == null) return true;
-      if (rest.length) return empty(field.fields, value, rest, false, path, scopes);
-      return field.fields.every((member) => empty(field.fields, value, [member.name], false, path, scopes));
-    }
-    if (field.list) return value == null || value.length === 0;
-    return value == null || (field.scalar === 'String' && value === '');
-  };
-  const holds = (entity, record, node) => {
-    if (!node) return true;
-    if (node.kind === 'and') return node.terms.every((term) => holds(entity, record, term));
-    if (node.kind === 'or') return node.terms.some((term) => holds(entity, record, term));
-    if (node.operator === 'IS_EMPTY' || node.operator === 'IS_NOT_EMPTY') {
-      return empty(fieldsOf(entity), record, node.path, true, [], node.scopes) === (node.operator === 'IS_EMPTY');
-    }
-    return values(fieldsOf(entity), record, node.path, true).some((value) => compare(value, node.operator, node.value));
-  };
-  return holds;
-};
-
-// A database-free adapter that plans every read with createQueryPlan, with its declared operators and reference
-// emptiness, and answers it from the store. Each call keeps a copy of its arguments, its plan and the keys it matched.
-// `batch` adds findChildrenBatch.
-const createMemoryAdapter = ({
-  queryFeatures, calls, batch = false, data = () => ({}),
-}) => {
-  let models;
-  let store;
-  let holds;
-  const copy = (record) => ({ ...structuredClone(record), id: record._id });
-  const all = (Model) => store[Model.name] ?? [];
-  const read = (method, Model, args, mode, records) => {
-    const call = { method, type: Model.name, args: safeClone(args) };
-    calls.push(call);
-    call.plan = createQueryPlan(models, Model.name, args, {
-      mode, operators: queryFeatures?.operators ?? LEGACY, referenceEmptiness: queryFeatures?.referenceEmptiness === true,
-    });
-    const found = records.filter((record) => holds(Model.name, record, call.plan.where));
-    call.rows = found.map((record) => record._id).sort();
-    return found.map(copy);
-  };
-  return {
-    ...(queryFeatures === undefined ? {} : { queryFeatures }),
-    bind() {},
-    prepare(registrations) {
-      models = describeModels(registrations);
-      store = data(models);
-      holds = createEvaluator(models, store);
-    },
-    createModel: (gqltype) => ({ name: gqltype.name }),
-    castId: String,
-    withTransaction: async (session, body) => body(session || {}),
-    async getById(Model, id) {
-      const record = all(Model).find((item) => item._id === String(id));
-      return record ? copy(record) : null;
-    },
-    async find(Model, gqltype, args) { return read('find', Model, args, 'find', all(Model)); },
-    async count(Model, gqltype, args) { return read('count', Model, args, 'count', all(Model)).length; },
-    async aggregate(Model, gqltype, args) {
-      read('aggregate', Model, args, 'aggregate', all(Model));
-      return [];
-    },
-    async findChildren(Model, gqltype, connectionField, parentId, args) {
-      return read('findChildren', Model, args, 'find', all(Model).filter((record) => record[connectionField] === String(parentId)));
-    },
-    ...(batch ? {
-      async findChildrenBatch(Model, gqltype, connectionField, parentIds, args) {
-        const keys = parentIds.map(String);
-        const found = read('findChildrenBatch', Model, args, 'find', all(Model).filter((record) => keys.includes(record[connectionField])));
-        calls.at(-1).parents = keys;
-        return keys.map((key) => found.filter((record) => record[connectionField] === key));
-      },
-    } : {}),
-  };
-};
-
 // The reference fixture, served by the memory adapter. The scope shape is the request context's `shape` ('admin' by
 // default). Middleware and the extra scopes do what the context asks: `context.middleware(params)` and
 // `context.scopes[typeKey][operation](params)`; `context.ran` lists, in order, every middleware and scope call.
@@ -809,7 +648,7 @@ describe('maxReferenceFrames', () => {
   const over = (count, limit = 10) => ({
     code: 'FILTER_DEPTH_EXCEEDED',
     status: 400,
-    message: `Emptiness conditions through references and collections need ${count} scoped joins and frames in one set of conditions (the client's arguments of a query field, or a view's where), more than the limit of ${limit} (maxReferenceFrames)`,
+    message: `The client's conditions need ${count} frames and scoped joins in one query field, more than the limit of ${limit} (maxReferenceFrames)`,
   });
   const RESTRICTED = { scopes: { shop: (args) => { args.name = { operator: 'NE', value: 'x' }; }, review: (args) => { args.text = { operator: 'NE', value: 'y' }; } } };
 
@@ -856,7 +695,7 @@ describe('maxReferenceFrames', () => {
     expect(trusted.errors).toBeUndefined();
   });
 
-  it('comes before the field and value checks of other conditions and the joined-scope 403s, and after the 403s of client paths, undeclared operators and the 2a codes', async () => {
+  it('comes after all client 400 checks and before joined-scope 403s', async () => {
     const error = (code, status, message) => ({ code, status, message });
     const reviewsText = 'OR: [{conditions: [{field: "reviews", path: "text", operator: EQ, value: "x"}]}]';
     // Checks that run after middleware: each gives its code beside TEN, and the limit's beside the eleventh pair, before
@@ -871,10 +710,11 @@ describe('maxReferenceFrames', () => {
     for (const [condition, context, expected] of later) {
       const under = [];
       expect(failure(await local.run(query(...TEN, condition), { ...context, ran: under })), condition).toEqual(expected);
-      expect(under, condition).toContain('middleware QfItem find');
+      if (expected.status === 400) expect(under, condition).toEqual([]);
+      else expect(under, condition).toContain('middleware QfItem find');
       const ran = [];
       local.calls.length = 0;
-      expect(failure(await local.run(query(...TEN, ELEVENTH, condition), { ...context, ran })), condition).toEqual(over(11));
+      expect(failure(await local.run(query(...TEN, ELEVENTH, condition), { ...context, ran })), condition).toEqual(expected.status === 400 ? expected : over(11));
       expect(ran, condition).toEqual([]);
       expect(local.calls, condition).toEqual([]);
     }
@@ -1071,5 +911,38 @@ describe('_aggregate calls and embedded own fields', () => {
     const through = await run(source, { shape: 'NE', middleware: turn({ field: 'odim', path: 'shop.name', operator: 'EQ', value: 'S1' }) });
     expect(failure(through)).toEqual(detached('The client\'s IS_EMPTY condition on shop.state now uses EQ on odim.shop.name, which reads through odim.shop without its scope'));
     expect(calls).toEqual([]);
+  });
+});
+
+describe('quantified twins of target scope planning and frame limits', () => {
+  it('lifts a target scope collection term into a trusted quantified node while retaining embedded-list rejection', async () => {
+    const { run, calls } = buildLocal({ queryFeatures: QUANTIFIED });
+    const scope = (args) => { args.items = { terms: [{ path: 'note', value: 'x' }] }; };
+    const result = await run('{qfItems(shop:{terms:[{path:"name",value:"x"}]}){id}}', { scopes: { shop: scope } });
+    expect(result.errors).toBeUndefined();
+    expect(calls[0].plan.where.terms[1]).toMatchObject({ kind: 'quantified', path: ['shop', 'items'], scope: null, where: predicate('note', 'EQ', 'x') });
+    const rejected = await run('{qfItems(shop:{terms:[{path:"name",value:"x"}]}){id}}', { scopes: { shop: (args) => { args.lines = { terms: [{ path: 'owner.name', value: 'x' }] }; } } });
+    expect(failure(rejected)?.code).toBe('FORBIDDEN_FILTER_PATH');
+    expect(calls).toHaveLength(1);
+  });
+  it('counts the ordinary OR collection frame beside ten distinct 2b pairs', async () => {
+    const { run, calls } = buildLocal({ queryFeatures: QUANTIFIED });
+    const ten = 'shop:{terms:[{operator:IS_EMPTY},{path:"name",operator:IS_EMPTY},{path:"owner",operator:IS_EMPTY},{path:"owner.name",operator:IS_EMPTY},{path:"items",operator:IS_EMPTY}]},backup:{terms:[{operator:IS_NOT_EMPTY},{path:"name",operator:IS_EMPTY}]},reviews:{terms:[{operator:IS_EMPTY}]},odim:{terms:[{operator:IS_EMPTY},{path:"shop.name",operator:IS_EMPTY}]}';
+    const frame = 'OR:[{conditions:[{field:"reviews.text",value:"x"}]}]';
+    const result = await run(`{qfItems(${ten},${frame},AND:[{conditions:[{field:"backup.items",operator:IS_EMPTY}]}]){id}}`);
+    expect(failure(result)).toEqual({ code: 'FILTER_DEPTH_EXCEEDED', status: 400, message: 'The client\'s conditions need 12 frames and scoped joins in one query field, more than the limit of 10 (maxReferenceFrames)' });
+    expect(calls).toEqual([]);
+  });
+});
+
+
+describe('phase2 fix1 required restricted OR twin', () => {
+  it('executes the standalone restricted reviews OR frame', async () => {
+    const { run, calls } = buildLocal({ queryFeatures: QUANTIFIED });
+    const result = await run('{qfItems(OR:[{conditions:[{field:"reviews.text",value:"x"}]}]){id}}', {
+      scopes: { shop: (args) => { args.name = { operator: 'NE', value: 'x' }; }, review: (args) => { args.text = { operator: 'NE', value: 'y' }; } },
+    });
+    expect(result.errors).toBeUndefined(); expect(calls).toHaveLength(1);
+    expect(calls[0].plan.where).toEqual({ kind: 'quantified', quantifier: 'ANY', path: ['reviews'], where: predicate('text', 'EQ', 'x'), scope: predicate('text', 'NE', 'y') });
   });
 });

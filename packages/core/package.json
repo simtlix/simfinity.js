@@ -1,6 +1,6 @@
 {
   "name": "@simtlix/simfinity-core",
-  "version": "3.12.0",
+  "version": "3.15.0",
   "description": "Driver-free GraphQL runtime and model metadata for Simfinity",
   "type": "module",
   "main": "./src/index.js",
@@ -27,6 +27,9 @@
       ],
       "validators": [
         "types/validators.d.ts"
+      ],
+      "introspection": [
+        "types/introspection.d.ts"
       ]
     }
   },
@@ -52,6 +55,7 @@
       "default": "./src/auth/rules.js"
     },
     "./internal/object-id": "./src/auth/object-id.js",
+    "./internal/transaction-callbacks": "./src/transaction-callbacks.js",
     "./internal/query-operators": "./src/query-operators.js",
     "./internal/record-version": "./src/record-version.js",
     "./internal/relation-storage": "./src/relation-storage.js",
@@ -66,7 +70,13 @@
     "./validators": {
       "types": "./types/validators.d.ts",
       "default": "./src/validators.js"
-    }
+    },
+    "./introspection": {
+      "types": "./types/introspection.d.ts",
+      "default": "./src/introspection-config.js"
+    },
+    "./internal/schema-registrations": "./src/schema-registrations.js",
+    "./internal/errors": "./src/errors/simfinity.error.js"
   },
   "files": [
     "src",

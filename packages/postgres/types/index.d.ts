@@ -15,6 +15,9 @@ export {
   validators,
 } from '@simtlix/simfinity-core';
 export type {
+  AfterCommitErrorDetails,
+  AfterCommitOptions,
+  CommittedControllerCallbacks,
   AuthPluginOptions,
   AuthRule,
   AuthRuleFunction,
@@ -243,9 +246,10 @@ export interface PostgresRuntime extends Runtime<PostgresModel, PostgresSession>
 }
 /**
  * PostgreSQL 15+ plugin for createSQL; omitted options allow later runtime.configure. Its `queryFeatures` lists every
- * `QLOperator` value. The case-insensitive text operators fold case with {@link caseFoldExpression}, which needs a UTF8
- * database with the ICU collation `und-x-icu`: on another database, such as one in LATIN1 or on a server built without
- * ICU, they fail with UNSUPPORTED_QUERY (400), and every other operation works.
+ * `QLOperator` value. The case-insensitive text operators and `IIN` fold case with {@link caseFoldExpression}, which
+ * needs a UTF8 database with the ICU collation `und-x-icu`: on another database, such as one in LATIN1 or on a server
+ * built without ICU, they fail with UNSUPPORTED_QUERY (400), except `IIN []`, which compiles to `FALSE` without a fold,
+ * and every other operation works.
  *
  * `IS_EMPTY` and `IS_NOT_EMPTY` compile from where a path is stored, binding no parameters: `(c IS NULL OR c = '')`
  * for a String column and `c IS NULL` for any other, the uuid identity included; `COALESCE(cardinality(c), 0) = 0`
@@ -253,6 +257,15 @@ export interface PostgresRuntime extends Runtime<PostgresModel, PostgresSession>
  * embedded object as missing, JSON `null`, or every stored member empty; and owned objects and lists through their
  * state column and a `NOT EXISTS` subquery on the owned table, null list items counting as items. `IS_NOT_EMPTY` is
  * the positive form of a leaf, which a btree can serve, and the `NOT` of an object or owned form.
+ *
+ * The plugin declares `queryFeatures.quantifiers: true`: collection filters become correlated EXISTS frames,
+ * preserving one parent row, and explicit ANY/NONE/ALL frames also admit single references. Client frames and
+ * crossings apply target find scopes; trusted frames read stored data. ALL uses NOT EXISTS with a two-valued
+ * failing body (null operands fail ordering comparisons), and an absent body is TRUE. A frame's aliases and
+ * scope/body joins are local to its subquery. Aggregate anchors share the joins of groupId and facts; filters
+ * whose collection prefixes are already joined keep their multiplicity. A reference reached through an embedded
+ * list keeps its vector join when the target scope is null, including after a restricted prefix; a non-null
+ * target scope there is FORBIDDEN_FILTER_PATH (403). Sorting through a collection is invalid.
  *
  * The plugin also declares `queryFeatures.referenceEmptiness`. A client's condition reads as missing every record that
  * the target's `find` scope hides. The references it crosses share the plain `LEFT JOIN` of other conditions while
@@ -281,7 +294,7 @@ export function postgresPlugin(options?: PostgresConfiguration): SQLPlugin<
 >;
 export function createPostgres(options?: PostgresConfiguration): PostgresRuntime;
 /**
- * The SQL text with which ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ fold both sides of their comparison, for an SQL
+ * The SQL text with which ILIKE, ISTARTS_WITH, IENDS_WITH, IEQ and IIN fold both sides of their comparison, for an SQL
  * expression such as a quoted column name or a jsonb member: `translate(lower((<expression>) COLLATE
  * "pg_catalog"."und-x-icu"), '<22 characters>', '<their simple case foldings>')`, the Unicode simple case foldings that
  * MongoDB's case-insensitive matching applies. Indexes serve these operators only on exactly this expression, so build
@@ -291,6 +304,7 @@ export function createPostgres(options?: PostgresConfiguration): PostgresRuntime
  * anything other than a non-empty string.
  */
 export function caseFoldExpression(sqlExpression: string): string;
+export const configureAfterCommit: PostgresRuntime['configureAfterCommit'];
 export const configure: PostgresRuntime['configure'];
 export const connect: PostgresRuntime['connect'];
 export const addNoEndpointType: PostgresRuntime['addNoEndpointType'];

@@ -63,11 +63,11 @@ const check = (archives, name) => {
 };
 
 // Every QLOperator value, in declaration order: the ten of 3.7.0, then the literal text operators (#108, part 1),
-// then the emptiness operators (#108, part 2a). The bundled adapters list the same names in an order of their own,
-// so their checks sort both lists.
+// then the emptiness operators (#108, part 2a), then the list operators CONTAINS_ALL and IIN (#108, part 4). The
+// bundled adapters list the same names in an order of their own, so their checks sort both lists.
 const LEGACY_OPERATORS = ['EQ', 'LT', 'GT', 'LTE', 'GTE', 'BTW', 'NE', 'IN', 'NIN', 'LIKE'];
 const EMPTINESS_OPERATORS = ['IS_EMPTY', 'IS_NOT_EMPTY'];
-const QUERY_OPERATORS = [...LEGACY_OPERATORS, 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ', ...EMPTINESS_OPERATORS];
+const QUERY_OPERATORS = [...LEGACY_OPERATORS, 'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ', ...EMPTINESS_OPERATORS, 'CONTAINS_ALL', 'IIN'];
 const SORTED_OPERATORS = [...QUERY_OPERATORS].sort();
 
 const adapterSource = `const adapter = {
@@ -94,6 +94,7 @@ const adapterSource = `const adapter = {
 // TypeScript fixture both read this list, so a declaration that drifts from its module fails one
 // of them. A new subpath export needs its declaration and an entry here.
 const coreSubpaths = {
+  introspection: { values: ['configureIntrospection'], types: ['IntrospectionOptions'], standalone: true },
   auth: {
     namespace: 'auth',
     values: [
@@ -165,7 +166,7 @@ const quotedUnion = (names) => names.map((name) => `'${name}'`).join(' | ');
 // the module's keys, and the TypeScript fixture with the declared exports. A new root export needs an
 // explicit `export` in types/index.d.ts and an entry here.
 const coreRootValues = [
-  'ForbiddenError', 'InternalServerError', 'MAX_RECORD_VERSION', 'QLOperator', 'QLSort', 'QLValue', 'RecordVersion',
+  'ForbiddenError', 'InternalServerError', 'MAX_RECORD_VERSION', 'QLOperator', 'QLQuantifier', 'QLSort', 'QLValue', 'RecordVersion',
   'SimfinityError', 'UnauthenticatedError', 'auth', 'buildErrorFormatter', 'configureMutationLimits',
   'configureQueryLimits', 'createQueryPlan', 'createRuntime', 'createValidatedScalar', 'describeModels', 'isVirtualField',
   'paginationStages', 'plugins', 'resolveModelPath', 'scalars', 'validators', 'virtualFieldOptions',
@@ -198,6 +199,7 @@ const coreSource = `import assert from 'node:assert/strict';
     InternalServerError,
     MAX_RECORD_VERSION,
     QLOperator,
+    QLQuantifier,
     QLSort,
     QLValue,
     RecordVersion,
@@ -299,6 +301,8 @@ const coreSource = `import assert from 'node:assert/strict';
   const concurrentBook = new GraphQLObjectType({ name: 'CoreConcurrentBook', extensions: { concurrency: { mode: 'optimistic' } }, fields: { id: { type: GraphQLID } } });
   assert.deepEqual(describeModels([{ gqltype: concurrentBook }]).entities[0].fields.map((field) => [field.name, field.scalar, field.version]), [['id', 'ID', undefined], ['version', 'Version', true]]);
   assert.equal(QLOperator.name, 'QLOperator');
+  assert.equal(QLQuantifier.name, 'QLQuantifier');
+  assert.deepEqual(QLQuantifier.getValues().map(({ value }) => value), ['ANY', 'ALL', 'NONE']);
   assert.equal(QLSort.name, 'QLSort');
   assert.equal(QLValue.name, 'QLValue');
   const known = new SimfinityError('known', 'KNOWN', 400);
@@ -354,6 +358,7 @@ const coreSource = `import assert from 'node:assert/strict';
   assert.deepEqual([...queryOperators.LEGACY_QUERY_OPERATORS].sort(), ${JSON.stringify([...LEGACY_OPERATORS].sort())});
   assert.equal(queryOperators.validateTextFilterValue('ILIKE', '', 'String'), '');
   assert.throws(() => queryOperators.validateTextFilterValue('ILIKE', 5, 'String'), (error) => error.getCode() === 'INVALID_FILTER_VALUE');
+  assert.deepEqual(queryOperators.validateTextListFilterValue('IIN', [], 'String'), []);
   const unsupported = await graphql({ schema, source: '{ coreBooks(title: { operator: ILIKE, value: "a" }) { id } }' });
   assert.equal(unsupported.errors[0].extensions.code, 'UNSUPPORTED_QUERY');
   assert.equal((await graphql({ schema, source: '{ coreBooks(title: { operator: LIKE, value: "a" }) { id } }' })).errors, undefined);
@@ -420,9 +425,8 @@ const coreSource = `import assert from 'node:assert/strict';
   const declaredSchema = declared.createSchema();
   const declaredResult = await graphql({ schema: declaredSchema, source: '{ coreDeclaredBooks(shop: { terms: [{ operator: IS_EMPTY }] }) { id } }' });
   assert.equal(declaredResult.errors, undefined);
-  // The Shop type has no find scope, so the marker's scope for shop is null. The copy of the arguments keeps the null
-  // prototype of an inline literal.
-  assert.deepEqual(JSON.parse(JSON.stringify(reads.at(-1).shop)), { terms: [{ operator: 'IS_EMPTY', __scope: { id: 0, scopes: { shop: null } } }] });
+  // The Shop type has no find scope, so no provenance marker is needed. Inline input keeps its null prototype.
+  assert.deepEqual(JSON.parse(JSON.stringify(reads.at(-1).shop)), { terms: [{ operator: 'IS_EMPTY' }] });
   assert.equal(Object.getPrototypeOf(reads.at(-1).shop.terms[0]), null);
   const undeclared = createRuntime({ ...adapter, queryFeatures: { operators: allOperators } });
   const undeclaredTypes = referenceTypes('CoreUndeclared');
@@ -445,7 +449,26 @@ const coreSource = `import assert from 'node:assert/strict';
   assert.deepEqual(createQueryPlan(referenceModels, 'CoreShapeBook', { shop: { terms: [{ operator: 'IS_EMPTY', __scope: { id: 0, scopes: { shop: { name: { operator: 'EQ', value: 'a' } } } } }] } }).where, {
     kind: 'predicate', path: ['shop'], operator: 'IS_EMPTY', value: null, scopes: { shop: { kind: 'predicate', path: ['name'], operator: 'EQ', value: 'a' } },
   });
-  assert.throws(() => createQueryPlan(referenceModels, 'CoreShapeBook', { shop: { terms: [{ operator: 'IS_EMPTY' }] } }, { operators: allOperators }), (error) => error.getCode() === 'UNSUPPORTED_QUERY');`;
+  assert.throws(() => createQueryPlan(referenceModels, 'CoreShapeBook', { shop: { terms: [{ operator: 'IS_EMPTY' }] } }, { operators: allOperators }), (error) => error.getCode() === 'UNSUPPORTED_QUERY');
+  // Recursive quantified inputs, frame plans and capability/limit validation survive packing.
+  assert.equal(queryOperators.resolveQueryFeatures(undefined).quantifiers, false);
+  for (const quantifiers of [null, undefined]) assert.equal(queryOperators.resolveQueryFeatures({ operators: [], quantifiers }).quantifiers, false);
+  assert.throws(() => createRuntime({ ...adapter, queryFeatures: { operators: allOperators, quantifiers: true } }), (error) => error.getCode() === 'INVALID_QUERY_FEATURES');
+  assert.throws(() => createRuntime({ ...adapter, queryFeatures: { operators: allOperators, referenceEmptiness: true, quantifiers: 'yes' } }), (error) => error.getCode() === 'INVALID_QUERY_FEATURES');
+  const quantifiedRuntime = createRuntime({ ...adapter, queryFeatures: { operators: allOperators, referenceEmptiness: true, quantifiers: true } });
+  const quantifiedTypes = referenceTypes('PackedFrame');
+  quantifiedRuntime.connect(null, quantifiedTypes.shop, 'packedFrameShop', 'packedFrameShops');
+  quantifiedRuntime.connect(null, quantifiedTypes.book, 'packedFrameBook', 'packedFrameBooks');
+  const quantifiedSchema = quantifiedRuntime.createSchema();
+  const quantified = await graphql({ schema: quantifiedSchema, source: '{ packedFrameBooks(AND:[{ALL:[{path:"shop",OR:[{conditions:[{field:"name",value:"a"}]},{AND:[{conditions:[{field:"name",value:"b"}]}]}]}]}]){id} }' });
+  assert.equal(quantified.errors, undefined);
+  const quantifiedFilter = await graphql({ schema: quantifiedSchema, source: '{ packedFrameBooks(shop:{quantifier:ALL,terms:[{path:"name",value:"a"}]}){id} }' });
+  assert.equal(quantifiedFilter.errors, undefined);
+  assert.deepEqual(createQueryPlan(referenceModels, 'CoreShapeBook', { AND: [{ ALL: [{ path: 'shop', conditions: [{ field: 'name', value: 'a' }] }] }] }).where, {
+    kind: 'quantified', quantifier: 'ALL', path: ['shop'], where: { kind: 'predicate', path: ['name'], operator: 'EQ', value: 'a' }, scope: null,
+  });
+  assert.throws(() => configureQueryLimits({ maxFrameNesting: 0 }), (error) => error.getCode() === 'INVALID_QUERY_LIMITS');
+  configureQueryLimits({ maxFrameNesting: 2 }); configureQueryLimits();`;
 
 const sqlSource = `import assert from 'node:assert/strict';
   import { createRequire } from 'node:module';
@@ -556,7 +579,7 @@ const sqlSource = `import assert from 'node:assert/strict';
   await declared.instance.initializeDatabase();
   const declaredResult = await graphql({ schema: declared.schema, source: '{ sqlDeclaredBooks(shop: { terms: [{ operator: IS_EMPTY }] }) { id } }' });
   assert.equal(declaredResult.errors, undefined);
-  assert.deepEqual(plans.at(-1).where, { kind: 'predicate', path: ['shop'], operator: 'IS_EMPTY', value: null, scopes: { shop: null } });
+  assert.deepEqual(plans.at(-1).where, { kind: 'predicate', path: ['shop'], operator: 'IS_EMPTY', value: null });
   const undeclared = referenceApi('SQLUndeclared', 'sqlUndeclared', false);
   await undeclared.instance.initializeDatabase();
   const undeclaredResult = await graphql({ schema: undeclared.schema, source: '{ sqlUndeclaredBooks(shop: { terms: [{ operator: IS_EMPTY }] }) { id } }' });
@@ -599,6 +622,7 @@ const postgresSource = `import assert from 'node:assert/strict';
     scalars,
     validators,
     configureMutationLimits,
+    configureAfterCommit,
     MAX_RECORD_VERSION,
     RecordVersion,
   } from '@simtlix/simfinity-postgres';
@@ -634,6 +658,9 @@ const postgresSource = `import assert from 'node:assert/strict';
   assert.equal(api.validators, validators);
   assert.equal(api.configureMutationLimits, configureMutationLimits);
   assert.equal(configureMutationLimits, coreConfigureMutationLimits);
+  assert.equal(typeof configureAfterCommit, 'function');
+  assert.notEqual(api.configureAfterCommit, configureAfterCommit);
+  assert.throws(() => configureAfterCommit({ onError: 42 }), (error) => error.getCode() === 'INVALID_AFTER_COMMIT_OPTIONS');
   api.connect(null, bookType, 'postgresBook', 'postgresBooks');
   const schema = api.createSchema();
   const beforeReady = await graphql({ schema, source: '{ postgresBooks { id } }' });
@@ -657,6 +684,7 @@ const postgresSource = `import assert from 'node:assert/strict';
   // only reach the uninitialized database; a copy that declares the operators alone, or replaces compileQuery, keeps
   // UNSUPPORTED_QUERY for them before any statement runs.
   assert.equal(postgresPlugin().queryFeatures.referenceEmptiness, true);
+  assert.equal(postgresPlugin().queryFeatures.quantifiers, true);
   for (const [prefix, endpoint, plugin, code] of [
     ['PgDeclared', 'pgDeclared', postgresPlugin({ pool, schema: 'app' }), 'DATABASE_NOT_INITIALIZED'],
     ['PgOperators', 'pgOperators', { ...postgresPlugin({ pool, schema: 'app' }), queryFeatures: { operators: postgresPlugin().queryFeatures.operators } }, 'UNSUPPORTED_QUERY'],
@@ -788,6 +816,9 @@ const mongoSource = `import assert from 'node:assert/strict';
     assert.equal(typeof simfinity[helper], 'function', helper);
     assert.equal(legacyEntry[helper], simfinity[helper], helper);
   }
+  assert.equal(typeof simfinity.configureAfterCommit, 'function');
+  assert.equal(legacyEntry.configureAfterCommit, simfinity.configureAfterCommit);
+  assert.throws(() => simfinity.configureAfterCommit({ onError: 42 }), (error) => error.getCode() === 'INVALID_AFTER_COMMIT_OPTIONS');
   assert.equal(simfinity.registerQuery, undefined);
   assert.equal(legacyAuth, auth);
   assert.equal(legacyIsOwner, auth.isOwner);
@@ -801,6 +832,8 @@ const mongoSource = `import assert from 'node:assert/strict';
   assert(Object.isFrozen(queryFeatures) && Object.isFrozen(queryFeatures.operators));
   // The adapter declares reference emptiness, and a spread copy keeps the declaration.
   assert.equal(queryFeatures.referenceEmptiness, true);
+  assert.equal(queryFeatures.quantifiers, true);
+  assert.equal({ ...simfinity.createMongoAdapter() }.queryFeatures.quantifiers, true);
   assert.equal({ ...simfinity.createMongoAdapter() }.queryFeatures.referenceEmptiness, true);
   assert.equal(simfinity.auth, auth);
   assert.equal(simfinity.plugins, plugins);
@@ -826,6 +859,7 @@ const mongoSource = `import assert from 'node:assert/strict';
   assert.equal(custom.errors, undefined);
   assert.equal(custom.data.mongoRead, 'mongo');
   const runtime = simfinity.createRuntime(adapter);
+  assert.notEqual(runtime.configureAfterCommit, simfinity.configureAfterCommit);
   const type = new GraphQLObjectType({
     name: 'RootRuntimeBook',
     fields: { id: { type: GraphQLID }, title: { type: GraphQLString } },
@@ -923,6 +957,7 @@ const mcpSdkSource = `import assert from 'node:assert/strict';
 const coreTypes = `import {
   InternalServerError,
   QLOperator,
+  QLQuantifier,
   QLSort,
   QLValue,
   SimfinityError,
@@ -946,7 +981,13 @@ const coreTypes = `import {
   type FieldDescription,
   type FieldValidations,
   type MutationLimitsOptions,
+  type QLFilterCondition,
+  type QLFilterGroup,
+  type QLQuantifiedGroup,
+  type QLTypeFilterExpression,
   type QueryFeatures,
+  type QueryJoins,
+  type QueryQuantifier,
   type QueryLimitsOptions,
   type QueryOperator,
   type QueryPredicate,
@@ -1097,7 +1138,7 @@ const textOperators: readonly QueryOperator[] = ['LIKE', 'ILIKE', 'STARTS_WITH',
 const textAdapter: DatabaseAdapter<Model, Session> = { ...adapter, queryFeatures: { operators: ['EQ', ...textOperators] } };
 const legacyAdapters: DatabaseAdapter<Model, Session>[] = [{ ...adapter, queryFeatures: null }, { ...adapter, queryFeatures: undefined }];
 // Names that this version does not know, such as those of later releases, still compile.
-const laterFeatures: QueryFeatures = { operators: Object.freeze(['EQ', 'CONTAINS_ALL']) };
+const laterFeatures: QueryFeatures = { operators: Object.freeze(['EQ', 'SOUNDS_LIKE']) };
 // @ts-expect-error operators is a list of operator names.
 const oneOperator: QueryFeatures = { operators: 'ILIKE' };
 // @ts-expect-error a declaration is an object with operators, not the list itself.
@@ -1106,7 +1147,7 @@ const bareList: DatabaseAdapter<Model, Session> = { ...adapter, queryFeatures: [
 const unknownOperator: QueryOperator = 'CONTAINS';
 const featureMembers: {
   adapter: Equals<DatabaseAdapter['queryFeatures'], QueryFeatures | null | undefined>;
-  operator: Equals<QueryOperator, 'EQ' | 'NE' | 'LT' | 'LTE' | 'GT' | 'GTE' | 'BTW' | 'IN' | 'NIN' | 'LIKE' | 'ILIKE' | 'STARTS_WITH' | 'ISTARTS_WITH' | 'ENDS_WITH' | 'IENDS_WITH' | 'IEQ' | 'IS_EMPTY' | 'IS_NOT_EMPTY'>;
+  operator: Equals<QueryOperator, 'EQ' | 'NE' | 'LT' | 'LTE' | 'GT' | 'GTE' | 'BTW' | 'IN' | 'NIN' | 'LIKE' | 'ILIKE' | 'STARTS_WITH' | 'ISTARTS_WITH' | 'ENDS_WITH' | 'IENDS_WITH' | 'IEQ' | 'IS_EMPTY' | 'IS_NOT_EMPTY' | 'CONTAINS_ALL' | 'IIN'>;
 } = { adapter: true, operator: true };
 const textPlan = createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', { title: { operator: 'ISTARTS_WITH', value: 'a' } }, { mode: 'count', operators: new Set<QueryOperator>(['EQ', 'ISTARTS_WITH']) });
 const planOperators = createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', {}, { operators: textOperators });
@@ -1138,15 +1179,61 @@ runtime.configureQueryLimits({ maxReferenceFrames: 12 });
 configureQueryLimits();
 // @ts-expect-error maxReferenceFrames is a number.
 configureQueryLimits({ maxReferenceFrames: '10' });
-// @ts-expect-error The options are maxPageSize and maxReferenceFrames.
+// @ts-expect-error The option name is maxReferenceFrames, not maxReferenceFrame.
 runtime.configureQueryLimits({ maxReferenceFrame: 10 });
 const referenceMembers: {
   feature: Equals<QueryFeatures['referenceEmptiness'], boolean | null | undefined>;
   scopes: Equals<Extract<QueryPredicate, { kind: 'predicate' }>['scopes'], Record<string, QueryPredicate | null> | undefined>;
-  limits: Equals<QueryLimitsOptions, { maxPageSize?: number; maxReferenceFrames?: number }>;
+  limits: Equals<QueryLimitsOptions, { maxPageSize?: number; maxReferenceFrames?: number; maxFrameNesting?: number }>;
   rootLimits: Equals<Parameters<typeof configureQueryLimits>[0], QueryLimitsOptions | undefined>;
   runtimeLimits: Equals<Parameters<typeof runtime.configureQueryLimits>[0], QueryLimitsOptions | undefined>;
 } = { feature: true, scopes: true, limits: true, rootLimits: true, runtimeLimits: true };
+const quantifierEnum: GraphQLEnumType = QLQuantifier;
+const quantifier: QueryQuantifier = 'ALL';
+const frameCondition: QLFilterCondition = { field: 'rating', operator: 'GTE', value: 4 };
+const quantifiedGroup: QLQuantifiedGroup = {
+  path: 'reviews', conditions: [frameCondition],
+  ALL: [{ path: 'author', conditions: [{ field: 'name', operator: 'IEQ', value: 'Ada' }] }],
+};
+const quantifiedFilter: QLFilterGroup = { ANY: [quantifiedGroup], OR: [{ NONE: [{ path: 'reviews' }] }] };
+const quantifiedExpression: QLTypeFilterExpression = { quantifier, terms: [{ path: 'rating', operator: 'GTE', value: 4 }] };
+const quantifiedFeatures: QueryFeatures = { operators: ['EQ'], referenceEmptiness: true, quantifiers: true };
+const nullQuantifiers: QueryFeatures = { operators: [], quantifiers: null };
+const undefinedQuantifiers: QueryFeatures = { operators: [], quantifiers: undefined };
+const frameJoins: QueryJoins = { author: scopedPredicate, 'author.shop': null };
+const quantifiedPredicate: QueryPredicate = {
+  kind: 'quantified', quantifier: 'ANY', path: ['reviews'], where: scopedPredicate, scope: null, joins: frameJoins,
+};
+const anchoredPredicate: QueryPredicate = {
+  kind: 'quantified', quantifier: 'NONE', path: ['reviews'], where: null, scope: null, anchor: ['reviews', 'product'],
+};
+const joinedPredicate: QueryPredicate = { kind: 'predicate', path: ['author', 'name'], operator: 'EQ', value: 'Ada', joins: frameJoins };
+createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', {}, { quantifiers: true });
+configureQueryLimits({ maxFrameNesting: 4 });
+runtime.configureQueryLimits({ maxFrameNesting: 2 });
+// @ts-expect-error quantified groups require a path.
+const missingFramePath: QLQuantifiedGroup = { conditions: [] };
+// @ts-expect-error a quantifier is ANY, ALL or NONE.
+const invalidQuantifier: QueryQuantifier = 'SOME';
+// @ts-expect-error a frame's where is a predicate or null.
+const invalidWhere: QueryPredicate = { kind: 'quantified', quantifier: 'ANY', path: ['reviews'], where: 'x', scope: null };
+// @ts-expect-error a join scope is a predicate or null.
+const invalidJoins: QueryJoins = { author: 'x' };
+// @ts-expect-error quantifiers is a boolean, null or undefined.
+const invalidQuantifiers: QueryFeatures = { operators: [], quantifiers: 'true' };
+// @ts-expect-error the plan option is a boolean.
+createQueryPlan(describeModels([{ gqltype: type }]), 'TypedCoreBook', {}, { quantifiers: 'true' });
+// @ts-expect-error the nesting limit is a number.
+configureQueryLimits({ maxFrameNesting: '3' });
+const quantifiedMembers: {
+  feature: Equals<QueryFeatures['quantifiers'], boolean | null | undefined>;
+  joins: Equals<Extract<QueryPredicate, { kind: 'predicate' }>['joins'], QueryJoins | undefined>;
+  frameJoins: Equals<Extract<QueryPredicate, { kind: 'quantified' }>['joins'], QueryJoins | undefined>;
+  quantifier: Equals<Extract<QueryPredicate, { kind: 'quantified' }>['quantifier'], QueryQuantifier>;
+  where: Equals<Extract<QueryPredicate, { kind: 'quantified' }>['where'], QueryPredicate | null>;
+  scope: Equals<Extract<QueryPredicate, { kind: 'quantified' }>['scope'], QueryPredicate | null>;
+} = { feature: true, joins: true, frameJoins: true, quantifier: true, where: true, scope: true };
+void [quantifierEnum, quantifiedFilter, quantifiedExpression, quantifiedFeatures, nullQuantifiers, undefinedQuantifiers, quantifiedPredicate, anchoredPredicate, joinedPredicate, missingFramePath, invalidQuantifier, invalidWhere, invalidJoins, invalidQuantifiers, quantifiedMembers];
 void [referenceAdapter, plainFeatures, nullReference, undefinedReference, textReference, scopedPredicate, textScope, scopeCount(referencePlan.where), queryLimits, referenceMembers, createRuntime(referenceAdapter), createRuntime(nullReference)];
 // Optimistic concurrency (#98): the scalar and its maximum, the declaration, the description of the version field and the
 // optional adapter members. The 3.11-shaped adapter above compiles without them.
@@ -1231,6 +1318,11 @@ type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B
 ${Object.entries(coreSubpaths).map(([subpath, config]) => {
     const binding = subpathBinding(subpath);
     const { namespace, values, types, errorClasses = [] } = config;
+    if (config.standalone) return [
+      `const ${binding}Keys: Record<keyof typeof ${binding}, true> = { ${values.map((name) => `${name}: true`).join(', ')} };`,
+      `const ${binding}Values = ${binding};`,
+      `const ${binding}Types: { ${types.map((name) => `${name}: Equals<${binding}.${name}, Core.${name}>`).join('; ')} } = { ${types.map((name) => `${name}: true`).join(', ')} };`,
+    ].join('\n');
     const members = values.filter((name) => name !== 'default');
     return [
       `const ${binding}Keys: Record<keyof typeof ${binding}, true> = { ${values.map((name) => `${name}: true`).join(', ')} };`,
@@ -1244,6 +1336,9 @@ ${Object.entries(coreSubpaths).map(([subpath, config]) => {
       `} = { ${[...types, ...errorClasses].map((name) => `${name}: true`).join(', ')} };`,
     ].join('\n');
   }).join('\n')}
+introspectionSubpath.configureIntrospection({ fieldExtensions: false });
+// @ts-expect-error Only opt-out is accepted in 3.x.
+introspectionSubpath.configureIntrospection({ fieldExtensions: true });
 const sameAuth: typeof auth = authDefault;
 const samePlugins: typeof plugins = pluginsDefault;
 const sameScalars: typeof scalars = scalarsDefault;
@@ -1603,6 +1698,11 @@ const undefinedReferencePlugin: SQLPlugin<Configuration, Client, Description> = 
 // @ts-expect-error referenceEmptiness is a boolean, null or undefined.
 const textReferencePlugin: SQLPlugin<Configuration, Client, Description> = { ...plugin, queryFeatures: { operators: [], referenceEmptiness: 'yes' } };
 const sqlReference: Equals<SQLQueryFeatures['referenceEmptiness'], boolean | null | undefined> = true;
+const sqlQuantifiers: Equals<SQLQueryFeatures['quantifiers'], boolean | null | undefined> = true;
+const quantifiedPlugin: SQLPlugin<Configuration, Client, Description> = { ...plugin, queryFeatures: { operators: ['EQ'], referenceEmptiness: true, quantifiers: true, compileQuery: plugin.compileQuery } };
+// @ts-expect-error quantifiers is boolean, null or undefined.
+const badQuantifiedPlugin: SQLPlugin = { ...plugin, queryFeatures: { operators: [], quantifiers: 'true' } };
+void [sqlQuantifiers, quantifiedPlugin, badQuantifiedPlugin];
 const scopedPaths = (query: QueryPlan): string[] => (query.where?.kind === 'predicate' ? Object.keys(query.where.scopes ?? {}) : []);
 void [referencePlugin, nullReferencePlugin, undefinedReferencePlugin, textReferencePlugin, sqlReference, scopedPaths, createSQL({ plugin: referencePlugin }), createSQL({ plugin: nullReferencePlugin })];
 // The facade re-exports core's scalar and maximum, with the same types, and the declaration type.
@@ -1755,6 +1855,10 @@ const legacyPg = createSQL({ plugin: { ...postgresPlugin({ pool }), queryFeature
 void [pgFeatures, pgCoreFeatures, pgOperators, legacyPg];
 // The plugin declares reference emptiness, and the facade's query limits take maxReferenceFrames.
 const pgReference: boolean | null | undefined = postgresPlugin().queryFeatures?.referenceEmptiness;
+const pgQuantifiers: boolean | null | undefined = postgresPlugin().queryFeatures?.quantifiers;
+configureQueryLimits({ maxFrameNesting: 3 });
+api.configureQueryLimits({ maxFrameNesting: 2 });
+void pgQuantifiers;
 configureQueryLimits({ maxPageSize: 100, maxReferenceFrames: 5 });
 api.configureQueryLimits({ maxReferenceFrames: 5 });
 // @ts-expect-error maxReferenceFrames is a number.
@@ -1784,6 +1888,11 @@ const mongoTypes = `import {
   type EnvelopSchemaPlugin,
   type GeneratedMCPTools,
   type MongoAdapter,
+  type FilterGroupInput,
+  type QuantifiedGroupInput,
+  type QLFilterGroup,
+  type QLQuantifiedGroup,
+  type QLTypeFilterExpression,
   type MongoAdapterOptions,
   type MutationLimitsOptions,
   type QueryLimitsOptions,
@@ -1889,6 +1998,14 @@ const legacyMongo: CoreDatabaseAdapter = { ...plain, queryFeatures: undefined };
 void [mongoFeatures, mongoOperators, createRuntime(legacyMongo)];
 // The adapter declares reference emptiness, and the facade's query limits take maxReferenceFrames, as core's do.
 const mongoReference: boolean | null | undefined = plain.queryFeatures.referenceEmptiness;
+const mongoQuantifiers: boolean | null | undefined = plain.queryFeatures.quantifiers;
+const mongoFrame: QuantifiedGroupInput = { path: 'reviews', conditions: [{ field: 'rating', value: 4 }], NONE: [{ path: 'product' }] };
+const mongoGroup: FilterGroupInput = { ALL: [mongoFrame] };
+const canonicalFrame: QLQuantifiedGroup = { path: 'reviews', conditions: [{ field: 'rating', operator: 'GTE', value: 4 }] };
+const canonicalGroup: QLFilterGroup = { ALL: [canonicalFrame] };
+const canonicalExpression: QLTypeFilterExpression = { quantifier: 'NONE', terms: [] };
+configureQueryLimits({ maxFrameNesting: 3 });
+void [mongoQuantifiers, mongoGroup, canonicalGroup, canonicalExpression];
 const mongoLimits: QueryLimitsOptions = { maxPageSize: 50, maxReferenceFrames: 3 };
 configureQueryLimits(mongoLimits);
 // @ts-expect-error maxReferenceFrames is a number.
@@ -2143,7 +2260,7 @@ adapter.batchesChildren = undefined;
 adapter.queryFeatures = undefined;
 adapter.writeFeatures = undefined;
 const copy: DatabaseAdapter = { ...adapter, findChildrenBatch: undefined, batchesChildren: undefined, queryFeatures: undefined, writeFeatures: undefined };
-const features: QueryFeatures[] = [{ operators: [], referenceEmptiness: undefined }, { operators: [], referenceEmptiness: null }];
+const features: QueryFeatures[] = [{ operators: [], referenceEmptiness: undefined, quantifiers: undefined }, { operators: [], referenceEmptiness: null, quantifiers: null }];
 adapter.queryFeatures = { operators: ['IS_EMPTY'], referenceEmptiness: undefined };
 adapter.writeFeatures = { optimisticConcurrency: true };
 void [copy, features];`;
@@ -2152,7 +2269,7 @@ const sqlExactOptionalTypes = `import type { SQLConfiguration, SQLPlugin, SQLQue
 declare const plugin: SQLPlugin;
 const copy: SQLPlugin = { ...plugin, compileChildrenQuery: undefined, compileRecordBatch: undefined, maxRecordBatchValues: undefined, queryFeatures: undefined };
 const configuration: SQLConfiguration = { batchedCollections: undefined };
-const features: SQLQueryFeatures[] = [{ operators: [], referenceEmptiness: undefined, compileQuery: undefined }, { operators: [], referenceEmptiness: null }];
+const features: SQLQueryFeatures[] = [{ operators: [], referenceEmptiness: undefined, quantifiers: undefined, compileQuery: undefined }, { operators: [], referenceEmptiness: null, quantifiers: null }];
 const declared: SQLPlugin = { ...plugin, queryFeatures: { operators: ['EQ'], referenceEmptiness: undefined } };
 void [copy, configuration, features, declared];`;
 
@@ -2171,6 +2288,25 @@ adapter.findChildrenBatch = undefined;
 adapter.batchesChildren = undefined;
 void createMongoAdapter({ batchedCollections: undefined });
 void createRuntime({ ...adapter, queryFeatures: undefined });`;
+
+const afterCommitTypes = (name, runtimeType, singleton = false) => `import type { AfterCommitOptions, AfterCommitErrorDetails, CommittedControllerCallbacks, EntityController } from '${name}';
+declare const runtime: ${runtimeType};
+const options: AfterCommitOptions = { onError(error: unknown, details: AfterCommitErrorDetails) { const committed: true = details.committed; void [error, committed, details.operation, details.callbackName, details.context]; } };
+runtime.configureAfterCommit(options);
+runtime.configureAfterCommit();
+const controller: EntityController = {
+  onSaveCommitted(record, args, context) { void [record, args, context]; },
+  onUpdateCommitted(record, context) { void [record, context]; },
+  onDeleteCommitted(record, context) { void [record, context]; },
+  onTransitionCommitted(record, action, context) { void [record, action.toUpperCase(), context]; },
+};
+const shared: CommittedControllerCallbacks = controller;
+// @ts-expect-error A reporter is a function, not a flag.
+runtime.configureAfterCommit({ onError: true });
+// @ts-expect-error Unknown options must not compile.
+runtime.configureAfterCommit({ reporter: () => {} });
+void shared;
+${singleton ? `import { configureAfterCommit } from '${name}'; configureAfterCommit(options);` : ''}`;
 
 const customQueryTypes = (name, runtimeType, singleton = false) => `import type { CreateSchemaOptions } from '${name}';
 import type { CreateSchemaOptions as CoreOptions } from '@simtlix/simfinity-core';
@@ -2247,7 +2383,10 @@ register('asyncItems', {
 const paramType: ViewParamType = new GraphQLList(new GraphQLList(GraphQLString));
 const param: ViewParam = { type: paramType };
 const condition: FilterCondition = { field: 'name', operator: 'IS_EMPTY' };
-const group: FilterGroup = { AND: [{ conditions: [condition] }] };
+const group: FilterGroup = { AND: [{ conditions: [condition] }], ANY: [{ path: 'reviews', ALL: [{ path: 'author', conditions: [{ field: 'name', operator: 'NE', value: 'hidden' }] }] }], NONE: [{ path: 'reviews', conditions: [{ field: 'rating', operator: 'LT', value: 1 }] }] };
+// @ts-expect-error A quantified view group requires its element path.
+const invalidFrame: FilterGroup = { ANY: [{ conditions: [] }] };
+void invalidFrame;
 const options: ViewOptions = { type, description: 'd', params: { param }, where: () => [group] };
 register('typedItems', options);
 // @ts-expect-error A param is a scalar, an enum or a list of them, not an input object.
@@ -2341,8 +2480,76 @@ remove('Order', { id: 'o1' }, 'session');
 transition('Order', 'close', { id: 'o1' }, 'session');`}
 void [shapes, calls${singleton ? ', sameMembers' : ''}];
 export {};`;
+const descriptorSource = `import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { __Field, GraphQLObjectType, GraphQLString } from 'graphql';
+import { buildClientDescriptor, createClientDescriptorHandler } from '@simtlix/simfinity-descriptor';
+import { configureIntrospection } from '@simtlix/simfinity-core/introspection';
+assert.equal(__Field.getFields().extensions, undefined);
+configureIntrospection({ fieldExtensions: false });
+const { createRuntime, SimfinityError } = await import('@simtlix/simfinity-core');
+const api = createRuntime({ createModel: () => ({}) });
+api.connect(null, new GraphQLObjectType({ name: 'PackedBook', fields: { title: { type: GraphQLString } } }), 'book', 'books');
+const schema = api.createSchema();
+const descriptor = buildClientDescriptor(schema);
+assert.equal(descriptor.formatVersion, 1);
+assert.equal(descriptor.generator.name, '@simtlix/simfinity-descriptor');
+assert.equal(descriptor.generator.version, JSON.parse(readFileSync('./node_modules/@simtlix/simfinity-descriptor/package.json', 'utf8')).version);
+assert.equal(descriptor.types.PackedBook.endpoints.add, 'addbook');
+assert.equal(typeof createClientDescriptorHandler(schema, { authorize: 'public' }), 'function');
+assert.throws(() => buildClientDescriptor({}), SimfinityError);
+assert.equal(__Field.getFields().extensions, undefined);`;
+
+const descriptorTypes = `import * as Descriptor from '@simtlix/simfinity-descriptor';
+import { buildClientDescriptor, createClientDescriptorHandler } from '@simtlix/simfinity-descriptor';
+import type { GraphQLSchema } from 'graphql';
+declare const schema: GraphQLSchema;
+const keys: Record<keyof typeof Descriptor, true> = { buildClientDescriptor: true, createClientDescriptorHandler: true };
+const descriptor: Descriptor.ClientDescriptor = buildClientDescriptor(schema);
+const version: 1 = descriptor.formatVersion;
+const name: '@simtlix/simfinity-descriptor' = descriptor.generator.name;
+// @ts-expect-error Descriptors are immutable.
+descriptor.types.Book = {};
+declare const field: Descriptor.ClientDescriptorField;
+const usage: 'required' | 'optional' | undefined = field.rootInputUsage?.add;
+// @ts-expect-error Nested usage metadata is immutable too.
+field.rootInputUsage!.add = 'optional';
+declare const relation: Descriptor.ClientDescriptorRelation;
+declare const machine: Descriptor.ClientDescriptorStateMachine;
+declare const operation: Descriptor.ClientDescriptorOperation;
+const transactionOperation: Descriptor.ClientDescriptorOperation['operation'] = 'transaction';
+declare const input: Descriptor.ClientDescriptorInputValue;
+declare const type: Descriptor.ClientDescriptorType;
+const handler = createClientDescriptorHandler<{ user: string }>(schema, {
+  context: async () => ({ user: 'reader' }), authorize: (_req, ctx) => ctx.user === 'reader',
+});
+const options: Descriptor.ClientDescriptorHandlerOptions = { authorize: 'public' };
+// @ts-expect-error Access must be explicit.
+createClientDescriptorHandler(schema, {});
+// @ts-expect-error Selectors and cache overrides are not v1 options.
+createClientDescriptorHandler(schema, { authorize: 'public', cacheControl: 'public' });
+declare const request: Descriptor.DescriptorRequest;
+declare const response: Descriptor.DescriptorResponse;
+void handler(request, response);
+void [keys, version, name, usage, relation, machine, operation, transactionOperation, input, type, options];`;
 
 const cases = [
+  {
+    name: 'descriptor',
+    archives: ({ core, descriptor }) => [core, descriptor],
+    source: descriptorSource,
+    types: descriptorTypes,
+    extraTypes: {
+      'node.ts': `import { createServer } from 'node:http';
+import { createClientDescriptorHandler } from '@simtlix/simfinity-descriptor';
+import type { GraphQLSchema } from 'graphql';
+declare const schema: GraphQLSchema;
+createServer(createClientDescriptorHandler(schema, { authorize: 'public' }));`,
+    },
+    typeDependencies: ['@types/node@18'],
+    moduleResolutions: ['NodeNext', 'Node16', 'Bundler', 'Node10'],
+    forbiddenPackages: ['pg', 'mongoose', 'mongodb', '@modelcontextprotocol/sdk', '@simtlix/simfinity-mcp'],
+  },
   {
     name: 'core',
     exactOptionalTypes: { 'exact-optional.ts': coreExactOptionalTypes },
@@ -2355,6 +2562,7 @@ const cases = [
       'auth-plugins.ts': coreAuthPluginsTypes,
       'schema-plugins.ts': coreSchemaPluginTypes,
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
+      'after-commit.ts': afterCommitTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
       'views.ts': viewTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
       'lifecycle-helpers.ts': lifecycleHelperTypes('@simtlix/simfinity-core', 'import(\'@simtlix/simfinity-core\').Runtime<{ name: string }, { active: boolean }>'),
     },
@@ -2372,6 +2580,7 @@ const cases = [
     extraTypes: {
       'barrel.ts': databaseBarrelTypes('@simtlix/simfinity-sql'),
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
+      'after-commit.ts': afterCommitTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
       'views.ts': viewTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
       'lifecycle-helpers.ts': lifecycleHelperTypes('@simtlix/simfinity-sql', 'import(\'@simtlix/simfinity-sql\').SQLRuntime'),
     },
@@ -2386,6 +2595,7 @@ const cases = [
     extraTypes: {
       'barrel.ts': databaseBarrelTypes('@simtlix/simfinity-postgres'),
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', true),
+      'after-commit.ts': afterCommitTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', true),
       'views.ts': viewTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', true),
       'lifecycle-helpers.ts': lifecycleHelperTypes('@simtlix/simfinity-postgres', 'import(\'@simtlix/simfinity-postgres\').PostgresRuntime', { singleton: true }),
     },
@@ -2427,7 +2637,9 @@ const cases = [
       'legacy-mcp-root.ts': mongoLegacyMcpBarrel('@simtlix/simfinity-js'),
       'legacy-mcp-workaround.ts': mongoLegacyMcpWorkaroundTypes,
       'custom-queries.ts': customQueryTypes('@simtlix/simfinity-js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
+      'after-commit.ts': afterCommitTypes('@simtlix/simfinity-js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
       'legacy-custom-queries.ts': customQueryTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
+      'legacy-after-commit.ts': afterCommitTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
       'views.ts': viewTypes('@simtlix/simfinity-js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
       'legacy-views.ts': viewTypes('@simtlix/simfinity-js/src/index.js', 'import(\'@simtlix/simfinity-core\').Runtime', true),
       'lifecycle-helpers.ts': lifecycleHelperTypes('@simtlix/simfinity-js', 'import(\'@simtlix/simfinity-core\').Runtime', { singleton: true, anySession: true }),
@@ -2445,6 +2657,7 @@ try {
   const core = check(archives, '@simtlix/simfinity-core');
   const sql = check(archives, '@simtlix/simfinity-sql');
   const mcp = check(archives, '@simtlix/simfinity-mcp');
+  const descriptor = check(archives, '@simtlix/simfinity-descriptor');
   const postgres = check(archives, '@simtlix/simfinity-postgres');
   const mongo = check(archives, '@simtlix/simfinity-js');
   for (const testCase of cases) {
@@ -2460,7 +2673,7 @@ try {
       '--ignore-scripts',
       '--no-audit',
       '--no-fund',
-      ...testCase.archives({ core, sql, mcp, postgres, mongo }),
+      ...testCase.archives({ core, sql, mcp, descriptor, postgres, mongo }),
       'graphql@16',
       'typescript@5',
       ...(testCase.dependencies || []),
@@ -2475,6 +2688,25 @@ try {
       }
     }
     run(process.execPath, ['--input-type=module', '--eval', testCase.source], cwd);
+    if (['core', 'mongo', 'postgres'].includes(testCase.name)) {
+      const facade = testCase.name === 'mongo' ? '@simtlix/simfinity-js' : testCase.name === 'postgres' ? '@simtlix/simfinity-postgres' : '@simtlix/simfinity-core';
+      run(process.execPath, ['--input-type=module', '--eval', `
+        import assert from 'node:assert/strict';
+        import { __Field, GraphQLObjectType, GraphQLString, buildClientSchema, introspectionFromSchema } from 'graphql';
+        import { configureIntrospection } from '@simtlix/simfinity-core/introspection';
+        configureIntrospection({ fieldExtensions: false });
+        assert.equal(__Field.getFields().extensions, undefined);
+        const core = await import('@simtlix/simfinity-core');
+        const facade = await import('${facade}');
+        assert.equal(facade.buildClientDescriptor, undefined);
+        assert.equal(facade.createClientDescriptorHandler, undefined);
+        const api = core.createRuntime({ createModel: () => ({}) });
+        api.connect(null, new GraphQLObjectType({ name: 'PackedBook', fields: { title: { type: GraphQLString } } }), 'book', 'books');
+        const schema = api.createSchema();
+        buildClientSchema(introspectionFromSchema(schema));
+      `], cwd);
+    }
+
     if (testCase.name === 'mongo') {
       run(process.execPath, [join(root, 'tests/fixtures/mongodb-package-resolution.js')], cwd);
     }
@@ -2498,6 +2730,22 @@ try {
         error.message = `${testCase.name} (moduleResolution ${moduleResolution}): ${error.message}`;
         throw error;
       }
+    }
+    if (['core', 'mongo', 'postgres', 'descriptor'].includes(testCase.name)) {
+      const packageName = testCase.name === 'mongo' ? '@simtlix/simfinity-js' : `@simtlix/simfinity-${testCase.name}`;
+      writeFileSync(join(cwd, 'no-ambient.ts'), `import * as api from '${packageName}'; void api;`);
+      writeFileSync(join(cwd, 'tsconfig.core-only.json'), JSON.stringify({
+        compilerOptions: {
+          // The existing Mongo facade re-exports MCP's AbortSignal API (a DOM global),
+          // but none of these main-entry graphs may require Node ambient declarations.
+          strict: true, target: 'ES2022', lib: testCase.name === 'mongo' ? ['ES2022', 'DOM'] : ['ES2022'], types: [],
+          module: 'NodeNext', moduleResolution: 'NodeNext', noEmit: true, skipLibCheck: false,
+        },
+        include: ['no-ambient.ts'],
+      }));
+      const files = run(process.execPath, ['node_modules/typescript/bin/tsc', '--project', 'tsconfig.core-only.json', '--listFiles'], cwd);
+      assert(!files.includes('/@types/node/'), `${testCase.name} main-entry declarations must not load Node types`);
+      assert(!files.includes('/types/http.d.ts'), `${testCase.name} main-entry declarations must not load HTTP types`);
     }
     if (testCase.exactOptionalTypes) {
       for (const [file, source] of Object.entries(testCase.exactOptionalTypes)) writeFileSync(join(cwd, file), source);
