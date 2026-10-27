@@ -940,6 +940,62 @@ describe('record keys (D1)', () => {
   });
 });
 
+describe('the nesting of an input is limited', () => {
+  const NESTED = 'input is nested too deeply';
+  const MODES = ['programmatic', 'coerced', 'copy'];
+  const TreeInput = new GraphQLInputObjectType({
+    name: 'TreeInput',
+    fields: () => ({
+      name: { type: GraphQLString }, meta: { type: JSONScalar }, next: { type: TreeInput }, children: { type: listOf(TreeInput) },
+    }),
+  });
+  const tree = (value, options = {}) => snapshot(value, TreeInput, options);
+  // `levels` input objects, each the `next` of the one above, the deepest being `leaf`.
+  const objects = (levels, leaf = {}) => {
+    let value = leaf;
+    for (let level = 1; level < levels; level += 1) value = { next: value };
+    return value;
+  };
+  // `levels` containers that alternate between an input object, at odd levels, and its `children` list.
+  const alternating = (levels) => {
+    let value = levels % 2 === 1 ? {} : [];
+    for (let level = levels - 1; level >= 1; level -= 1) value = level % 2 === 1 ? { children: value } : [value];
+    return value;
+  };
+  const alternatingPath = (level) => `input${Array.from({ length: level - 1 }, (_, index) => (index % 2 === 0 ? '.children' : '[0]')).join('')}`;
+  const depthOf = (value, step) => {
+    let depth = 0;
+    for (let current = value; current !== undefined; current = step(current)) depth += 1;
+    return depth;
+  };
+
+  test.each(MODES)('256 nested input objects are walked and the 257th is refused at its path (%s)', (mode) => {
+    expect(depthOf(tree(objects(256), { mode }), (object) => object.next)).toBe(256);
+    expectInvalid(() => tree(objects(257), { mode }), `input${'.next'.repeat(256)}`, NESTED);
+  });
+
+  test.each(MODES)('lists count as levels too (%s)', (mode) => {
+    expect(depthOf(tree(alternating(256), { mode }), (level) => (Array.isArray(level) ? level[0] : level.children)))
+      .toBe(256);
+    expectInvalid(() => tree(alternating(257), { mode }), alternatingPath(257), NESTED);
+  });
+
+  test.each(['programmatic', 'coerced'])('a 5000-deep input is an INVALID_INPUT, never a RangeError (%s)', (mode) => {
+    expectInvalid(() => tree(objects(5000), { mode }), `input${'.next'.repeat(256)}`, NESTED);
+    expectInvalid(() => tree(alternating(5000), { mode }), alternatingPath(257), NESTED);
+  });
+
+  test('a scalar value at the deepest input level keeps its own limit', () => {
+    let meta = [];
+    for (let level = 1; level < 256; level += 1) meta = [meta];
+    const walked = tree(objects(256, { meta }));
+
+    let deepest = walked;
+    while (deepest.next !== undefined) deepest = deepest.next;
+    expect(deepest.meta).toEqual(meta);
+  });
+});
+
 describe('modes', () => {
   const GraphQLShaped = () => Object.assign(Object.create(null), {
     id: '507f1f77bcf86cd799439011',

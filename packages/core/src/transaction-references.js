@@ -4,10 +4,10 @@ import {
 import SimfinityError from './errors/simfinity.error.js';
 import { getListShape, normalizeConnectionField } from './relation-storage.js';
 
-// Internal, and never exported from the package. The references of the generated transaction (#151,
-// spec section 4.3): an operation names the ID of an earlier operation's result with a `$K` token in one
-// of four ID positions. planReferences() checks every token once, before the transaction, and
-// resolveReferences() writes the IDs into each attempt's copy of the operations.
+// Internal, and never exported from the package. The references of the generated transaction (#151): an
+// operation names the ID of an earlier operation's result with a `$K` token in one of four ID positions.
+// planReferences() checks every token once, before the transaction, and resolveReferences() writes the
+// IDs into each attempt's copy of the operations.
 //
 // The positions are found by walking each operation's value along its GraphQL input types, with the
 // object type that generated them for the relation metadata (extensions.relation). Strings are never

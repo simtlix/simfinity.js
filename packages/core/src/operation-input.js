@@ -26,6 +26,7 @@ const CYCLE = 'cycle';
 const UNSUPPORTED_SCALAR = 'unsupported scalar value';
 const STRING_KEY = 'pass the ID as a string, for example String(record._id)';
 const PRIMITIVE_KEY = 'pass the ID as a primitive value';
+const NESTED_TOO_DEEPLY = 'input is nested too deeply';
 
 const requiredValueError = (path) => new SimfinityError(`Required value ${path} is missing`, 'REQUIRED_VALUE', 400);
 
@@ -37,6 +38,11 @@ const invalidInputError = (path, reason) => new SimfinityError(`Invalid input at
 // value of a few thousand nested arrays is a client's to send, and it must be refused as input, not
 // crash with a stack overflow.
 const MAX_SCALAR_DEPTH = 256;
+
+// How many input objects and lists an input may nest, the top-level input object included. Past it the walk
+// would recurse without a bound and end in a stack overflow, a 500 where GraphQL's own roots give a 400.
+// Scalar values inside count on their own, against MAX_SCALAR_DEPTH.
+const MAX_INPUT_DEPTH = 256;
 
 const intrinsicGetTime = Date.prototype.getTime;
 
@@ -93,10 +99,18 @@ const listItems = (list, path, checked) => {
 };
 
 // Cycles are looked for along the path from the root to the value being copied, so an object that two
-// positions share without containing itself is not one.
+// positions share without containing itself is not one. `state.depth` counts the input objects and lists
+// entered, and the one past MAX_INPUT_DEPTH is refused at its own path.
 const enter = (source, path, state) => {
   if (state.ancestors.has(source)) throw invalidInputError(path, CYCLE);
+  if (state.depth >= MAX_INPUT_DEPTH) throw invalidInputError(path, NESTED_TOO_DEEPLY);
   state.ancestors.add(source);
+  state.depth += 1;
+};
+
+const leave = (source, state) => {
+  state.ancestors.delete(source);
+  state.depth -= 1;
 };
 
 // A scalar value as plain data: primitives as they are, `Date` by time, and arrays and objects with
@@ -180,7 +194,7 @@ const walkList = (value, type, path, state, position) => {
   // walkValue turns an `undefined` item into `null`, which executeItemFunction skips.
   const items = listItems(value, path, state.checkShape)
     .map((item, index) => walkValue(item, type.ofType, `${path}[${index}]`, state, position));
-  state.ancestors.delete(value);
+  leave(value, state);
   return items;
 };
 
@@ -223,7 +237,7 @@ const walkObject = (value, type, path, state, position) => {
     if (item === null && isTopLevelId(key)) throw requiredValueError(fieldPath);
     defineData(copy, key, walkValue(item, field.type, fieldPath, state, fieldPosition));
   }
-  state.ancestors.delete(value);
+  leave(value, state);
   for (const [name, field] of Object.entries(fields)) {
     const required = (state.checkShape && isNonNullType(field.type)) || isTopLevelId(name);
     if (required && !Object.hasOwn(copy, name)) throw requiredValueError(`${path}.${name}`);
@@ -259,6 +273,7 @@ const createWalkState = ({
     idInputType,
     recordVersionRef,
     ancestors: new Set(),
+    depth: 0,
   };
 };
 
@@ -274,6 +289,9 @@ const createWalkState = ({
  * `recordVersionRef` the input of a versioned delete (default: Simfinity's own), which the walk knows
  * by identity to find their record keys. With `stateManaged`, an undeclared top-level `state` says that
  * state changes only through transitionObject; elsewhere it is an unknown field.
+ *
+ * Input objects and lists may nest 256 levels, the top-level input included, in every mode; the next one
+ * is refused with `input is nested too deeply`.
  *
  * A missing or null value throws REQUIRED_VALUE (400) and any other violation INVALID_INPUT (400), both
  * naming a path such as `input.lines.added[1].price` and never a value. The value is never changed.

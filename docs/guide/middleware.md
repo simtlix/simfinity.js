@@ -68,9 +68,9 @@ simfinity.use(async (params, next) => {
 | `find` | List query, named view or generated non-embedded collection relation. |
 | `get_by_id` | Single-record query or generated non-embedded single relation with a reference. |
 | `aggregate` | Aggregation query. |
-| `save` | Generated add mutation, an `add<endpoint>` operation of a transaction mutation or nested `added` child (including children of a `saveObject()` call). |
-| `update` | Generated update mutation, an `update<endpoint>` operation of a transaction mutation or nested `updated` child (including children of a `saveObject()` or `updateObject()` call). |
-| `delete` | Generated delete mutation, a `delete<endpoint>` operation of a transaction mutation or nested `deleted` child (including children of a `saveObject()` or `updateObject()` call). |
+| `save` | Generated add mutation, an `add<endpoint>` operation of a transaction mutation or nested `added` child (including children of a `saveObject()`, `updateObject()` or `transitionObject()` call). |
+| `update` | Generated update mutation, an `update<endpoint>` operation of a transaction mutation or nested `updated` child (including children of a `saveObject()`, `updateObject()` or `transitionObject()` call). |
+| `delete` | Generated delete mutation, a `delete<endpoint>` operation of a transaction mutation or nested `deleted` child (including children of a `saveObject()`, `updateObject()` or `transitionObject()` call). |
 | `state_changed` | Generated state-machine action, also as an operation of a transaction mutation. |
 | `custom_mutation` | Custom mutation registered with `registerMutation()`. |
 | `custom_query` | [Custom query](./queries#custom-queries) registered with `registerCustomQuery()`. Its callback receives a copy of `args.input` as middleware leaves it. |

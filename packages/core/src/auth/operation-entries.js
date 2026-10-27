@@ -37,10 +37,13 @@ export const isGeneratedMutationRoot = (field) => {
 };
 
 // The entries Map of a generated root, created on first use in a non-enumerable property that cannot
-// be replaced. Anything else under the key is an error, never overwritten.
+// be replaced, or undefined when the marker has none and cannot take one (a frozen, sealed or
+// non-extensible marker): the root's own wrapper still applies its rules, and authorizeOperation denies
+// operations on it. Anything else under the key is an error, never overwritten.
 const entriesOf = (field) => {
   const marker = field.extensions.simfinityMutation;
   if (!Object.hasOwn(marker, OPERATION_EVALUATORS)) {
+    if (!Object.isExtensible(marker)) return undefined;
     Object.defineProperty(marker, OPERATION_EVALUATORS, { value: new Map() });
   }
   const entries = marker[OPERATION_EVALUATORS];
@@ -57,9 +60,10 @@ const findPair = (entries, instanceToken, permissionKey) => {
 };
 
 // Records the entry of the instance `instanceToken` for the root under `permissionKey`, replacing
-// that pair's earlier entry and making it the latest.
+// that pair's earlier entry and making it the latest. A marker that cannot take entries records nothing.
 export const recordOperationEntry = (field, instanceToken, permissionKey, entry) => {
   const entries = entriesOf(field);
+  if (entries === undefined) return;
   const pair = findPair(entries, instanceToken, permissionKey);
   if (pair !== undefined) entries.delete(pair);
   entries.set(Object.freeze({ instance: instanceToken, permissionKey }), entry);
@@ -77,14 +81,19 @@ export const hasOperationEntry = (field, instanceToken, permissionKey) => {
  * in that schema. The rules see `info` with the root's field name and return type; the root is a
  * field of the same Mutation type as the field that runs the operation, `info.parentType`. The path,
  * field nodes and operation stay the caller's. Fails closed: an entry of an unknown protocol, deferred
- * or not, denies with ForbiddenError before any entry runs. A root with no entries passes, as a root
- * no instance wrapped does when called directly.
+ * or not, denies with ForbiddenError before any entry runs, and so does a marker that has no entries
+ * and cannot take them, since an instance may have wrapped the root without recording its entry. A
+ * root with no entries passes, as a root no instance wrapped does when called directly.
  * @returns {Promise<void>}
  */
 export const authorizeOperation = async (rootField, parent, args, ctx, info) => {
   const marker = rootField.extensions?.simfinityMutation;
-  if (marker === null || typeof marker !== 'object' || !Object.hasOwn(marker, OPERATION_EVALUATORS)) return;
+  if (marker === null || typeof marker !== 'object') return;
   const key = `${info.parentType.name}.${rootField.name}`;
+  if (!Object.hasOwn(marker, OPERATION_EVALUATORS)) {
+    if (!Object.isExtensible(marker)) throw new ForbiddenError(`Access denied to ${key}`);
+    return;
+  }
   const entries = marker[OPERATION_EVALUATORS];
   if (!(entries instanceof Map)) throw new ForbiddenError(`Access denied to ${key}`);
   const latestFirst = [...entries.values()].reverse();

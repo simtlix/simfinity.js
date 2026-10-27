@@ -993,10 +993,10 @@ const startsWithTransactionMarker = (field) => typeof field.description === 'str
   && field.description.startsWith(TRANSACTION_MARKER);
 
 /**
- * The shape core's generated transaction field keeps in a rebuild that lost
- * its description and extensions and also dropped some of its generated
- * mutations (spec #151 section 5, ruling R22), which
- * {@link transactionSignature} no longer recognizes: a single argument
+ * The shape core's generated transaction field (#151) keeps in a rebuild that
+ * lost its description and extensions and also dropped some of its generated
+ * mutations, which {@link transactionSignature} no longer recognizes, so that
+ * such a field is still never published as a custom tool: a single argument
  * `operations: [X!]!`, where at least one field of X matches a mutation root
  * of `mutationType` and every field of X named after a root matches it (see
  * {@link matchesOperationRoot}), and a result that is a list of an object
@@ -2471,6 +2471,44 @@ const unknownArgumentsMessage = (toolName, unknown, argNames) => {
 };
 
 /**
+ * Agent-facing text for a transaction call whose `operations` is not a list
+ * of items that each name exactly one of the tool's operation keys, or
+ * undefined when it is one. Each item must be a plain object with exactly
+ * one own key whose value is not undefined, among the keys the tool
+ * advertises; own keys whose value is undefined are ignored, as for the
+ * tool's top-level arguments, since they are never sent. The check runs in
+ * both modes before anything executes, so a
+ * key the tool does not advertise, such as one the remote server has but the
+ * local schema or the filters left out, never reaches the endpoint. A single
+ * item outside a list is refused too, though GraphQL would coerce it into a
+ * list of one. Values are not echoed.
+ * @param {string} toolName
+ * @param {*} operations the `operations` argument the call would run with
+ * @param {Map<string, *>} keys the tool's operation keys
+ * @returns {string|undefined}
+ */
+const transactionOperationsMessage = (toolName, operations, keys) => {
+  const valid = ` Valid operations: ${[...keys.keys()].join(', ')}. The tool was not executed.`;
+  if (!Array.isArray(operations)) {
+    return `Argument "operations" for tool "${toolName}" must be a list of operations.${valid}`;
+  }
+  for (let index = 0; index < operations.length; index += 1) {
+    const item = operations[index];
+    const prototype = item !== null && typeof item === 'object' ? Object.getPrototypeOf(item) : undefined;
+    const own = prototype === Object.prototype || prototype === null
+      ? Reflect.ownKeys(item).filter((key) => item[key] !== undefined)
+      : [];
+    if (own.length !== 1 || typeof own[0] !== 'string') {
+      return `operations[${index}] for tool "${toolName}" must name exactly one operation.${valid}`;
+    }
+    if (!keys.has(own[0])) {
+      return `Unknown operation "${own[0]}" at operations[${index}] for tool "${toolName}".${valid}`;
+    }
+  }
+  return undefined;
+};
+
+/**
  * Root-value key under which simfinity-core's generated find resolver looks
  * for a count sink (see reportCount in packages/core/src/runtime.js). When the
  * root value carries a function there, the resolver hands it the pagination
@@ -2879,6 +2917,15 @@ const createCallTool = ({
     if (unknown.length) {
       return limitErrorResult(stringify, unknownArgumentsMessage(call.name, unknown, entry.argNames), 'MCP_UNKNOWN_ARGUMENT');
     }
+    // A transaction runs only the operations its tool advertises, as the call reaches execution, middleware
+    // included: remotely, the endpoint's own field may have more.
+    const invalidOperations = entry.transactionKeys
+      ? transactionOperationsMessage(call.name, args !== null && typeof args === 'object' ? args.operations : undefined,
+        entry.transactionKeys)
+      : undefined;
+    if (invalidOperations !== undefined) {
+      return limitErrorResult(stringify, invalidOperations, 'MCP_UNKNOWN_ARGUMENT');
+    }
     if (entry.hasPagination) {
       if (limits.defaultPagination && args.pagination == null) {
         args = { ...args, pagination: { ...limits.defaultPagination } };
@@ -3155,7 +3202,7 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
     };
   };
 
-  // Whether the filters publish a transaction tool (spec #151, section 5): include and exclude accept it by
+  // Whether the filters publish a transaction tool (#151): include and exclude accept it by
   // its own name or 'mutation'; exclude names none of its operation keys, bare or prefixed; and, with type
   // filters, every type its operations write resolves, none is in excludeTypes, and includeTypes, when
   // set, lists them all. Its result type is no entity.
@@ -3232,7 +3279,7 @@ const buildToolDefinitions = (schema, options = {}, limits = {}) => {
         if (!plan) {
           if (!warnedTransactionFields.has(field) && selectedByName(fieldName, toolName, kind)) {
             warnedTransactionFields.add(field);
-            console.warn(`[simfinity-mcp] The mutation "${fieldName}" looks like a Simfinity transaction field, but MCP cannot publish it as one, so it is omitted. A transaction tool needs the field's marker description, an operations argument whose @oneOf input type has one field per generated mutation, and the field's result type; a schema rebuilt from introspection must request getIntrospectionQuery({ oneOf: true }) with descriptions.`);
+            console.warn(`[simfinity-mcp] The mutation "${fieldName}" looks like a Simfinity transaction field, but MCP cannot publish it as one, so it is omitted. A transaction tool needs the field's marker description, an operations argument whose @oneOf input type has at least one field, each matching a mutation root of the same schema by name and input type (a generated root or any root of that name), and the field's result type; a schema rebuilt from introspection must request getIntrospectionQuery({ oneOf: true }) with descriptions.`);
           }
           continue;
         }
@@ -3555,8 +3602,10 @@ const prepareMCPTools = (schema, options = {}) => {
  *   one-time warning. Each operation is selected with the selectionDepth and
  *   nestedCollections of its own tool and, below the result list, only the
  *   virtual fields with mcp: 'select'; each result item keeps only its id and
- *   its own operation key, unless the tool has an explicit selection. Other
- *   values throw MCP_INVALID_OPTIONS.
+ *   its own operation key, unless the tool has an explicit selection. A call
+ *   whose `operations` is not a list of items that each name exactly one of
+ *   the tool's operation keys is rejected (MCP_UNKNOWN_ARGUMENT, nothing
+ *   executed), in both modes. Other values throw MCP_INVALID_OPTIONS.
  * @param {boolean} [options.includeId] deprecated and ignored: every scalar/enum
  *   field without required arguments, `id` included, is always selected, and
  *   an object type with none selects `__typename`.

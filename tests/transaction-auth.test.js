@@ -511,6 +511,51 @@ describe('entry protocol and core copies', () => {
       .toEqual(FORBIDDEN('Mutation.deleteproducto'));
   });
 
+  describe('markers that cannot take entries', () => {
+    const freezeMarkers = (schema) => Object.values(roots(schema)).forEach((field) => {
+      if (field.extensions?.simfinityMutation) Object.freeze(field.extensions.simfinityMutation);
+    });
+
+    test('without the transaction field, the plugin wraps the roots, records nothing and direct calls keep their rules', async () => {
+      await loadEntries();
+      const runtime = createRuntime(createOptimisticMemoryAdapter());
+      const Producto = new GraphQLObjectType({ name: 'Producto', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+      runtime.connect(null, Producto, 'producto', 'productos');
+      const schema = runtime.createSchema();
+      freezeMarkers(schema);
+
+      const plugin = createAuthPlugin({ Mutation: { deleteproducto: refuse } }, { defaultPolicy: 'ALLOW' });
+      expect(() => plugin.onSchemaChange({ schema })).not.toThrow();
+      expect(Object.getOwnPropertySymbols(roots(schema).deleteproducto.extensions.simfinityMutation)).toEqual([]);
+      expect(await directError(schema)).toEqual(FORBIDDEN('Mutation.deleteproducto'));
+      const added = await graphql({ schema, source: 'mutation { addproducto(input: { name: "Mate" }) { name } }', contextValue: {} });
+      expect(added).toEqual({ data: { addproducto: { name: 'Mate' } } });
+      // Processing the schema again records nothing either.
+      expect(() => plugin.onSchemaChange({ schema: copyOf(schema) })).not.toThrow();
+    });
+
+    test('an operation whose marker cannot take entries and has none is denied, whatever the rules', async () => {
+      await loadEntries();
+      const schema = buildSchema();
+      freezeMarkers(schema);
+      expect(await rejection(authorize(schema, 'addproducto'))).toEqual(FORBIDDEN('Mutation.addproducto'));
+
+      protect(schema, { Mutation: { addproducto: allow(), deleteproducto: allow() } }, 'ALLOW');
+      expect(await rejection(authorize(schema, 'addproducto'))).toEqual(FORBIDDEN('Mutation.addproducto'));
+      expect(await rejection(authorize(schema, 'deleteproducto'))).toEqual(FORBIDDEN('Mutation.deleteproducto'));
+    });
+
+    test('a marker frozen after the plugin recorded its entries keeps running them', async () => {
+      await loadEntries();
+      const schema = buildSchema();
+      protect(schema, { Mutation: { deleteproducto: refuse, addproducto: allow() } }, 'ALLOW');
+      freezeMarkers(schema);
+
+      expect(await rejection(authorize(schema, 'deleteproducto'))).toEqual(FORBIDDEN('Mutation.deleteproducto'));
+      await expect(authorize(schema, 'addproducto')).resolves.toBeUndefined();
+    });
+  });
+
   test('the entries are not exported from the package root or the auth subpath', async () => {
     const { OPERATION_EVALUATORS } = await loadEntries();
     expect(OPERATION_EVALUATORS).toBe(KEY);

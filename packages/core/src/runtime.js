@@ -9,7 +9,8 @@ import {
   GraphQLObjectType, GraphQLString, GraphQLID, GraphQLSchema, GraphQLList,
   GraphQLNonNull, GraphQLInputObjectType, GraphQLScalarType,
   GraphQLInt, GraphQLEnumType, GraphQLBoolean, GraphQLError, GraphQLInterfaceType, GraphQLUnionType,
-  Kind, getNamedType, isEnumType, isListType, isNonNullType, isObjectType, isOutputType, isScalarType,
+  Kind, defaultFieldResolver, getNamedType, isEnumType, isListType, isNonNullType, isObjectType, isOutputType,
+  isScalarType,
 } from 'graphql';
 
 import SimfinityError from './errors/simfinity.error.js';
@@ -463,7 +464,7 @@ const classifyError = (error) => {
 };
 
 // The error that a transaction field reports when the operation `operation`, at `operationIndex`, ended
-// it (#151, section 4.8): a new error with the code, status and message that buildErrorFormatter gives
+// it (#151): a new error with the code, status and message that buildErrorFormatter gives
 // `cause` when a root resolver throws it, and every extension of it, plus the operation's position. An
 // InternalServerError stays one, as for a root, so the callback that masks unexpected errors still hides
 // the message of a cause that is not an application error. The original is its non-enumerable `cause`,
@@ -4005,9 +4006,10 @@ const readSchemaOptions = (options, includedMutationTypes, includedCustomMutatio
 // registered in this runtime.
 const referenceRegistry = { registeredTypes: () => Object.values(typesDict.types).map(({ gqltype }) => gqltype) };
 
-// The model affinity check (#151, section 4.7), before the session opens. The adapter's check is
-// synchronous: a thenable it returns is refused, once the rejection of a native promise is handled so it
-// cannot crash the process. An error it throws passes through unchanged.
+// The model affinity check (#151), before the session opens, so that models that cannot share one database
+// transaction fail before anything runs. The adapter's check is synchronous: a thenable it returns is
+// refused, once the rejection of a native promise is handled so it cannot crash the process. An error it
+// throws passes through unchanged.
 const assertTransactionModels = (models) => {
   if (typeof adapter.assertTransactionModels !== 'function') throw transactionUnsupportedError();
   const result = adapter.assertTransactionModels(models);
@@ -4028,38 +4030,38 @@ const operationInputError = (error, index, key) => {
   return positioned;
 };
 
-// The input walk over the list GraphQL coerced (section 3), which applies the scalar and record-key rules
-// and requires the top-level id of an update, an action or a delete. GraphQL has checked the items
-// (@oneOf), so each has exactly one of the field's operation keys. Returns the steps, `{ index, key,
-// entry }`, and the snapshot: one `{ [key]: value }` per item, which the list never shares.
-const snapshotTransaction = (transactionState, operationList) => {
-  const steps = [];
-  const snapshot = operationList.map((item, index) => {
-    const keys = item !== null && typeof item === 'object' ? Object.keys(item) : [];
-    const entry = keys.length === 1 ? transactionState.operations.get(keys[0]) : undefined;
-    if (entry === undefined) throw new TypeError(`Item ${index} is not an operation of ${transactionState.name}`);
-    const [key] = keys;
-    steps.push({ index, key, entry });
-    try {
-      return {
-        [key]: snapshotOperationInput(item[key], entry.valueType, {
-          ...operationWalkOptions, mode: 'coerced', path: `operations[${index}].${key}`, topLevelId: entry.operation !== operations.SAVE,
-        }),
-      };
-    } catch (error) {
-      throw operationInputError(error, index, key);
-    }
-  });
-  return { steps, snapshot };
-};
+// The steps of the list GraphQL coerced, `{ index, key, entry }`, one per item. GraphQL has checked the
+// items (@oneOf), so each has exactly one of the field's operation keys.
+const transactionSteps = (transactionState, operationList) => operationList.map((item, index) => {
+  const keys = item !== null && typeof item === 'object' ? Object.keys(item) : [];
+  const entry = keys.length === 1 ? transactionState.operations.get(keys[0]) : undefined;
+  if (entry === undefined) throw new TypeError(`Item ${index} is not an operation of ${transactionState.name}`);
+  return { index, key: keys[0], entry };
+});
+
+// The input walk over the list GraphQL coerced, which applies the scalar and record-key rules, bounds the
+// nesting and requires the top-level id of an update, an action or a delete. Returns the snapshot: one
+// `{ [key]: value }` per item, which the list never shares.
+const snapshotTransaction = (steps, operationList) => steps.map(({ index, key, entry }) => {
+  try {
+    return {
+      [key]: snapshotOperationInput(operationList[index][key], entry.valueType, {
+        ...operationWalkOptions, mode: 'coerced', path: `operations[${index}].${key}`, topLevelId: entry.operation !== operations.SAVE,
+      }),
+    };
+  } catch (error) {
+    throw operationInputError(error, index, key);
+  }
+});
 
 // The nested entries of the whole list, nulls included, against the snapshotted limit; null is no limit.
-// It only looks ahead: the attempts count what runs. A delete has no nested entries.
-const assertTransactionNestedOperations = (steps, snapshot, limit) => {
+// `list` is the list GraphQL coerced, or a snapshot of it, which has the same entries. It only looks
+// ahead: the attempts count what runs. A delete has no nested entries.
+const assertTransactionNestedOperations = (steps, list, limit) => {
   if (limit === null) return;
   const counted = { count: 0 };
   for (const { index, key, entry } of steps) {
-    if (entry.operation !== operations.DELETE) assertNestedOperations(entry.type.gqltype, snapshot[index][key], limit, counted);
+    if (entry.operation !== operations.DELETE) assertNestedOperations(entry.type.gqltype, list[index][key], limit, counted);
   }
 };
 
@@ -4082,7 +4084,7 @@ const unexposedOperationError = (mutationType, operationIndex, operation) => {
   return error;
 };
 
-// Where each operation of the list may run (section 4.5): `mutationType`, the Mutation type that runs the
+// Where each operation of the list may run: `mutationType`, the Mutation type that runs the
 // transaction (`info.parentType`), must expose its generated root, that is, have a field whose marker is
 // the marker of the root the field was built with, or a copy of it, under any name. A served copy of the
 // schema can drop a root, or put another field under its name, and a direct call could then not reach the
@@ -4093,7 +4095,8 @@ const unexposedOperationError = (mutationType, operationIndex, operation) => {
 // marker, by identity, among the markers of the fields that expose the root and the marker of the root the
 // field was built with. The identity field's marker comes first, then those of the other fields in field
 // order, then the built one. A copy that renames the root, aliases it or clones its markers thus runs the
-// checks of every name that reaches the root, and never fewer than the schema the field was built in (R13).
+// checks of every name that reaches the root, and never fewer than the schema the field was built in: a
+// transform that clones the markers would otherwise drop the entries its copied wrappers still enforce.
 // authorizeOperation reads only a root's name, type and marker, so each root is a view of one marker with
 // the identity the rules see: the operation key as `info.fieldName`, and the type of the identity field,
 // which is the field that exposes the root under the key, or else the first field that exposes it, in field
@@ -4123,7 +4126,7 @@ const exposedOperationRoots = (steps, mutationType) => {
   return roots;
 };
 
-// The checks a direct call to an operation's root gets (section 4.5): the entries the auth plugin recorded
+// The checks a direct call to an operation's root gets: the entries the auth plugin recorded
 // on each of the operation's roots (exposedOperationRoots), in order.
 const authorizeTransactionOperation = async (roots, parent, args, context, info) => {
   for (const root of roots) await authorizeOperation(root, parent, args, context, info);
@@ -4146,11 +4149,49 @@ const reachesOperationError = (error, operationError) => {
   return false;
 };
 
-// Runs a non-empty operation list of a transaction field (section 4.4) and returns one result per
-// operation, `{ id, [key]: record }`, where the record of a delete of a missing record and its id are null.
-// Before the transaction: the limits are read once, then come the operation count, the model affinity
-// check, the input walk, the references, the nested entries of the whole list and the roots the Mutation
-// type that runs the transaction exposes. Then one owned transaction runs the list, retries included; each
+// The record of each result item of a transaction that has one, with the item's operation key and the type
+// that operation's root returned when the field was built: what TransactionResult.id resolves from. The
+// item of a delete of a missing record has none.
+const transactionResultRecords = new WeakMap();
+
+// The record's type in the executing schema, whose fields a plugin applied to that schema wrapped: the
+// object type the executing result type gives the operation key, or else the executing schema's object
+// type of the name the root returned when the field was built. Undefined when it has neither: the type the
+// field was built with is never used, since a plugin applied to a copy with new type objects never wrapped it.
+const executingRecordType = (info, key, builtType) => {
+  const resultFields = info.parentType.getFields();
+  const executing = Object.hasOwn(resultFields, key) ? getNamedType(resultFields[key].type) : undefined;
+  if (isObjectType(executing)) return executing;
+  const named = info.schema.getType(builtType.name);
+  return isObjectType(named) ? named : undefined;
+};
+
+// TransactionResult.id: the id of the operation's record, resolved by the `id` field of the record's own
+// type in the executing schema (executingRecordType), with the record as parent, no arguments and that
+// field's info, as a direct call to the operation's root that selects `id` resolves it, so that a rule an
+// auth plugin put on `<Type>.id` applies here too. Without such a type the id is refused with FORBIDDEN
+// (null and the error). An item without a record, and a type without an `id` field, give null without
+// calling anything.
+const resolveTransactionResultId = (item, args, context, info) => {
+  const result = item !== null && typeof item === 'object' ? transactionResultRecords.get(item) : undefined;
+  if (result === undefined) return null;
+  const { key, record, builtType } = result;
+  const recordType = executingRecordType(info, key, builtType);
+  if (recordType === undefined) throw new ForbiddenError(`Access denied to ${info.parentType.name}.id`);
+  const recordFields = recordType.getFields();
+  if (!Object.hasOwn(recordFields, 'id')) return null;
+  const idField = recordFields.id;
+  return (idField.resolve ?? defaultFieldResolver)(record, {}, context, {
+    ...info, fieldName: 'id', parentType: recordType, returnType: idField.type,
+  });
+};
+
+// Runs a non-empty operation list of a transaction field and returns one result per operation, `{ id,
+// [key]: record }`, where the record of a delete of a missing record and its id are null. Before the
+// transaction: the limits are read once, then come the operation count, the model affinity check, the
+// nested entries of the whole list, counted on what GraphQL coerced so that a list past the limit fails as
+// a root past it does, the input walk, the references and the roots the Mutation type that runs the
+// transaction exposes. Then one owned transaction runs the list, retries included; each
 // attempt works on its own copy of the snapshot, with an execution state on its session for the limits and
 // the joint nested budget. When the error of an operation of the final attempt ends the transaction, the
 // resolver reports it with that operation's position (decorateOperationError); every other error is
@@ -4163,7 +4204,9 @@ const executeTransaction = async (transactionState, operationList, parent, conte
     throw transactionOperationsExceededError(limits.maxTransactionOperations);
   }
   assertTransactionModels(transactionState.models);
-  const { steps, snapshot } = snapshotTransaction(transactionState, operationList);
+  const steps = transactionSteps(transactionState, operationList);
+  assertTransactionNestedOperations(steps, operationList, limits.maxNestedOperations);
+  const snapshot = snapshotTransaction(steps, operationList);
   // Once, on the snapshot, which it changes in place: `$$` literals lose a `$` before any attempt copies them.
   const referencePlan = planReferences(snapshot, transactionState, referenceRegistry);
   // The plan's positions by operation index, in plan order, so that each operation reads only its own.
@@ -4172,7 +4215,6 @@ const executeTransaction = async (transactionState, operationList, parent, conte
     if (!referencesOf.has(position.index)) referencesOf.set(position.index, []);
     referencesOf.get(position.index).push(position);
   }
-  assertTransactionNestedOperations(steps, snapshot, limits.maxNestedOperations);
   const operationRoots = exposedOperationRoots(steps, info.parentType);
 
   // One record per attempt that started, in order. Its `failure` is `{ error, operationIndex, operation }`
@@ -4195,7 +4237,7 @@ const executeTransaction = async (transactionState, operationList, parent, conte
       }));
       // `{ id }` of each operation's record in this attempt, or null, which resolveReferences reads.
       const written = [];
-      // One operation (section 4.4, step 4): its references, the checks of its roots with the root's args,
+      // One operation: its references, the checks of its roots with the root's args,
       // `{ input }` or, for a delete, `{ id }` or `{ id, version }`, the root's middleware with the same
       // args, then, on a copy of what middleware left and before anything of it is written, the look-ahead
       // of its nested entries and the collection check, and the operation itself on the attempt's session.
@@ -4237,7 +4279,13 @@ const executeTransaction = async (transactionState, operationList, parent, conte
         }
         const id = record == null ? null : record._id ?? record.id ?? null;
         written[step.index] = record == null ? null : { id };
-        results.push({ id, [step.key]: record ?? null });
+        const item = { id, [step.key]: record ?? null };
+        if (record != null) {
+          transactionResultRecords.set(item, {
+            key: step.key, record, builtType: getNamedType(step.entry.rootField.type),
+          });
+        }
+        results.push(item);
       }
       return results;
     } finally {
@@ -4253,7 +4301,7 @@ const executeTransaction = async (transactionState, operationList, parent, conte
   }
 };
 
-// The models one transaction of the field may write (#151, section 4.7): those of the types that own
+// The models one transaction of the field may write (#151): those of the types that own
 // its operations, then those of the referenced collections their inputs declare, through the items'
 // own inputs and embedded values at any depth, without null models or repeats.
 const transactionModels = (operationEntries) => {
@@ -4336,6 +4384,7 @@ const buildTransaction = ({ name, types }, query, mutation, shadowedRoots) => {
     types,
     operations: descriptors,
     recordVersionRef: RecordVersionRef,
+    resolveId: resolveTransactionResultId,
     // An empty list runs nothing: no transaction and no affinity check.
     async resolve(parent, args, context, info) {
       const { operations: list } = args;

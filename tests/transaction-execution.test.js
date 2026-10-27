@@ -14,7 +14,7 @@ import {
   GraphQLString, graphql,
 } from 'graphql';
 import { configureMutationLimits, createRuntime, SimfinityError } from '@simtlix/simfinity-core';
-import { allow, createAuthPlugin } from '@simtlix/simfinity-core/auth';
+import { allow, createAuthPlugin, requireRole } from '@simtlix/simfinity-core/auth';
 import { resolveReferences } from '../packages/core/src/transaction-references.js';
 import { createOptimisticMemoryAdapter, transientError } from './helpers/optimistic-memory-adapter.js';
 
@@ -281,6 +281,72 @@ describe('runs', () => {
       only('1000', 'deleteproducto', { name: 'a' }),
     ]);
     expect(fixture.storedKeys()).toEqual(['Pedido:1001']);
+  });
+
+  test('an inline literal list runs: a reference by $0, a $$ literal and a null nested entry', async () => {
+    // Autor has a collection of Libros linked through their autor; the field covers both types.
+    configureMutationLimits({ maxNestedOperations: 2 });
+    const adapter = createOptimisticMemoryAdapter();
+    // The memory adapter's ids are digits; references keep any other text as it is.
+    adapter.castId = (id) => String(id);
+    vi.spyOn(adapter, 'withTransaction');
+    const runtime = createRuntime(adapter);
+    const Autor = new GraphQLObjectType({
+      name: 'Autor',
+      fields: () => ({
+        id: { type: GraphQLID },
+        nombre: { type: GraphQLString },
+        libros: { type: new GraphQLList(Libro), extensions: { relation: { embedded: false, connectionField: 'autor' } } },
+      }),
+    });
+    const Libro = new GraphQLObjectType({
+      name: 'Libro',
+      fields: () => ({
+        id: { type: GraphQLID }, titulo: { type: GraphQLString }, autor: { type: Autor, extensions: { relation: { embedded: false } } },
+      }),
+    });
+    runtime.connect(null, Autor, 'autor', 'autores');
+    runtime.connect(null, Libro, 'libro', 'libros');
+    const schema = runtime.createSchema(null, null, null, { transaction: { types: [Autor, Libro] } });
+    // GraphQL coerces literal input objects into containers with a null prototype, which the nested count
+    // reads before the input walk copies them.
+    const run = () => graphql({
+      schema,
+      contextValue: {},
+      source: `mutation {
+        transaction(operations: [
+          { addautor: { nombre: "A", libros: { added: [{ titulo: "uno" }, null] } } },
+          { updateautor: { id: "$0", nombre: "B" } },
+          { addlibro: { titulo: "$$0 stays", autor: { id: "$$0" } } }
+        ]) { id addautor { id nombre } updateautor { id nombre } addlibro { id titulo } }
+      }`,
+    });
+    const result = await run();
+
+    expect(result.errors, JSON.stringify(result.errors)).toBeUndefined();
+    expect(result.data.transaction).toEqual([
+      {
+        id: '1000', addautor: { id: '1000', nombre: 'A' }, updateautor: null, addlibro: null,
+      },
+      {
+        id: '1000', addautor: null, updateautor: { id: '1000', nombre: 'B' }, addlibro: null,
+      },
+      {
+        id: '1002', addautor: null, updateautor: null, addlibro: { id: '1002', titulo: '$$0 stays' },
+      },
+    ]);
+    expect(adapter.withTransaction).toHaveBeenCalledTimes(1);
+    expect([...adapter.records.keys()].sort()).toEqual(['Autor:1000', 'Libro:1001', 'Libro:1002']);
+    expect(adapter.stored('Autor', '1000')).toMatchObject({ nombre: 'B' });
+    expect(adapter.stored('Libro', '1001')).toMatchObject({ titulo: 'uno', autor: '1000' });
+    // `$$0` at the reference is the literal `$0`, not operation 0's ID; a string field keeps its text.
+    expect(adapter.stored('Libro', '1002')).toMatchObject({ titulo: '$$0 stays', autor: '$0' });
+
+    // The null entry counts against the limit like the other one.
+    configureMutationLimits({ maxNestedOperations: 1 });
+    expect(failure(await run())).toEqual(NESTED_EXCEEDED(1));
+    expect(adapter.withTransaction).toHaveBeenCalledTimes(1);
+    expect([...adapter.records.keys()].sort()).toEqual(['Autor:1000', 'Libro:1001', 'Libro:1002']);
   });
 
   test('a reference to a later operation fails before the transaction, naming its operation', async () => {
@@ -586,6 +652,109 @@ describe('authorization', () => {
       'rule deletepedido', 'middleware delete Pedido'];
     expect(fixture.events.filter((event) => /^(rule|middleware) /.test(event))).toEqual([...order, ...order]);
   });
+
+  test('an operation whose root marker cannot carry entries is refused, positioned, and nothing is written', async () => {
+    const fixture = build();
+    Object.values(fixture.schema.getMutationType().getFields()).forEach((field) => {
+      if (field.extensions?.simfinityMutation) Object.freeze(field.extensions.simfinityMutation);
+    });
+    // The plugin skips the entries it cannot record, and the roots keep their rules when called directly.
+    protect(fixture.schema, { Mutation: { deleteproducto: () => false } }, 'ALLOW');
+    expect(failure(await fixture.run('mutation { deleteproducto(id: "1") { id } }'))).toEqual(FORBIDDEN('Mutation.deleteproducto'));
+
+    const result = await fixture.transaction([{ addproducto: { name: 'a' } }]);
+    expect(failure(result)).toEqual(FORBIDDEN('Mutation.addproducto'));
+    expect(positionOf(result)).toEqual({ operationIndex: 0, operation: 'addproducto' });
+    expect(fixture.dataCalls()).toBe(0);
+    expect(fixture.storedKeys()).toEqual([]);
+    expect((await fixture.run('mutation { addproducto(input: { name: "b" }) { name } }')).errors).toBeUndefined();
+  });
+});
+
+describe('the id of a result', () => {
+  const REQUIRES_ADMIN = { code: 'FORBIDDEN', status: 403, message: 'Requires role: admin' };
+  const USER = { user: { role: 'user' } };
+  const ADMIN = { user: { role: 'admin' } };
+
+  // A schema with the transaction field over Serie only, protected under DENY as the authorization guide
+  // suggests: every field of TransactionResult allowed, and Serie.id restricted.
+  const buildSeries = () => {
+    const adapter = createOptimisticMemoryAdapter();
+    const runtime = createRuntime(adapter);
+    const Serie = new GraphQLObjectType({ name: 'Serie', fields: { id: { type: GraphQLID }, name: { type: GraphQLString } } });
+    runtime.connect(null, Serie, 'serie', 'series');
+    const schema = runtime.createSchema(null, null, null, { transaction: { types: [Serie] } });
+    protect(schema, {
+      Mutation: { transaction: allow(), addserie: allow(), deleteserie: allow() },
+      TransactionResult: { '*': allow() },
+      Serie: { '*': allow(), id: requireRole('admin') },
+    }, 'DENY');
+    return { adapter, schema };
+  };
+  const underAllow = () => {
+    const { adapter, schema } = build();
+    protect(schema, { Producto: { id: requireRole('admin') } }, 'ALLOW');
+    return { adapter, schema };
+  };
+
+  test.each([
+    ['under ALLOW, Producto.id', underAllow, 'producto'],
+    ['under DENY, Serie.id', buildSeries, 'serie'],
+  ])('%s restricted to admins applies to the id of each result as it does to a direct call', async (_label, setUp, name) => {
+    const { adapter, schema } = setUp();
+    const run = (source, contextValue) => graphql({ schema, source, contextValue });
+    const direct = (contextValue) => run(`mutation { add${name}(input: { name: "d" }) { id name } }`, contextValue);
+    const transaction = (contextValue) => run(`mutation { transaction(operations: [{ add${name}: { name: "t" } }]) { id add${name} { name } } }`,
+      contextValue);
+
+    const deniedDirect = await direct(USER);
+    expect(failure(deniedDirect)).toEqual(REQUIRES_ADMIN);
+    expect(deniedDirect.errors[0].path).toEqual([`add${name}`, 'id']);
+    expect(deniedDirect.data).toEqual({ [`add${name}`]: { id: null, name: 'd' } });
+    const denied = await transaction(USER);
+    expect(failure(denied)).toEqual(REQUIRES_ADMIN);
+    expect(denied.errors[0].path).toEqual(['transaction', 0, 'id']);
+    expect(denied.data).toEqual({ transaction: [{ id: null, [`add${name}`]: { name: 't' } }] });
+
+    expect(await direct(ADMIN)).toEqual({ data: { [`add${name}`]: { id: '1002', name: 'd' } } });
+    expect(await transaction(ADMIN)).toEqual({ data: { transaction: [{ id: '1003', [`add${name}`]: { name: 't' } }] } });
+    // A denied id is an output error after the commit: every add was written.
+    const typeName = `${name.charAt(0).toUpperCase()}${name.slice(1)}`;
+    expect([...adapter.records.keys()].sort()).toEqual(['1000', '1001', '1002', '1003'].map((id) => `${typeName}:${id}`));
+  });
+
+  test('the record type\'s id field resolves it, with the record as parent and the info of that field', async () => {
+    const fixture = build();
+    fixture.adapter.seed('Producto', { _id: '1', name: 'kept' });
+    const seen = [];
+    protect(fixture.schema, {
+      Producto: {
+        id: (parent, args, ctx, info) => {
+          seen.push({
+            parent, args, ctx, fieldName: info.fieldName, parentType: info.parentType, returnType: info.returnType, path: info.path,
+          });
+          return true;
+        },
+      },
+    }, 'ALLOW');
+    const context = { request: 'transaction' };
+    const result = await fixture.transaction([
+      { updateproducto: { id: '1', name: 'renamed' } },
+      { deleteproducto: { id: '999' } },
+    ], { selection: 'id', contextValue: context });
+
+    expect(result).toEqual({ data: { transaction: [{ id: '1' }, { id: null }] } });
+    // A delete of a missing record has no record, and its id is null without a call.
+    expect(seen).toHaveLength(1);
+    const [call] = seen;
+    expect(call.parent).toMatchObject({ _id: '1', name: 'renamed' });
+    expect(call.args).toEqual({});
+    expect(call.ctx).toBe(context);
+    expect(call.fieldName).toBe('id');
+    expect(call.parentType).toBe(fixture.types.Producto);
+    expect(call.returnType).toBe(fixture.types.Producto.getFields().id.type);
+    expect(call.path).toMatchObject({ key: 'id', prev: { key: 0, prev: { key: 'transaction' } } });
+  });
 });
 
 describe('the joint nested budget', () => {
@@ -762,7 +931,7 @@ describe('order inside an operation', () => {
 });
 
 describe('preflight', () => {
-  test('it checks the count, the models, the inputs, the references and the nested entries, in that order', async () => {
+  test('it checks the count, the models, the nested entries, the inputs and the references, in that order', async () => {
     configureMutationLimits({ maxNestedOperations: 1, maxTransactionOperations: 2 });
     const badScalar = { addproducto: { name: 'b', cost: '5' } };
     const badReference = { updateproducto: { id: '$1', name: 'x' } };
@@ -776,8 +945,15 @@ describe('preflight', () => {
 
     const affinity = build();
     affinity.adapter.assertTransactionModels.mockImplementation(() => { throw affinityError; });
-    const refused = await affinity.transaction([badReference, badScalar]);
+    const refused = await affinity.transaction([badScalar, tooManyEntries]);
     expect(refused.errors[0].originalError).toBe(affinityError);
+
+    // The nested entries of the list are counted on what GraphQL coerced, before the input walk, so a list past
+    // the limit fails as a root past it does, whatever else is wrong with it.
+    const nested = build();
+    expect(failure(await nested.transaction([badScalar, tooManyEntries]))).toEqual(NESTED_EXCEEDED(1));
+    expect(failure(await nested.transaction([badReference, tooManyEntries]))).toEqual(NESTED_EXCEEDED(1));
+    expect(nested.adapter.assertTransactionModels).toHaveBeenCalledTimes(2);
 
     const walked = build();
     const invalid = await walked.transaction([badReference, badScalar]);
@@ -785,15 +961,97 @@ describe('preflight', () => {
     expect(walked.adapter.assertTransactionModels).toHaveBeenCalledTimes(1);
 
     const planned = build();
-    const reference = await planned.transaction([tooManyEntries, badReference]);
+    const reference = await planned.transaction([badReference]);
     expect(failure(reference).code).toBe('INVALID_OPERATION_REFERENCE');
-
-    const nested = build();
-    expect(failure(await nested.transaction([tooManyEntries]))).toEqual(NESTED_EXCEEDED(1));
-    for (const fixture of [counted, affinity, walked, planned, nested]) {
+    for (const fixture of [counted, affinity, nested, walked, planned]) {
       expect(fixture.adapter.withTransaction).not.toHaveBeenCalled();
       expect(fixture.dataCalls()).toBe(0);
     }
+  });
+});
+
+describe('deep inputs', () => {
+  const NESTED = 'input is nested too deeply';
+
+  // Nodo has a collection of Nodos linked through their parent: each level of an input is a Nodo input, its
+  // `children` collection input and the list `added`, three containers.
+  const buildNodos = () => {
+    const adapter = createOptimisticMemoryAdapter();
+    vi.spyOn(adapter, 'withTransaction');
+    vi.spyOn(adapter, 'saveRecord');
+    const runtime = createRuntime(adapter);
+    const Nodo = new GraphQLObjectType({
+      name: 'Nodo',
+      fields: () => ({
+        id: { type: GraphQLID },
+        name: { type: GraphQLString },
+        parent: { type: Nodo, extensions: { relation: { embedded: false } } },
+        children: { type: new GraphQLList(Nodo), extensions: { relation: { embedded: false, connectionField: 'parent' } } },
+      }),
+    });
+    runtime.connect(null, Nodo, 'nodo', 'nodos');
+    const schema = runtime.createSchema(null, null, null, { transaction: { types: [Nodo] } });
+    adapter.seed('Nodo', { _id: '1', name: 'root' });
+    const run = (source, variableValues) => graphql({
+      schema, source, variableValues, contextValue: {},
+    });
+    return {
+      adapter,
+      runtime,
+      root: (input) => run('mutation Add($input: NodoInput!) { addnodo(input: $input) { id } }', { input }),
+      transaction: (operations) => run('mutation Run($operations: [TransactionOperation!]!) { transaction(operations: $operations) { id } }',
+        { operations }),
+      storedNodos: () => [...adapter.records.keys()].filter((key) => key.startsWith('Nodo:')).length,
+    };
+  };
+  // `levels` Nodos, each the only item its parent adds; the deepest one is `leaf`.
+  const chain = (levels, leaf = {}) => {
+    let node = { name: `n${levels}`, ...leaf };
+    for (let level = levels - 1; level >= 1; level -= 1) node = { name: `n${level}`, children: { added: [node] } };
+    return node;
+  };
+  // The path of the container at `level` of an input whose top-level Nodo input is at level 1, below `root`.
+  const pathAt = (root, level) => `${root}${'.children.added[0]'.repeat(Math.floor((level - 1) / 3))}${['', '.children', '.children.added'][(level - 1) % 3]}`;
+
+  test('an input 300 levels deep fails with INVALID_INPUT in a helper and in the transaction, before any write', async () => {
+    const fixture = buildNodos();
+    // The update input is level 1, so its first added Nodo is at level 4.
+    const helper = await fixture.runtime.updateObject('Nodo', { id: '1', children: { added: [chain(300)] } }).catch((error) => error);
+    expect(helper).toBeInstanceOf(SimfinityError);
+    expect({ code: helper.getCode(), status: helper.getStatus(), message: helper.message })
+      .toEqual(invalidInput(pathAt('input', 257), NESTED));
+
+    const result = await fixture.transaction([{ addnodo: chain(300) }]);
+    expect(failure(result)).toEqual(invalidInput(pathAt('operations[0].addnodo', 257), NESTED));
+    expect(positionOf(result)).toEqual({ operationIndex: 0, operation: 'addnodo' });
+    expect(fixture.adapter.withTransaction).not.toHaveBeenCalled();
+    expect(fixture.adapter.saveRecord).not.toHaveBeenCalled();
+    expect(fixture.storedNodos()).toBe(1);
+  });
+
+  test('with maxNestedOperations, an input 600 levels deep fails with NESTED_OPERATIONS_EXCEEDED, as the root does', async () => {
+    configureMutationLimits({ maxNestedOperations: 5 });
+    const fixture = buildNodos();
+    expect(failure(await fixture.root(chain(600)))).toEqual(NESTED_EXCEEDED(5));
+    expect(failure(await fixture.transaction([{ addnodo: chain(600) }]))).toEqual(NESTED_EXCEEDED(5));
+    expect(fixture.adapter.saveRecord).not.toHaveBeenCalled();
+    expect(fixture.storedNodos()).toBe(1);
+  });
+
+  test('an input nested 256 levels runs, and one more level is refused', async () => {
+    const fixture = buildNodos();
+    // 86 Nodos: the deepest is at level 3 * 85 + 1 = 256.
+    const result = await fixture.transaction([{ addnodo: chain(86) }]);
+    expect(result.errors).toBeUndefined();
+    expect(fixture.storedNodos()).toBe(1 + 86);
+    // Its update input adds a level, so 85 Nodos below it reach 256.
+    const updated = await fixture.runtime.updateObject('Nodo', { id: '1', children: { added: [chain(85)] } });
+    expect(updated).toMatchObject({ _id: '1' });
+    expect(fixture.storedNodos()).toBe(1 + 86 + 85);
+
+    const deeper = await fixture.transaction([{ addnodo: chain(86, { children: {} }) }]);
+    expect(failure(deeper)).toEqual(invalidInput(pathAt('operations[0].addnodo', 257), NESTED));
+    expect(fixture.storedNodos()).toBe(1 + 86 + 85);
   });
 });
 

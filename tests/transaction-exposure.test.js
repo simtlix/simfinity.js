@@ -7,7 +7,10 @@
 // adapter.
 import { describe, expect, test, vi } from 'vitest';
 import {
-  GraphQLEnumType, GraphQLID, GraphQLNonNull, GraphQLObjectType, GraphQLSchema, GraphQLString, graphql,
+  GraphQLDirective, GraphQLEnumType, GraphQLID, GraphQLInputObjectType, GraphQLInterfaceType, GraphQLList, GraphQLNonNull,
+  GraphQLObjectType, GraphQLScalarType, GraphQLSchema, GraphQLString, GraphQLUnionType, getNamedType, graphql, isEnumType,
+  isInputObjectType, isInterfaceType, isListType, isNonNullType, isObjectType, isSpecifiedDirective, isSpecifiedScalarType,
+  isUnionType,
 } from 'graphql';
 import { createRuntime } from '@simtlix/simfinity-core';
 import { allow, createAuthPlugin, requireRole } from '@simtlix/simfinity-core/auth';
@@ -290,5 +293,130 @@ describe('controls', () => {
     expect(failure(result)).toEqual(FORBIDDEN('RootMutation.deleteproducto'));
     expect(positionOf(result)).toEqual({ operationIndex: 3, operation: 'deleteproducto' });
     expect(fixture.storedKeys()).toEqual(STORED);
+  });
+});
+
+// A copy of the schema in which every named type is a new object built from its config, so that a plugin
+// applied to the copy wraps none of the original's fields. `rename` maps a type name to the copy's name for
+// it, and `omit` a type name to the fields the copy leaves out. Resolvers and markers are shared.
+const rebuilt = (schema, { rename = {}, omit = {} } = {}) => {
+  const copies = new Map();
+  const ref = (type) => {
+    if (isNonNullType(type)) return new GraphQLNonNull(ref(type.ofType));
+    if (isListType(type)) return new GraphQLList(ref(type.ofType));
+    return copies.get(type.name);
+  };
+  const argsOf = (config) => Object.fromEntries(Object.entries(config).map(([name, arg]) => [name, { ...arg, type: ref(arg.type) }]));
+  const fieldsOf = (typeName, config, withArgs) => () => Object.fromEntries(Object.entries(config)
+    .filter(([fieldName]) => !(omit[typeName] ?? []).includes(fieldName))
+    .map(([fieldName, field]) => [fieldName, { ...field, type: ref(field.type), ...(withArgs ? { args: argsOf(field.args) } : {}) }]));
+  // The introspection types and the types they reach, such as core's field metadata types, stay shared.
+  const shared = new Set();
+  const share = (type) => {
+    const named = getNamedType(type);
+    if (shared.has(named.name)) return;
+    shared.add(named.name);
+    if (isObjectType(named) || isInterfaceType(named)) {
+      for (const field of Object.values(named.getFields())) {
+        share(field.type);
+        for (const arg of field.args) share(arg.type);
+      }
+    }
+  };
+  for (const type of Object.values(schema.getTypeMap())) if (type.name.startsWith('__')) share(type);
+  for (const type of Object.values(schema.getTypeMap())) {
+    if (shared.has(type.name) || isSpecifiedScalarType(type)) {
+      copies.set(type.name, type);
+      continue;
+    }
+    const config = { ...type.toConfig(), name: rename[type.name] ?? type.name };
+    let copy;
+    if (isObjectType(type) || isInterfaceType(type)) {
+      const Type = isObjectType(type) ? GraphQLObjectType : GraphQLInterfaceType;
+      copy = new Type({ ...config, interfaces: () => config.interfaces.map(ref), fields: fieldsOf(type.name, config.fields, true) });
+    } else if (isUnionType(type)) {
+      copy = new GraphQLUnionType({ ...config, types: () => config.types.map(ref) });
+    } else if (isInputObjectType(type)) {
+      copy = new GraphQLInputObjectType({ ...config, fields: fieldsOf(type.name, config.fields, false) });
+    } else {
+      copy = isEnumType(type) ? new GraphQLEnumType(config) : new GraphQLScalarType(config);
+    }
+    copies.set(type.name, copy);
+  }
+  const root = (type) => (type ? copies.get(type.name) : undefined);
+  return new GraphQLSchema({
+    query: root(schema.getQueryType()),
+    mutation: root(schema.getMutationType()),
+    subscription: root(schema.getSubscriptionType()),
+    types: [...copies.values()],
+    directives: schema.getDirectives().map((directive) => (isSpecifiedDirective(directive)
+      ? directive
+      : new GraphQLDirective({ ...directive.toConfig(), args: argsOf(directive.toConfig().args) }))),
+  });
+};
+
+describe('the id of a result in a copy whose types are new objects', () => {
+  const ADD = [{ addproducto: { name: 'a' } }];
+  const USER = { user: { role: 'user' } };
+  const ADMIN = { user: { role: 'admin' } };
+  const REQUIRES_ADMIN = { code: 'FORBIDDEN', status: 403, message: 'Requires role: admin' };
+
+  // The id of the single result of an add, for a non-admin and then for an admin: `{ id, error }`.
+  const idsOf = async (fixture, served) => {
+    const read = (result) => ({
+      id: result.data?.transaction?.[0]?.id ?? null,
+      error: result.errors === undefined ? undefined : { ...failure(result), path: result.errors[0].path },
+    });
+    return { user: read(await fixture.transaction(served, ADD, USER)), admin: read(await fixture.transaction(served, ADD, ADMIN)) };
+  };
+  const deniedAt = (error) => ({ ...error, path: ['transaction', 0, 'id'] });
+
+  test.each([
+    ['the schema the field was built in', (schema) => schema],
+    ['an unmodified copy', (schema) => rebuilt(schema)],
+  ])('%s, processed under Producto.id restricted to admins, gives the id to an admin only', async (_label, serve) => {
+    const fixture = build();
+    const served = serve(fixture.schema);
+    protect(served, { Producto: { id: requireRole('admin') } }, 'ALLOW');
+
+    expect(await idsOf(fixture, served)).toEqual({
+      user: { id: null, error: deniedAt(REQUIRES_ADMIN) }, admin: { id: '1001', error: undefined },
+    });
+    // A denied id is an output error after the commit: both adds were written.
+    expect(fixture.storedKeys()).toEqual([...STORED, 'Producto:1000', 'Producto:1001']);
+  });
+
+  test('a copy whose result type lacks the operation key resolves the id through the copy\'s type of the record\'s name', async () => {
+    const fixture = build();
+    const served = rebuilt(fixture.schema, { omit: { TransactionResult: ['addproducto'] } });
+    expect(served.getType('TransactionResult').getFields()).not.toHaveProperty('addproducto');
+    protect(served, { Producto: { id: requireRole('admin') } }, 'ALLOW');
+
+    expect(await idsOf(fixture, served)).toEqual({
+      user: { id: null, error: deniedAt(REQUIRES_ADMIN) }, admin: { id: '1001', error: undefined },
+    });
+  });
+
+  test('a copy that renames the record type runs the id rule of the new name', async () => {
+    const fixture = build();
+    const served = rebuilt(fixture.schema, { rename: { Producto: 'Product' } });
+    expect(served.getType('Producto')).toBeUndefined();
+    expect(served.getType('TransactionResult').getFields().addproducto.type).toBe(served.getType('Product'));
+    protect(served, { Product: { id: requireRole('admin') } }, 'ALLOW');
+
+    expect(await idsOf(fixture, served)).toEqual({
+      user: { id: null, error: deniedAt(REQUIRES_ADMIN) }, admin: { id: '1001', error: undefined },
+    });
+  });
+
+  test('a copy with neither the operation key in its result type nor a type of the record\'s name refuses the id', async () => {
+    const fixture = build();
+    const served = rebuilt(fixture.schema, { rename: { Producto: 'Product' }, omit: { TransactionResult: ['addproducto'] } });
+    protect(served, { Product: { id: requireRole('admin') } }, 'ALLOW');
+
+    const refusedId = deniedAt(FORBIDDEN('TransactionResult.id'));
+    expect(await idsOf(fixture, served)).toEqual({ user: { id: null, error: refusedId }, admin: { id: null, error: refusedId } });
+    // The operations ran: the refusal is an output error after the commit.
+    expect(fixture.storedKeys()).toEqual([...STORED, 'Producto:1000', 'Producto:1001']);
   });
 });

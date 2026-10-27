@@ -231,7 +231,11 @@ export function addNoEndpointType(gqltype: GraphQLObjectType): void;
  * constructed otherwise.
  * options.includedCustomQueries selects custom queries by name (see CreateSchemaOptions); an
  * invalid options argument throws INVALID_SCHEMA_OPTIONS (500), and an included custom query named
- * like an included generated query throws QUERY_NAME_CONFLICT (500), before models are created. A
+ * like an included generated query throws QUERY_NAME_CONFLICT (500), before models are created.
+ * options.transaction adds the generated transaction field (see CreateSchemaOptions): an invalid
+ * option throws INVALID_SCHEMA_OPTIONS (500) before models are created, except that a field name or
+ * derived type name taken in the built schema, or no operation left, is found once the models are
+ * prepared; an adapter without assertTransactionModels throws TRANSACTION_UNSUPPORTED (500). A
  * schema without mutation fields has no Mutation root.
  */
 export function createSchema(

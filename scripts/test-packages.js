@@ -256,6 +256,17 @@ const coreSource = `import assert from 'node:assert/strict';
   assert.equal(await runtime.deleteObject('CoreBook', { id: '1' }), null);
   await assert.rejects(() => runtime.deleteObject('CoreBook', '1'), (error) => error.getCode() === 'INVALID_INPUT' && error.message === 'Invalid input at input: expected a plain object');
   await assert.rejects(() => runtime.transitionObject('CoreBook', 'close', { id: '1' }), (error) => error.getCode() === 'UNKNOWN_ACTION' && error.message === 'Type CoreBook has no state machine action close');
+  // The generated transaction field (#151): the option needs an adapter that implements assertTransactionModels, which
+  // is optional for core, and the field it adds carries the marker sentence.
+  const bareBook = new GraphQLObjectType({ name: 'CoreBareTxBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+  const bareRuntime = createRuntime(adapter);
+  bareRuntime.connect(null, bareBook, 'coreBareTxBook', 'coreBareTxBooks');
+  assert.throws(() => bareRuntime.createSchema(null, null, null, { transaction: { types: [bareBook] } }), (error) => error.getCode() === 'TRANSACTION_UNSUPPORTED' && error.getStatus() === 500 && error.message === 'The database adapter does not support generated transactions');
+  const affinityBook = new GraphQLObjectType({ name: 'CoreAffinityTxBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+  const affinityRuntime = createRuntime({ ...adapter, assertTransactionModels() {} });
+  affinityRuntime.connect(null, affinityBook, 'coreAffinityTxBook', 'coreAffinityTxBooks');
+  const affinitySchema = affinityRuntime.createSchema(null, null, null, { transaction: { types: [affinityBook] } });
+  assert(affinitySchema.getMutationType().getFields().transaction.description.startsWith('Simfinity transaction: runs the listed generated mutations in order in one database transaction.'));
   const introspection = graphqlSync({
     schema,
     source: '{ __type(name: "__Field") { fields { name } } }',
@@ -307,6 +318,9 @@ const coreSource = `import assert from 'node:assert/strict';
   configureMutationLimits({ maxNestedOperations: 10 });
   assert.throws(() => configureMutationLimits({ maxNestedOperations: -1 }), (error) => error.getCode() === 'INVALID_MUTATION_LIMITS');
   assert.throws(() => configureMutationLimits({ maxNestedOperation: 10 }), (error) => error.getCode() === 'INVALID_MUTATION_LIMITS');
+  // The cap of one generated transaction (#151) is a positive safe integer.
+  configureMutationLimits({ maxTransactionOperations: 5 });
+  assert.throws(() => configureMutationLimits({ maxTransactionOperations: 0 }), (error) => error.getCode() === 'INVALID_MUTATION_LIMITS' && error.getStatus() === 400 && error.message === 'maxTransactionOperations must be a positive safe integer');
   configureMutationLimits();
   const masking = buildErrorFormatter((error) => (error instanceof InternalServerError ? new InternalServerError('Unexpected error') : undefined));
   assert.equal(masking(new Error('secret')).message, 'Unexpected error');
@@ -549,7 +563,17 @@ const sqlSource = `import assert from 'node:assert/strict';
   assert.equal(undeclaredResult.errors[0].extensions.code, 'UNSUPPORTED_QUERY');
   assert.equal(undeclaredResult.errors[0].message, 'IS_EMPTY on shop ends at the reference shop: the database adapter does not support emptiness through references and collections');
   await assert.rejects(() => undeclared.instance.getModel(undeclared.book).find({ shop: { terms: [{ operator: 'IS_EMPTY' }] } }), (error) => error.getCode() === 'UNSUPPORTED_QUERY');
-  assert.equal(plans.length, 1);`;
+  assert.equal(plans.length, 1);
+  // The generated transaction field (#151): the packed adapter implements assertTransactionModels, so createSchema takes
+  // the option, and the instance's mutation limits take the cap of one transaction.
+  const statementsBefore = calls.length;
+  const transactionBook = new GraphQLObjectType({ name: 'SQLTxBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+  const transactionApi = createSQL({ plugin });
+  transactionApi.connect(null, transactionBook, 'sqlTxBook', 'sqlTxBooks');
+  const transactionSchema = transactionApi.createSchema(null, null, null, { transaction: { types: [transactionBook] } });
+  assert(transactionSchema.getMutationType().getFields().transaction.description.startsWith('Simfinity transaction: runs the listed generated mutations in order in one database transaction.'));
+  assert.throws(() => api.configureMutationLimits({ maxTransactionOperations: 0 }), (error) => error.getCode() === 'INVALID_MUTATION_LIMITS' && error.message === 'maxTransactionOperations must be a positive safe integer');
+  assert.equal(calls.length, statementsBefore);`;
 
 const postgresSource = `import assert from 'node:assert/strict';
   import {
@@ -729,7 +753,15 @@ const postgresSource = `import assert from 'node:assert/strict';
   assert(formatted.originalError instanceof SimfinityError);
   // The facade re-exports core's scalar and maximum, not copies.
   assert.equal(RecordVersion, coreRecordVersion);
-  assert.equal(MAX_RECORD_VERSION, coreMaxRecordVersion);`;
+  assert.equal(MAX_RECORD_VERSION, coreMaxRecordVersion);
+  // The generated transaction field (#151): the packed adapter implements assertTransactionModels, so createSchema takes
+  // the option, and the shared mutation limits take the cap of one transaction.
+  const transactionType = new GraphQLObjectType({ name: 'PostgresTxBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+  const transactionApi = createPostgres({ pool, schema: 'transaction_app' });
+  transactionApi.connect(null, transactionType, 'postgresTxBook', 'postgresTxBooks');
+  const transactionSchema = transactionApi.createSchema(null, null, null, { transaction: { types: [transactionType] } });
+  assert(transactionSchema.getMutationType().getFields().transaction.description.startsWith('Simfinity transaction: runs the listed generated mutations in order in one database transaction.'));
+  assert.throws(() => configureMutationLimits({ maxTransactionOperations: 0 }), (error) => error.getCode() === 'INVALID_MUTATION_LIMITS' && error.message === 'maxTransactionOperations must be a positive safe integer');`;
 
 const mongoSource = `import assert from 'node:assert/strict';
   import * as legacyEntry from '@simtlix/simfinity-js/src/index.js';
@@ -814,6 +846,15 @@ const mongoSource = `import assert from 'node:assert/strict';
   assert(introspection.data.__type.fields.some((field) => field.name === 'extensions'));
   assert(simfinity.buildErrorFormatter()(new Error('root')).originalError instanceof simfinity.InternalServerError);
   assert.equal(simfinity.configureMutationLimits, runtime.configureMutationLimits);
+  // The generated transaction field (#151): the packed MongoDB adapter implements assertTransactionModels, so
+  // createSchema takes the option, and the shared mutation limits take the cap of one transaction.
+  assert.equal(typeof simfinity.createMongoAdapter().assertTransactionModels, 'function');
+  const transactionType = new GraphQLObjectType({ name: 'MongoTxBook', fields: { id: { type: GraphQLID }, title: { type: GraphQLString } } });
+  const transactionRuntime = simfinity.createRuntime(simfinity.createMongoAdapter());
+  transactionRuntime.connect(null, transactionType, 'mongoTxBook', 'mongoTxBooks');
+  const transactionSchema = transactionRuntime.createSchema(null, null, null, { transaction: { types: [transactionType] } });
+  assert(transactionSchema.getMutationType().getFields().transaction.description.startsWith('Simfinity transaction: runs the listed generated mutations in order in one database transaction.'));
+  assert.throws(() => simfinity.configureMutationLimits({ maxTransactionOperations: 0 }), (error) => error.getCode() === 'INVALID_MUTATION_LIMITS' && error.message === 'maxTransactionOperations must be a positive safe integer');
   // The legacy deep imports of the core subpaths re-export them unchanged, as their declarations do.
   const legacySubpaths = ${JSON.stringify(Object.fromEntries(Object.entries(mongoLegacySubpaths).map(([path, subpath]) => [path, [subpath, coreSubpaths[subpath].values]])))};
   for (const [path, [subpath, names]] of Object.entries(legacySubpaths)) {
@@ -853,7 +894,9 @@ const mcpSource = `import assert from 'node:assert/strict';
   );
   const compact = await generateMCPTools(schema, { textFormat: 'compact', nestedCollections: 'none' }).callTool('greeting');
   assert.equal(compact.content[0].text, '{"greeting":"hello"}');
-  for (const options of [{ textFormat: 'json' }, { nestedCollections: 'bounded' }, { toolOverrides: { greeting: { nestedCollections: 'some' } } }]) {
+  // The transaction tool is an opt-in boolean (#151): a schema without the field publishes the same tools with it on.
+  assert.deepEqual(generateMCPTools(schema, { transactionTools: true }).tools.map((tool) => tool.name), ['greeting']);
+  for (const options of [{ textFormat: 'json' }, { nestedCollections: 'bounded' }, { toolOverrides: { greeting: { nestedCollections: 'some' } } }, { transactionTools: 'yes' }]) {
     assert.throws(
       () => generateMCPTools(schema, options),
       (error) => error.getCode() === 'MCP_INVALID_OPTIONS',
@@ -992,9 +1035,14 @@ const limits: MutationLimitsOptions = { maxNestedOperations: 100 };
 configureMutationLimits(limits);
 runtime.configureMutationLimits({ maxNestedOperations: null });
 runtime.configureMutationLimits();
+// The cap of one generated transaction (#151) is a number.
+configureMutationLimits({ maxTransactionOperations: 5 });
+runtime.configureMutationLimits({ maxNestedOperations: null, maxTransactionOperations: 100 });
 // @ts-expect-error The limit is a number or null.
 configureMutationLimits({ maxNestedOperations: '100' });
-// @ts-expect-error The only option is maxNestedOperations.
+// @ts-expect-error The transaction cap is a number.
+configureMutationLimits({ maxTransactionOperations: '5' });
+// @ts-expect-error The options are maxNestedOperations and maxTransactionOperations.
 configureMutationLimits({ maxNestedOperation: 100 });
 const formatError = buildErrorFormatter((error) => {
   if (error instanceof InternalServerError) {
@@ -1791,6 +1839,13 @@ type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B
 const itemRules: ItemValidators = [validators.maxLength('Tag', 20), null];
 const tagRules = validators.arrayLength('Tags', 10, itemRules);
 const sameItemValidators: Equals<ItemValidators, CoreItemValidators> = true;
+// The MongoDB adapter implements the affinity check of the generated transaction field (#151), so it is a required
+// member there, and the cap of a transaction is a limit of the facade.
+const mongoAffinity: Equals<MongoAdapter['assertTransactionModels'], (models: any[]) => void> = true;
+configureMutationLimits({ maxTransactionOperations: 5 });
+// @ts-expect-error The transaction cap is a number.
+configureMutationLimits({ maxTransactionOperations: '5' });
+void mongoAffinity;
 const sameSchemaPlugins: {
   envelop: Equals<EnvelopSchemaPlugin, CoreEnvelopSchemaPlugin>;
   auth: Equals<AuthSchemaPlugin, CoreAuthSchemaPlugin>;
@@ -1996,6 +2051,12 @@ const politeRetry = createHTTPMCPHandler(schema, {
     mode: 'remote', endpoint, retry: { attempts: 3, backoffMs: 250, retryAfter: true, maxRetryAfterMs: 30000, jitter: true },
   },
 });
+// The transaction tool is an opt-in boolean or null (#151).
+const transactional: GeneratedMCPTools = generateMCPTools(schema, { transactionTools: true });
+generateMCPTools(schema, { transactionTools: null });
+createHTTPMCPHandler(schema, { transactionTools: false });
+// @ts-expect-error transactionTools is a boolean or null.
+generateMCPTools(schema, { transactionTools: 'yes' });
 // @ts-expect-error Bounded nested collections are not an option.
 generateMCPTools(schema, { nestedCollections: 'bounded' });
 // @ts-expect-error A tool's nested collections are 'all' or 'none'.
@@ -2033,7 +2094,7 @@ const readBack = [
 ];
 void [generated, server, sameGenerator, singleMiddleware, optionalPlugins, handler, sharedPlugins, memberPlugins];
 void [headerForms, fromEnvironment, stdio, fallible, unlimited, maxPageSize, maxResultBytes, defaultSize, readBack];
-void [shaped, politeRetry, nestedCollections, toolNestedCollections, textFormat];`;
+void [shaped, politeRetry, nestedCollections, toolNestedCollections, textFormat, transactional];`;
 
 // The legacy deep imports of /auth and /plugins re-export them unchanged, so they can be
 // re-exported together too.

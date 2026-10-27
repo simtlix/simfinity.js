@@ -100,9 +100,10 @@ export const assertTransactionSchema = ({
 // order, where `inputType` is the root's named input (null for a delete) and `returnType` the root's
 // type. Add, update and action values reuse the roots' inputs, which are nullable and have no defaults
 // as @oneOf fields must; a delete takes `{ id }`, or `{ id, version }` (RecordVersionRef) for a
-// protected type. The result has `id` and one nullable field per key, typed as that root.
+// protected type. The result has `id`, resolved by `resolveId`, and one nullable field per key, typed as
+// that root.
 export const buildTransactionField = ({
-  name, types, operations, recordVersionRef, resolve,
+  name, types, operations, recordVersionRef, resolve, resolveId,
 }) => {
   const names = transactionTypeNames(name);
   const deleteInput = needsDeleteInput(operations)
@@ -126,7 +127,7 @@ export const buildTransactionField = ({
     name: names.result,
     description: `The result of one operation of ${name}: the record's id and the field of that operation.`,
     fields: {
-      id: { type: GraphQLID },
+      id: { type: GraphQLID, resolve: resolveId },
       ...Object.fromEntries(operations.map(({ key, returnType }) => [key, { type: returnType }])),
     },
   });
@@ -154,7 +155,8 @@ export const recordTransactionState = (field, state) => {
   transactionStates.set(field.extensions.simfinityTransaction, state);
 };
 
-// The state of a field or field config, or undefined for any other field.
+// The state of a field or field config, or undefined for any other field. No runtime code reads it: it is
+// a hook for tests, which inspect the state the runtime recorded.
 export const transactionStateOf = (field) => {
   const marker = field?.extensions?.simfinityTransaction;
   return marker !== null && typeof marker === 'object' ? transactionStates.get(marker) : undefined;

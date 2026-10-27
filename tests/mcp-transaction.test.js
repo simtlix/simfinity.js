@@ -546,6 +546,150 @@ describe('input schema', () => {
   });
 });
 
+describe('operation keys', () => {
+  const REMOTE = { mode: 'remote', endpoint: 'https://api.example.test/graphql' };
+  const PRODUCTO_KEYS = ['addproducto', 'deleteproducto', 'updateproducto'];
+  const VALID = 'Valid operations: addproducto, deleteproducto, updateproducto. The tool was not executed.';
+
+  // The message of a call refused before execution with MCP_UNKNOWN_ARGUMENT.
+  const refused = (result) => {
+    expect(result.isError).toBe(true);
+    const { errors } = JSON.parse(result.content[0].text);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].extensions).toEqual({ code: 'MCP_UNKNOWN_ARGUMENT' });
+    return errors[0].message;
+  };
+
+  // The schema an MCP server builds with fewer types than the GraphQL server it forwards to: its transaction
+  // field covers Producto only, so its tool advertises the Producto keys only.
+  const productoOnly = () => {
+    const runtime = createRuntime(createOptimisticMemoryAdapter());
+    const { Producto } = defineTypes();
+    runtime.connect(null, Producto, 'producto', 'productos');
+    return runtime.createSchema(null, [Producto], null, { transaction: { types: [Producto] } });
+  };
+
+  // Runs `body` with fetch stubbed by an endpoint that executes every request on the fixture's schema, whose
+  // transaction field covers Producto and Pedido.
+  const withEndpoint = async (fixture, body) => {
+    const fetch = vi.fn(async (url, init) => {
+      const { query, variables } = JSON.parse(init.body);
+      const result = await graphql({
+        schema: fixture.schema, source: query, variableValues: variables, contextValue: {},
+      });
+      return new Response(JSON.stringify(result), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetch);
+    try {
+      return await body(fetch);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  };
+
+  test.each([
+    {}, { excludeTypes: ['Pedido'] }, { exclude: ['addpedido', 'deletepedido'] }, { includeTypes: ['Producto'] },
+  ])('remotely, an operation the tool does not advertise never reaches the endpoint, whatever the filters: %j', async (filters) => {
+    const fixture = build();
+    await withEndpoint(fixture, async (fetch) => {
+      const { tools, callTool } = generateMCPTools(productoOnly(), { transactionTools: true, execution: REMOTE, ...filters });
+      expect(Object.keys(byName(tools, 'transaction').inputSchema.$defs.TransactionOperation.properties)).toEqual(PRODUCTO_KEYS);
+      expect(refused(await callTool('transaction', { operations: [{ addpedido: { numero: 'X' } }] })))
+        .toBe(`Unknown operation "addpedido" at operations[0] for tool "transaction". ${VALID}`);
+      expect(refused(await callTool('transaction', {
+        operations: [{ addproducto: { name: 'a' } }, { deletepedido: { id: '1', version: 1 } }],
+      }))).toBe(`Unknown operation "deletepedido" at operations[1] for tool "transaction". ${VALID}`);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(fixture.adapterCalls()).toBe(0);
+      expect(fixture.storedKeys()).toEqual(STORED);
+
+      // An operation it advertises still runs on the endpoint.
+      const result = await callTool('transaction', { operations: [{ addproducto: { name: 'a' } }] });
+      expect(result.isError).toBe(false);
+      expect(result.structuredContent.transaction).toEqual([{ id: '1000', addproducto: { id: '1000', name: 'a', price: null } }]);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fixture.storedKeys()).toEqual(['Pedido:1', 'Producto:1', 'Producto:1000']);
+    });
+  });
+
+  // Each malformed `operations` value, and the first sentence of the message that refuses it.
+  const oneOperation = (index) => `operations[${index}] for tool "transaction" must name exactly one operation.`;
+  const malformed = [
+    ['an item with two keys', [{ addproducto: { name: 'a' }, deleteproducto: { id: '1' } }], oneOperation(0)],
+    ['an item with no key', [{ addproducto: { name: 'a' } }, {}], oneOperation(1)],
+    ['an item whose only key is undefined', [{ addproducto: undefined }], oneOperation(0)],
+    ['an item whose only keys are undefined', [{ addproducto: { name: 'a' } }, { addproducto: undefined, deleteproducto: undefined }],
+      oneOperation(1)],
+    ['an item that is not an object', [{ addproducto: { name: 'a' } }, 'addproducto'], oneOperation(1)],
+    ['an item that is a list', [[{ addproducto: { name: 'a' } }]], oneOperation(0)],
+    ['a single item that is not in a list', { addproducto: { name: 'a' } },
+      'Argument "operations" for tool "transaction" must be a list of operations.'],
+  ];
+
+  test.each(malformed)('%s is refused before execution, locally', async (_label, operations, sentence) => {
+    const fixture = build();
+    const { callTool } = generateMCPTools(fixture.schema, { transactionTools: true });
+    expect(refused(await callTool('transaction', { operations })))
+      .toBe(`${sentence} Valid operations: ${KEYS.join(', ')}. The tool was not executed.`);
+    expect(fixture.adapterCalls()).toBe(0);
+    expect(fixture.storedKeys()).toEqual(STORED);
+  });
+
+  test.each(malformed)('%s is refused before the request, remotely', async (_label, operations, sentence) => {
+    const fixture = build();
+    await withEndpoint(fixture, async (fetch) => {
+      const { callTool } = generateMCPTools(productoOnly(), { transactionTools: true, execution: REMOTE });
+      expect(refused(await callTool('transaction', { operations }))).toBe(`${sentence} ${VALID}`);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(fixture.storedKeys()).toEqual(STORED);
+    });
+  });
+
+  // An own key whose value is undefined is not sent, as for the tool's top-level arguments: the item names
+  // its one other key.
+  const ADDED = { id: '1000', addproducto: { id: '1000', name: 'a', price: null } };
+
+  test('locally, an item whose other keys are undefined runs its one operation', async () => {
+    const fixture = build();
+    const { callTool } = generateMCPTools(fixture.schema, { transactionTools: true });
+    const result = await callTool('transaction', { operations: [{ addproducto: { name: 'a' }, deleteproducto: undefined }] });
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent.transaction).toEqual([ADDED]);
+    expect(fixture.storedKeys()).toEqual(['Pedido:1', 'Producto:1', 'Producto:1000']);
+  });
+
+  test('remotely, an item whose other keys are undefined runs its one operation, and those keys are not sent', async () => {
+    const fixture = build();
+    await withEndpoint(fixture, async (fetch) => {
+      const { callTool } = generateMCPTools(productoOnly(), { transactionTools: true, execution: REMOTE });
+      const result = await callTool('transaction', {
+        operations: [{ addproducto: { name: 'a' }, deleteproducto: undefined }, { addproducto: { name: 'b' }, addpedido: undefined }],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.structuredContent.transaction).toEqual([
+        ADDED, { id: '1001', addproducto: { id: '1001', name: 'b', price: null } },
+      ]);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const { variables } = JSON.parse(fetch.mock.calls[0][1].body);
+      expect(JSON.stringify(variables)).not.toMatch(/deleteproducto|addpedido/);
+      expect(fixture.storedKeys()).toEqual(['Pedido:1', 'Producto:1', 'Producto:1000', 'Producto:1001']);
+    });
+  });
+
+  test('locally, every operation of the tool runs', async () => {
+    const fixture = build();
+    const { callTool } = generateMCPTools(fixture.schema, { transactionTools: true });
+    const result = await callTool('transaction', {
+      operations: [{ addpedido: { numero: 'Q' } }, { close_pedido: { id: '1', version: 1 } }, { deleteproducto: { id: '1' } }],
+    });
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent.transaction.map((item) => Object.keys(item))).toEqual([
+      ['id', 'addpedido'], ['id', 'close_pedido'], ['id', 'deleteproducto'],
+    ]);
+    expect(fixture.storedKeys()).toEqual(['Pedido:1', 'Pedido:1000']);
+  });
+});
+
 describe('result items', () => {
   // Ten adds of a Producto, whose records take the ids 1000 to 1009, and their results.
   const tenAdds = Array.from({ length: 10 }, (_, index) => ({ addproducto: { name: `p${index}` } }));
@@ -626,14 +770,16 @@ describe('result items', () => {
         { id: '1000', addproducto: { id: '1000', name: 'a', price: null } },
         { id: null, deleteproducto: null },
       ]);
-      // Two keys set, or no key set and no known key sent: the item has no single key of its own.
+      // Two keys set: the item has no single key of its own. With no key set, the key the operation sent
+      // names it, and an item at a position where no operation was sent, so no known key either, is kept
+      // whole (an operation that names no known key is refused before the request, see operation keys).
       const twoKeys = { id: '1', addproducto: { id: '1' }, deleteproducto: { id: '1' } };
       const noKey = { id: null, addproducto: null, deleteproducto: null };
       reply = { data: { transaction: [twoKeys, noKey, { ...noKey }] } };
       const kept = await callTool('transaction', {
-        operations: [{ addproducto: { name: 'x' } }, { refresh: {} }, { deleteproducto: { id: '9' } }],
+        operations: [{ addproducto: { name: 'x' } }, { deleteproducto: { id: '9' } }],
       });
-      expect(kept.structuredContent.transaction).toEqual([twoKeys, noKey, { id: null, deleteproducto: null }]);
+      expect(kept.structuredContent.transaction).toEqual([twoKeys, { id: null, deleteproducto: null }, noKey]);
       expect(fetch).toHaveBeenCalledTimes(2);
     } finally {
       vi.unstubAllGlobals();

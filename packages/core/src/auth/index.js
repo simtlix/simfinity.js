@@ -394,7 +394,9 @@ export const createFieldMiddleware = (permissions, options = {}) => createAuthMi
  *
  * On each generated mutation root it wraps, in whatever type the field sits, the plugin also records
  * an internal entry with the same rules, default policy and deferral, which the generated transaction
- * field runs for each operation on that root.
+ * field runs for each operation on that root. A root whose marker cannot take the entry (a frozen or
+ * otherwise non-extensible `extensions.simfinityMutation`) is still wrapped, and the transaction field
+ * refuses its operations with FORBIDDEN.
  *
  * @param {PermissionSchema} permissions - The permission schema object
  * @param {AuthMiddlewareOptions} [options={}] - Plugin options
