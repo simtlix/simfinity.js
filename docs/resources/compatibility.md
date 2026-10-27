@@ -35,6 +35,12 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22.12.0 or newer |
 
+## Upgrade notes for the next release
+
+### Case-insensitive filters that MongoDB cannot compile
+
+On MongoDB, a value of `ILIKE`, `ISTARTS_WITH`, `IENDS_WITH` or `IEQ` within the 32,764 bytes that Simfinity checks before the query runs can still make a regular expression too large to compile, because ignoring case the server compiles each letter that has other case forms to a class of them: on MongoDB 8.0, an `IEQ` value of 21,843 letters `k` or `s` does. The server rejected such a query (`Location51091`), and [`buildErrorFormatter`](../reference/errors#builderrorformatter) reported it as `INTERNAL_SERVER_ERROR` (500). It now fails with `INVALID_FILTER_VALUE` (400) and the message `Case-insensitive text filter value is too long: MongoDB cannot compile its regular expression when ignoring case, because letters such as k and s match more than one character`, in every read that filters: lists, `pagination.count`, scoped by-ID reads, aggregates and collection fields, batched or not. The driver error is `error.cause`, which `error.getCause()` also returns. Only that server error is mapped, and only for a query with a case-insensitive text filter; values that run keep their results, and PostgreSQL, which has no such limit, is unchanged. See [text operators](../guide/queries#text-operators) and the [compatibility ledger](../compatibility#next-release-case-insensitive-filters-that-mongodb-cannot-compile).
+
 ## Upgrade to 3.15.0
 
 ### Controller callbacks after commit
