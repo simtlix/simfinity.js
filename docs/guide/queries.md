@@ -200,7 +200,7 @@ A field filter and an `AND`/`OR` condition resolve `valuePath` from the containi
 | Operators | Compatible operands |
 | --- | --- |
 | `EQ`, `NE` | Int/Float numeric pairs, String/String, Boolean/Boolean, ID/ID, the same GraphQL enum, or the same effective DateTime/Date/Time scalar |
-| `LT`, `LTE`, `GT`, `GTE` | Numeric pairs, String/String in code-point order, or the same effective temporal scalar |
+| `LT`, `LTE`, `GT`, `GTE` | Numeric pairs, String/String (engine collation rules below), or the same effective temporal scalar |
 | `LIKE`, `STARTS_WITH`, `ENDS_WITH` | String/String, literal and case-sensitive |
 
 Validated scalars follow their supported base. Record identities remain identities even if declared String; name a reference identity with `.id` or `._id` where the engine permits it. Different enum types stay incompatible even with identical members, and nontrivial internal enum values compare by semantic member. Managed `RecordVersion`/`Version` fields are unsupported. Case-insensitive operators, `IN`, `NIN`, `BTW`, `CONTAINS_ALL` and emptiness operators cannot take `valuePath` (`INVALID_FILTER_OPERATOR`). Incompatible scalar pairs give `INVALID_FILTER_VALUE`.
@@ -215,9 +215,20 @@ Custom adapters require `queryFeatures.valuePath: true` and `referenceEmptiness:
 
 PostgreSQL uses null-safe distinctness, C collation, guarded text predicates and comparable native/jsonb temporal instants. MongoDB uses guarded aggregation expressions and literal code-point text operations. Supplied MongoDB identity fields must have compatible ObjectId, String or Number representations. Unsupported or ambiguous supplied-model enum representations fail explicitly; native malformed data is outside the declared model contract. Neither engine silently treats a declared numeric or Boolean field as text for comparison.
 
-MongoDB String `LT`/`LTE`/`GT`/`GTE` comparisons require an effective `simple` collation on the aggregate command; a non-simple collation gives `UNSUPPORTED_QUERY`. The command's root model determines that collation for its lookups and collection frames, regardless of the target collections' defaults. Simfinity does not force a different collation because that would also change existing literal filters. Exact String equality, scalar-list membership, enum decoding and `LIKE`/`STARTS_WITH`/`ENDS_WITH` field comparisons remain supported under non-simple collations.
+MongoDB String `LT`/`LTE`/`GT`/`GTE` field comparisons use the aggregate command's effective collation. The operation's collation overrides the root collection's default and also applies to lookups and collection frames, regardless of the target collections' defaults. Mongoose applies a model's `schema.options.collation` to its aggregates; application hooks or Aggregate overrides can change it. With no configured collation, MongoDB uses `simple`. PostgreSQL uses explicit C collation for these comparisons, so ordered results can differ between engines or between MongoDB configurations.
 
-For these ordered String comparisons, MongoDB compilation reads the root model's declared `schema.options.collation`, which Mongoose applies to aggregates. Without a declaration, it inspects the connected root collection's options once per compilation. If those options cannot be inspected, including an offline model or insufficient metadata permissions, it fails with `UNSUPPORTED_QUERY` rather than guessing. The adapter also checks a collation override already present on the returned Aggregate; removing a declaration that compilation relied on fails closed too. Native aggregate hooks or wrappers that change collation after validation must preserve this requirement. Callers executing a builder's pipeline directly must use the same collation that compilation resolved or the model declared; the raw driver does not inherit Mongoose schema options.
+For example, given `name: "A"`, `needle: "a"` and `{ locale: 'en', strength: 2 }`, which ignores case:
+
+| `name` compared with `valuePath: "needle"` | MongoDB result |
+| --- | --- |
+| `EQ` | `false` |
+| `NE` | `true` |
+| `LT` or `GT` | `false` |
+| `LTE` or `GTE` | `true` |
+
+Equality stays exact while ordering considers these two strings equivalent. Collation strength can also ignore accents, and `numericOrdering: true` puts `"10"` after `"2"` rather than before it as under simple/C ordering. Exact String EQ/NE, scalar-list membership, enum decoding and `LIKE`/`STARTS_WITH`/`ENDS_WITH` field comparisons remain independent of collation. Null ordered/text operands still produce false.
+
+Simfinity neither inspects collection collation metadata nor validates or overrides the command's collation for field comparisons. Compilation works with offline models and needs no metadata permissions; execution follows the database and application configuration. Existing literal filters retain their behavior, including when combined with `valuePath` predicates. Direct raw-driver execution uses its own operation options or the collection default, without inheriting Mongoose schema options; choose matching options explicitly when the same ordering is required through both APIs.
 
 Field comparisons have no general ordinary-index guarantee. Combine them with selective literal filters, inspect representative database plans, and use an application-maintained derived field when a measured hot path needs its own index. No data migration or generated index is required for this feature.
 

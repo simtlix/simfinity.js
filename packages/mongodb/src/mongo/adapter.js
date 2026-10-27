@@ -554,18 +554,18 @@ export const createMongoAdapter = (options) => {
       // Mongoose does not cast aggregation stages, so cast the key type here, without setters.
       if (requiredId != null) pipeline.unshift({ $match: { _id: castModelId(Model, requiredId) } });
       if (pipeline.length === 0) return versionedRead(Model, withSession(Model.find({}), session), true);
-      return mapRegexErrors(pipeline, queries.checkAggregateCollation(pipeline, withSession(Model.aggregate(pipeline), session)));
+      return mapRegexErrors(pipeline, withSession(Model.aggregate(pipeline), session));
     },
     async count(Model, gqltype, args, session) {
       integrity.assertReady();
       const pipeline = await queries.buildQuery(args, gqltype, true);
-      const result = await mapRegexErrors(pipeline, queries.checkAggregateCollation(pipeline, withSession(Model.aggregate(pipeline), session)));
+      const result = await mapRegexErrors(pipeline, withSession(Model.aggregate(pipeline), session));
       return result[0] ? result[0].size : 0;
     },
     async aggregate(Model, gqltype, args, session) {
       integrity.assertReady();
       const pipeline = await queries.buildAggregationQuery(args, gqltype, args.aggregation);
-      return mapRegexErrors(pipeline, queries.checkAggregateCollation(pipeline, withSession(Model.aggregate(pipeline), session)));
+      return mapRegexErrors(pipeline, withSession(Model.aggregate(pipeline), session));
     },
     async findChildren(Model, gqltype, connectionField, parentId, args, session) {
       integrity.assertReady();
@@ -579,7 +579,7 @@ export const createMongoAdapter = (options) => {
         throw error;
       }
       pipeline.unshift({ $match: { [connectionField]: parentKey } });
-      return mapRegexErrors(pipeline, queries.checkAggregateCollation(pipeline, withSession(Model.aggregate(pipeline), session)));
+      return mapRegexErrors(pipeline, withSession(Model.aggregate(pipeline), session));
     },
   };
 
@@ -631,9 +631,9 @@ export const createMongoAdapter = (options) => {
       const commands = [];
       for (let start = 0; start < subPipelines.length; start += parentsPerCommand) {
         const [first, ...others] = subPipelines.slice(start, start + parentsPerCommand);
-        const command = queries.checkAggregateCollation(pipeline, Model.aggregate([
+        const command = Model.aggregate([
           ...first, ...others.map((subPipeline) => ({ $unionWith: { coll, pipeline: subPipeline } })),
-        ]));
+        ]);
         // One more than the rows the command can return, so that its first batch closes the cursor.
         if (Number.isSafeInteger(limit)) command.option({ batchSize: limit * (others.length + 1) + 1 });
         commands.push(command);

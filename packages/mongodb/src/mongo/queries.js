@@ -46,9 +46,6 @@ export const MONGO_QUERY_OPERATORS = Object.freeze([
 export const createMongoQueries = ({ getModel, getRegistrations }) => {
 // One alias per relation path for each query build, keyed by the build's `included` accumulator.
 const lookupAliases = new WeakMap();
-// Pipelines retain only their compilation's command policy. The root command's collation applies
-// to nested lookups and union branches too; target collections do not select their own collation.
-const pipelineCommands = new WeakMap();
 // Only actual reference joins reached through embedded lists multiply a body's candidates.
 const multiplyingBuilds = new WeakSet();
 
@@ -413,7 +410,7 @@ const compileTargetScope = async (build, scope, targetType) => {
   const compiled = build.scopes.get(scope);
   if (compiled?.has(targetType)) return compiled.get(targetType);
   const stages = [];
-  const match = await collectFiltersAndLookups(scope, targetType, stages, {}, 'find', undefined, build.command);
+  const match = await collectFiltersAndLookups(scope, targetType, stages, {});
   if (match) stages.push(match);
   const result = stages.length ? { token: `s${build.counts.scope++}`, stages } : null;
   if (!build.scopes.has(scope)) build.scopes.set(scope, new Map());
@@ -513,11 +510,10 @@ const buildEmptinessClause = async (gqltype, path, operator, value, construct, l
 };
 
 // A build keeps one rewrite context; aggregate J paths must survive every logical-group pass.
-const rewriteContext = (gqltype, operation = 'find', aggregation, command) => {
+const rewriteContext = (gqltype, operation = 'find', aggregation) => {
   const ctx = {
     gqltype, operation, quantifiers: true, referenceEmptiness: true, valuePath: true,
     operators: new Set(MONGO_QUERY_OPERATORS), base: '', inFrame: false, ancestors: [], bindings: new Map(),
-    command: command ?? { model: getModel(gqltype), typeName: gqltype.name },
   };
   // Ordinary root markers reject at the existing post-value guards, preserving native order.
   ctx.deferOrdinaryRootMarkers = true;
@@ -650,7 +646,7 @@ const compileFrame = async (ctx, quantifier, group) => {
     const alias = allocateRelationAlias(build, 'frame', `prefix:${build.serials.get(group)}`);
     const stages = [];
     const included = {};
-    relationBuilds.set(included, { ...relationBuild(included), counts: build.counts, scopes: build.scopes, command: ctx.command });
+    relationBuilds.set(included, { ...relationBuild(included), counts: build.counts, scopes: build.scopes });
     const positive = await compileFrame({ ...ctx, stages, included, prefixIsolated: true }, quantifier === 'NONE' ? 'ANY' : quantifier, group);
     if (quantifier === 'ALL' && !Object.keys(positive).length) return {};
     ctx.stages.push({ $lookup: {
@@ -675,9 +671,9 @@ const compileFrame = async (ctx, quantifier, group) => {
   const alias = allocateRelationAlias(build, 'frame', `group:${build.serials.get(group)} ${path} ${[...crossed.chain, scope ? scope.token : '-'].join(',')}`);
   const stages = [];
   const included = {};
-  relationBuilds.set(included, { ...relationBuild(included), counts: build.counts, scopes: build.scopes, command: ctx.command });
+  relationBuilds.set(included, { ...relationBuild(included), counts: build.counts, scopes: build.scopes });
   const childCtx = {
-    ...rewriteContext(targetType, 'find', undefined, ctx.command), base: joinPath(ctx.base, path), inFrame: true,
+    ...rewriteContext(targetType), base: joinPath(ctx.base, path), inFrame: true,
     ancestors: [...ctx.ancestors, ctx], stages, included,
   };
   const body = await buildFilterGroupMatch(group, targetType, stages, included, 0, childCtx);
@@ -799,69 +795,6 @@ const comparisonStorage = (resolved, path) => {
   return entries;
 };
 
-const collationUnavailable = (command) => filterError(
-  `Cannot establish MongoDB command collation for ordered String field comparisons on ${command.typeName}; `
-  + 'declare schema.options.collation with locale "simple", or connect the model so its collection options can be inspected',
-  'UNSUPPORTED_QUERY',
-);
-
-// Mongoose copies schema collation onto every aggregate, overriding the collection default. With
-// no declaration, inspect the real root collection. Cache the promise only for this compilation:
-// stale metadata must not survive collection replacement or a later schema configuration change.
-const commandCollation = async (command) => {
-  if (!command.collation) command.collation = (async () => {
-    const { model } = command;
-    if (model?.schema?.options?.collation != null) {
-      command.declaredCollation = model.schema.options.collation;
-      return command.declaredCollation;
-    }
-    const collection = model?.collection?.collection ?? model?.collection;
-    const database = model?.db?.db;
-    if ((model?.db && model.db.readyState !== 1)
-      || (typeof database?.listCollections !== 'function' && typeof collection?.options !== 'function')) {
-      throw collationUnavailable(command);
-    }
-    try {
-      // listCollections also distinguishes an absent collection from an inspection failure;
-      // recent drivers' Collection.options() throws an untyped error when it does not exist.
-      const options = typeof database?.listCollections === 'function'
-        ? (await database.listCollections({ name: model.collection.collectionName }, { nameOnly: false }).next())?.options
-        : await collection.options();
-      return options?.collation ?? { locale: 'simple' };
-    } catch (error) {
-      // A not-yet-created collection has MongoDB's simple default. Other failures, including
-      // insufficient listCollections privileges, cannot establish comparison semantics.
-      if (error?.code === 26) return { locale: 'simple' };
-      throw collationUnavailable(command);
-    }
-  })();
-  return command.collation;
-};
-
-const assertSimpleCollation = (command, collation) => {
-  if (!collation || typeof collation !== 'object' || typeof collation.locale !== 'string') {
-    throw collationUnavailable(command);
-  }
-  if (collation.locale !== 'simple') throw filterError(
-    `Ordered String field comparisons on ${command.typeName} require MongoDB simple collation; the command uses locale "${collation.locale}"`,
-    'UNSUPPORTED_QUERY',
-  );
-};
-
-const checkAggregateCollation = (pipeline, aggregate) => {
-  const command = pipelineCommands.get(pipeline);
-  // A supplied aggregate static can select options before returning its Aggregate. Inspect that
-  // visible override too. Later aggregate middleware/direct-caller mutations own their semantics.
-  if (command?.orderedString) {
-    if (aggregate?.options?.collation != null) assertSimpleCollation(command, aggregate.options.collation);
-    else if (command.declaredCollation != null) throw filterError(
-      `An Aggregate override removed the declared simple collation for ordered String field comparisons on ${command.typeName}; preserve the compiled command collation`,
-      'UNSUPPORTED_QUERY',
-    );
-  }
-  return aggregate;
-};
-
 // $eq follows collection collation. Code-point indexing and lengths give exact String equality
 // even on a supplied collection with a non-simple collation, without changing literal filters.
 const exactComparison = (left, right) => ({ $cond: [
@@ -937,10 +870,6 @@ const buildComparisonClause = async (gqltype, path, rightPath, condition, includ
   const b = comparisonDescription(right);
   const operator = condition.operator ?? 'EQ';
   validateComparisonTypes(a, b, operator, path, operandPath);
-  if (a.scalar === 'String' && ['LT', 'LTE', 'GT', 'GTE'].includes(operator)) {
-    ctx.command.orderedString = true;
-    assertSimpleCollation(ctx.command, await commandCollation(ctx.command));
-  }
   if ((a.identity || a.scalar === 'ID') && identityRepresentation(left, path) !== identityRepresentation(right, operandPath)) {
     throw filterError(`Incompatible identity storage in field comparison: ${path} and ${operandPath}`);
   }
@@ -1098,8 +1027,6 @@ const buildFilterGroupMatch = async (rawFilterGroup, gqltype, aggregateClauses, 
   let ctx = rewriteCtx;
   if (!ctx) {
     ctx = rewriteContext(gqltype);
-    relationBuild(aggregationsIncluded).command = ctx.command;
-    pipelineCommands.set(aggregateClauses, ctx.command);
     const input = { AND: [filterGroup] };
     validateQuantifiedGroups(input, ctx);
     filterGroup = frameCollectionPaths(input, ctx).AND[0];
@@ -1198,10 +1125,8 @@ const FIND_CONTROL_KEYS = new Set(['pagination', 'sort', 'AND', 'OR']);
 // `aggregation` is the expression argument only on aggregate queries; elsewhere it names a field.
 const AGGREGATE_CONTROL_KEYS = new Set([...FIND_CONTROL_KEYS, 'aggregation']);
 
-const collectFiltersAndLookups = async (rawInput, gqltype, aggregateClauses, aggregationsIncluded, operation = 'find', aggregation, command) => {
-  const ctx = rewriteContext(gqltype, operation, aggregation, command);
-  relationBuild(aggregationsIncluded).command = ctx.command;
-  pipelineCommands.set(aggregateClauses, ctx.command);
+const collectFiltersAndLookups = async (rawInput, gqltype, aggregateClauses, aggregationsIncluded, operation = 'find', aggregation) => {
+  const ctx = rewriteContext(gqltype, operation, aggregation);
   validateQuantifiedGroups(rawInput, ctx);
   const input = frameCollectionPaths(rawInput, ctx);
   // Top-level arguments are field filters plus AND/OR groups; `conditions` is a key only inside groups.
@@ -1371,5 +1296,5 @@ const buildAggregationQuery = async (input, gqltype, aggregationExpression) => {
   return aggregateClauses;
 };
 
-  return { buildQuery, buildFilterGroupMatch, buildAggregationQuery, checkAggregateCollation };
+  return { buildQuery, buildFilterGroupMatch, buildAggregationQuery };
 };

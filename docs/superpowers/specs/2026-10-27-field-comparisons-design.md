@@ -59,7 +59,7 @@ With `valuePath`, ILIKE, ISTARTS_WITH, IENDS_WITH, IEQ, IIN, IN, NIN, BTW, CONTA
 Compatibility follows the effective base scalar, including validated scalars:
 
 - Int/Float mix numerically.
-- String/String compares case-sensitively. Ordered string comparisons use code-point order, no locale folding or normalization.
+- String/String equality and supported text predicates are exact and case-sensitive. Ordered String comparisons use PostgreSQL C collation or MongoDB's effective aggregate-command collation, as specified in the amendment below.
 - Boolean/Boolean permits EQ/NE only.
 - ID/ID permits EQ/NE only. Actual record identities are treated as identities even when declared String; this applies only to the new comparison form. MongoDB additionally validates compatible physical identity representations from the supplied/generated model (ObjectId, String or Number); mismatches fail rather than silently compare unrelated types. PostgreSQL uses its stored UUID identities.
 - Enums must be the same GraphQL enum, EQ/NE only. Compare semantic members, accounting for a MongoDB state field storing names while another field stores internal values. Do not assume display names equal storage values. Reuse metadata/codecs and reject ambiguous unsupported storage representations rather than compare the wrong values.
@@ -185,6 +185,12 @@ Builder check (2026-10-27): a fresh software-engineer reviewer read this design 
 
 ## Approved MongoDB collation amendment (2026-10-27)
 
-MongoDB ordered String expressions inherit the aggregate command's collation. A supplied collection with a non-simple collation can therefore disagree with the code-point ordering above. Setting `collation: { locale: 'simple' }` on the whole command would also change existing literal filters and is not an acceptable implicit fix. Exact String equality, scalar-list membership, enum member decoding and the three text operators already use collation-independent expressions.
+The maintainer chose native MongoDB ordering with documented engine differences. This supersedes the earlier approved rejection of non-simple collations. For String `LT`/`LTE`/`GT`/`GTE`, MongoDB applies the effective aggregate-command collation, including to lookups and collection frames. PostgreSQL keeps explicit C collation. Both engines retain the existing null/type guards.
 
-The maintainer approved rejecting String `LT`/`LTE`/`GT`/`GTE` field comparisons under an effective non-simple MongoDB collation with `UNSUPPORTED_QUERY`. All other supported field comparisons remain available. Implement and test this guard without changing command collation or existing literal-filter behavior. PostgreSQL uses explicit C collation and is unaffected.
+Three approaches were considered: forcing simple collation changes existing literal filters; rejecting non-simple or unknown collation preserves portable ordering but requires metadata reads and rejects otherwise executable queries; accepting native collation keeps the database configuration and removes that overhead. The maintainer selected the third approach and approved the documented difference between exact equality and locale ordering.
+
+Remove collection/schema collation inspection, per-compilation command policy and Aggregate-option rejection. Do not set or override command collation. Mongoose schema options and application aggregate hooks/overrides continue to affect execution normally; direct raw-driver calls use their own operation options or collection default. Compilation requires no collection metadata access and works with an offline model.
+
+Exact String EQ/NE, scalar-list membership, enum member decoding and the three text operators remain collation-independent. With `name: "A"`, `needle: "a"` and `{ locale: 'en', strength: 2 }`, `name EQ needle` is false, LT/GT are false and LTE/GTE are true. Locale strength and numericOrdering may also alter accent and digit-string ordering. Document this explicitly rather than promising cross-engine ordering parity. Preserve existing literal-filter behavior, authorization/scopes, null handling, all other unsupported-query errors and public interfaces.
+
+Verify the native collection default, a declared schema collation, application Aggregate overrides (including removal of a schema declaration), the root command's effect through lookups/scopes, and every adapter read path including eligible child batches. Check the case/accent/numeric-order examples against real MongoDB, retain exact EQ/NE/text regressions, and prove compilation does not require metadata access.

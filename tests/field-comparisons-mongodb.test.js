@@ -158,14 +158,15 @@ describe('MongoDB ordered String comparisons and command collation', () => {
   };
   const withRootCollation = (collation) => queriesFor(new Map([...models, [Product, modelWithCollation(Product, collation)]]));
 
-  test.each(['LT', 'LTE', 'GT', 'GTE'])('rejects %s on String operands under a declared non-simple command collation', async (operator) => {
+  test.each(['LT', 'LTE', 'GT', 'GTE'])('compiles %s on String operands without consulting command collation', async (operator) => {
     const supplied = withRootCollation({ locale: 'en', strength: 2 });
     const input = comparison('name', operator, 'needle');
-    for (const compile of [
-      () => supplied.buildQuery(input, Product),
-      () => supplied.buildFilterGroupMatch(input.AND[0], Product, [], {}),
-      () => supplied.buildAggregationQuery(input, Product, { groupId: 'id', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }] }),
-    ]) await reject(compile(), 'UNSUPPORTED_QUERY');
+    const plain = await queries.buildQuery(input, Product);
+    expect(await supplied.buildQuery(input, Product)).toEqual(plain);
+    expect(await supplied.buildFilterGroupMatch(input.AND[0], Product, [], {})).toEqual(matchOf(plain));
+    const aggregation = { groupId: 'id', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }] };
+    expect(await supplied.buildAggregationQuery(input, Product, aggregation))
+      .toEqual(await queries.buildAggregationQuery(input, Product, aggregation));
   });
 
   test('allows ordered Strings with explicit simple collation and leaves literal collation alone', async () => {
@@ -180,72 +181,29 @@ describe('MongoDB ordered String comparisons and command collation', () => {
     expect(matchOf(await collated.buildQuery(comparison('kind', 'EQ', 'state'), Product))).toHaveProperty('$expr');
   });
 
-  test('uses the root command collation for scopes and outer operands inside child lookups', async () => {
+  test('compiles scopes and outer operands with any model collation', async () => {
     const collated = withRootCollation({ locale: 'en', strength: 2 });
-    await reject(collated.buildQuery(comparison('reviews.name', 'LT', 'needle'), Product), 'UNSUPPORTED_QUERY');
-    const input = comparison('stock', 'LT', 'shop.min', {
-      __scope: { id: 'comparison', scopes: { shop: { name: { operator: 'LT', valuePath: 'needle' } } } },
-    });
-    await reject(collated.buildQuery(input, Product), 'UNSUPPORTED_QUERY');
-    const nested = { AND: [{ ANY: [{ path: 'reviews', conditions: [{
-      field: 'rating', operator: 'LT', valuePath: 'shop.min',
-      __scope: { id: 'nested-comparison', scopes: { shop: { name: { operator: 'LT', valuePath: 'needle' } } } },
-    }] }] }] };
-    await reject(collated.buildQuery(nested, Product), 'UNSUPPORTED_QUERY');
-    const simple = queriesFor(new Map([...models,
-      [Product, modelWithCollation(Product, { locale: 'simple' })],
-      [Shop, modelWithCollation(Shop, { locale: 'en', strength: 2 })],
-      [Review, modelWithCollation(Review, { locale: 'en', strength: 2 })],
-    ]));
-    expect(matchOf(await simple.buildQuery(input, Product))).toHaveProperty('$expr');
-    expect((await simple.buildQuery(comparison('reviews.name', 'LT', 'needle'), Product)).some((stage) => stage.$lookup)).toBe(true);
-    expect((await simple.buildQuery(nested, Product)).some((stage) => stage.$lookup)).toBe(true);
+    const inputs = [
+      comparison('reviews.name', 'LT', 'needle'),
+      comparison('stock', 'LT', 'shop.min', {
+        __scope: { id: 'comparison', scopes: { shop: { name: { operator: 'LT', valuePath: 'needle' } } } },
+      }),
+      { AND: [{ ANY: [{ path: 'reviews', conditions: [{
+        field: 'rating', operator: 'LT', valuePath: 'shop.min',
+        __scope: { id: 'nested-comparison', scopes: { shop: { name: { operator: 'LT', valuePath: 'needle' } } } },
+      }] }] }] },
+    ];
+    for (const input of inputs) {
+      expect(await collated.buildQuery(input, Product)).toEqual(await queries.buildQuery(input, Product));
+    }
   });
 
-  test('fails closed when an offline supplied model has no known command collation', async () => {
+  test('compiles ordered Strings with an offline supplied model and no collation metadata', async () => {
     const isolated = new mongoose.Mongoose();
     const model = isolated.model('ComparisonOfflineCollation', productSchema.clone());
     const supplied = queriesFor(new Map([...models, [Product, model]]));
-    await reject(supplied.buildQuery(comparison('name', 'LT', 'needle'), Product), 'UNSUPPORTED_QUERY');
-  });
-
-  test('rejects a visible Aggregate.options override before executing adapter reads', async () => {
-    const isolated = new mongoose.Mongoose();
-    isolated.set('bufferCommands', false);
-    const schema = productSchema.clone();
-    schema.options.collation = { locale: 'simple' };
-    schema.options.bufferCommands = false;
-    const model = isolated.model('ComparisonOverriddenCollation', schema);
-    const originalAggregate = model.aggregate;
-    model.aggregate = function aggregateWithCollation(...args) {
-      return originalAggregate.apply(this, args).collation({ locale: 'en', strength: 2 });
-    };
-    const registered = new Map([...models, [Product, model]]);
-    const adapter = createMongoAdapter();
-    adapter.bind({ getModel: (type) => registered.get(type), getRegistrations: () => [{ gqltype: Product, model }] });
-    const args = comparison('name', 'LT', 'needle');
-    for (const read of [
-      () => adapter.find(model, Product, args),
-      () => adapter.count(model, Product, args),
-      () => adapter.aggregate(model, Product, { ...args, aggregation: { groupId: 'id', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }] } }),
-      () => adapter.findChildren(model, Product, 'shop', new mongoose.Types.ObjectId('000000000000000000000011'), args),
-    ]) await reject(read(), 'UNSUPPORTED_QUERY');
-  });
-
-  test.each([null, undefined])('rejects a visible override that removes declared simple collation (%s)', async (collation) => {
-    const isolated = new mongoose.Mongoose();
-    isolated.set('bufferCommands', false);
-    const schema = productSchema.clone();
-    schema.options.collation = { locale: 'simple' };
-    const model = isolated.model('ComparisonRemovedCollation', schema);
-    const originalAggregate = model.aggregate;
-    model.aggregate = function aggregateWithoutCollation(...args) {
-      return originalAggregate.apply(this, args).collation(collation);
-    };
-    const registered = new Map([...models, [Product, model]]);
-    const adapter = createMongoAdapter();
-    adapter.bind({ getModel: (type) => registered.get(type), getRegistrations: () => [{ gqltype: Product, model }] });
-    await reject(adapter.find(model, Product, comparison('name', 'LT', 'needle')), 'UNSUPPORTED_QUERY');
+    expect(await supplied.buildQuery(comparison('name', 'LT', 'needle'), Product))
+      .toEqual(await queries.buildQuery(comparison('name', 'LT', 'needle'), Product));
   });
 });
 
@@ -424,39 +382,65 @@ describe.each([
       }
     });
 
-    test('inspects native collection collation when a supplied model omits its declaration', async () => {
-      await connection.createCollection('comparison_native_collation', { collation: { locale: 'en', strength: 2 } });
+    test.each(['collection', 'schema', 'override', 'remove-null', 'remove-undefined'])('uses effective %s collation across adapter reads while equality stays exact', async (source) => {
+      const collation = { locale: 'en', strength: 2 };
+      const native = ['collection', 'remove-null', 'remove-undefined'].includes(source);
+      const overridden = source === 'override' || source.startsWith('remove-');
+      const collectionName = `comparison_collation_${source.replaceAll('-', '_')}`;
+      await connection.createCollection(collectionName, { collation: native ? collation : { locale: 'simple' } });
       const schema = productSchema.clone();
-      const model = connection.model('ComparisonNativeCollation', schema, 'comparison_native_collation');
+      if (source !== 'collection') schema.options.collation = source === 'schema' ? collation : { locale: 'simple' };
+      const model = connection.model(`ComparisonCollation_${source}`, schema, collectionName);
+      if (overridden) {
+        const aggregate = model.aggregate;
+        model.aggregate = function aggregateWithCollation(...args) {
+          return aggregate.apply(this, args).collation(source === 'override' ? collation : (source === 'remove-null' ? null : undefined));
+        };
+      }
       await model.collection.insertMany([
         { _id: id('41'), name: 'A', needle: 'a', stock: 1, shop: id('11') },
         { _id: id('42'), name: 'Z', needle: 'a', stock: 1, shop: id('12') },
+        { _id: id('43'), name: null, needle: 'a', shop: id('11') },
+        { _id: id('44'), name: 'A', shop: id('12') },
       ]);
       const registered = new Map([...models, [Product, model]]);
-      const supplied = queriesFor(registered);
-      const args = comparison('name', 'LT', 'needle');
-      const aggregation = { groupId: 'id', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }] };
       const adapter = createMongoAdapter({ batchedCollections: true });
       adapter.bind({ getModel: (type) => registered.get(type), getRegistrations: () => [{ gqltype: Product, model }] });
-      for (const compile of [
-        () => supplied.buildQuery(args, Product),
-        () => supplied.buildFilterGroupMatch(args.AND[0], Product, [], {}),
-        () => supplied.buildAggregationQuery(args, Product, aggregation),
-        () => adapter.find(model, Product, args),
-        () => adapter.count(model, Product, args),
-        () => adapter.aggregate(model, Product, { ...args, aggregation }),
-        () => adapter.findChildren(model, Product, 'shop', id('11'), args),
-        () => adapter.findChildrenBatch(model, Product, 'shop', [id('11'), id('12')], args),
-        () => supplied.buildQuery(comparison('reviews.name', 'LT', 'needle'), Product),
-        () => supplied.buildQuery(comparison('stock', 'LT', 'shop.min', {
-          __scope: { id: 'comparison', scopes: { shop: { name: { operator: 'LT', valuePath: 'needle' } } } },
-        }), Product),
-      ]) await reject(compile(), 'UNSUPPORTED_QUERY');
-      // Existing literal matching still inherits the native collection's collation.
-      const literal = await model.aggregate(await supplied.buildQuery({ name: { value: 'a' } }, Product));
-      expect(literal.map((row) => row.name)).toEqual(['A']);
-      const exact = await model.aggregate(await supplied.buildQuery(comparison('name', 'EQ', 'needle'), Product));
-      expect(exact).toEqual([]);
+      const ids = (rows) => rows.map((row) => row._id.toString().slice(-2)).sort();
+      const aggregation = { groupId: 'id', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }] };
+      for (const [operator, want] of [
+        ['LT', []], ['LTE', ['41']], ['GT', ['42']], ['GTE', ['41', '42']],
+        ['EQ', []], ['NE', ['41', '42', '43', '44']],
+      ]) {
+        const args = comparison('name', operator, 'needle');
+        expect(ids(await adapter.find(model, Product, args))).toEqual(want);
+        expect(await adapter.count(model, Product, args)).toBe(want.length);
+        const grouped = await adapter.aggregate(model, Product, { ...args, aggregation });
+        expect(grouped.map((row) => row.groupId.toString().slice(-2)).sort()).toEqual(want);
+        expect(grouped.every((row) => row.facts.n === 1)).toBe(true);
+        const parents = [id('11'), id('12')];
+        const singles = await Promise.all(parents.map((parent) => adapter.findChildren(model, Product, 'shop', parent, args)));
+        expect(singles.map(ids)).toEqual([want.filter((key) => ['41', '43'].includes(key)), want.filter((key) => ['42', '44'].includes(key))]);
+        if (!overridden) {
+          expect((await adapter.findChildrenBatch(model, Product, 'shop', parents, args)).map(ids)).toEqual(singles.map(ids));
+        }
+      }
+      // A literal and a field comparison in the same command retain their own equality semantics.
+      expect(ids(await adapter.find(model, Product, { name: { value: 'a' }, ...comparison('name', 'LTE', 'needle') }))).toEqual(['41']);
+    });
+
+    test.each([
+      ['case', { locale: 'en', strength: 2 }, 'A', 'a', ['LTE', 'GTE']],
+      ['accent', { locale: 'en', strength: 1 }, 'é', 'e', ['LTE', 'GTE']],
+      ['numeric', { locale: 'en', numericOrdering: true }, '10', '2', ['GT', 'GTE']],
+      ['simple', { locale: 'simple' }, 'A', 'a', ['LT', 'LTE']],
+    ])('respects %s ordering and exact equality when executing the same pipeline', async (label, collation, name, needle, matches) => {
+      const rows = await connection.createCollection(`comparison_order_${label}`, { collation });
+      await rows.insertOne({ name, needle });
+      for (const operator of ['LT', 'LTE', 'GT', 'GTE', 'EQ', 'NE']) {
+        const pipeline = await queries.buildQuery(comparison('name', operator, 'needle'), Product);
+        expect(await rows.aggregate(pipeline).toArray()).toHaveLength(matches.includes(operator) || operator === 'NE' ? 1 : 0);
+      }
     });
 
     test('lets a declared simple command override a native non-simple default without changing options', async () => {
@@ -471,9 +455,10 @@ describe.each([
       const supplied = queriesFor(registered);
       const args = comparison('name', 'LT', 'needle');
       const pipeline = await supplied.buildQuery(args, Product);
-      // Native driver callers explicitly pass the same collation the compiler resolved.
+      // Raw-driver execution uses its own options, independently of the Mongoose schema.
       const direct = await model.collection.aggregate(pipeline, { collation: { locale: 'simple' } }).toArray();
       expect(direct.map((row) => row.name)).toEqual(['A', 'Z']);
+      expect(await model.collection.aggregate(pipeline).toArray()).toEqual([]);
       const adapter = createMongoAdapter({ batchedCollections: true });
       adapter.bind({ getModel: (type) => registered.get(type), getRegistrations: () => [{ gqltype: Product, model }] });
       expect((await adapter.find(model, Product, args)).map((row) => row.name)).toEqual(['A', 'Z']);
@@ -483,32 +468,63 @@ describe.each([
       expect(schema.options.collation).toEqual({ locale: 'simple' });
     });
 
-    test('uses the native root default through target scopes even when the target declares another collation', async () => {
-      await connection.createCollection('comparison_collated_scope', { collation: { locale: 'en', strength: 2 } });
-      const shopSchema = new mongoose.Schema({ name: String, needle: String, min: Number }, { collation: { locale: 'en', strength: 2 } });
-      const shopModel = connection.model('ComparisonCollatedScope', shopSchema, 'comparison_collated_scope');
+    test.each(['simple', 'collated'])('uses the %s root collation in scopes, outer operands and aggregate joins', async (mode) => {
+      const simple = { locale: 'simple' };
+      const collated = { locale: 'en', strength: 2 };
+      const rootName = `comparison_scope_root_${mode}`;
+      const shopName = `comparison_scope_shop_${mode}`;
+      const reviewName = `comparison_scope_review_${mode}`;
+      await connection.createCollection(rootName, { collation: mode === 'simple' ? simple : collated });
+      await connection.createCollection(shopName, { collation: mode === 'simple' ? collated : simple });
+      await connection.createCollection(reviewName, { collation: mode === 'simple' ? collated : simple });
+      const shopSchema = new mongoose.Schema({ name: String, needle: String, min: Number }, { collation: mode === 'simple' ? collated : simple });
+      const shopModel = connection.model(`ComparisonScopeShop_${mode}`, shopSchema, shopName);
+      const model = connection.model(`ComparisonScopeRoot_${mode}`, productSchema.clone(), rootName);
+      const reviewModel = connection.model(`ComparisonScopeReview_${mode}`, new mongoose.Schema({ product: ObjectId, shop: ObjectId, rating: Number, name: String, needle: String }), reviewName);
+      await model.collection.insertOne({ _id: id('01'), stock: 1, needle: 'a', shop: id('11') });
       await shopModel.collection.insertOne({ _id: id('11'), name: 'Z', needle: 'a', min: 2 });
-      const model = connection.model('ComparisonSimpleScopeRoot', productSchema.clone(), 'comparison_products');
-      const registered = new Map([...models, [Product, model], [Shop, shopModel]]);
+      await reviewModel.collection.insertOne({ _id: id('21'), product: id('01'), shop: id('11'), rating: 1, name: 'A', needle: 'a' });
+      const registered = new Map([...models, [Product, model], [Shop, shopModel], [Review, reviewModel]]);
       const supplied = queriesFor(registered);
-      const input = comparison('stock', 'LT', 'shop.min', {
-        __scope: { id: 'comparison', scopes: { shop: { name: { operator: 'LT', valuePath: 'needle' } } } },
-      });
-      const rows = await model.aggregate(await supplied.buildQuery(input, Product));
-      expect(rows.map((row) => row._id.toString().slice(-2))).toEqual(['01']);
+      const inputs = [
+        comparison('stock', 'LT', 'shop.min', {
+          __scope: { id: 'comparison', scopes: { shop: { name: { operator: 'LT', valuePath: 'needle' } } } },
+        }),
+        comparison('reviews.name', 'LT', 'needle'),
+        { AND: [{ ANY: [{ path: 'reviews', conditions: [{
+          field: 'rating', operator: 'LT', valuePath: 'shop.min',
+          __scope: { id: 'nested-comparison', scopes: { shop: { name: { operator: 'LT', valuePath: 'needle' } } } },
+        }] }] }] },
+      ];
+      for (const input of inputs) {
+        const rows = await model.aggregate(await supplied.buildQuery(input, Product));
+        expect(rows.map((row) => row._id.toString().slice(-2))).toEqual(mode === 'simple' ? ['01'] : []);
+      }
+      const aggregate = await model.aggregate(await supplied.buildAggregationQuery(comparison('reviews.name', 'LT', 'reviews.needle'), Product, {
+        groupId: 'reviews.id', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }],
+      }));
+      expect(aggregate.map((row) => row.groupId.toString().slice(-2))).toEqual(mode === 'simple' ? ['21'] : []);
     });
 
-    test('refreshes collection collation metadata on each compilation', async () => {
+    test('compiles before collection creation and uses its eventual collation without metadata reads', async () => {
       const schema = productSchema.clone();
       schema.options.autoCreate = false;
       schema.options.autoIndex = false;
       const model = connection.model('ComparisonChangedCollation', schema, 'comparison_changed_collation');
       const supplied = queriesFor(new Map([...models, [Product, model]]));
-      const args = comparison('name', 'LT', 'needle');
-      // Before creation the collection uses MongoDB's simple default; no process cache survives.
-      expect(matchOf(await supplied.buildQuery(args, Product))).toHaveProperty('$expr');
+      const args = comparison('name', 'LTE', 'needle');
+      const pipeline = await supplied.buildQuery(args, Product);
       await connection.createCollection('comparison_changed_collation', { collation: { locale: 'en', strength: 2 } });
-      await reject(supplied.buildQuery(args, Product), 'UNSUPPORTED_QUERY');
+      await model.collection.insertOne({ name: 'A', needle: 'a' });
+      // Make metadata access fail so this also covers applications without listCollections privileges.
+      const original = connection.db.listCollections;
+      connection.db.listCollections = () => { throw new Error('Collection metadata is unavailable'); };
+      try {
+        expect(await supplied.buildQuery(args, Product)).toEqual(pipeline);
+        expect((await model.aggregate(pipeline)).map((row) => row.name)).toEqual(['A']);
+      } finally {
+        connection.db.listCollections = original;
+      }
     });
   });
 });
