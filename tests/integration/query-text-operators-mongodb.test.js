@@ -1,5 +1,5 @@
 import {
-  afterAll, beforeAll, describe, expect, test,
+  afterAll, beforeAll, describe, expect, test, vi,
 } from 'vitest';
 import mongoose from 'mongoose';
 import {
@@ -144,6 +144,9 @@ const codeOf = async (body) => {
   }
   return null;
 };
+
+// The message of a case-insensitive regular expression that MongoDB cannot compile (Location51091).
+const REGEX_TOO_LARGE = 'Case-insensitive text filter value is too long: MongoDB cannot compile its regular expression when ignoring case, because letters such as k and s match more than one character';
 
 describe('MongoDB text operator compilation', () => {
   const fixture = createFixture('QtmPlan', { preventCreatingCollection: true });
@@ -421,6 +424,45 @@ describe('MongoDB text operator compilation', () => {
         .rejects.toThrow('IEQ value on shop.name is too long: MongoDB accepts regular expressions of at most 32764 bytes, and this one has 32765');
       await expect(build({ OR: [{ conditions: [{ field: 'tags', operator: 'LIKE', value: '.'.repeat(16381) }] }] }))
         .rejects.toThrow('LIKE value on tags is too long');
+    });
+
+    // MongoDB fails a command whose regular expression it cannot compile with Location51091. Within the byte limit
+    // above, only a case-insensitive pattern can compile too large, so only then is the client's value the cause.
+    test('map the server rejecting a case-insensitive regular expression to INVALID_FILTER_VALUE, and no other error', async () => {
+      const Model = fixture.model('Product');
+      const serverError = (code, errmsg) => new mongoose.mongo.MongoServerError({ ok: 0, code, codeName: `Location${code}`, errmsg });
+      const tooLarge = serverError(51091, 'Regular expression is invalid: regular expression is too large');
+      const thrownBy = async (error, read) => {
+        const aggregate = vi.spyOn(Model, 'aggregate').mockImplementation(() => Promise.reject(error));
+        try {
+          return await read().then(() => null, (thrown) => thrown);
+        } finally {
+          aggregate.mockRestore();
+        }
+      };
+      const { adapter } = fixture;
+      const args = { name: { operator: 'IEQ', value: 'k' } };
+      const aggregation = { groupId: 'name', facts: [{ operation: 'COUNT', factName: 'n', path: 'id' }] };
+      const reads = {
+        find: () => adapter.find(Model, Product, args, null),
+        count: () => adapter.count(Model, Product, args, null),
+        aggregate: () => adapter.aggregate(Model, Product, { ...args, aggregation }, null),
+        findChildren: () => adapter.findChildren(Model, Product, 'shop', new mongoose.Types.ObjectId().toString(), args, null),
+      };
+      for (const [name, read] of Object.entries(reads)) {
+        const thrown = await thrownBy(tooLarge, read);
+        expect(thrown?.message, name).toBe(REGEX_TOO_LARGE);
+        expect(thrown.extensions, name).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
+        expect(thrown.getCause(), name).toBe(tooLarge);
+      }
+      // IIN sends BSON regular expressions inside $in rather than $regex/$options.
+      const iin = await thrownBy(tooLarge, () => adapter.find(Model, Product, { name: { operator: 'IIN', value: ['k'] } }, null));
+      expect(iin.extensions).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
+      expect(iin.getCause()).toBe(tooLarge);
+      // A case-sensitive pattern, which the byte limit bounds, and other server errors keep the driver's error.
+      expect(await thrownBy(tooLarge, () => adapter.find(Model, Product, { name: { operator: 'STARTS_WITH', value: 'k' } }, null))).toBe(tooLarge);
+      const badValue = serverError(2, 'BadValue');
+      expect(await thrownBy(badValue, reads.find)).toBe(badValue);
     });
 
     test('keep path errors ahead of value errors', async () => {
@@ -888,6 +930,39 @@ describe.each(servers)('MongoDB text operators on a %s', (_label, uri, prefix) =
       expect(await keys(on('tags', 'ILIKE'), '\u00e9'.repeat(16382))).toEqual([]);
       const tags = await fixture.execute(withValue(on('tags', 'ILIKE')), { v: '\u00e9'.repeat(16383) });
       expect(tags.errors?.[0].extensions.code).toBe('INVALID_FILTER_VALUE');
+    });
+
+    // Ignoring case, the server compiles each letter that has other case forms to a class: k also matches K and the
+    // Kelvin sign U+212A, s also matches S and the long s U+017F. About 21,843 such letters fit in the byte limit, but
+    // their regular expression is too large to compile (Location51091).
+    test('a case-insensitive value whose regular expression the server cannot compile fails with INVALID_FILTER_VALUE, not a server error', async () => {
+      const rejected = async (target, source, value, context) => {
+        const result = await target.execute(source, { v: value }, context);
+        expect(result.errors?.[0], source).toMatchObject({ message: REGEX_TOO_LARGE, extensions: { code: 'INVALID_FILTER_VALUE', status: 400 } });
+      };
+      const k = 'k'.repeat(22000);
+      for (const operator of ['IEQ', 'ILIKE', 'ISTARTS_WITH', 'IENDS_WITH']) await rejected(fixture, withValue(on('name', operator)), k);
+      await rejected(fixture, withValue(on('name', 'IEQ')), 's'.repeat(22000));
+      await rejected(fixture, withValue(on('name', 'IIN')), [k]);
+      // Through a join, with pagination.count, in a scoped by-ID read, an aggregate and collection fields, read one
+      // parent at a time and batched.
+      await rejected(fixture, withValue(term('shop', 'name', 'IEQ')), k);
+      await rejected(fixture, `query($v: QLValue) { ${fixture.products}(name: {operator: IEQ, value: $v}, pagination: {page: 1, size: 1, count: true}) { key } }`, k);
+      const productByIdScope = (args) => { args.name = { operator: 'IEQ', value: k }; };
+      await rejected(fixture, `{ ${fixture.lower}product(id: "${ids.p01}") { key } }`, undefined, { productByIdScope });
+      await rejected(fixture, `query($v: QLValue) { ${fixture.products}_aggregate(name: {operator: ILIKE, value: $v}, aggregation: {groupId: "key", facts: [{operation: COUNT, factName: "n", path: "id"}]}) { groupId facts } }`, k);
+      const warn = vi.spyOn(console, 'warn');
+      try {
+        for (const target of [fixture, batched]) {
+          await rejected(target, `query($v: QLValue) { ${target.shops}(sort: {terms: [{field: "key", order: ASC}]}) { key products(name: {operator: ISTARTS_WITH, value: $v}) { key } } }`, k);
+        }
+        // The failed batch is the client's error, which the runtime does not report as an adapter failure.
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+      // An IEQ value of 32,761 letters without other case forms, the longest the byte limit accepts, still runs.
+      expect(await keys(on('name', 'IEQ'), 'a'.repeat(32761))).toEqual([]);
     });
 
     test('STARTS_WITH reads a prefix range of the field index; the other operators read the whole index', async () => {
