@@ -162,8 +162,10 @@ const createDescriptor = (schema, registrations) => {
         } : null;
       }
     }
-    if (isInputObjectType(type)) result.fields = Object.values(type.getFields()).map(input);
-    else if (isObjectType(type) || isInterfaceType(type)) {
+    if (isInputObjectType(type)) {
+      result.fields = Object.values(type.getFields()).map(input);
+      if (type.isOneOf === true) result.isOneOf = true;
+    } else if (isObjectType(type) || isInterfaceType(type)) {
       result.interfaces = type.getInterfaces().map((item) => item.name);
       result.fields = Object.values(type.getFields()).map((field) => {
         const relation = relationOf(type, field);

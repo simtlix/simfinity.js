@@ -58,6 +58,7 @@ export interface ClientDescriptorType {
   readonly inputs?: Readonly<{ add?: string; update?: string }>;
   readonly stateMachine?: ClientDescriptorStateMachine | null;
   readonly fields?: readonly (ClientDescriptorField | ClientDescriptorInputValue)[];
+  readonly isOneOf?: boolean;
   readonly interfaces?: readonly string[];
   readonly possibleTypes?: readonly string[];
   readonly values?: readonly Readonly<{ name: string; description: string | null; deprecationReason: string | null }>[];

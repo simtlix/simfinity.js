@@ -2520,6 +2520,7 @@ declare const operation: Descriptor.ClientDescriptorOperation;
 const transactionOperation: Descriptor.ClientDescriptorOperation['operation'] = 'transaction';
 declare const input: Descriptor.ClientDescriptorInputValue;
 declare const type: Descriptor.ClientDescriptorType;
+const isOneOf: boolean | undefined = type.isOneOf;
 const handler = createClientDescriptorHandler<{ user: string }>(schema, {
   context: async () => ({ user: 'reader' }), authorize: (_req, ctx) => ctx.user === 'reader',
 });
@@ -2531,7 +2532,7 @@ createClientDescriptorHandler(schema, { authorize: 'public', cacheControl: 'publ
 declare const request: Descriptor.DescriptorRequest;
 declare const response: Descriptor.DescriptorResponse;
 void handler(request, response);
-void [keys, version, name, usage, relation, machine, operation, transactionOperation, input, type, options];`;
+void [keys, version, name, usage, relation, machine, operation, transactionOperation, input, type, isOneOf, options];`;
 
 const cases = [
   {

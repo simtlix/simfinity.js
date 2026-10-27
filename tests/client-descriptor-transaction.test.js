@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import {
-  GraphQLID, GraphQLObjectType, GraphQLSchema, GraphQLString,
+  GraphQLID, GraphQLInputObjectType, GraphQLObjectType, GraphQLSchema, GraphQLString,
 } from 'graphql';
 import { createRuntime } from '../packages/core/src/index.js';
 import { buildClientDescriptor } from '../packages/descriptor/src/index.js';
@@ -50,6 +50,10 @@ describe('client descriptor transactions', () => {
       args: [{ name: 'operations', type: `[${prefix}Operation!]!`, hasDefault: false }],
       returns: `[${prefix}Result!]`,
     });
+    expect(descriptor.types[`${prefix}Operation`]).toMatchObject({ kind: 'input', isOneOf: true });
+    expect(Object.isFrozen(descriptor.types[`${prefix}Operation`])).toBe(true);
+    expect(descriptor.types.TransactionBookInput).not.toHaveProperty('isOneOf');
+    expect(descriptor.types[`${prefix}DeleteInput`]).not.toHaveProperty('isOneOf');
     expect(Object.fromEntries(descriptor.types[`${prefix}Operation`].fields.map((field) => [field.name, field.type]))).toEqual({
       addbook: 'TransactionBookInput',
       updatebook: 'TransactionBookInputForUpdate',
@@ -58,6 +62,29 @@ describe('client descriptor transactions', () => {
     expect(Object.fromEntries(descriptor.types[`${prefix}Result`].fields.map((field) => [field.name, field.type]))).toEqual({
       id: 'ID', addbook: 'TransactionBook', updatebook: 'TransactionBook', deletebook: 'TransactionBook',
     });
+  });
+
+  test('snapshots custom oneOf inputs while omitting the flag from ordinary inputs', () => {
+    const { runtime } = fixture();
+    const Details = new GraphQLInputObjectType({
+      name: 'LookupDetails', fields: { title: { type: GraphQLString } },
+    });
+    const Choice = new GraphQLInputObjectType({
+      name: 'LookupChoice', isOneOf: true,
+      fields: { id: { type: GraphQLID }, details: { type: Details } },
+    });
+    runtime.registerMutation('lookup', 'Choose a lookup', Choice, GraphQLString, () => 'selected');
+    const schema = runtime.createSchema();
+    const descriptor = buildClientDescriptor(schema);
+
+    expect(descriptor.types.LookupChoice).toMatchObject({ kind: 'input', isOneOf: true });
+    expect(descriptor.types.LookupDetails).not.toHaveProperty('isOneOf');
+    expect(Object.isFrozen(descriptor.types.LookupChoice)).toBe(true);
+    Choice.isOneOf = false;
+    Details.isOneOf = true;
+    expect(buildClientDescriptor(schema)).toBe(descriptor);
+    expect(descriptor.types.LookupChoice.isOneOf).toBe(true);
+    expect(descriptor.types.LookupDetails).not.toHaveProperty('isOneOf');
   });
 
   test('keeps transaction classification and snapshots specific to their owning schemas', () => {
