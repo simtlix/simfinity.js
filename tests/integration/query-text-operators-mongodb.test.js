@@ -22,6 +22,8 @@ const LEGACY = ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE'
 const TEXT = ['ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ'];
 // The emptiness operators (#108, part 2a), which take no value; query-emptiness-mongodb.test.js tests them.
 const EMPTINESS = ['IS_EMPTY', 'IS_NOT_EMPTY'];
+// The list operators (#108, part 4), which take an array; list-operators-mongodb.test.js tests them.
+const LIST = ['CONTAINS_ALL', 'IIN'];
 // The operators that match every non-null string for an empty value.
 const OPEN_ENDED = ['ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH'];
 
@@ -453,6 +455,10 @@ describe('MongoDB text operator compilation', () => {
         expect(thrown.extensions, name).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
         expect(thrown.getCause(), name).toBe(tooLarge);
       }
+      // IIN sends BSON regular expressions inside $in rather than $regex/$options.
+      const iin = await thrownBy(tooLarge, () => adapter.find(Model, Product, { name: { operator: 'IIN', value: ['k'] } }, null));
+      expect(iin.extensions).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
+      expect(iin.getCause()).toBe(tooLarge);
       // A case-sensitive pattern, which the byte limit bounds, and other server errors keep the driver's error.
       expect(await thrownBy(tooLarge, () => adapter.find(Model, Product, { name: { operator: 'STARTS_WITH', value: 'k' } }, null))).toBe(tooLarge);
       const badValue = serverError(2, 'BadValue');
@@ -468,7 +474,7 @@ describe('MongoDB text operator compilation', () => {
   describe('queryFeatures', () => {
     test('the adapter declares every QLOperator value, listed explicitly, and reference emptiness', () => {
       for (const adapter of [fixture.adapter, createMongoAdapter({ batchedCollections: true })]) {
-        expect(adapter.queryFeatures).toEqual({ operators: [...LEGACY, ...TEXT, ...EMPTINESS], referenceEmptiness: true, quantifiers: true });
+        expect(adapter.queryFeatures).toEqual({ operators: [...LEGACY, ...TEXT, ...EMPTINESS, ...LIST], referenceEmptiness: true, quantifiers: true });
         expect(Object.isFrozen(adapter.queryFeatures)).toBe(true);
         expect(Object.isFrozen(adapter.queryFeatures.operators)).toBe(true);
       }
@@ -476,10 +482,12 @@ describe('MongoDB text operator compilation', () => {
       expect(QLOperator.getValues().map((entry) => entry.value).sort()).toEqual([...fixture.adapter.queryFeatures.operators].sort());
     });
 
-    test('every declared operator compiles on a String leaf', async () => {
+    test('every declared operator compiles on a String leaf or list', async () => {
       for (const operator of fixture.adapter.queryFeatures.operators) {
-        const value = ['IN', 'NIN', 'BTW'].includes(operator) ? ['a', 'b'] : EMPTINESS.includes(operator) ? undefined : 'a';
-        expect(await matchOf({ name: { operator, value } })).toHaveProperty('name');
+        // CONTAINS_ALL takes a list leaf.
+        const field = operator === 'CONTAINS_ALL' ? 'tags' : 'name';
+        const value = ['IN', 'NIN', 'BTW', ...LIST].includes(operator) ? ['a', 'b'] : EMPTINESS.includes(operator) ? undefined : 'a';
+        expect(await matchOf({ [field]: { operator, value } })).toHaveProperty(field);
       }
     });
 
@@ -488,8 +496,8 @@ describe('MongoDB text operator compilation', () => {
         adapter: { ...createMongoAdapter(), queryFeatures: undefined },
         preventCreatingCollection: true,
       });
-      for (const operator of [...TEXT, ...EMPTINESS]) {
-        const value = EMPTINESS.includes(operator) ? '' : ', value: "a"';
+      for (const operator of [...TEXT, ...EMPTINESS, ...LIST]) {
+        const value = EMPTINESS.includes(operator) ? '' : LIST.includes(operator) ? ', value: ["a"]' : ', value: "a"';
         const result = await copy.execute(`{ ${copy.products}(name: {operator: ${operator}${value}}) { key } }`);
         expect(result.errors?.[0].extensions.code).toBe('UNSUPPORTED_QUERY');
       }
@@ -935,6 +943,7 @@ describe.each(servers)('MongoDB text operators on a %s', (_label, uri, prefix) =
       const k = 'k'.repeat(22000);
       for (const operator of ['IEQ', 'ILIKE', 'ISTARTS_WITH', 'IENDS_WITH']) await rejected(fixture, withValue(on('name', operator)), k);
       await rejected(fixture, withValue(on('name', 'IEQ')), 's'.repeat(22000));
+      await rejected(fixture, withValue(on('name', 'IIN')), [k]);
       // Through a join, with pagination.count, in a scoped by-ID read, an aggregate and collection fields, read one
       // parent at a time and batched.
       await rejected(fixture, withValue(term('shop', 'name', 'IEQ')), k);

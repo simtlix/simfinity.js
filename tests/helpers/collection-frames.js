@@ -147,6 +147,18 @@ export const createEvaluator = (models, store) => {
     if (node.operator === 'IS_EMPTY' || node.operator === 'IS_NOT_EMPTY') {
       return empty(fieldsOf(entity), record, node.path, true, [], node.scopes) === (node.operator === 'IS_EMPTY');
     }
+    // A scalar list is one value of `values`, so the list operators flatten one level. CONTAINS_ALL holds when every
+    // value is among the record's (SameValueZero, nothing cast); IIN when some string equals a value ignoring case,
+    // where missing and null values, and empty lists, give no string.
+    if (node.operator === 'CONTAINS_ALL') {
+      const found = values(fieldsOf(entity), record, node.path, true, node.joins).flatMap((value) => (Array.isArray(value) ? value : [value]));
+      return node.value.every((item) => found.includes(item));
+    }
+    if (node.operator === 'IIN') {
+      const found = values(fieldsOf(entity), record, node.path, true, node.joins).flatMap((value) => (Array.isArray(value) ? value : [value])).filter((value) => typeof value === 'string');
+      const wanted = node.value.map((item) => item.toLowerCase());
+      return found.some((value) => wanted.includes(value.toLowerCase()));
+    }
     return values(fieldsOf(entity), record, node.path, true, node.joins).some((value) => compare(value, node.operator, node.value));
   };
   return holds;

@@ -309,7 +309,7 @@ describe('PostgreSQL emptiness declaration', () => {
 
   it('declares IS_EMPTY and IS_NOT_EMPTY in the PostgreSQL plugin, after the text operators, and binds them', () => {
     const { operators } = postgresPlugin().queryFeatures;
-    expect(operators.slice(-3)).toEqual(['IEQ', 'IS_EMPTY', 'IS_NOT_EMPTY']);
+    expect(operators.slice(-5, -2)).toEqual(['IEQ', 'IS_EMPTY', 'IS_NOT_EMPTY']);
     expect(bindPlugin(postgresPlugin()).queryFeatures.operators).toEqual(operators);
     expect(createSQLAdapter(postgresPlugin()).queryFeatures.operators).toEqual(operators);
   });

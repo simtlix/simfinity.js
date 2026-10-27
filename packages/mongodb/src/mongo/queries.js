@@ -12,7 +12,7 @@ import { SimfinityError, QLOperator, paginationStages } from '@simtlix/simfinity
 import {
   TEXT_QUERY_OPERATORS, aggregateJoinPrefixes, crossingKeys, describeEmptiness, effectiveScalarName, emptinessScopePaths,
   frameCollectionPaths, isEmptinessOperator, validateQuantifiedGroups,
-  textQueryOperator, validateTextFilterValue,
+  textQueryOperator, validateTextFilterValue, validateTextListFilterValue,
 } from '@simtlix/simfinity-core/internal/query-operators';
 import {
   getFieldStorageName, getListShape, hasStoredIdentity, isVirtualField, normalizeConnectionField,
@@ -39,6 +39,7 @@ export const MONGO_QUERY_OPERATORS = Object.freeze([
   'EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE',
   'ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ',
   'IS_EMPTY', 'IS_NOT_EMPTY',
+  'CONTAINS_ALL', 'IIN',
 ]);
 
 export const createMongoQueries = ({ getModel, getRegistrations }) => {
@@ -108,14 +109,18 @@ const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // which would report a client's long value as an internal error. Escaping adds a byte to each
 // metacharacter and the operators add their anchors, so the limit applies to the compiled pattern.
 const MAX_REGEX_PATTERN_BYTES = 32764;
-// A $regex match, rejected with INVALID_FILTER_VALUE before the query runs when MongoDB would reject
-// its pattern. `path` is the condition's GraphQL path, for the message.
-const regexMatch = (operator, pattern, ignoreCase, path) => {
+// MongoDB rejects a regular expression longer than 32,764 UTF-8 bytes on the server (Location51091). `path` is the
+// condition's GraphQL path, for the message. Returns the pattern.
+const assertPatternBytes = (operator, pattern, path) => {
   const bytes = Buffer.byteLength(pattern, 'utf8');
   if (bytes > MAX_REGEX_PATTERN_BYTES) {
     const where = path == null ? '' : ` on ${path}`;
     throw filterError(`${operator} value${where} is too long: MongoDB accepts regular expressions of at most ${MAX_REGEX_PATTERN_BYTES} bytes, and this one has ${bytes}`);
   }
+  return pattern;
+};
+const regexMatch = (operator, pattern, ignoreCase, path) => {
+  assertPatternBytes(operator, pattern, path);
   return ignoreCase ? { $regex: pattern, $options: 'i' } : { $regex: pattern };
 };
 
@@ -509,7 +514,8 @@ const rewriteContext = (gqltype, operation = 'find', aggregation) => {
 };
 
 // Cross references in the containing pipeline. Collection steps occur here only for an aggregate
-// anchor: all ordinary collection crossings have already become frames in the shared rewrite.
+// anchor, or inside the prefix witness of a hand-built implicit group that crosses a collection
+// before its end: all ordinary collection crossings have already become frames in the shared rewrite.
 const crossFramePath = async (gqltype, segments, scopes, build, lookups, included) => {
   let type = gqltype;
   let parent = { key: '', schemaPath: '', path: '' };
@@ -585,7 +591,9 @@ const compileFrame = async (ctx, quantifier, group) => {
   for (const [index, name] of segments.entries()) {
     const field = type.getFields()[name];
     if (field.extensions?.relation && !field.extensions.relation.embedded) {
-      if (index < segments.length - 1 && vector) multiplyingPrefix = true;
+      // A collection crossed before the end multiplies the prefix as an embedded-list vector does (#108 part 4): only a
+      // hand-built implicit group crosses one outside an anchor, and anchored groups skip the witness below.
+      if (index < segments.length - 1 && (vector || getListShape(field.type))) multiplyingPrefix = true;
       vector = false;
       if (!getModel(getNamedType(field.type))) throw filterError(`Related model is not available for ${joinPath(ctx.base, segments.join('.'))}`, 'INVALID_FILTER_PATH');
       if (!anchor.length || index >= anchor.length || getListShape(field.type)) paths.push(segments.slice(0, index + 1).join('.'));
@@ -601,7 +609,7 @@ const compileFrame = async (ctx, quantifier, group) => {
     }
   }
   const emptyAll = quantifier === 'ALL' && !['conditions', 'ANY', 'ALL', 'NONE', 'AND', 'OR'].some((key) => group[key]?.length);
-  // A vector prefix belongs to this predicate, not to the containing result set. A
+  // A vector or collection prefix belongs to this predicate, not to the containing result set. A
   // self-correlated witness keeps its joins local without discarding any target. Aggregate
   // anchors retain their intentional expansion. NONE tests the positive ANY witness; ALL
   // looks for a prefix whose complete ALL test fails, including vacuous empty prefixes.
@@ -719,7 +727,14 @@ const buildMatchesClause = (resolved, operator, value, path) => {
     const text = validateTextFilterValue(op, value, effectiveScalarName(resolved.fieldType), path);
     return { [resolved.mongoPath]: OP_TO_MONGO[op](text, path) };
   }
-  const collectionOperator = op === 'IN' || op === 'NIN' || op === 'BTW';
+  // IIN, IN ignoring case (#108 part 4): one anchored, escaped, case-insensitive regular expression per value inside
+  // $in, as a BSON regular expression, so the server receives exactly the pattern checked against its limit. Values
+  // are never cast; core's rule has accepted them.
+  if (op === 'IIN') {
+    const values = validateTextListFilterValue(op, value, effectiveScalarName(resolved.fieldType), path);
+    return { [resolved.mongoPath]: { $in: values.map((item) => new mongoose.mongo.BSONRegExp(assertPatternBytes(op, TEXT_PATTERNS.exact(escapeRegex(item)), path), 'i')) } };
+  }
+  const collectionOperator = op === 'IN' || op === 'NIN' || op === 'BTW' || op === 'CONTAINS_ALL';
   if (collectionOperator && (!Array.isArray(value) || (op === 'BTW' && value.length !== 2))) {
     throw filterError(`${op} requires ${op === 'BTW' ? 'exactly two values' : 'an array value'}`);
   }
@@ -734,6 +749,7 @@ const buildMatchesClause = (resolved, operator, value, path) => {
   const coerced = collectionOperator ? value.map(cast) : op === 'LIKE' ? value : cast(value);
   if (op === 'EQ') return { [resolved.mongoPath]: coerced };
   if (op === 'IN' || op === 'NIN') return { [resolved.mongoPath]: { [op === 'IN' ? '$in' : '$nin']: coerced } };
+  if (op === 'CONTAINS_ALL') return { [resolved.mongoPath]: { $all: coerced } };
   return { [resolved.mongoPath]: OP_TO_MONGO[op](coerced, path) };
 };
 

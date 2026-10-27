@@ -118,7 +118,9 @@ export interface MongoAdapter extends DatabaseAdapter {
    * Frozen; lists every `QLOperator` value and declares `referenceEmptiness: true` and `quantifiers: true`. The literal text
    * operators compile to escaped regular expressions: `ILIKE` unanchored, `STARTS_WITH` and
    * `ISTARTS_WITH` anchored with `^`, `ENDS_WITH` and `IENDS_WITH` with `\z`, and `IEQ` with both, with
-   * the `i` option for the case-insensitive ones. `IS_EMPTY` and `IS_NOT_EMPTY` compile to plain query
+   * the `i` option for the case-insensitive ones. `CONTAINS_ALL` compiles to `$all` with cast values; `IIN` to `$in`
+   * of anchored, escaped, case-insensitive regular expressions, one per value, each within MongoDB's 32,764-byte
+   * limit. `IS_EMPTY` and `IS_NOT_EMPTY` compile to plain query
    * operators on the record's own fields, and through single references and at references and
    * collections to joins and frames (see {@link buildQuery}). A copy of the adapter without this member
    * supports only the operators of 3.7.0, and one whose declaration leaves out `referenceEmptiness`

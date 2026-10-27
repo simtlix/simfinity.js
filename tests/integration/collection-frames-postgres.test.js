@@ -126,7 +126,7 @@ describe('PostgreSQL collection frame statements', () => {
     expect(shorthand.values).toEqual([4]);
     expect(shorthand).toEqual(make({ AND: [{ conditions: [{ field: 'reviews.rating', operator: 'GTE', value: 4 }] }] }));
   });
-  it.each([['EQ', 'IS NOT DISTINCT FROM', 'x'], ['IN', 'COALESCE', ['x']], ['NIN', 'COALESCE', ['x']]])('keeps ALL %s two-valued', (operator, expected, value) => {
+  it.each([['EQ', 'IS NOT DISTINCT FROM', 'x'], ['IN', 'COALESCE', ['x']], ['NIN', 'COALESCE', ['x']], ['IIN', 'COALESCE', ['x']]])('keeps ALL %s two-valued', (operator, expected, value) => {
     const result = compile(frame('reviews', pred('author', operator, value), { quantifier: 'ALL' }));
     expect(result.text).toContain(expected);
     expect(result.text).toContain('AND NOT (');
@@ -260,6 +260,29 @@ describe('phase5-native PostgreSQL operand precedence', () => {
       expect(error.message).toBe(message);
     }
   });
+  // Not a row of the pin above: CONTAINS_ALL is new in #108 part 4, and its elements are cast as IN casts them.
+  it('checks native CONTAINS_ALL elements before new joins metadata', () => {
+    for (const extra of [{}, { joins: { ref: null } }, { joins: {} }]) {
+      const error = caught(() => native(pred('ref.tags', 'CONTAINS_ALL', ['x', 42], extra)));
+      expect(error?.extensions, `${JSON.stringify(extra)} ${error?.stack}`).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
+      expect(error.message).toBe('Expected a string for tags');
+    }
+  });
+  // predicate() names no path; with joins, core's re-validation names it first.
+  it('rejects IIN on a native Int operand with core\'s field rule, never as a detached filter', () => {
+    for (const [extra, message] of [[{}, 'IIN requires a String field'], [{ joins: { ref: null } }, 'IIN requires a String field on ref.rank'], [{ joins: {} }, 'IIN requires a String field on ref.rank']]) {
+      const error = caught(() => native(pred('ref.rank', 'IIN', ['a'], extra)));
+      expect(error?.extensions, `${JSON.stringify(extra)} ${error?.stack}`).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
+      expect(error.message).toBe(message);
+    }
+  });
+  it('pin: rejects IEQ on a native Int operand with core\'s field rule, never as a detached filter', () => {
+    for (const [extra, message] of [[{}, 'IEQ requires a String field'], [{ joins: { ref: null } }, 'IEQ requires a String field on ref.rank'], [{ joins: {} }, 'IEQ requires a String field on ref.rank']]) {
+      const error = caught(() => native(pred('ref.rank', 'IEQ', 'a', extra)));
+      expect(error?.extensions, `${JSON.stringify(extra)} ${error?.stack}`).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
+      expect(error.message).toBe(message);
+    }
+  });
   it('checks a native String operand inside a literal new quantified plan', () => {
     const error = caught(() => compile(frame('products', pred('pro.name', 'EQ', 42, { joins: {} })), 'Shop'));
     expect(error?.extensions, error?.stack).toMatchObject({ code: 'INVALID_FILTER_VALUE', status: 400 });
@@ -267,6 +290,19 @@ describe('phase5-native PostgreSQL operand precedence', () => {
   });
   it.each([{}, { ref: undefined }, [], { ref: false }])('keeps valid native operands fail-closed with malformed joins %j', (joins) => {
     expect(caught(() => native(pred('ref.name', 'EQ', 'valid', { joins })))?.extensions).toMatchObject({ code: 'DETACHED_CLIENT_FILTER', status: 500 });
+    // The case-insensitive operators fold the checkpoint's placeholder, and the list operators of #108 part 4 bind
+    // their arrays, on scalar leaves and on a list.
+    const rows = [
+      ...['ref.name', 'ref.detail.id'].flatMap((path) => [
+        ...['IEQ', 'ILIKE', 'ISTARTS_WITH', 'IENDS_WITH'].map((operator) => [path, operator, 'valid']), [path, 'IIN', ['a']], [path, 'IIN', []],
+      ]),
+      ['ref.tags', 'IIN', ['x']], ['ref.tags', 'CONTAINS_ALL', ['x']],
+    ];
+    for (const [path, operator, value] of rows) {
+      const error = caught(() => native(pred(path, operator, value, { joins })));
+      expect(error, `${path} ${operator} ${error?.stack}`).not.toBeInstanceOf(TypeError);
+      expect(error?.extensions, `${path} ${operator} ${error?.stack}`).toMatchObject({ code: 'DETACHED_CLIENT_FILTER', status: 500 });
+    }
   });
   it('keeps an embedded String id distinct from an entity UUID on the rejecting branch', () => {
     expect(caught(() => native(pred('ref.detail.id', 'EQ', 'plain-string', { joins: {} })))?.extensions).toMatchObject({ code: 'DETACHED_CLIENT_FILTER', status: 500 });

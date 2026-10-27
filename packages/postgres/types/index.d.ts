@@ -246,9 +246,10 @@ export interface PostgresRuntime extends Runtime<PostgresModel, PostgresSession>
 }
 /**
  * PostgreSQL 15+ plugin for createSQL; omitted options allow later runtime.configure. Its `queryFeatures` lists every
- * `QLOperator` value. The case-insensitive text operators fold case with {@link caseFoldExpression}, which needs a UTF8
- * database with the ICU collation `und-x-icu`: on another database, such as one in LATIN1 or on a server built without
- * ICU, they fail with UNSUPPORTED_QUERY (400), and every other operation works.
+ * `QLOperator` value. The case-insensitive text operators and `IIN` fold case with {@link caseFoldExpression}, which
+ * needs a UTF8 database with the ICU collation `und-x-icu`: on another database, such as one in LATIN1 or on a server
+ * built without ICU, they fail with UNSUPPORTED_QUERY (400), except `IIN []`, which compiles to `FALSE` without a fold,
+ * and every other operation works.
  *
  * `IS_EMPTY` and `IS_NOT_EMPTY` compile from where a path is stored, binding no parameters: `(c IS NULL OR c = '')`
  * for a String column and `c IS NULL` for any other, the uuid identity included; `COALESCE(cardinality(c), 0) = 0`
@@ -293,7 +294,7 @@ export function postgresPlugin(options?: PostgresConfiguration): SQLPlugin<
 >;
 export function createPostgres(options?: PostgresConfiguration): PostgresRuntime;
 /**
- * The SQL text with which ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ fold both sides of their comparison, for an SQL
+ * The SQL text with which ILIKE, ISTARTS_WITH, IENDS_WITH, IEQ and IIN fold both sides of their comparison, for an SQL
  * expression such as a quoted column name or a jsonb member: `translate(lower((<expression>) COLLATE
  * "pg_catalog"."und-x-icu"), '<22 characters>', '<their simple case foldings>')`, the Unicode simple case foldings that
  * MongoDB's case-insensitive matching applies. Indexes serve these operators only on exactly this expression, so build

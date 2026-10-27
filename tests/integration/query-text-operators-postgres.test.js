@@ -24,6 +24,7 @@ const uri = process.env.SIMFINITY_POSTGRES_URI;
 const LEGACY = ['EQ', 'NE', 'LT', 'LTE', 'GT', 'GTE', 'BTW', 'IN', 'NIN', 'LIKE'];
 const TEXT = ['ILIKE', 'STARTS_WITH', 'ISTARTS_WITH', 'ENDS_WITH', 'IENDS_WITH', 'IEQ'];
 const EMPTINESS = ['IS_EMPTY', 'IS_NOT_EMPTY'];
+const LIST = ['CONTAINS_ALL', 'IIN'];
 const ICU = '"pg_catalog"."und-x-icu"';
 // The case fold of #108 section 3.1, spelled out apart from the compiler: the 22 characters that ICU lower() keeps
 // and simple case folding maps to another lowercase letter, then their foldings, U+00B5 to μ, U+017F to s, U+0345 to
@@ -32,7 +33,7 @@ const ICU = '"pg_catalog"."und-x-icu"';
 const FOLD_FROM = '\u00B5\u017F\u0345\u03C2\u03D0\u03D1\u03D5\u03D6\u03F0\u03F1\u03F5\u1C80\u1C81\u1C82\u1C83\u1C84\u1C85\u1C86\u1C87\u1C88\u1E9B\u1FBE';
 const FOLD_TO = '\u03BC\u0073\u03B9\u03C3\u03B2\u03B8\u03C6\u03C0\u03BA\u03C1\u03B5\u0432\u0434\u043E\u0441\u0442\u0442\u044A\u0463\uA64B\u1E61\u03B9';
 const fold = (sql) => `translate(lower((${sql}) COLLATE ${ICU}), '${FOLD_FROM}', '${FOLD_TO}')`;
-const CASE_FOLD_UNSUPPORTED = { code: 'UNSUPPORTED_QUERY', status: 400, message: 'ILIKE, ISTARTS_WITH, IENDS_WITH and IEQ need a UTF8 database with the ICU collation und-x-icu' };
+const CASE_FOLD_UNSUPPORTED = { code: 'UNSUPPORTED_QUERY', status: 400, message: 'ILIKE, ISTARTS_WITH, IENDS_WITH, IEQ and IIN need a UTF8 database with the ICU collation und-x-icu' };
 const code = (error) => error?.extensions?.code;
 const summary = (error) => ({ code: code(error), status: error.extensions?.status, message: error.message });
 const nodes = (plan) => [plan, ...(plan.Plans || []).flatMap(nodes)];
@@ -106,8 +107,8 @@ describe('PostgreSQL text operator statements', () => {
     }
   });
 
-  it('folds both sides of the four case-insensitive operators, and only theirs, with caseFoldExpression', () => {
-    const values = { EQ: 'ΚΑΣ', NE: 'ΚΑΣ', LT: 'a', LTE: 'a', GT: 'a', GTE: 'a', BTW: ['a', 'b'], IN: ['a', 'Σ'], NIN: ['a', 'Σ'], LIKE: 'ΚΑΣ', ILIKE: 'ΚΑΣ', STARTS_WITH: 'ΚΑΣ', ISTARTS_WITH: 'ΚΑΣ', ENDS_WITH: 'Σ ΑΒ', IENDS_WITH: 'Σ ΑΒ', IEQ: 'ΟΔΟΣ' };
+  it('folds both sides of the five case-insensitive operators, and only theirs, with caseFoldExpression', () => {
+    const values = { EQ: 'ΚΑΣ', NE: 'ΚΑΣ', LT: 'a', LTE: 'a', GT: 'a', GTE: 'a', BTW: ['a', 'b'], IN: ['a', 'Σ'], NIN: ['a', 'Σ'], LIKE: 'ΚΑΣ', ILIKE: 'ΚΑΣ', STARTS_WITH: 'ΚΑΣ', ISTARTS_WITH: 'ΚΑΣ', ENDS_WITH: 'Σ ΑΒ', IENDS_WITH: 'Σ ΑΒ', IEQ: 'ΟΔΟΣ', IIN: ['ΚΑΣ', 'x'] };
     for (const path of PLACES) {
       for (const [operator, value] of Object.entries(values)) {
         for (const [surface, compile] of Object.entries(surfaces)) {
@@ -116,7 +117,7 @@ describe('PostgreSQL text operator statements', () => {
             const { text } = compile(shape(path, operator, value, form));
             const label = `${path} ${operator} ${surface} ${form}`;
             // Both sides of each comparison, which the batched children statement repeats once per parent.
-            const folds = ['ILIKE', 'ISTARTS_WITH', 'IENDS_WITH', 'IEQ'].includes(operator) ? 2 * (surface === 'children' ? 2 : 1) : 0;
+            const folds = ['ILIKE', 'ISTARTS_WITH', 'IENDS_WITH', 'IEQ', 'IIN'].includes(operator) ? 2 * (surface === 'children' ? 2 : 1) : 0;
             expect(text.split(`, '${FOLD_FROM}', '${FOLD_TO}')`).length - 1, label).toBe(folds);
             expect(text.split(ICU).length - 1, label).toBe(folds);
           }
@@ -219,7 +220,7 @@ describe('SQL plugin queryFeatures', () => {
   const invalidPlugin = expect.objectContaining({ extensions: expect.objectContaining({ code: 'INVALID_SQL_PLUGIN' }) });
 
   it('declares every QLOperator value in the PostgreSQL plugin and binds a frozen copy', () => {
-    expect([...ALL].sort()).toEqual([...LEGACY, ...TEXT, ...EMPTINESS].sort());
+    expect([...ALL].sort()).toEqual([...LEGACY, ...TEXT, ...EMPTINESS, ...LIST].sort());
     const plugin = postgresPlugin();
     expect([...plugin.queryFeatures.operators].sort()).toEqual([...ALL].sort());
     const bound = bindPlugin(plugin);
@@ -273,15 +274,26 @@ describe('SQL plugin queryFeatures', () => {
       expect(await legacy.result({ name: { operator, value: 'x' } }), operator).toBe('UNSUPPORTED_QUERY');
       expect(await legacy.result({ OR: [{ conditions: [{ field: 'shop.name', operator, value: 'x' }] }] }), operator).toBe('UNSUPPORTED_QUERY');
     }
+    // The list operators of #108 part 4, in the field and OR-condition forms.
+    const lists = [['name', 'IIN'], ['tags', 'CONTAINS_ALL']];
+    for (const [field, operator] of lists) {
+      expect(await legacy.result({ [field]: { operator, value: ['x'] } }), operator).toBe('UNSUPPORTED_QUERY');
+      expect(await legacy.result({ OR: [{ conditions: [{ field, operator, value: ['x'] }] }] }), operator).toBe('UNSUPPORTED_QUERY');
+    }
     expect(legacy.middleware()).toBe(0);
     // The storage is not initialized, so a request that passes the gate fails there.
     expect(await legacy.result({ name: { operator: 'LIKE', value: 'x' } })).toBe('DATABASE_NOT_INITIALIZED');
     const current = await run(postgresPlugin({ pool: offline(), schema: 'offline' }));
     for (const operator of TEXT) expect(await current.result({ name: { operator, value: 'x' } }), operator).toBe('DATABASE_NOT_INITIALIZED');
+    for (const [field, operator] of lists) expect(await current.result({ [field]: { operator, value: ['x'] } }), operator).toBe('DATABASE_NOT_INITIALIZED');
     // A copy that replaces compileQuery, as 3.8.0 documents, keeps the operators of 3.7.0 until it declares more.
     let compiled = 0;
     const copy = await run({ ...postgresPlugin({ pool: offline(), schema: 'offline' }), compileQuery: (...args) => { compiled += 1; return compileQuery(...args); } });
     for (const operator of TEXT) expect(await copy.result({ name: { operator, value: 'x' } }), operator).toBe('UNSUPPORTED_QUERY');
+    for (const [field, operator] of lists) {
+      expect(await copy.result({ [field]: { operator, value: ['x'] } }), operator).toBe('UNSUPPORTED_QUERY');
+      expect(await copy.result({ OR: [{ conditions: [{ field, operator, value: ['x'] }] }] }), operator).toBe('UNSUPPORTED_QUERY');
+    }
     expect([copy.middleware(), compiled]).toEqual([0, 0]);
   });
 });
@@ -519,6 +531,11 @@ describe.skipIf(!uri)('PostgreSQL text operators', () => {
       expect(code(result.errors?.[0]), operator).toBe('UNSUPPORTED_QUERY');
       await expect(legacy.getModel(legacy.type).find({ word: { operator, value: 'p' } }), operator).rejects.toMatchObject({ extensions: { code: 'UNSUPPORTED_QUERY' } });
     }
+    for (const operator of LIST) {
+      const result = await graphql({ schema: legacy.schema, source: 'query($word:QLFilter){qtLegacyWords(word:$word){key}}', variableValues: { word: { operator, value: ['p'] } } });
+      expect(code(result.errors?.[0]), operator).toBe('UNSUPPORTED_QUERY');
+      await expect(legacy.getModel(legacy.type).find({ word: { operator, value: ['p'] } }), operator).rejects.toMatchObject({ extensions: { code: 'UNSUPPORTED_QUERY' } });
+    }
     expect((await legacy.getModel(legacy.type).find({ word: { operator: 'LIKE', value: 'Pal' } })).map((record) => record.key)).toEqual(['l1']);
   });
 
@@ -528,6 +545,11 @@ describe.skipIf(!uri)('PostgreSQL text operators', () => {
       const result = await graphql({ schema: copy.schema, source: 'query($word:QLFilter){qtCopyWords(word:$word){key}}', variableValues: { word: { operator, value: 'p' } } });
       expect(code(result.errors?.[0]), operator).toBe('UNSUPPORTED_QUERY');
       await expect(copy.getModel(copy.type).find({ word: { operator, value: 'p' } }), operator).rejects.toMatchObject({ extensions: { code: 'UNSUPPORTED_QUERY' } });
+    }
+    for (const operator of LIST) {
+      const result = await graphql({ schema: copy.schema, source: 'query($word:QLFilter){qtCopyWords(word:$word){key}}', variableValues: { word: { operator, value: ['p'] } } });
+      expect(code(result.errors?.[0]), operator).toBe('UNSUPPORTED_QUERY');
+      await expect(copy.getModel(copy.type).find({ word: { operator, value: ['p'] } }), operator).rejects.toMatchObject({ extensions: { code: 'UNSUPPORTED_QUERY' } });
     }
     expect(copy.compiled).toBe(before);
     expect((await copy.getModel(copy.type).find({ word: { operator: 'LIKE', value: 'Pal' } })).map((record) => record.key)).toEqual(['c1']);
@@ -729,6 +751,37 @@ describe.skipIf(!uri)('PostgreSQL case-insensitive operators on databases that c
       // The database still serves everything else afterwards, and other errors keep their codes.
       expect(await rows({ name: { operator: 'LIKE', value: 'Holly' } })).toEqual(['A']);
       if (cause === '22P05') expect((await rows({ name: { operator: 'EQ', value: 'Σ' } })).code).toBe('INVALID_VALUE');
+    } finally {
+      await pool.end();
+    }
+  }, 60000);
+
+  // The list operators of #108 part 4: IIN folds case as IEQ does, except IIN [], which compiles to FALSE without a
+  // fold; CONTAINS_ALL never folds.
+  it.each(KINDS.map((item) => [item.kind, item]))('fails IIN on %s with UNSUPPORTED_QUERY, except IIN [], which matches nothing, and serves CONTAINS_ALL', async (name, kind, context) => {
+    if (!allowed(kind)) context.skip();
+    const pool = new pg.Pool({ connectionString: uriOf(kind.database) });
+    try {
+      if (kind.withoutIcu) await pool.query(`DROP COLLATION IF EXISTS ${ICU}`);
+      const runtime = createPostgres({ pool, schema: 'ql', batchedCollections: true });
+      const fixture = createTextOperatorFixture();
+      registerTextOperatorFixture(runtime, fixture);
+      const schema = runtime.createSchema();
+      await runtime.initializeDatabase();
+      const run = (source, variableValues) => graphql({ schema, source, variableValues, contextValue: {} });
+      const item = await run('mutation($input:QtItemInput!){addqtItem(input:$input){id}}', { input: { key: 'A', name: 'Palermo Soho', tags: ['Red', 'blue'], lines: [{ sku: 'SKU-1' }] } });
+      expect(item.errors).toBeUndefined();
+      const rows = async (args) => {
+        const { source, variables } = listOperation('qtItems', args);
+        const result = await run(source, variables);
+        return result.errors ? summary(result.errors[0]) : result.data.qtItems.map((row) => row.key);
+      };
+      const expected = { code: 'UNSUPPORTED_QUERY', status: 400, message: CASE_FOLD_UNSUPPORTED.message };
+      expect(await rows({ name: { operator: 'IIN', value: ['palermo soho'] } })).toEqual(expected);
+      expect(await rows({ tags: { operator: 'IIN', value: ['RED'] } })).toEqual(expected);
+      expect(await rows({ name: { operator: 'IIN', value: [] } })).toEqual([]);
+      expect(await rows({ tags: { operator: 'CONTAINS_ALL', value: ['Red', 'blue'] } })).toEqual(['A']);
+      expect(await rows({ lines: { terms: [{ path: 'sku', operator: 'CONTAINS_ALL', value: ['SKU-1'] }] } })).toEqual(['A']);
     } finally {
       await pool.end();
     }

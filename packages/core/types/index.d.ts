@@ -56,11 +56,18 @@ export const MAX_RECORD_VERSION: number;
  * missing; constructs that middleware and scopes add read stored data. With any other adapter they
  * fail with `UNSUPPORTED_QUERY`. A term or group condition without a path tests the field itself, except that every term
  * of a quantified relation filter needs a non-empty element-relative path.
+ *
+ * `IIN` is `IN` ignoring case: an array of non-null strings without U+0000, possibly empty, on a `String` field or
+ * `String` list by its effective scalar; it matches where `IEQ` matches one of them, and `[]` matches nothing.
+ * `CONTAINS_ALL` takes a non-empty array of non-null scalars, cast like `IN` elements; it applies to a scalar list or a
+ * field reached through embedded lists, where it holds when every value is among the values of all items, and fails
+ * with `INVALID_FILTER_OPERATOR` on other leaves and with `INVALID_FILTER_PATH` through a collection or a reference
+ * inside an embedded list. Neither has a negated form.
  */
 export type QueryOperator =
   | 'EQ' | 'NE' | 'LT' | 'LTE' | 'GT' | 'GTE' | 'BTW' | 'IN' | 'NIN' | 'LIKE'
   | 'ILIKE' | 'STARTS_WITH' | 'ISTARTS_WITH' | 'ENDS_WITH' | 'IENDS_WITH' | 'IEQ'
-  | 'IS_EMPTY' | 'IS_NOT_EMPTY';
+  | 'IS_EMPTY' | 'IS_NOT_EMPTY' | 'CONTAINS_ALL' | 'IIN';
 
 /** The quantifier applied to the elements visible in a collection or reference frame. */
 export type QueryQuantifier = 'ANY' | 'ALL' | 'NONE';
@@ -616,10 +623,17 @@ export interface DatabaseAdapter<Model = any, Session = any> {
    * by-ID read through a `get_by_id` scope, whose arguments use a `QLOperator` value the adapter
    * does not support fails with `UNSUPPORTED_QUERY` (400), before middleware runs for the client's
    * arguments and before `find`, `count`, `aggregate`, `findChildren` or `findChildrenBatch` for
-   * conditions that middleware, scopes and joined scopes added. Operators outside `QLOperator` still
-   * reach the adapter, which reports them as before. Declaring `IS_EMPTY` and `IS_NOT_EMPTY` means
-   * compiling their semantics on the record's own fields; emptiness through references and
-   * collections also needs `referenceEmptiness: true`, and fails with `UNSUPPORTED_QUERY` without it.
+   * conditions that middleware, scopes and joined scopes added. Operators outside `QLOperator`, which
+   * only trusted code can write, fail with `INVALID_FILTER_OPERATOR` (400) before the adapter is
+   * called, except in the forms the compilers ignore: an operator beside the `terms` of an object
+   * filter, and the `terms` of a scalar, scalar-list, interface or union field's filter. Those reach
+   * the adapter, which ignores them. Declaring `IS_EMPTY` and `IS_NOT_EMPTY` means compiling their
+   * semantics on the record's own fields; emptiness through references and collections also needs
+   * `referenceEmptiness: true`, and fails with `UNSUPPORTED_QUERY` without it.
+   * Declaring `CONTAINS_ALL` means compiling set containment over the leaf's values, including the
+   * values of every item of embedded lists, two-valued under negation; declaring `IIN` means
+   * compiling case-insensitive membership under the case-folding contract of the text operators.
+   * Names that an older version ignored are honored once this version knows them.
    */
   queryFeatures?: QueryFeatures | null | undefined;
   /**
@@ -791,6 +805,8 @@ export type QueryJoins = Record<string, QueryPredicate | null>;
 
 /**
  * `operator` is a {@link QueryOperator}; the value of a text operator is a validated string. For
+ * `CONTAINS_ALL` the value is a non-empty array of non-null scalars, validated and not cast; the
+ * compiler casts each element as for `IN`. For `IIN` it is an array of strings, possibly empty. For
  * `IS_EMPTY` and `IS_NOT_EMPTY` the value is null, and `path` may end at an embedded object, an
  * embedded list or a scalar list as well as at a scalar; `IS_NOT_EMPTY` is the exact complement,
  * which the compiler builds. With `referenceEmptiness: true`, their `path` may also cross single
@@ -849,6 +865,22 @@ export interface QueryPlan {
  * object fails with `INVALID_FILTER_PATH`, as on MongoDB; a bare object field keeps
  * `MISSING_FILTER_PATH`.
  *
+ * `CONTAINS_ALL` and `IIN` are checked in this order: the path (`AMBIGUOUS_FILTER_FIELD`,
+ * `INVALID_FILTER_PATH`, `INVALID_FILTER_FIELD`) and the object-end rule above, then an unknown name
+ * (`INVALID_FILTER_OPERATOR`) and `operators` (`UNSUPPORTED_QUERY`), then, for `CONTAINS_ALL` only,
+ * `INVALID_FILTER_PATH` through a collection, aggregate join prefixes included
+ * (`The shorthand excludes them; use an explicit group`), `INVALID_FILTER_PATH` through a reference
+ * inside an embedded list, and `INVALID_FILTER_OPERATOR` on a leaf that is neither a scalar list nor
+ * a scalar reached through an embedded list, and the values last, with `INVALID_FILTER_VALUE`.
+ * `CONTAINS_ALL` takes a non-empty array of non-null scalars, none of them an array or a plain
+ * object; `IIN` takes an array of strings without U+0000, possibly empty, on a `String` field or list
+ * by its effective scalar. A hole of a sparse array fails for both, while `IN`, `NIN` and `BTW` keep
+ * skipping holes.
+ * Both plan `{ kind: 'predicate', path, operator, value }` with the array as validated, neither cast
+ * nor deduplicated. `IIN` through a collection plans as `IN` does: an implicit `ANY` frame with
+ * `quantifiers`, a row filter on an aggregate's join prefix, a legacy join otherwise. `CONTAINS_ALL`
+ * is never cut into a frame.
+ *
  * `referenceEmptiness` defaults to true when `operators` is omitted and to false when it is given.
  * When it is false, an emptiness condition that crosses or ends at a reference or a collection, or
  * reads a reference or collection member, fails with `UNSUPPORTED_QUERY` where the order above has
@@ -857,8 +889,17 @@ export interface QueryPlan {
  * becomes the predicate's `scopes`. `quantifiers` has the same default rule and requires reference
  * emptiness; enabled collection filters emit quantified nodes, with per-group/prefix correlation,
  * element-relative scopes/joins and aggregate anchors beyond legacy J joins. `__scope`, `__implicit`
- * and `__anchor` are reserved internal input metadata. A marker not filled for every path fails
- * with `DETACHED_CLIENT_FILTER` (500).
+ * and `__anchor` are reserved internal input metadata. A group that trusted code writes with
+ * `__implicit: true` must, after its `__anchor`, end at a collection, or at a reference without
+ * crossing a list, and its `__anchor`, when present, must have exactly the shape the collection
+ * shorthand writes: in an aggregate, on a group at the root, a non-empty array of field names without
+ * dots that crosses at least one collection, each a join prefix, followed by a `path` of one
+ * collection. Otherwise the group fails with `INVALID_FILTER_PATH` (400), whatever operators it holds
+ * and before its conditions are checked, with the message
+ * `An implicit quantified path must end at a collection, or at a reference without crossing a list` or
+ * `An implicit quantified anchor must name the aggregate's join prefixes`; the anchor's form is
+ * checked before the path rule, the rest after it.
+ * A marker not filled for every path fails with `DETACHED_CLIENT_FILTER` (500).
  */
 export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode']; operators?: Iterable<string>; referenceEmptiness?: boolean; quantifiers?: boolean }): QueryPlan;
 export function resolveModelPath(models: ModelDescription, entityName: string, path: string | string[]): FieldDescription[];

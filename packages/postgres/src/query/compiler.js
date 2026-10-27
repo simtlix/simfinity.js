@@ -1,6 +1,7 @@
 import { QLQuantifier, resolveModelPath, SimfinityError } from '@simtlix/simfinity-core';
 import {
-  crossingKeys, describeEmptiness, describeModelEmptiness, emptinessScopePaths, isEmptinessOperator, textQueryOperator, validateQuantifiedGroups, validateTextFilterValue,
+  assertContainsAllPath, crossingKeys, describeEmptiness, describeModelEmptiness, emptinessScopePaths, isEmptinessOperator, textQueryOperator,
+  validateContainsAllValue, validateQuantifiedGroups, validateTextFilterValue, validateTextListFilterValue,
 } from '@simtlix/simfinity-core/internal/query-operators';
 import { identifier as q, literal, qualified } from '../schema/sql.js';
 import { encodeScalar, storageTypes, invalidValue } from '../codecs.js';
@@ -347,6 +348,22 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
       return operator === 'IN' ? expressionSQL : `NOT ${expressionSQL}`;
     }
     if (operator === 'BTW') return `(${predicate(expression, 'GTE', value[0], negated)} AND ${predicate(expression, 'LTE', value[1], negated)})`;
+    if (operator === 'CONTAINS_ALL') {
+      validateContainsAllValue(value);
+      // One array parameter of the path's element type, cast like IN elements: set containment, as MongoDB's $all. NULL
+      // elements of the stored list are ignored, and a NULL list gives NULL, which only the negated form turns into false.
+      const contains = `${sql} @> ${bind(value.map(encodeValue), `${type}[]`)}`;
+      return negated ? `COALESCE(${contains}, FALSE)` : contains;
+    }
+    if (operator === 'IIN') {
+      validateTextListFilterValue(operator, value, field.scalar);
+      if (!value.length) return 'FALSE';
+      // The values are folded by the server, once per statement, so that application indexes on the folded column serve it.
+      const members = `ANY (ARRAY(SELECT ${fold('w.value')} FROM unnest(${bind(value, 'text[]')}) w(value)))`;
+      if (list) return `EXISTS (SELECT 1 FROM unnest(${sql}) v(value) WHERE ${fold('v.value')} = ${members})`;
+      const compare = `${fold(expression.uncollated)} = ${members}`;
+      return negated ? `COALESCE(${compare}, FALSE)` : compare;
+    }
     if (value == null || Array.isArray(value)) invalidValue(`${operator} requires a non-null scalar value`);
     const text = textQueryOperator(operator);
     if (text) return textPredicate(expression, operator, text, value, negated);
@@ -598,6 +615,9 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
     if (!node) return 'TRUE';
     if (node.kind === 'quantified') return quantified(node, frame);
     if (node.kind === 'predicate' && isEmptinessOperator(node.operator)) return `(${emptiness(node, frame)})`;
+    // CONTAINS_ALL's path and leaf rules (#108 part 4), with core's codes, before any join or alias, so that a plan built
+    // by hand never compiles to the legacy collection join or the multiplying vector join, or raises 42883.
+    if (node.kind === 'predicate' && node.operator === 'CONTAINS_ALL') assertContainsAllPath(resolveModelPath(models, frame.entity, node.path));
     if (node.kind === 'predicate') {
       // Check ordinary paths and values before the new client metadata, without creating joins or aliases.
       if (Object.hasOwn(node, 'joins')) validateQuantifiedGroups({ AND: [{ conditions: [{ field: node.path.join('.'), operator: node.operator, value: node.value }] }] }, { models, entity: frame.entity, referenceEmptiness: true, quantifiers: true });
@@ -609,7 +629,9 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
         const leaf = steps.at(-1);
         const identity = ['id', '_id'].includes(leaf.name) && (steps.length === 1 ? !frame.table.ownership : steps.at(-2).kind !== 'embedded');
         const field = operandField(leaf, identity);
-        predicate({ field, type: storageTypes[field.scalar], list: field.list, sql: '', uncollated: '' }, node.operator, node.value, negated);
+        // The placeholders are never emitted: detached() follows. They must be non-empty, because textPredicate and the IIN
+        // branch fold `uncollated` with caseFoldExpression, which rejects an empty expression (case-fold.js:60).
+        predicate({ field, type: storageTypes[field.scalar], list: field.list, sql: 'NULL', uncollated: 'NULL' }, node.operator, node.value, negated);
         detached(checked.reason);
       }
       const sql = predicate(path(node.path, 'filter', frame, checked.joins), node.operator, node.value, negated);

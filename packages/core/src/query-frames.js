@@ -6,7 +6,10 @@ import { isVirtualField } from './relation-storage.js';
 import {
   describeEmptiness, describeModelEmptiness, emptinessScopePaths, graphqlStep, isEmptinessOperator, modelStep,
 } from './query-emptiness.js';
-import { isQueryOperator, textQueryOperator, validateTextFilterValue } from './query-operators.js';
+import {
+  assertContainsAllPath, isQueryOperator, takesListValue, textQueryOperator, validateContainsAllValue, validateTextFilterValue,
+  validateTextListFilterValue,
+} from './query-operators.js';
 import { collectQueryOperators, validateQueryGroupKeys } from './query-plan.js';
 import { getQueryMaxFrameNesting } from './query-limits.js';
 
@@ -281,18 +284,25 @@ const validateShapes = (args) => {
 };
 const validateValue = (entry, resolved, ctx) => {
   const { operator, value } = entry;
+  const scalar = resolved.steps.at(-1).scalar;
   // GraphQL compilers historically report the text operator's own type/value diagnostic.
   // Model planning retains its generic scalar-shape checks before text validation.
   if (ctx.gqltype && textQueryOperator(operator)) {
-    validateTextFilterValue(operator, value, resolved.steps.at(-1).scalar, entry.path);
+    validateTextFilterValue(operator, value, scalar, entry.path);
     return;
   }
-  const array = ['IN', 'NIN', 'BTW'].includes(operator);
+  if (ctx.gqltype && operator === 'IIN') {
+    validateTextListFilterValue(operator, value, scalar, entry.path);
+    return;
+  }
+  const array = takesListValue(operator);
   if (value === undefined || (!array && Array.isArray(value)) || (value === null && !['EQ', 'NE'].includes(operator))) fail('Expected a scalar filter value');
   if (array && Array.isArray(value) && value.some((item) => item == null || Array.isArray(item))) fail('Filter lists require non-null scalar elements');
   if (array && !Array.isArray(value)) fail(`${operator} requires an array value`);
   if (operator === 'BTW' && value.length !== 2) fail('BTW requires two values');
-  if (textQueryOperator(operator)) validateTextFilterValue(operator, value, resolved.steps.at(-1).scalar, entry.path);
+  if (operator === 'CONTAINS_ALL') validateContainsAllValue(value);
+  if (textQueryOperator(operator)) validateTextFilterValue(operator, value, scalar, entry.path);
+  if (operator === 'IIN') validateTextListFilterValue(operator, value, scalar, entry.path);
 };
 /** Internal: check sort shape and path syntax without resolving or authorizing model fields. */
 export const assertSortSyntax = (sort) => {
@@ -407,6 +417,32 @@ export const validateQuantifiedGroups = (args, ctx) => {
     if (entry.form === 'quantified') {
       if (!implicit && (steps.slice(0, -1).some((step) => ['collection', 'embeddedList'].includes(step.kind))
         || !['reference', 'collection', 'embeddedList'].includes(last.kind))) fail('A quantified path must end at a relation without crossing a list', 'INVALID_FILTER_PATH');
+      // A hand-built anchor (#108 part 4) is first a non-empty array of single path segments, before the path rule,
+      // which counts the anchor's steps by its elements; list() reads any other present value as [].
+      const anchored = implicit && entry.construct.__anchor != null;
+      if (anchored && (!anchor.length || anchor.some((name) => typeof name !== 'string' || name.includes('.')))) {
+        fail('An implicit quantified anchor must name the aggregate\'s join prefixes', 'INVALID_FILTER_PATH');
+      }
+      // A hand-built implicit group, whatever its operators (#108 part 4): after any anchor, its path ends at a collection,
+      // whatever it crosses first, or at a reference without crossing a list, the explicit groups' rule for references.
+      if (implicit && last.kind !== 'collection' && (last.kind !== 'reference'
+        || steps.slice(anchor.length, -1).some((step) => ['collection', 'embeddedList'].includes(step.kind)))) {
+        fail('An implicit quantified path must end at a collection, or at a reference without crossing a list', 'INVALID_FILTER_PATH');
+      }
+      // Then the shape the rewrite writes (cutAt): in an aggregate, on a group at the root, an anchor that crosses at
+      // least one collection, every one a J prefix, with any embedded lists, embedded objects and references between,
+      // and after it one step, a collection.
+      if (anchored) {
+        const prefixes = ctx.J ?? new Set();
+        const crossed = steps.slice(0, anchor.length);
+        const prefix = (index) => crossed.slice(0, index + 1).map(({ name }) => name).join('.');
+        if (ctx.operation !== 'aggregate' || entry.frames.length
+          || !crossed.some((step) => step.kind === 'collection')
+          || crossed.some((step, index) => step.kind === 'collection' && !prefixes.has(prefix(index)))
+          || partsOf(entry.construct.path).length !== 1 || last.kind !== 'collection') {
+          fail('An implicit quantified anchor must name the aggregate\'s join prefixes', 'INVALID_FILTER_PATH');
+        }
+      }
       if (!implicit && !QUANTIFIERS.has(entry.quantifier)) fail('Unknown quantifier', 'INVALID_FILTER_VALUE');
       if (!implicit) gates.push(() => {
         if (ctx.quantifiers !== true || last.kind === 'embeddedList') fail('Quantified groups are not supported by this query compiler', 'UNSUPPORTED_QUERY');
@@ -420,11 +456,10 @@ export const validateQuantifiedGroups = (args, ctx) => {
         if (!valueLeaf(last, current)) fail(ordinaryCondition && steps.length === 1
           ? `Filter on object field "${last.name}" requires a path` : 'Filter on object field requires a scalar path',
         steps.length > 1 ? 'INVALID_FILTER_PATH' : 'MISSING_FILTER_PATH');
-        // CONTAINS_ALL has no semantics in this release; its excluded shorthand form has
-        // the permanent path error specified for it, while every other use stays unknown.
-        if (entry.operator === 'CONTAINS_ALL' && steps.slice(0, -1).some((step) => step.kind === 'collection')) fail('The shorthand excludes them; use an explicit group', 'INVALID_FILTER_PATH');
         if (!isQueryOperator(entry.operator)) fail(`Unknown filter operator: ${entry.operator}`, 'INVALID_FILTER_OPERATOR');
         if (ctx.operators && !ctx.operators.has(entry.operator)) fail(`The ${entry.operator} filter operator is not supported by this query compiler`, 'UNSUPPORTED_QUERY');
+        // CONTAINS_ALL's permanent path rules, then its leaf rule (#108 section 3.3), on the frame-relative path.
+        if (entry.operator === 'CONTAINS_ALL') assertContainsAllPath(steps);
         if (current.gqltype && last.kind === 'abstract' && entry.value === undefined) fail(`Expected a scalar value for ${entry.path}`);
         validateValue(entry, resolved, current);
       }

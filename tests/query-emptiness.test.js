@@ -35,7 +35,9 @@ const EMPTINESS = ['IS_EMPTY', 'IS_NOT_EMPTY'];
 // Rule 6's message when the caller does not support reference emptiness (#108 part 2b).
 const NOT_SUPPORTED = 'the database adapter does not support emptiness through references and collections';
 const UNDECLARED = { referenceEmptiness: false };
-const ENUM_ORDER = ['EQ', 'LT', 'GT', 'LTE', 'GTE', 'BTW', 'NE', 'IN', 'NIN', 'LIKE', ...TEXT, ...EMPTINESS];
+// The list operators (#108 part 4) follow the emptiness operators; tests/list-operators.test.js covers them.
+const LIST_OPERATORS = ['CONTAINS_ALL', 'IIN'];
+const ENUM_ORDER = ['EQ', 'LT', 'GT', 'LTE', 'GTE', 'BTW', 'NE', 'IN', 'NIN', 'LIKE', ...TEXT, ...EMPTINESS, ...LIST_OPERATORS];
 
 // Loaded on use, so that each test of the shared module fails on its own where the module lacks a name.
 const OPERATORS_MODULE = '@simtlix/simfinity-core/internal/query-operators';
@@ -223,7 +225,7 @@ describe('QLOperator', () => {
     const schema = runtime.createSchema();
     expect(printSchema(schema)).toContain(`enum QLOperator {\n${ENUM_ORDER.map((name) => `  ${name}`).join('\n')}\n}`);
     const result = await graphql({ schema, source: '{ __type(name: "QLOperator") { enumValues { name } } }' });
-    expect(result.data.__type.enumValues.map((value) => value.name).slice(-2)).toEqual(EMPTINESS);
+    expect(result.data.__type.enumValues.map((value) => value.name).slice(-4, -2)).toEqual(EMPTINESS);
   });
 });
 
@@ -236,7 +238,7 @@ describe('shared emptiness helpers', () => {
     expect(operators.LEGACY_QUERY_OPERATORS).toEqual(LEGACY);
     expect(EMPTINESS.every(operators.isEmptinessOperator)).toBe(true);
     expect([...LEGACY, ...TEXT, 'is_empty', 'BAD', '', null, undefined, 'toString'].some(operators.isEmptinessOperator)).toBe(false);
-    expect([...operators.resolveQueryFeatures({ operators: ['IS_EMPTY', 'IS_NOT_EMPTY', 'CONTAINS_ALL'] }).operators]).toEqual(EMPTINESS);
+    expect([...operators.resolveQueryFeatures({ operators: ['IS_EMPTY', 'IS_NOT_EMPTY', 'SOUNDS_LIKE'] }).operators]).toEqual(EMPTINESS);
   });
 
   it('accepts only an omitted or null value, with INVALID_FILTER_VALUE for any other', async () => {
