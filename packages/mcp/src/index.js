@@ -994,11 +994,11 @@ const startsWithTransactionMarker = (field) => typeof field.description === 'str
 
 /**
  * The shape core's generated transaction field (#151) keeps in a rebuild that
- * lost its description and extensions and also dropped some of its generated
+ * lost its description and extensions and also dropped some or all generated
  * mutations, which {@link transactionSignature} no longer recognizes, so that
  * such a field is still never published as a custom tool: a single argument
- * `operations: [X!]!`, where at least one field of X matches a mutation root
- * of `mutationType` and every field of X named after a root matches it (see
+ * `operations: [X!]!`, where X has at least one field and every field of X
+ * named after a root of `mutationType` matches it (see
  * {@link matchesOperationRoot}), and a result that is a list of an object
  * type with a field of the same name for every field of X. X need not be
  * `@oneOf`. The result rule keeps an application's batch mutation that
@@ -1018,20 +1018,17 @@ const hasTransactionResultShape = (fieldName, field, mutationType) => {
   }
   const roots = mutationType.getFields();
   const results = result.getFields();
-  let matched = false;
-  for (const [key, operationField] of Object.entries(item.getFields())) {
+  const operations = Object.entries(item.getFields());
+  for (const [key, operationField] of operations) {
     if (!Object.hasOwn(results, key)) {
       return false;
     }
     const root = key !== fieldName && Object.hasOwn(roots, key) ? roots[key] : undefined;
-    if (root) {
-      if (!matchesOperationRoot(operationField.type, root)) {
-        return false;
-      }
-      matched = true;
+    if (root && !matchesOperationRoot(operationField.type, root)) {
+      return false;
     }
   }
-  return matched;
+  return operations.length > 0;
 };
 
 /**
@@ -2674,7 +2671,6 @@ const truncateErrorMessage = (message) => {
  * @param {boolean} params.withFirstError whether extensions.firstError is set
  * @param {string} params.sizes "(N bytes) exceeds maxResultBytes (M)"
  * @param {string} params.idNote what happened to the root ids
- * @param {boolean} [params.remote] whether the tool executes remotely
  * @returns {string}
  */
 const oversizedMutationMessage = (params) => {
@@ -2726,27 +2722,23 @@ const oversizedMutationMessage = (params) => {
  * Text of the notice for an oversized transaction result (see
  * {@link oversizedMutationMessage}). The operations run in one database
  * transaction, so the notice never says they were applied in part: a root
- * value shows that they were committed together; without one, none was
- * applied unless the error came from the commit (or, remotely, from the
- * request to the GraphQL endpoint) or is TRANSACTION_RETRY_EXCEEDED, which
- * leaves it uncertain whether all were.
+ * value shows that they were committed together; without one, the outcome
+ * remains unknown. Errors can arise after a successful commit, including
+ * during session cleanup or result serialization, in either execution mode.
  * @param {Object} params see {@link oversizedMutationMessage}
  * @returns {string}
  */
 function oversizedTransactionMessage({
-  name, idempotent, applied, withErrors, withFirstError, sizes, idNote, remote,
+  name, idempotent, applied, withErrors, withFirstError, sizes, idNote,
 }) {
   if (applied === 'unknown') {
     const firstError = withFirstError ? ' (extensions.firstError holds the start of the first error)' : '';
-    const uncertain = remote
-      ? 'came from the commit or from the request to the GraphQL endpoint, or is TRANSACTION_RETRY_EXCEEDED'
-      : 'came from the commit or is TRANSACTION_RETRY_EXCEEDED';
     const repeat = idempotent
       ? `Calling ${name} again with the same arguments would not repeat changes that were already applied.`
       : `If they were applied, calling ${name} again could repeat the changes.`;
     return `${name} returned errors; the error result ${sizes} and was omitted${firstError}. Its operations run in one `
-      + 'database transaction, so they were applied all together or not at all, never in part: none was applied, unless '
-      + `the error ${uncertain}, which leaves it uncertain whether all were. ${repeat} Check the current state with a `
+      + 'database transaction, so they were applied all together or not at all, never in part. '
+      + `This result does not establish whether they were committed. ${repeat} Check the current state with a `
       + 'query tool before calling it again.';
   }
   const committed = `${name} was applied: its operations were committed together in one database transaction`;
@@ -2778,11 +2770,10 @@ function oversizedTransactionMessage({
  *   content block, from {@link normalizeTextFormat}
  * @param {Object} [params.args] the arguments the call ran with, whose
  *   `operations` name the key of a transaction result without a record
- * @param {boolean} [params.remote] whether the tool executes remotely
  * @returns {Object} CallToolResult
  */
 const oversizedMutationResult = ({
-  entry, name, result, isError, bytes, maxResultBytes, stringify, args, remote,
+  entry, name, result, isError, bytes, maxResultBytes, stringify, args,
 }) => {
   const root = result.data !== null && typeof result.data === 'object' ? result.data[entry.fieldName] : undefined;
   // The outputSchema declares an integer, and a fractional cap is accepted.
@@ -2822,7 +2813,6 @@ const oversizedMutationResult = ({
     withFirstError: firstError !== undefined,
     sizes: `(${bytes} bytes) exceeds maxResultBytes (${cap})`,
     idNote,
-    remote,
   });
   if (!isError) {
     const structured = {};
@@ -3042,7 +3032,6 @@ const createCallTool = ({
             maxResultBytes: limits.maxResultBytes,
             stringify,
             args,
-            remote: mode === 'remote',
           });
         }
         // Whole bytes, as in the mutation notice: a fractional cap allows

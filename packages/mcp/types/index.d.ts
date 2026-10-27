@@ -472,10 +472,11 @@ export interface GenerateMCPToolsOptions {
    * `extensions.simfinityTransaction`, the description's marker sentence, or
    * a single `operations: [X!]!` argument each of whose fields matches a
    * mutation root of the same schema by name and input type, a generated
-   * root or any root of that name; also when only some fields of X match
-   * one, as long as every field of X named after a root matches it and the
-   * field returns a list of an object type with a field named after each
-   * field of X) is ever published, not even as a custom tool.
+   * root or any root of that name; also when some or all of those roots are
+   * missing, as long as X has at least one field, every field of X named
+   * after a remaining root matches it, and the field returns a list of an
+   * object type with a field named after each field of X) is ever published,
+   * not even as a custom tool.
    * `true`: the field is published when its marker description, its
    * structure and its `@oneOf` operation type are all present (rebuild a
    * schema from `getIntrospectionQuery({ oneOf: true })` with descriptions),

@@ -114,8 +114,7 @@ const defineTypes = ({ virtuals } = {}) => {
 // The schema, with the transaction field over Producto, Pedido and `extras` more types, Extra0, Extra1…,
 // each with its add, update and delete keys, unless `transaction` is false. Producto 1 and the open
 // Pedido 1, at version 1, are stored.
-const build = ({ transaction = true, extras = 0, virtuals } = {}) => {
-  const adapter = createOptimisticMemoryAdapter();
+const build = ({ transaction = true, extras = 0, virtuals, adapter = createOptimisticMemoryAdapter() } = {}) => {
   vi.spyOn(adapter, 'withTransaction');
   vi.spyOn(adapter, 'saveRecord');
   const runtime = createRuntime(adapter);
@@ -161,7 +160,7 @@ const fromSDL = (schema, { descriptions = true, without = {} } = {}) => {
   const definitions = document.definitions
     .filter((definition) => !METADATA_TYPES.includes(definition.name?.value))
     .map((definition) => (Object.hasOwn(without, definition.name?.value ?? '')
-      ? { ...definition, fields: definition.fields.filter((field) => field.name.value !== without[definition.name.value]) }
+      ? { ...definition, fields: definition.fields.filter((field) => ![without[definition.name.value]].flat().includes(field.name.value)) }
       : definition));
   const rebuilt = { ...document, definitions };
   return buildASTSchema(descriptions
@@ -207,8 +206,8 @@ const results = runs.map((options) => {
 });
 process.stdout.write(JSON.stringify({ isOneOf: schema.getType('TransactionOperation').isOneOf, results }));
 `;
-// With `descriptions: false` the introspection query requests no descriptions, and `drop` names a mutation
-// that the rebuilt Mutation type leaves out.
+// With `descriptions: false` the introspection query requests no descriptions, and `drop` names one or
+// more mutations that the rebuilt Mutation type leaves out.
 const fromIntrospection = (schema, oneOf, runs, { descriptions = true, drop } = {}) => {
   const { data, errors } = graphqlSync({ schema, source: getIntrospectionQuery({ oneOf, descriptions }) });
   expect(errors).toBeUndefined();
@@ -217,7 +216,7 @@ const fromIntrospection = (schema, oneOf, runs, { descriptions = true, drop } = 
     __schema: {
       ...data.__schema,
       types: data.__schema.types.map((type) => (type.name === mutationName
-        ? { ...type, fields: type.fields.filter(({ name }) => name !== drop) }
+        ? { ...type, fields: type.fields.filter(({ name }) => ![drop].flat().includes(name)) }
         : type)),
     },
   };
@@ -332,6 +331,35 @@ describe('type filters', () => {
 });
 
 describe('exclusion without extensions', () => {
+  test.each([{}, { transactionTools: false, exclude: ['addproducto'] }, { transactionTools: true }, { transactionTools: true, exclude: ['addproducto'] }])(
+    'a descriptionless SDL with only the transaction mutation cannot execute writes remotely (%j)', async (options) => {
+      const fixture = build();
+      const drop = Object.keys(fixture.schema.getMutationType().getFields()).filter((name) => name !== 'transaction');
+      const rebuilt = fromSDL(fixture.schema, { descriptions: false, without: { Mutation: drop } });
+      expect(Object.keys(rebuilt.getMutationType().getFields())).toEqual(['transaction']);
+      const fetch = vi.fn(async (_url, request) => {
+        const { query, variables } = JSON.parse(request.body);
+        return new Response(JSON.stringify(await graphql({ schema: fixture.schema, source: query, variableValues: variables })), {
+          headers: { 'content-type': 'application/json' },
+        });
+      });
+      vi.stubGlobal('fetch', fetch);
+      try {
+        const { tools, callTool } = generateMCPTools(rebuilt, {
+          ...options,
+          execution: { mode: 'remote', endpoint: 'https://api.example.test/graphql' },
+        });
+        await expect(callTool('transaction', { operations: [{ addproducto: { name: 'excluded' } }] }))
+          .rejects.toMatchObject({ extensions: { code: 'MCP_TOOL_NOT_FOUND' } });
+        expect(names(tools)).not.toContain('transaction');
+        expect(fixture.storedKeys()).toEqual(STORED);
+        expect(fetch).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
   test('a schema rebuilt from SDL without descriptions never publishes it, and the opt-in warns once and omits it', () => {
     const rebuilt = fromSDL(build().schema, { descriptions: false });
     const field = rebuilt.getMutationType().getFields().transaction;
@@ -410,6 +438,8 @@ describe('exclusion without extensions', () => {
     ['a delete whose input lacks the version', (schema) => ({ deletepedido: { type: schema.getType('IdInputType') } }), {}],
     ['@oneOf operations, one of them no generated mutation, returning a scalar', addAndRefresh, { isOneOf: true }],
     ['@oneOf operations, one of them no generated mutation, returning a list without a field for it', addAndRefresh, { isOneOf: true, returns: ['addproducto'] }],
+    ['no matching roots, returning a scalar', () => ({ refresh: { type: GraphQLString } }), {}],
+    ['no matching roots, returning a list without a field for its operation', () => ({ refresh: { type: GraphQLString } }), { returns: ['status'] }],
     ['operations, one of which names a generated mutation without matching it, returning a list', (schema) => ({
       ...addAndRefresh(schema), deletepedido: { type: schema.getType('IdInputType') },
     }), { returns: ['addproducto', 'refresh', 'deletepedido'] }],
@@ -434,6 +464,19 @@ describe('exclusion without extensions', () => {
 });
 
 describe('a schema rebuilt from introspection, in a fresh process', () => {
+  test('without descriptions or oneOf, a transaction-only mutation type never publishes a custom transaction tool', () => {
+    const { schema } = build();
+    const drop = Object.keys(schema.getMutationType().getFields()).filter((name) => name !== 'transaction');
+    const { isOneOf, results } = fromIntrospection(schema, false, [
+      {}, { transactionTools: false, exclude: ['addproducto'] }, { transactionTools: true },
+    ], { descriptions: false, drop });
+    expect(isOneOf).toBe(false);
+    for (const result of results) expect(result.names).not.toContain('transaction');
+    expect(results[0].warnings).toEqual([]);
+    expect(results[1].warnings).toEqual([]);
+    expect(results[2].warnings).toHaveLength(1);
+  });
+
   test('without descriptions or oneOf, a rebuild that also drops a generated mutation is never published either', () => {
     const { isOneOf, results: [byDefault, optedIn] } = fromIntrospection(build().schema, false, [{}, { transactionTools: true }], {
       descriptions: false, drop: 'deleteproducto',
@@ -890,10 +933,34 @@ describe('output', () => {
     const [error] = JSON.parse(result.content[0].text).errors;
     expect(error.extensions).toEqual({ code: 'MCP_RESULT_TOO_LARGE', applied: 'unknown', firstError: expect.any(String) });
     expect(error.message).toMatch(/^transaction returned errors; the error result \(\d+ bytes\) exceeds maxResultBytes \(20\) and was omitted \(extensions\.firstError holds the start of the first error\)\. /);
-    expect(error.message).toContain('Its operations run in one database transaction, so they were applied all together or not at all, never in part: '
-      + 'none was applied, unless the error came from the commit or is TRANSACTION_RETRY_EXCEEDED, which leaves it uncertain whether all were. '
+    expect(error.message).toContain('Its operations run in one database transaction, so they were applied all together or not at all, never in part. '
+      + 'This result does not establish whether they were committed. '
       + 'If they were applied, calling transaction again could repeat the changes. Check the current state with a query tool before calling it again.');
     expect(fixture.storedKeys()).toEqual(STORED);
+  });
+
+  test('an oversized error after commit does not claim the persisted operations were rolled back', async () => {
+    const adapter = createOptimisticMemoryAdapter();
+    const withTransaction = adapter.withTransaction.bind(adapter);
+    adapter.withTransaction = async (...args) => {
+      const result = await withTransaction(...args);
+      // A session cleanup or adapter wrapper can fail after the transaction has committed.
+      if (!args[0]) throw new Error('session cleanup failed');
+      return result;
+    };
+    const fixture = build({ adapter });
+    const { callTool } = generateMCPTools(fixture.schema, { transactionTools: true, limits: { maxResultBytes: 20 } });
+    const result = await callTool('transaction', { operations: [{ addproducto: { name: 'persisted' } }] });
+    expect(result.isError).toBe(true);
+    const [error] = JSON.parse(result.content[0].text).errors;
+    expect(error.extensions).toMatchObject({
+      code: 'MCP_RESULT_TOO_LARGE', applied: 'unknown', firstError: 'session cleanup failed',
+    });
+    expect(fixture.adapter.stored('Producto', '1000')).toMatchObject({ name: 'persisted' });
+    expect(error.message).toContain('This result does not establish whether they were committed.');
+    expect(error.message).not.toContain('none was applied');
+    expect(error.message).toContain('calling transaction again could repeat the changes');
+    expect(error.message).toContain('Check the current state with a query tool before calling it again.');
   });
 
   test('remotely, a failed request to the endpoint also leaves it uncertain, and the call is not retried', async () => {
@@ -914,8 +981,7 @@ describe('output', () => {
       expect(error.extensions).toEqual({
         code: 'MCP_RESULT_TOO_LARGE', applied: 'unknown', firstError: 'GraphQL endpoint request failed: socket hang up',
       });
-      expect(error.message).toContain('none was applied, unless the error came from the commit or from the request to the '
-        + 'GraphQL endpoint, or is TRANSACTION_RETRY_EXCEEDED, which leaves it uncertain whether all were.');
+      expect(error.message).toContain('This result does not establish whether they were committed.');
       expect(fetch).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();
