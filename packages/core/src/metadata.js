@@ -54,7 +54,7 @@ const scalarDescription = (type) => {
       if (storedValues.has(stored) && !Object.is(storedValues.get(stored), entry.value)) invalid(`Enum storage collision in ${type.name}: distinct internal values serialize to ${stored}`);
       storedValues.set(stored, entry.value);
     }
-    return { scalar: 'Enum', values: [...storedValues.keys()], enumValues: type.getValues().map(({ name, value }) => ({ name, value })) };
+    return { scalar: 'Enum', enumName: type.name, values: [...storedValues.keys()], enumValues: type.getValues().map(({ name, value }) => ({ name, value })) };
   }
   // The walk stops on a type that still has a base only where the chain repeats.
   if (rootScalar(type).baseScalarType) invalid(`Cyclic base scalar ${type.name}`);
@@ -63,7 +63,7 @@ const scalarDescription = (type) => {
   if (!['String', 'ID', 'Int', 'Float', 'Boolean', 'DateTime'].includes(scalar)) {
     invalid(`Unsupported scalar ${type.name}: declare a supported baseScalarType`);
   }
-  return { scalar };
+  return { scalar, ...(scalar === 'DateTime' ? { temporalName: name } : {}) };
 };
 
 // The version field of a protected entity, described the same way whether the type carries Simfinity's

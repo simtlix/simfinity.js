@@ -170,6 +170,57 @@ A btree index on `fold("column")` with the default operator class serves `IEQ` a
 
 On MongoDB, `STARTS_WITH` reads a prefix range of an index on the field. The other text operators, like `LIKE`, test every key of such an index, or every document without one, and so does `IIN`, which tests each key against the pattern of every value. `$regex` ignores collations, so a case-insensitive collation index does not serve them; for frequent case-insensitive equality or prefix searches, store a normalized copy of the field, such as its lowercase form, and filter it with `EQ` or `STARTS_WITH`. MongoDB accepts regular expressions of at most 32,764 bytes of UTF-8, so on MongoDB a value whose pattern is longer fails with `INVALID_FILTER_VALUE` (400) before the query runs, with `LIKE`, with the text operators and with each value of `IIN`, which MongoDB receives as one pattern per value. Every escaped character counts one byte more, and the operators add up to four bytes of their own: `^` for the prefixes, `\z` for the suffixes, both for `IEQ` and for each value of `IIN`, and `.*` twice for `LIKE`. So an `ILIKE` value of 32,764 ASCII letters runs, while 16,383 dots or 16,383 two-byte letters such as `é` fail. Ignoring case, MongoDB also compiles each letter that has other case forms to a class of them: `k` matches `K` and the Kelvin sign `K` (U+212A) too, and `s` matches `S` and the long s `ſ` (U+017F). Such letters make the compiled expression larger than its bytes, so a value of `ILIKE`, `ISTARTS_WITH`, `IENDS_WITH` `IEQ` or `IIN` within the 32,764 bytes can still be too large to compile: on MongoDB 8.0, an `IEQ` value of 21,843 letters `k` is, while one of 32,761 letters `a` runs. The server rejects such a value when the query runs, and Simfinity reports it as `INVALID_FILTER_VALUE` (400) too, with the message `Case-insensitive text filter value is too long: MongoDB cannot compile its regular expression when ignoring case, because letters such as k and s match more than one character`, instead of an internal error. PostgreSQL has no such limit.
 
+## Compare stored fields
+
+Use nullable `valuePath: String` instead of `value` to compare two stored fields. It works in generated lists, counted pages, aggregates, collection-field arguments, named views, middleware and query scopes on both bundled adapters. These illustrative Product fields must be declared in the application's schema:
+
+```graphql
+query LowStock {
+  products(stock: { operator: LTE, valuePath: "reorderLevel" }) { id }
+}
+query ShopMinimum {
+  products(stock: { operator: LT, valuePath: "shop.minStock" }) { id }
+}
+query Dimensions {
+  products(AND: [{ conditions: [
+    { field: "dims.width", operator: LT, valuePath: "dims.height" }
+  ] }]) { id }
+}
+query ShopRange {
+  products(shop: { terms: [
+    { path: "minStock", operator: LT, valuePath: "maxStock" }
+  ] }) { id }
+}
+```
+
+A field filter and an `AND`/`OR` condition resolve `valuePath` from the containing record. A relation term resolves it from the related object: the final example compares two Shop fields. Explicit `ANY`/`ALL`/`NONE` bodies resolve both paths from their element; collection-field arguments start at the queried child. Boolean groups do not change that origin. Paths contain dot-separated GraphQL names, with no expressions or dollar prefixes.
+
+`value` is supplied when it is not `undefined`; `valuePath` is supplied when neither `undefined` nor `null`. Supplying both, including `value: null`, gives `INVALID_FILTER_VALUE` (400). `valuePath: null` preserves the existing literal-filter behavior. An omitted operator means `EQ`.
+
+| Operators | Compatible operands |
+| --- | --- |
+| `EQ`, `NE` | Int/Float numeric pairs, String/String, Boolean/Boolean, ID/ID, the same GraphQL enum, or the same effective DateTime/Date/Time scalar |
+| `LT`, `LTE`, `GT`, `GTE` | Numeric pairs, String/String in code-point order, or the same effective temporal scalar |
+| `LIKE`, `STARTS_WITH`, `ENDS_WITH` | String/String, literal and case-sensitive |
+
+Validated scalars follow their supported base. Record identities remain identities even if declared String; name a reference identity with `.id` or `._id` where the engine permits it. Different enum types stay incompatible even with identical members, and nontrivial internal enum values compare by semantic member. Managed `RecordVersion`/`Version` fields are unsupported. Case-insensitive operators, `IN`, `NIN`, `BTW`, `CONTAINS_ALL` and emptiness operators cannot take `valuePath` (`INVALID_FILTER_OPERATOR`). Incompatible scalar pairs give `INVALID_FILTER_VALUE`.
+
+Missing and null normalize to null: `EQ` matches two null operands, `NE` is its exact complement, and ordering/text comparisons are false if either operand is null. Empty strings are values; a non-null string contains, starts with and ends with `""`. A scalar-list left operand supports only `EQ` membership and its complement `NE`. A null right operand matches a missing/null list or `[null]`, but never `[]`. The right operand must be scalar (`INVALID_FILTER_PATH` for a list). Whole objects, references and collections are not scalar endpoints. Crossing an embedded list with either operand requires future element-frame support and gives `UNSUPPORTED_QUERY`, including references reached inside that list.
+
+Collection shorthand binds the same visible child for both paths. In a Product condition, `reviews.rating LT valuePath: "reviews.maxRating"` compares one review's own values, while `reviews.rating LT valuePath: "stock"` compares that review with its containing Product. Every collection crossed by the right path must already be bound by the left chain. An unrelated `otherReviews.rating`, or a right-only collection, gives `INVALID_FILTER_PATH`; use an explicit group to choose an element. Conditions sharing a collection prefix in one group use that child, while separate groups can use different children. Normalization preserves outer origins internally; public `$parent`/`$root` paths remain unsupported. Aggregate group/fact prefixes retain their existing joined-row cardinality, and comparisons select those rows before grouping.
+
+Both paths need read permission, including a right field omitted from the selection, and obey stored/queryable/virtual restrictions. Client references read targets through their `find` scopes; a hidden or missing target contributes null. Comparison-only references add no legacy group-level joined restriction. Literal filters, sorts and facts keep their established scope behavior beside comparisons. Middleware and scope conditions read stored data; see [query scopes](./query-scope) and [marker-preserving edits](./middleware#keep-client-filter-objects).
+
+Custom adapters require `queryFeatures.valuePath: true` and `referenceEmptiness: true`; collection shorthand additionally needs `quantifiers: true`. Unsupported adapters reject with `UNSUPPORTED_QUERY` before compilation. Hand-built descriptions need logical `enumName` and `temporalName` metadata rather than guessing collapsed storage types. See the [SQL plan contract](./sql-plugins#query-features).
+
+PostgreSQL uses null-safe distinctness, C collation, guarded text predicates and comparable native/jsonb temporal instants. MongoDB uses guarded aggregation expressions and literal code-point text operations. Supplied MongoDB identity fields must have compatible ObjectId, String or Number representations. Unsupported or ambiguous supplied-model enum representations fail explicitly; native malformed data is outside the declared model contract. Neither engine silently treats a declared numeric or Boolean field as text for comparison.
+
+MongoDB String `LT`/`LTE`/`GT`/`GTE` comparisons require an effective `simple` collation on the aggregate command; a non-simple collation gives `UNSUPPORTED_QUERY`. The command's root model determines that collation for its lookups and collection frames, regardless of the target collections' defaults. Simfinity does not force a different collation because that would also change existing literal filters. Exact String equality, scalar-list membership, enum decoding and `LIKE`/`STARTS_WITH`/`ENDS_WITH` field comparisons remain supported under non-simple collations.
+
+For these ordered String comparisons, MongoDB compilation reads the root model's declared `schema.options.collation`, which Mongoose applies to aggregates. Without a declaration, it inspects the connected root collection's options once per compilation. If those options cannot be inspected, including an offline model or insufficient metadata permissions, it fails with `UNSUPPORTED_QUERY` rather than guessing. The adapter also checks a collation override already present on the returned Aggregate; removing a declaration that compilation relied on fails closed too. Native aggregate hooks or wrappers that change collation after validation must preserve this requirement. Callers executing a builder's pipeline directly must use the same collation that compilation resolved or the model declared; the raw driver does not inherit Mongoose schema options.
+
+Field comparisons have no general ordinary-index guarantee. Combine them with selective literal filters, inspect representative database plans, and use an application-maintained derived field when a measured hot path needs its own index. No data migration or generated index is required for this feature.
+
 ## Empty values
 
 `IS_EMPTY` matches the records in which a field holds no value, and `IS_NOT_EMPTY` the records in which it holds one, so every record matches exactly one of the two. They take no value: omit `value`, or pass `null`. They test the queried record's own fields, scalars, enums, lists, embedded objects and embedded lists, and, on an adapter that supports [references and collections](#references-and-collections), as both bundled adapters do, its references and collections and the fields it reaches through single references, wherever filters apply: field filters, relation `terms`, `AND`/`OR` conditions, `pagination.count`, aggregate filters, collection fields, batched or not, `find`, `get_by_id` and `aggregate` [scopes](./query-scope), middleware and [MCP tools](./mcp).

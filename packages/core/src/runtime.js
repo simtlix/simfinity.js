@@ -26,7 +26,7 @@ import QLSort from './const/QLSort.js';
 import {
   collectQueryOperators, collectQueryPathEntries, walkQueryPath,
 } from './query-plan.js';
-import { QUERY_OPERATORS, isQueryOperator, resolveQueryFeatures } from './query-operators.js';
+import { QUERY_OPERATORS, hasValuePath, isQueryOperator, resolveQueryFeatures } from './query-operators.js';
 import {
   assertEmptinessPath, describeEmptiness, emptinessScopeTargets, isEmptinessOperator,
 } from './query-emptiness.js';
@@ -210,6 +210,7 @@ const prefixScopeGroup = (group, prefix, copyQuantifiedGroup) => {
       field: `${prefix}.${condition?.path != null && condition.path !== '' ? `${condition.field}.${condition.path}` : condition?.field}`,
       operator: condition?.operator,
       value: condition?.value,
+      ...(hasValuePath(condition) ? { valuePath: `${prefix}.${condition.valuePath}` } : {}),
     }));
   }
   if (group.AND != null) prefixed.AND = [].concat(group.AND).map((item) => prefixScopeGroup(item, prefix, copyQuantifiedGroup));
@@ -243,9 +244,13 @@ const prefixScopeArgs = (scopeArgs, prefix, typeName, copyQuantifiedGroup) => {
         // An emptiness term without a path (omitted, null or "") tests the field itself; other
         // operators keep the path as written.
         const itself = isEmptinessOperator(term?.operator) && (term.path == null || term.path === '');
-        conditions.push({ field: itself ? `${prefix}.${name}` : `${prefix}.${name}.${term?.path}`, operator: term?.operator, value: term?.value });
+        conditions.push({ field: itself ? `${prefix}.${name}` : `${prefix}.${name}.${term?.path}`, operator: term?.operator, value: term?.value,
+          ...(hasValuePath(term) ? { valuePath: `${prefix}.${name}.${term.valuePath}` } : {}),
+        });
       }
-    } else conditions.push({ field: `${prefix}.${name}`, operator: value.operator, value: value.value });
+    } else conditions.push({ field: `${prefix}.${name}`, operator: value.operator, value: value.value,
+      ...(hasValuePath(value) ? { valuePath: `${prefix}.${value.valuePath}` } : {}),
+    });
   }
   return conditions.length ? [{ conditions }, ...groups] : groups;
 };
@@ -599,7 +604,7 @@ export const createRuntime = (adapter) => {
   // IS_EMPTY and IS_NOT_EMPTY through references and collections (#108 part 2b), and a client's
   // conditions of that kind carry a scope marker from the runtime (see markClientConstructs).
   const {
-    operators: supportedOperators, referenceEmptiness: supportsReferenceEmptiness, quantifiers: supportsQuantifiers,
+    operators: supportedOperators, referenceEmptiness: supportsReferenceEmptiness, quantifiers: supportsQuantifiers, valuePath: supportsValuePath,
   } = resolveQueryFeatures(adapter.queryFeatures);
   const supportsEveryOperator = QUERY_OPERATORS.every((operator) => supportedOperators.has(operator));
   // The write features the adapter implements, read once: with optimisticConcurrency, schemas may
@@ -735,6 +740,7 @@ const QLFilter = new GraphQLInputObjectType({
   fields: () => ({
     operator: { type: QLOperator },
     value: { type: QLValue },
+    valuePath: { type: GraphQLString, description: 'Compare with a stored field path; mutually exclusive with value.' },
   }),
 });
 
@@ -743,6 +749,7 @@ const QLTypeFilter = new GraphQLInputObjectType({
   fields: () => ({
     operator: { type: QLOperator },
     value: { type: QLValue },
+    valuePath: { type: GraphQLString, description: 'Compare with a stored field path; mutually exclusive with value.' },
     path: { type: GraphQLString },
   }),
 });
@@ -768,6 +775,7 @@ const QLFilterCondition = new GraphQLInputObjectType({
     field: { type: new GraphQLNonNull(GraphQLString) },
     operator: { type: QLOperator },
     value: { type: QLValue },
+    valuePath: { type: GraphQLString, description: 'Compare with a stored field path; mutually exclusive with value.' },
     path: { type: GraphQLString },
   }),
 });
@@ -2291,13 +2299,13 @@ const inspectClientPaths = (gqltype, args, operation, { checkQueryable = true } 
   const J = operation === 'aggregate' ? aggregateJoinPrefixes(args.aggregation, { gqltype }) : new Set();
   const entries = collectQueryPathEntries(args, operation, { gqltype, expandMembers: true });
   for (const {
-    segments, group, member, operator, use, frames, quantifier,
+    segments, group, member, operator, use, frames, quantifier, comparison,
   } of entries) {
     const filter = use === 'filter';
     const relations = filter && supportsQuantifiers ? pathRelations(gqltype, segments) : [];
     const cut = relations.find((relation) => relation.collection && !J.has(relation.path));
     const anchored = cut && relations.some((relation) => relation.collection && J.has(relation.path));
-    const joins = !member && !(supportsReferenceEmptiness && isEmptinessOperator(operator))
+    const joins = !member && !comparison && !(supportsReferenceEmptiness && isEmptinessOperator(operator))
       && !(filter && (frames.length || quantifier || (cut && !anchored)));
     walkQueryPath(gqltype, segments, ({ type, fieldName, field, index }) => {
       const path = segments.slice(0, index + 1).join('.');
@@ -2400,7 +2408,7 @@ const assertEmptinessForm = (gqltype, {
 // carriers, which do not become predicates but must not use known undeclared capabilities.
 const queryFrameContext = (gqltype, args, operation) => ({
   gqltype, operation, quantifiers: supportsQuantifiers, referenceEmptiness: supportsReferenceEmptiness,
-  operators: supportedOperators,
+  operators: supportedOperators, valuePath: supportsValuePath,
   J: operation === 'aggregate' ? aggregateJoinPrefixes(args.aggregation, { gqltype }) : new Set(),
   scopeMarkers: 'pending',
 });
@@ -2614,8 +2622,9 @@ const markClientConstructs = (checked, { aggregation, issued = new Map() } = {})
   };
   for (const { entry, shape } of conditions) {
     const { construct } = entry;
-    if (!construct || !(shape || entry.form === 'quantified' || ordinaryFrameCarrier(gqltype, entry, clientJ))) continue;
-    const targets = pathRelations(gqltype, entry.segments).map(({ typeName }) => typeName);
+    if (!construct || !(shape || entry.hasValuePath || entry.form === 'quantified' || ordinaryFrameCarrier(gqltype, entry, clientJ))) continue;
+    const comparisonPath = entry.hasValuePath ? [...entry.segments.slice(0, -entry.relative.length), ...entry.valuePath.split('.')] : [];
+    const targets = [...pathRelations(gqltype, entry.segments), ...pathRelations(gqltype, comparisonPath)].map(({ typeName }) => typeName);
     if (shape) targets.push(...Object.values(emptinessScopeTargets(shape, entry.relative)));
     if (!targets.some((name) => getScope(typesDict.types[name]?.gqltype, 'find'))) continue;
     const origin = { operator: entry.operator ?? entry.quantifier, path: entry.path };
@@ -2658,7 +2667,8 @@ const assertClientMarkers = (gqltype, args, operation, issued, clientJ) => {
       throw detachedClientFilter(`The client's ${origin.operator} condition on ${origin.path} is inside a trusted frame`);
     }
     if (supportsQuantifiers && !entry.frames.length && entry.form !== 'quantified' && !isEmptinessOperator(operator)) {
-      for (const relation of pathRelations(gqltype, entry.segments)) if (relation.collection && clientJ.has(relation.path) !== J.has(relation.path)) {
+      const operandPaths = [entry.segments, ...(entry.hasValuePath ? [[...entry.segments.slice(0, -entry.relative.length), ...entry.valuePath.split('.')]] : [])];
+      for (const relation of operandPaths.flatMap((parts) => pathRelations(gqltype, parts))) if (relation.collection && clientJ.has(relation.path) !== J.has(relation.path)) {
         throw detachedClientFilter(`The client's ${origin.operator} condition on ${origin.path} changed aggregate join prefixes`);
       }
     }
@@ -2735,7 +2745,11 @@ const fillClientScopes = async (gqltype, checked, context, issued) => {
     const vectors = [];
     for (const { entry, shape, type } of positions) {
       const relations = pathRelations(type, entry.relative);
-      if (!shape && entry.form !== 'quantified' && !ordinaryFrameCarrier(gqltype, entry, J)) {
+      if (entry.hasValuePath) {
+        const existing = new Set(relations.map(({ path }) => path));
+        relations.push(...pathRelations(type, entry.valuePath.split('.')).filter(({ path }) => !existing.has(path)));
+      }
+      if (!shape && !entry.hasValuePath && entry.form !== 'quantified' && !ordinaryFrameCarrier(gqltype, entry, J)) {
         const relation = relationOnPath(gqltype, entry.segments);
         if (relation) throw detachedClientFilter(`The client's ${origin.operator} condition on ${origin.path} now uses ${entry.operator} on `
           + `${entry.path}, which reads through ${relation} without its scope`);
@@ -2744,7 +2758,7 @@ const fillClientScopes = async (gqltype, checked, context, issued) => {
       const anchored = rootShorthand && relations.some(({ collection, path }) => collection && J.has(path));
       const cut = anchored ? relations.find(({ collection, path }) => collection && !J.has(path)) : null;
       const keys = shape ? emptinessScopeTargets(shape, entry.relative) : Object.fromEntries(relations
-        .filter((relation) => !anchored || relation.collection || (cut && relation.index >= cut.index))
+        .filter((relation) => entry.hasValuePath || !anchored || relation.collection || (cut && relation.index >= cut.index))
         .map(({ path, typeName, collection }) => [path, rootShorthand && collection && J.has(path) ? null : typeName]));
       for (const [key, target] of Object.entries(keys)) {
         if (Object.hasOwn(targets, key) && targets[key] !== target) {

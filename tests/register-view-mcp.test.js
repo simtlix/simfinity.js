@@ -91,7 +91,9 @@ describe('named views through MCP', () => {
     expect(language).toContain('nested AND/OR and ANY/ALL/NONE filter groups, pagination (page/size) and sorting.');
     expect(language).toContain('queryFeatures.quantifiers: true');
     expect(language).toContain('conditions on the same collection prefix in one group must match the same element');
-    expect(language.endsWith('otherwise they fail with UNSUPPORTED_QUERY.')).toBe(true);
+    expect(language).toContain('otherwise they fail with UNSUPPORTED_QUERY.');
+    expect(language).toContain('valuePath instead of value');
+    expect(language).toContain('queryFeatures.valuePath: true');
     expect(list.description).toBe(`List and search NvItem records. ${language} Returns an array of NvItem.`);
   });
 

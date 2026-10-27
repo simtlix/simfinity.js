@@ -178,7 +178,7 @@ describe('the transaction field and its types', () => {
   test('pin: a schema without the option is byte-identical in SDL', () => {
     const schema = build().create();
     const sdl = printSchema(schema);
-    expect(createHash('sha256').update(sdl).digest('hex')).toBe('622711658aae4c7d061cf96bedf0f7fc56736a9958716562efe780c7032d548d');
+    expect(createHash('sha256').update(sdl).digest('hex')).toBe('4646dfd0b4a380a6b3255cf3dbac6ac785bdb6640fb78cd5b4ead3a0ef7a96af');
     expect(schema.getMutationType().getFields().transaction).toBeUndefined();
     expect(Object.keys(schema.getTypeMap()).filter((name) => name.startsWith('Transaction'))).toEqual([]);
   });

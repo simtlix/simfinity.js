@@ -264,6 +264,10 @@ Quantified forms on an adapter without `quantifiers`, including those returned b
 
 For [optimistic concurrency](/guide/concurrency), `TRANSACTION_RETRY_EXCEEDED` (409) is a normal contention outcome: re-read and reapply as for `VERSION_CONFLICT`. A `get_by_id` scope defers stale/exhausted-version errors for hidden callers until their hooks accept the write; it does not hide malformed stored-version errors, which may occur before hooks. Root mutation authorization and middleware still precede the pre-read.
 
+For [`valuePath` comparisons](/guide/queries#compare-stored-fields), `INVALID_FILTER_VALUE` (400) covers competing `value`/`valuePath`, a non-string path and incompatible logical types. `INVALID_FILTER_OPERATOR` (400) covers unsupported comparison operators or ordered/text list comparisons. `INVALID_FILTER_PATH` (400) covers malformed paths, scalar-list right operands, non-scalar endpoints and unbound right collections; unknown fields keep `INVALID_FILTER_FIELD`. Embedded-list crossings, undeclared `valuePath` support, missing logical enum/temporal metadata and MongoDB String ordered comparisons under a non-simple command collation give `UNSUPPORTED_QUERY` (400). Non-queryable/virtual client operands give `FORBIDDEN_FILTER_PATH`; authorization read-rule denials retain `FORBIDDEN` (403). Damaged provenance keeps `DETACHED_CLIENT_FILTER` (500). Both paths participate in the same checks.
+
+Only `queryFeatures.valuePath: true` enables comparisons and it requires `referenceEmptiness: true`; a malformed flag or dependency gives `INVALID_QUERY_FEATURES` (500) in core or `INVALID_SQL_PLUGIN` (400) during SQL binding. For the new form, carrier/presence/path checks precede operator/type checks and capability/frame gates; existing literal diagnostic ordering is unchanged.
+
 ## Client descriptor errors
 
 The optional descriptor package uses the same `SimfinityError` identity as core:

@@ -4,7 +4,7 @@ import { paginationStages } from './query-limits.js';
 import SimfinityError from './errors/simfinity.error.js';
 import {
   describeEmptiness, describeModelEmptiness, emptinessMemberPaths, emptinessScopeTargets, isEmptinessOperator, isQueryOperator,
-  takesListValue, textQueryOperator, validateContainsAllValue, validateTextFilterValue, validateTextListFilterValue,
+  hasValuePath, takesListValue, textQueryOperator, validateComparisonOperand, validateContainsAllValue, validateTextFilterValue, validateTextListFilterValue,
 } from './query-operators.js';
 
 const fail = (message, code = 'INVALID_FILTER_VALUE') => { throw new SimfinityError(message, code, 400); };
@@ -45,7 +45,7 @@ const walkQueryEntries = (args, operation, { paths = false, gqltype, expandMembe
   const records = [];
   const open = new Set();
   const childFrame = (parent, path, quantifier, construct, anchor = []) => ({
-    base: [...parent.base, ...anchor, ...pathSegments(path)],
+    parent, base: [...parent.base, ...anchor, ...pathSegments(path)],
     frames: [...parent.frames, { path, type: quantifier, construct }],
     groups: new Map(),
   });
@@ -96,7 +96,21 @@ const walkQueryEntries = (args, operation, { paths = false, gqltype, expandMembe
       entries.push({ ...entry, segments, relative: segments.slice(frame.base.length), member: true });
     }
   };
-  const addOperator = (item, form, field, rawPath, depth, frame, container, relativePath, quantifier) => {
+  const operandPath = (item, prefix = '') => hasValuePath(item)
+    ? (prefix ? `${prefix}.${item.valuePath}` : item.valuePath) : undefined;
+  const addPredicatePaths = (path, item, frame, container, group = null, prefix = '') => {
+    const comparison = hasValuePath(item) || item?.__operand != null;
+    addPath(path, frame, container, group, item?.operator ?? 'EQ', comparison ? item : item ?? null,
+      comparison ? { role: 'left', comparison: true } : {});
+    if (!comparison) return;
+    let origin = frame;
+    if (item.__operand) {
+      for (let up = item.__operand.up; up > 0 && origin.parent; up--) origin = origin.parent;
+    }
+    const right = item.__operand ? item.__operand.path?.join('.') : operandPath(item, prefix);
+    addPath(right, origin, container, group, item.operator ?? 'EQ', item, { role: 'right', comparison: true });
+  };
+  const addOperator = (item, form, field, rawPath, depth, frame, container, relativePath, quantifier, prefix = '') => {
     if (!isObject(item)) return;
     const quantified = form === 'quantified';
     const relative = pathSegments(relativePath);
@@ -112,9 +126,11 @@ const walkQueryEntries = (args, operation, { paths = false, gqltype, expandMembe
       rawPath,
       value: item.value,
       hasValue: Object.hasOwn(item, 'value'),
+      ...(hasValuePath(item) ? { hasValuePath: true, valuePath: operandPath(item, prefix) } : {}),
+      ...(Object.hasOwn(item, '__operand') ? { operand: item.__operand } : {}),
       ambiguous: form === 'condition' && typeof field === 'string' && field.includes('.') && !isPathless(rawPath),
       depth,
-      construct: quantified || form === 'term' || form === 'condition' ? item : null,
+      construct: quantified || form === 'term' || form === 'condition' || hasValuePath(item) || item.__operand ? item : null,
       emptiness: isEmptinessOperator(operator),
       ...(quantified ? { quantifier } : {}),
     });
@@ -134,7 +150,7 @@ const walkQueryEntries = (args, operation, { paths = false, gqltype, expandMembe
         const field = condition?.field;
         const path = conditionPath(field, condition?.path);
         if (paths) {
-          if (typeof field === 'string') addPath(path, inner, group, group, condition.operator ?? 'EQ', condition);
+          if (typeof field === 'string') addPredicatePaths(path, condition, inner, group, group);
         } else addOperator(condition, 'condition', field, condition?.path, depth, inner, group, path);
       }
       continue;
@@ -149,7 +165,7 @@ const walkQueryEntries = (args, operation, { paths = false, gqltype, expandMembe
         if (paths) {
           // Invalid path-less terms still name the field, as before; validation rejects them
           // before authorization marking. Their relative path names nothing in the child.
-          if (hasTermPath(term)) addPath(term.path, frame, value, null, term.operator ?? 'EQ', term);
+          if (hasTermPath(term)) addPredicatePaths(term.path, term, frame, value);
           else if (isPathless(term.path)) {
             entries.push({ ...metadata([], frame, value), group: null, operator: term.operator ?? 'EQ', construct: term });
           }
@@ -159,20 +175,21 @@ const walkQueryEntries = (args, operation, { paths = false, gqltype, expandMembe
     }
     if (!paths) {
       const hasTerms = Array.isArray(value.terms);
-      if (!hasTerms || value.operator !== undefined) addOperator(value, hasTerms ? 'beside-terms' : 'filter', name, undefined, 0, root, value, name);
-      if (hasTerms) for (const term of terms) addOperator(term, 'term', name, term?.path, 0, root, value, conditionPath(name, term?.path));
+      if (!hasTerms || value.operator !== undefined || hasValuePath(value)) addOperator(value, hasTerms ? 'beside-terms' : 'filter', name, undefined, 0, root, value, name);
+      if (hasTerms) for (const term of terms) addOperator(term, 'term', name, term?.path, 0, root, value, conditionPath(name, term?.path), undefined, name);
       continue;
     }
     const pathless = (term) => isEmptinessOperator(term?.operator) && isPathless(term.path);
     if (!terms.some(hasTermPath)) {
       const term = terms.find(pathless);
       if (term) addPath(name, root, value, null, term.operator, term);
+      else if (hasValuePath(value)) addPredicatePaths(name, value, root, value);
       else addPath(name, root, value, null, value.operator ?? 'EQ');
       continue;
     }
     let field = false;
     for (const term of terms) {
-      if (hasTermPath(term)) addPath(`${name}.${term.path}`, root, value, null, term.operator ?? 'EQ', term);
+      if (hasTermPath(term)) addPredicatePaths(`${name}.${term.path}`, term, root, value, null, name);
       else if (!field && pathless(term)) {
         addPath(name, root, value, null, term.operator, term);
         field = true;
@@ -198,7 +215,9 @@ const walkQueryEntries = (args, operation, { paths = false, gqltype, expandMembe
  * A quantified carrier names its path in the containing frame, with `quantifier` and its own
  * construct; children enter its frame. The legacy `group` remains the conditions owner, otherwise
  * null; operator and construct retain their old meanings except that quantifier filters now carry
- * their own construct. An omitted filter operator is EQ; non-filter reads and quantified carriers
+ * their own construct. Comparisons emit left/right roles with comparison:true and one owning
+ * construct, including ordinary field filters; RHS paths preserve their lexical term/frame origin.
+ * An omitted filter operator is EQ; non-filter reads and quantified carriers
  * have no operator. `expandMembers` appends stored emptiness member paths, preserving metadata.
  */
 export const collectQueryPathEntries = (args, operation = 'find', options = {}) => (
@@ -209,7 +228,8 @@ export const collectQueryPathEntries = (args, operation = 'find', options = {}) 
  * Internal: filter constructs only, with the same frame metadata as the path collector. Preserves
  * form, field, rawPath, value, hasValue, ambiguous, deepest depth and emptiness. Quantified carriers
  * have form `quantified`, operator null and their own construct; ordinary own filter operators keep
- * construct null. Explicit groups add a depth level, implicit ones none. Invalid entries are left
+ * construct null. Comparisons add hasValuePath:true and a frame-relative valuePath; their owning
+ * construct is always retained. Generated outer comparisons carry operand instead. Explicit groups add a depth level, implicit ones none. Invalid entries are left
  * to the validator; unknown group keys and path on a plain group fail closed here.
  */
 export const collectQueryOperators = (args, operation = 'find') => walkQueryEntries(args, operation);
@@ -290,9 +310,12 @@ export const resolveModelPath = (models, entityName, path) => {
  * explicit ANY/ALL/NONE and quantifier filters retain their quantifier, and scoped reference
  * crossings inside a frame lift into `joins`. Aggregate collection joins remain legacy; later
  * frames carry their legacy chain in `anchor`. Sorts through collections fail even in count mode.
+ * With `valuePath` (the same default as `quantifiers`), comparisons preserve their literal-free
+ * value:null placeholder and add operand:{up,path}. Same-frame scoped joins are the union of both
+ * paths on the predicate; generated outer operands own their joins in their ancestor frame.
  */
 export const createQueryPlan = (models, entityName, source = {}, {
-  mode = 'find', operators: supported, referenceEmptiness = supported == null, quantifiers = supported == null,
+  mode = 'find', operators: supported, referenceEmptiness = supported == null, quantifiers = supported == null, valuePath = supported == null,
 } = {}) => {
   let input = source;
   const allowed = supported == null ? null : new Set(supported);
@@ -316,7 +339,7 @@ export const createQueryPlan = (models, entityName, source = {}, {
       if (scopes[path] !== null && (!isObject(scopes[path]) || ![Object.prototype, null].includes(Object.getPrototypeOf(scopes[path])))) detached(`${label} carries a malformed scope of ${path}`);
       lifted[path] = scopes[path] === null
         ? null
-        : createQueryPlan(models, targets[path], scopes[path], { mode: 'find', operators: allowed ?? undefined, referenceEmptiness: references, quantifiers }).where;
+        : createQueryPlan(models, targets[path], scopes[path], { mode: 'find', operators: allowed ?? undefined, referenceEmptiness: references, quantifiers, valuePath }).where;
     }
     return lifted;
   };
@@ -338,7 +361,7 @@ export const createQueryPlan = (models, entityName, source = {}, {
   };
   // `construct` is the term or group condition that holds the predicate, the only objects whose
   // `__scope` is read; null for a field filter's own operator.
-  const predicate = (path, operator, value, construct = null, frameEntity = entityName, inFrame = false) => {
+  const predicate = (path, operator, value, construct = null, frameEntity = entityName, inFrame = false, ancestors = [], prefix = '') => {
     const steps = resolveModelPath(models, frameEntity, path);
     const op = operator ?? 'EQ';
     if (isEmptinessOperator(op)) return emptiness(path, steps, op, value, construct, frameEntity);
@@ -348,6 +371,25 @@ export const createQueryPlan = (models, entityName, source = {}, {
     }
     if (!isQueryOperator(op)) fail(`Unknown filter operator: ${op}`, 'INVALID_FILTER_OPERATOR');
     if (allowed && !allowed.has(op)) fail(`The ${op} filter operator is not supported by this query compiler`, 'UNSUPPORTED_QUERY');
+    const comparison = hasValuePath(construct) || construct?.__operand !== undefined;
+    if (comparison) {
+      const internal = construct.__operand;
+      const rightPath = internal?.path ?? (prefix ? `${prefix}.${validateComparisonOperand(construct)}` : validateComparisonOperand(construct)).split('.');
+      const up = internal?.up ?? 0;
+      const rightEntity = up ? ancestors[ancestors.length - up] : frameEntity;
+      if (!rightEntity) fail('Invalid comparison operand frame', 'INVALID_FILTER_PATH');
+      resolveModelPath(models, rightEntity, rightPath);
+      const segments = Array.isArray(path) ? path : path.split('.');
+      const node = { kind: 'predicate', path: segments, operator: op, value: null, operand: { up, path: rightPath } };
+      const scopeTargets = (paths, entity) => Object.fromEntries([...new Set(paths.flatMap((item) => crossingKeys(item, { models, entity })))].map((key) => [key, resolveModelPath(models, entity, key).at(-1).target]));
+      if (hasMarker(construct)) {
+        node.joins = liftScopes(construct.__scope, scopeTargets(up ? [segments] : [segments, rightPath], frameEntity), segments, op);
+      }
+      if (internal && Object.hasOwn(internal, 'scopes')) {
+        node.operand.joins = liftScopes({ scopes: internal.scopes }, scopeTargets([rightPath], rightEntity), rightPath, op);
+      }
+      return node;
+    }
     const collection = takesListValue(op);
     if (value === undefined || (!collection && Array.isArray(value)) || (value === null && !['EQ', 'NE'].includes(op))) fail('Expected a scalar filter value');
     if (collection && Array.isArray(value) && value.some((item) => item == null || Array.isArray(item))) fail('Filter lists require non-null scalar elements');
@@ -364,11 +406,13 @@ export const createQueryPlan = (models, entityName, source = {}, {
     }
     return node;
   };
+  const hasComparisonNode = (node) => Boolean(node && (node.operand || hasComparisonNode(node.where)
+    || node.terms?.some(hasComparisonNode)));
   const validateGroup = (value, keys = ['conditions', 'AND', 'OR']) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) fail('Expected a filter group object');
     for (const key of keys) if (value[key] != null && !Array.isArray(value[key])) fail(`${key} requires an array`);
   };
-  const group = (value, depth = -1, frameEntity = entityName, inFrame = false) => {
+  const group = (value, depth = -1, frameEntity = entityName, inFrame = false, ancestors = []) => {
     validateGroup(value);
     const level = depth + (value.__implicit === true ? 0 : 1);
     if (level > 5) fail('Filter nesting too deep', 'FILTER_DEPTH_EXCEEDED');
@@ -376,7 +420,7 @@ export const createQueryPlan = (models, entityName, source = {}, {
     for (const condition of value.conditions || []) {
       if (!condition || typeof condition.field !== 'string') fail('Invalid filter path', 'INVALID_FILTER_PATH');
       if (condition.field.includes('.') && condition.path) fail('Filter condition cannot use both dotted field syntax and a separate path', 'AMBIGUOUS_FILTER_FIELD');
-      terms.push(predicate(condition.path ? `${condition.field}.${condition.path}` : condition.field, condition.operator, condition.value, condition, frameEntity, inFrame));
+      terms.push(predicate(condition.path ? `${condition.field}.${condition.path}` : condition.field, condition.operator, condition.value, condition, frameEntity, inFrame, ancestors));
     }
     if (quantifiers !== true && QUANTIFIED_LISTS.some((key) => value[key] != null)) {
       fail('Quantified groups are not supported by this query compiler', 'UNSUPPORTED_QUERY');
@@ -385,12 +429,12 @@ export const createQueryPlan = (models, entityName, source = {}, {
       const anchor = item.__implicit === true ? item.__anchor : undefined;
       const path = item.path.split('.');
       const target = resolveModelPath(models, frameEntity, [...(anchor ?? []), ...path]).at(-1).target;
-      const node = { kind: 'quantified', quantifier, path, where: group(item, level, target, true), scope: null };
+      const node = { kind: 'quantified', quantifier, path, where: group(item, level, target, true, [...ancestors, frameEntity]), scope: null };
       if (anchor?.length) node.anchor = anchor;
       if (hasMarker(item)) {
         const fullPath = [...(anchor ?? []), ...path];
         const key = fullPath.join('.');
-        const crossings = anchor?.length ? [] : crossingKeys(path, { models, entity: frameEntity });
+        const crossings = anchor?.length && !hasComparisonNode(node.where) ? [] : crossingKeys(fullPath, { models, entity: frameEntity });
         const targets = Object.fromEntries(crossings.map((prefix) => [prefix, resolveModelPath(models, frameEntity, prefix).at(-1).target]));
         targets[key] = target;
         const scopes = liftScopes(item.__scope, targets, fullPath, quantifier);
@@ -399,17 +443,18 @@ export const createQueryPlan = (models, entityName, source = {}, {
           for (const prefix of J) if (key.startsWith(`${prefix}.`)) {
             if (!Object.hasOwn(item.__scope.scopes, prefix) || item.__scope.scopes[prefix] !== null) detached(`${quantifier} on ${key} requires a null aggregate anchor scope for ${prefix}`);
           }
-        } else if (crossings.length) node.joins = Object.fromEntries(crossings.map((prefix) => [prefix, scopes[prefix]]));
+        }
+        if (crossings.length) node.joins = Object.fromEntries(crossings.map((prefix) => [prefix, scopes[prefix]]));
       }
       terms.push(node);
     }
-    for (const item of value.AND || []) terms.push(group(item, level, frameEntity, inFrame));
-    terms.push(combine('or', (value.OR || []).map((item) => group(item, level, frameEntity, inFrame))));
+    for (const item of value.AND || []) terms.push(group(item, level, frameEntity, inFrame, ancestors));
+    terms.push(combine('or', (value.OR || []).map((item) => group(item, level, frameEntity, inFrame, ancestors))));
     return combine('and', terms);
   };
   // Validate received arguments in filled-marker mode before the pure, frame-producing rewrite.
   validateGroup(input, ['AND', 'OR']);
-  const context = { models, entity: entityName, operation: mode, operators: allowed, referenceEmptiness: references, quantifiers };
+  const context = { models, entity: entityName, operation: mode, operators: allowed, referenceEmptiness: references, quantifiers, valuePath };
   const J = mode === 'aggregate' ? aggregateJoinPrefixes(input.aggregation, context) : new Set();
   context.J = J;
   validateQuantifiedGroups(input, context);
@@ -428,7 +473,7 @@ export const createQueryPlan = (models, entityName, source = {}, {
         + `${name}: { terms: [{ operator: ${value.operator} }] }`, 'MISSING_FILTER_PATH');
     }
     if (object && (!Array.isArray(value.terms) || !value.terms.length)) fail('Object filters require non-empty terms', 'MISSING_FILTER_PATH');
-    if (!object) terms.push(predicate(name, value.operator, value.value));
+    if (!object) terms.push(predicate(name, value.operator, value.value, hasValuePath(value) || value.__operand ? value : null));
     else for (const term of value.terms) {
       if (!term || typeof term !== 'object' || Array.isArray(term)) fail('Expected a relationship filter term');
       if (isEmptinessOperator(term.operator) && isPathless(term.path)) {
@@ -436,7 +481,7 @@ export const createQueryPlan = (models, entityName, source = {}, {
         continue;
       }
       if (typeof term.path !== 'string' || !term.path) fail('Relationship terms require a path', 'INVALID_FILTER_PATH');
-      terms.push(predicate(`${name}.${term.path}`, term.operator, term.value, term));
+      terms.push(predicate(`${name}.${term.path}`, term.operator, term.value, term, entityName, false, [], name));
     }
   }
   for (const item of input.AND || []) terms.push(group(item));

@@ -1,6 +1,6 @@
 # Query language part 5: field comparisons
 
-Status: builder-checked proposed design for maintainer approval; no runtime implementation yet.
+Status: implemented from the design approved by the maintainer on 2026-10-27, including the collation amendment below. Verification is recorded in the pull request.
 
 Baseline: `v3.16.0`, master `e8d7f6e425271eb889588bf78c391eb3211e91b2`.
 Motivation and original contract: [issue #108](https://github.com/simtlix/simfinity.js/issues/108), sections 4.1–4.4, 4.7–4.10 and [compiler proposal](https://github.com/simtlix/simfinity.js/issues/108#issuecomment-6252215307).
@@ -155,7 +155,7 @@ Keep existing diagnostics for literal-only queries and their precedence. For a n
 | Unknown field | INVALID_FILTER_FIELD |
 | Unsupported operator/pair or ordered comparison on scalar-list left | INVALID_FILTER_OPERATOR |
 | Valid new form on undeclared adapter; comparison crossing embedded list | UNSUPPORTED_QUERY |
-| Client forbidden/virtual operand path | FORBIDDEN_FILTER_PATH |
+| Client non-queryable/virtual operand path | FORBIDDEN_FILTER_PATH (authorization read-rule denials retain FORBIDDEN) |
 | Broken client provenance | DETACHED_CLIENT_FILTER |
 
 The generated input addition is additive. No data migration or new index is required. A new capability field previously ignored by core becomes meaningful; document that custom declarations must be truthful and wrappers must redeclare their own compiler support. A trusted caller already writing valuePath into an untyped object may change from ignored metadata to validation/comparison: call out that compatibility change. Preserve every valid 3.16.0 literal filter's results, row counts and compilation unless a separate, demonstrated correction is explicitly approved.
@@ -182,3 +182,9 @@ Approval covers the existing #108 intent plus these explicit refinements for the
 Helper names, file splits, cache representation, fixture organization and equivalent safe expression optimizations are builder decisions, subject to this contract and repository rules. If implementation evidence requires changing accepted inputs, null semantics, trust boundaries or supported storage types, bring that concrete difference back for a design amendment.
 
 Builder check (2026-10-27): a fresh software-engineer reviewer read this design and the current query walkers, normalization, scope issuance/fill, planner and PostgreSQL compiler. Result: "nothing important left". This is a design-readiness check, not runtime verification or maintainer approval.
+
+## Approved MongoDB collation amendment (2026-10-27)
+
+MongoDB ordered String expressions inherit the aggregate command's collation. A supplied collection with a non-simple collation can therefore disagree with the code-point ordering above. Setting `collation: { locale: 'simple' }` on the whole command would also change existing literal filters and is not an acceptable implicit fix. Exact String equality, scalar-list membership, enum member decoding and the three text operators already use collation-independent expressions.
+
+The maintainer approved rejecting String `LT`/`LTE`/`GT`/`GTE` field comparisons under an effective non-simple MongoDB collation with `UNSUPPORTED_QUERY`. All other supported field comparisons remain available. Implement and test this guard without changing command collation or existing literal-filter behavior. PostgreSQL uses explicit C collation and is unaffected.

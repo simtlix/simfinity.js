@@ -52,7 +52,8 @@ export const bindPlugin = (plugin) => {
   // `referenceEmptiness: true` (#108 part 2b) says that compileQuery compiles emptiness predicates that cross or end at
   // references and collections, and the `scopes` of client constructs; it is copied under the same rule, and only
   // when true. `quantifiers` additionally declares collection/reference frames and requires referenceEmptiness;
-  // its declaration follows the same compiler identity rule. Each omitted flag stays absent in the bound
+  // valuePath declares validated field operands and also requires referenceEmptiness. Both declarations follow
+  // the same compiler identity rule. Each omitted flag stays absent in the bound
   // declaration, and the adapter rejects requests for that feature. Undefined and null mean false.
   const { queryFeatures } = plugin;
   if (queryFeatures != null && (typeof queryFeatures !== 'object' || Array.isArray(queryFeatures)
@@ -68,6 +69,12 @@ export const bindPlugin = (plugin) => {
   if (queryFeatures?.quantifiers != null && typeof queryFeatures.quantifiers !== 'boolean') {
     invalid('SQL plugin queryFeatures.quantifiers must be a boolean');
   }
+  if (queryFeatures?.valuePath != null && typeof queryFeatures.valuePath !== 'boolean') {
+    invalid('SQL plugin queryFeatures.valuePath must be a boolean');
+  }
+  if (queryFeatures?.valuePath === true && queryFeatures.referenceEmptiness !== true) {
+    invalid('SQL plugin queryFeatures.valuePath requires referenceEmptiness');
+  }
   if (queryFeatures?.quantifiers === true && queryFeatures.referenceEmptiness !== true) {
     invalid('SQL plugin queryFeatures.quantifiers requires referenceEmptiness');
   }
@@ -76,6 +83,7 @@ export const bindPlugin = (plugin) => {
     operators: Object.freeze([...(declared ? queryFeatures.operators : LEGACY_QUERY_OPERATORS)]),
     ...(declared && queryFeatures.referenceEmptiness === true ? { referenceEmptiness: true } : {}),
     ...(declared && queryFeatures.quantifiers === true ? { quantifiers: true } : {}),
+    ...(declared && queryFeatures.valuePath === true ? { valuePath: true } : {}),
   });
   for (const [group, names] of Object.entries(methods)) {
     const members = {};

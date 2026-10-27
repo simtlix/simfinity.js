@@ -61,13 +61,13 @@ describe('collection frames: features', () => {
 
   it.each([false, null, undefined])('normalizes quantifiers %j to false', (quantifiers) => {
     expect(resolveQueryFeatures({ operators: ['EQ'], quantifiers })).toEqual({
-      operators: new Set(['EQ']), referenceEmptiness: false, quantifiers: false,
+      operators: new Set(['EQ']), referenceEmptiness: false, quantifiers: false, valuePath: false,
     });
   });
 
   it('enables quantifiers only with reference emptiness and retains known operators', () => {
     expect(resolveQueryFeatures({ operators: ['EQ', 'FUTURE', 'IS_EMPTY'], referenceEmptiness: true, quantifiers: true })).toEqual({
-      operators: new Set(['EQ', 'IS_EMPTY']), referenceEmptiness: true, quantifiers: true,
+      operators: new Set(['EQ', 'IS_EMPTY']), referenceEmptiness: true, quantifiers: true, valuePath: false,
     });
   });
 
@@ -698,10 +698,14 @@ describe('collection frames: remaining validator and rewrite contracts', () => {
   it.each(['tags', 'abstract', 'union'])('rejects an explicit frame ending at %s before the capability gate', (path) => {
     expect(errorOf(() => frames.validateQuantifiedGroups({ AND: [{ ANY: [{ path }] }] }, { ...treeContext, quantifiers: false }))?.extensions.code).toBe('INVALID_FILTER_PATH');
   });
-  it('uses the first marked member for the shared prefix and retains operand extensions', () => {
+  it('uses the first marked member for the shared prefix and retains unrelated extensions', () => {
     const first = marked(condition('children.name'), { children: null, unrelated: null }, 7);
-    const second = marked({ ...condition('children.n', 'EQ', 1), valuePath: 'other', customOperand: 2 }, { children: { different: true } }, 8);
-    expect(frames.frameCollectionPaths(grouped(first, second), treeContext)).toEqual({ AND: [{ conditions: [], ANY: [implicit('children', [condition('name'), { ...condition('n', 'EQ', 1), valuePath: 'other', customOperand: 2 }], { __scope: { scopes: { children: null } } })] }] });
+    const second = marked({ ...condition('children.n', 'EQ', 1), customOperand: 2 }, { children: { different: true } }, 8);
+    expect(frames.frameCollectionPaths(grouped(first, second), treeContext)).toEqual({ AND: [{ conditions: [], ANY: [implicit('children', [condition('name'), { ...condition('n', 'EQ', 1), customOperand: 2 }], { __scope: { scopes: { children: null } } })] }] });
+  });
+  it('rejects valuePath metadata that names an unknown comparison field', () => {
+    const input = grouped({ field: 'children.n', valuePath: 'other' });
+    expect(errorOf(() => frames.frameCollectionPaths(input, treeContext))?.extensions.code).toBe('INVALID_FILTER_FIELD');
   });
   it('rejects non-null J scopes on marked aggregate anchors after all value errors', () => {
     const ctx = { ...enabled, gqltype: frameTypes.Product, operation: 'aggregate', J: new Set(['reviews']) };
