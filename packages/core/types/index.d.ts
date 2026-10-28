@@ -910,7 +910,15 @@ export function createRuntime<Model = any, Session = any>(adapter: DatabaseAdapt
 export type QueryJoins = Record<string, QueryPredicate | null>;
 
 /** A field operand in the same frame (up: 0) or an enclosing shorthand frame. */
-export type QueryOperand = { up: number; path: string[]; joins?: QueryJoins };
+export type QueryOperand = {
+  up: number;
+  path: string[];
+  joins?: QueryJoins;
+  /** Structural embedded container: bound frame distance and a single-object path within it.
+   * When present, the outer `up` is zero and `path` is relative to this container.
+   * This must identify an actual embedded ancestor, never an arbitrary outer entity. */
+  container?: { up: number; path: string[] };
+};
 
 /**
  * `operator` is a {@link QueryOperator}; the value of a text operator is a validated string. For
@@ -1018,7 +1026,7 @@ export interface QueryPlan {
  * checked before the path rule, the rest after it.
  * A marker not filled for every path fails with `DETACHED_CLIENT_FILTER` (500).
  */
-export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode']; operators?: Iterable<string>; referenceEmptiness?: boolean; quantifiers?: boolean; valuePath?: boolean }): QueryPlan;
+export function createQueryPlan(models: ModelDescription, entityName: string, input?: Record<string, any>, options?: { mode?: QueryPlan['mode']; operators?: Iterable<string>; referenceEmptiness?: boolean; quantifiers?: boolean; valuePath?: boolean; elementFrames?: boolean }): QueryPlan;
 export function resolveModelPath(models: ModelDescription, entityName: string, path: string | string[]): FieldDescription[];
 
 /**

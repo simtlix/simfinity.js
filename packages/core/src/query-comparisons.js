@@ -14,8 +14,8 @@ export const validateComparisonOperand = (carrier) => {
   if (!hasValuePath(carrier)) return null;
   if (carrier.value !== undefined) fail('A filter cannot supply both value and valuePath');
   if (typeof carrier.valuePath !== 'string') fail('valuePath requires a string field path');
-  if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(carrier.valuePath)) {
-    fail('valuePath requires a nonempty dotted field path; outer paths require an explicit group', 'INVALID_FILTER_PATH');
+  if (!/^(?:\$parent\.)*[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(carrier.valuePath)) {
+    fail('valuePath requires a field path optionally preceded by embedded $parent prefixes', 'INVALID_FILTER_PATH');
   }
   return carrier.valuePath;
 };

@@ -1,10 +1,8 @@
-import { getNamedType, isEnumType, isObjectType } from 'graphql';
+import { getNamedType, isObjectType } from 'graphql';
 import { GROUP_KEYS, QUANTIFIED_LISTS, QUANTIFIERS } from './const/QLQuantifier.js';
 import SimfinityError from './errors/simfinity.error.js';
-import { effectiveScalarName } from './metadata.js';
-import { isVirtualField } from './relation-storage.js';
 import {
-  describeEmptiness, describeModelEmptiness, emptinessScopePaths, graphqlStep, isEmptinessOperator, modelStep,
+  describeEmptiness, describeModelEmptiness, emptinessScopePaths, isEmptinessOperator,
 } from './query-emptiness.js';
 import {
   assertContainsAllPath, isQueryOperator, takesListValue, textQueryOperator, validateContainsAllValue, validateTextFilterValue,
@@ -12,6 +10,7 @@ import {
 } from './query-operators.js';
 import { collectQueryOperators, validateQueryGroupKeys } from './query-plan.js';
 import { getQueryMaxFrameNesting } from './query-limits.js';
+import { enterQueryFrame, resolveComparisonContext, resolveContainerContext, resolveQueryContext } from './query-context.js';
 
 export { GROUP_KEYS };
 export const IMPLICIT_KEY = '__implicit';
@@ -28,55 +27,7 @@ const controls = (operation) => new Set(['AND', 'OR', 'sort', 'pagination', ...(
 const hasMarker = (value) => object(value) && Object.hasOwn(value, '__scope');
 const nonemptyPath = (path) => typeof path === 'string' && path.length > 0;
 const partsOf = (path) => (Array.isArray(path) ? path : typeof path === 'string' ? path.split('.') : []);
-const childContext = (ctx, step) => (ctx.gqltype
-  ? { ...ctx, gqltype: step.node }
-  : { ...ctx, entity: step.target ?? ctx.entity, fields: step.node });
-
-// One schema-path resolver for these operations, using the same step classifications as emptiness.
-// Model contexts retain embedded fields locally; relation steps switch to the target entity.
-const resolve = (path, ctx, onStep, virtualLabel, ordinaryCondition = false) => {
-  const parts = partsOf(path);
-  const invalid = parts.findIndex((part) => typeof part !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(part));
-  if (!parts.length || invalid !== -1) {
-    if (ordinaryCondition && invalid > 0) fail(`Invalid filter path segment: "${parts[invalid]}"`, 'INVALID_FILTER_PATH');
-    fail('Invalid filter path', 'INVALID_FILTER_PATH');
-  }
-  let current = ctx;
-  const steps = [];
-  const raw = [];
-  for (const [index, name] of parts.entries()) {
-    let step;
-    if (ctx.gqltype) {
-      const fields = isObjectType(current.gqltype) ? current.gqltype.getFields() : null;
-      const field = fields && Object.hasOwn(fields, name) ? fields[name] : null;
-      if (!field) fail(ordinaryCondition && index === 0 ? `Unknown filter field: ${name}`
-        : `Unknown field ${parts.slice(0, index + 1).join('.')}`, 'INVALID_FILTER_FIELD');
-      if (isVirtualField(field)) {
-        const label = virtualLabel?.(field) ?? parts.join('.');
-        fail(`Query path ${label} uses the virtual field ${current.gqltype.name}.${name}, which is not stored`, 'INVALID_FILTER_FIELD');
-      }
-      step = graphqlStep(name, field);
-      const type = getNamedType(field.type);
-      step.scalar = isEnumType(type) ? 'Enum' : effectiveScalarName(type);
-      step.enumName = isEnumType(type) ? type.name : undefined;
-      step.temporalName = ['Date', 'Time', 'DateTime'].includes(step.scalar) ? step.scalar : undefined;
-      step.version = step.scalar === 'RecordVersion' || step.scalar === 'Version';
-      raw.push(field);
-    } else {
-      const fields = current.fields ?? current.models?.entities.find((entity) => entity.name === current.entity)?.fields;
-      const field = fields?.find((item) => item.name === name && !item.private);
-      if (!field) fail(`Unknown field ${parts.slice(0, index + 1).join('.')}`, 'INVALID_FILTER_FIELD');
-      step = { ...field, ...modelStep(field) };
-      if (relation(step)) step.node = ctx.models?.entities.find((entity) => entity.name === step.target)?.fields;
-      raw.push(field);
-    }
-    onStep?.(step, current);
-    steps.push(step);
-    if (index < parts.length - 1 && !step.node) fail(`Field ${name} cannot be traversed`, 'INVALID_FILTER_PATH');
-    current = childContext(current, step);
-  }
-  return { steps, raw, end: current };
-};
+const resolve = (path, ctx, onStep, virtualLabel, ordinaryCondition = false) => resolveQueryContext(path, ctx, { onStep, virtualLabel, ordinaryCondition });
 
 const comparisonDescriptor = (resolved) => {
   const last = resolved.steps.at(-1);
@@ -85,22 +36,25 @@ const comparisonDescriptor = (resolved) => {
     && (!previous || relation(previous)), version: last.version || ['Version', 'RecordVersion'].includes(last.scalar) };
 };
 const operandContext = (entry, ctx, up) => inFrames({ frames: entry.frames.slice(0, entry.frames.length - up) }, ctx);
-const validateInternalOperand = (entry) => {
+const validateInternalOperand = (entry, current) => {
   const operand = entry.operand;
   if (operand === undefined) return;
-  if (!plain(operand) || !Number.isSafeInteger(operand.up) || operand.up <= 0 || operand.up > entry.frames.length
-    || entry.frames.slice(-operand.up).some((frame) => frame.construct.__implicit !== true)
+  const structural = operand?.container !== undefined;
+  if (!plain(operand) || !Number.isSafeInteger(operand.up)
+    || (structural ? operand.up !== 0 : operand.up <= 0 || operand.up > entry.frames.length
+      || entry.frames.slice(-operand.up).some((frame) => frame.construct.__implicit !== true))
     || !Array.isArray(operand.path) || !operand.path.length
     || operand.path.some((part) => typeof part !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(part))
-    || Object.keys(operand).some((key) => !['up', 'path', 'scopes'].includes(key)) || entry.hasValuePath || entry.value !== undefined) {
+    || Object.keys(operand).some((key) => !['up', 'path', 'scopes', 'container'].includes(key)) || entry.hasValuePath || entry.value !== undefined) {
     fail('Invalid compiler-generated comparison operand', 'INVALID_FILTER_PATH');
   }
+  if (structural) resolveContainerContext(operand.container, current);
 };
 const inFrames = (entry, ctx) => {
   let current = ctx;
   for (const frame of entry.frames) {
     const anchor = frame.construct.__implicit === true ? list(frame.construct.__anchor) : [];
-    current = resolve([...anchor, ...partsOf(frame.path)], current).end;
+    current = enterQueryFrame(current, [...anchor, ...partsOf(frame.path)]);
   }
   return current;
 };
@@ -135,14 +89,14 @@ export const aggregateJoinPrefixes = (aggregation, ctx) => {
 };
 
 // The first non-J collection and its optional legacy-join anchor. J is supplied only at the root.
-const cutAt = (resolved, J) => {
+const cutAt = (resolved, J, elements = false) => {
   let joined = false;
   for (const [index, step] of resolved.steps.entries()) {
-    if (step.kind !== 'collection') continue;
+    if (step.kind !== 'collection' && !(elements && step.kind === 'embeddedList')) continue;
     const prefix = resolved.steps.slice(0, index + 1).map(({ name }) => name);
-    if (J.has(prefix.join('.'))) { joined = true; continue; }
+    if (step.kind === 'collection' && J.has(prefix.join('.'))) { joined = true; continue; }
     const anchor = joined ? prefix.slice(0, -1) : [];
-    return { index, prefix, anchor, path: prefix.slice(anchor.length).join('.') };
+    return { index, prefix, anchor, path: prefix.slice(anchor.length).join('.'), element: step.kind === 'embeddedList' };
   }
   return null;
 };
@@ -170,7 +124,9 @@ const cutCondition = (item, rest, prefix, keys, rightKeys = []) => {
   delete operands.field;
   delete operands.path;
   const condition = { field: rest, ...operands };
-  if (item.__operand) condition.__operand = { ...item.__operand, up: item.__operand.up + 1 };
+  if (item.__operand) condition.__operand = item.__operand.container
+    ? { ...item.__operand, container: { ...item.__operand.container, up: item.__operand.container.up + 1 } }
+    : { ...item.__operand, up: item.__operand.up + 1 };
   else if (hasValuePath(item)) {
     if (item.valuePath.startsWith(`${prefix}.`)) condition.valuePath = item.valuePath.slice(prefix.length + 1);
     else {
@@ -193,6 +149,16 @@ const termCondition = (term) => {
   return { field: path, ...operands };
 };
 
+// Public parent syntax is resolved once at its carrier. Rewrites must retain that binding.
+const normalizeParentOperand = (item, frame, prefix = '') => {
+  if (!hasValuePath(item) || !item.valuePath.startsWith('$parent.')) return item;
+  const { container, path } = resolveComparisonContext(item.valuePath, frame, prefix);
+  if (container.up === 0) return { ...item, valuePath: [...container.path, ...path].join('.') };
+  const result = { ...item, __operand: { up: 0, path, container } };
+  delete result.valuePath;
+  return result;
+};
+
 /** Internal: pure collection-frame rewrite. The same J must be threaded through repeated passes. */
 export const frameCollectionPaths = (args, ctx) => {
   if (ctx.quantifiers !== true) return args;
@@ -212,18 +178,21 @@ export const frameCollectionPaths = (args, ctx) => {
     positions.set(position, output);
     active.set(input, output);
     const buckets = new Map();
+    const bucketKinds = new Map();
     const cut = (condition, path) => {
       const resolved = resolve(path, frame);
       const operator = condition.operator ?? 'EQ';
       if (isEmptinessOperator(operator) || operator === 'CONTAINS_ALL') return null;
-      const at = cutAt(resolved, J);
+      const at = cutAt(resolved, J, ctx.elementFrames === true && (hasValuePath(condition) || condition.__operand !== undefined));
       if (!at) return null;
       const prefix = at.prefix.join('.');
-      let bucket = buckets.get(prefix);
+      const bucketKey = at.element ? Symbol(prefix) : prefix;
+      let bucket = buckets.get(bucketKey);
       if (!bucket) {
         bucket = { path: at.path, conditions: [], __implicit: true };
         if (at.anchor.length) bucket.__anchor = at.anchor;
-        buckets.set(prefix, bucket);
+        buckets.set(bucketKey, bucket);
+        bucketKinds.set(bucket, at.element && operator === 'NE' ? 'NONE' : 'ANY');
       }
       const rightResolved = hasValuePath(condition) ? resolve(condition.valuePath, frame) : null;
       const rightKeys = rightResolved ? comparisonKeys(rightResolved) : [];
@@ -231,23 +200,24 @@ export const frameCollectionPaths = (args, ctx) => {
       if (hasMarker(condition) && !hasMarker(bucket)) {
         bucket.__scope = { scopes: prefixScopes(condition.__scope?.scopes, prefix, [...keys, ...rightKeys]) };
       }
-      bucket.conditions.push(cutCondition(condition, resolved.steps.slice(at.index + 1).map(({ name }) => name).join('.'), prefix, keys, rightKeys));
+      bucket.conditions.push(cutCondition(at.element && operator === 'NE' ? { ...condition, operator: 'EQ' } : condition, resolved.steps.slice(at.index + 1).map(({ name }) => name).join('.'), prefix, keys, rightKeys));
       return bucket;
     };
     if (Array.isArray(input.conditions)) {
-      output.conditions = input.conditions.filter((item) => !cut(item, pathless(item.path) ? item.field : `${item.field}.${item.path}`));
+      output.conditions = input.conditions.map((item) => normalizeParentOperand(item, frame)).filter((item) => !cut(item, pathless(item.path) ? item.field : `${item.field}.${item.path}`));
     }
     for (const key of ['AND', 'OR']) if (Array.isArray(input[key])) output[key] = input[key].map((group) => rewriteGroup(group, frame, J, position));
     for (const type of QUANTIFIED_LISTS) if (Array.isArray(input[type])) {
       output[type] = input[type].map((group) => {
         const anchor = group.__implicit === true ? list(group.__anchor) : [];
-        return rewriteGroup(group, resolve([...anchor, ...partsOf(group.path)], frame).end, new Set(), positionOf(position, group, type, group.path));
+        return rewriteGroup(group, enterQueryFrame(frame, [...anchor, ...partsOf(group.path)]), new Set(), positionOf(position, group, type, group.path));
       });
     }
     for (const bucket of buckets.values()) {
       const path = [...list(bucket.__anchor), ...partsOf(bucket.path)];
-      const rewritten = rewriteGroup(bucket, resolve(path, frame).end, new Set(), positionOf(position, bucket, 'ANY', bucket.path));
-      output.ANY = [...list(output.ANY), rewritten];
+      const type = bucketKinds.get(bucket);
+      const rewritten = rewriteGroup(bucket, enterQueryFrame(frame, path), new Set(), positionOf(position, bucket, type, bucket.path));
+      output[type] = [...list(output[type]), rewritten];
     }
     active.delete(input);
     return output;
@@ -274,15 +244,21 @@ export const frameCollectionPaths = (args, ctx) => {
       const carrier = hasValuePath(value) ? { ...value } : { operator: value.operator ?? 'EQ', value: value.value };
       const group = { conditions: [{ field: name, ...carrier }] };
       const rewritten = rewriteGroup(group, ctx, ctx.J ?? new Set());
-      if (list(rewritten.ANY).length) {
-        syntheticGroups.push({ __implicit: true, ANY: rewritten.ANY });
+      if (QUANTIFIED_LISTS.some((key) => list(rewritten[key]).length)) {
+        syntheticGroups.push({ __implicit: true, ...Object.fromEntries(QUANTIFIED_LISTS.filter((key) => list(rewritten[key]).length).map((key) => [key, rewritten[key]])) });
         delete output[name];
       }
       continue;
     }
     if (!Array.isArray(value.terms) || valueLeaf(leaf, ctx)) continue;
-    const group = { conditions: value.terms.map((term) => ({ ...termCondition(term), field: pathless(term.path) ? name : `${name}.${term.path}`, ...(hasValuePath(term) ? { valuePath: `${name}.${term.valuePath}` } : {}) })) };
+    const group = { conditions: value.terms.map((term) => {
+      const parent = hasValuePath(term) && term.valuePath.startsWith('$parent.');
+      const carrier = parent ? normalizeParentOperand(term, ctx, name) : term;
+      return { ...termCondition(carrier), field: pathless(term.path) ? name : `${name}.${term.path}`,
+        ...(hasValuePath(carrier) && !parent ? { valuePath: `${name}.${carrier.valuePath}` } : {}) };
+    }) };
     const rewritten = rewriteGroup(group, ctx, ctx.J ?? new Set());
+    if (list(rewritten.NONE).length) syntheticGroups.push({ __implicit: true, NONE: rewritten.NONE });
     implicitGroups.push(...list(rewritten.ANY));
     if (rewritten.conditions.length === value.terms.length) continue;
     if (!rewritten.conditions.length) delete output[name];
@@ -441,9 +417,9 @@ export const validateQuantifiedGroups = (args, ctx) => {
   for (const entry of entries) {
     if (ignoredValueTerm(entry, ctx)) continue;
     if (entry.hasValuePath) validateComparisonOperand(entry.construct);
-    validateInternalOperand(entry);
     const comparison = entry.hasValuePath || entry.operand !== undefined;
     const current = inFrames(entry, ctx);
+    validateInternalOperand(entry, current);
     let rightResolved;
     let rightCurrent;
     const implicit = entry.form === 'quantified' && entry.construct.__implicit === true;
@@ -474,7 +450,10 @@ export const validateQuantifiedGroups = (args, ctx) => {
       }
       // A hand-built implicit group, whatever its operators (#108 part 4): after any anchor, its path ends at a collection,
       // whatever it crosses first, or at a reference without crossing a list, the explicit groups' rule for references.
-      if (implicit && last.kind !== 'collection' && (last.kind !== 'reference'
+      if (implicit && last.kind !== 'collection'
+        && !(ctx.elementFrames === true && last.kind === 'embeddedList' && comparisonInGroup(entry.construct)
+          && !steps.slice(anchor.length, -1).some((step) => ['collection', 'embeddedList'].includes(step.kind)))
+        && (last.kind !== 'reference'
         || steps.slice(anchor.length, -1).some((step) => ['collection', 'embeddedList'].includes(step.kind)))) {
         fail('An implicit quantified path must end at a collection, or at a reference without crossing a list', 'INVALID_FILTER_PATH');
       }
@@ -494,20 +473,22 @@ export const validateQuantifiedGroups = (args, ctx) => {
       }
       if (!implicit && !QUANTIFIERS.has(entry.quantifier)) fail('Unknown quantifier', 'INVALID_FILTER_VALUE');
       if (!implicit) gates.push(() => {
-        if (ctx.quantifiers !== true || last.kind === 'embeddedList') fail('Quantified groups are not supported by this query compiler', 'UNSUPPORTED_QUERY');
+        if (ctx.quantifiers !== true || (last.kind === 'embeddedList' && ctx.elementFrames !== true)) fail('Quantified groups are not supported by this query compiler', 'UNSUPPORTED_QUERY');
       });
     } else {
       if (comparison) {
-        rightCurrent = entry.operand ? operandContext(entry, ctx, entry.operand.up) : current;
-        const rightPath = entry.operand?.path ?? partsOf(entry.valuePath);
-        rightResolved = resolve(rightPath, rightCurrent);
+        const publicOperand = entry.operand ? null : resolveComparisonContext(entry.valuePath, current, entry.valuePathPrefix);
+        rightCurrent = entry.operand?.container ? resolveContainerContext(entry.operand.container, current)
+          : entry.operand ? operandContext(entry, ctx, entry.operand.up) : publicOperand.context;
+        const rightPath = entry.operand?.path ?? publicOperand.path ?? partsOf(entry.valuePath);
+        rightResolved = entry.operand ? resolve(rightPath, rightCurrent) : publicOperand.resolved;
         if (!['scalar', 'scalarList'].includes(last.kind) || !['scalar', 'scalarList'].includes(rightResolved.steps.at(-1).kind)) {
           fail('Field comparison operands must end in scalar fields', 'INVALID_FILTER_PATH');
         }
         if (!isQueryOperator(entry.operator)) fail(`Unknown filter operator: ${entry.operator}`, 'INVALID_FILTER_OPERATOR');
         if (ctx.operators && !ctx.operators.has(entry.operator)) fail(`The ${entry.operator} filter operator is not supported by this query compiler`, 'UNSUPPORTED_QUERY');
-        const collections = new Set(steps.flatMap((step, index) => step.kind === 'collection' ? [steps.slice(0, index + 1).map(({ name }) => name).join('.')] : []));
-        if (entry.operand) {
+        const collections = new Set(steps.flatMap((step, index) => (step.kind === 'collection' || (ctx.elementFrames === true && step.kind === 'embeddedList')) ? [steps.slice(0, index + 1).map(({ name }) => name).join('.')] : []));
+        if (entry.operand && !entry.operand.container) {
           const chain = entry.frames.slice(entry.frames.length - entry.operand.up)
             .flatMap((frame) => [...list(frame.construct.__anchor), ...partsOf(frame.path)]);
           const bound = resolve([...chain, ...path], rightCurrent).steps;
@@ -516,13 +497,13 @@ export const validateQuantifiedGroups = (args, ctx) => {
             if (ctx.J?.has(key) && entry.operand.up === entry.frames.length) collections.add(key);
           }
         }
-        if (rightResolved.steps.some((step, index, right) => step.kind === 'collection'
+        if (rightResolved.steps.some((step, index, right) => (step.kind === 'collection' || (ctx.elementFrames === true && step.kind === 'embeddedList'))
           && !collections.has(right.slice(0, index + 1).map(({ name }) => name).join('.')))) {
           fail('The right operand introduces an unbound collection; use an explicit group', 'INVALID_FILTER_PATH');
         }
         validateComparisonTypes(comparisonDescriptor(resolved), comparisonDescriptor(rightResolved), entry.operator, path.join('.'), rightPath.join('.'));
         gates.push(() => {
-          if ([...steps, ...rightResolved.steps].some((step) => step.kind === 'embeddedList')) fail('Field comparisons through embedded lists require element frames', 'UNSUPPORTED_QUERY');
+          if (ctx.elementFrames !== true && ([...steps, ...rightResolved.steps].some((step) => step.kind === 'embeddedList') || publicOperand?.container || entry.operand?.container)) fail('Field comparisons through embedded lists require element frames', 'UNSUPPORTED_QUERY');
           if (ctx.valuePath !== true || ctx.referenceEmptiness !== true) fail('Field comparisons require valuePath and referenceEmptiness support from this query compiler', 'UNSUPPORTED_QUERY');
           const J = entry.frames.length ? new Set() : ctx.J ?? new Set();
           if (ctx.quantifiers !== true && steps.some((step, index) => step.kind === 'collection' && !J.has(steps.slice(0, index + 1).map(({ name }) => name).join('.')))) {
@@ -554,7 +535,7 @@ export const validateQuantifiedGroups = (args, ctx) => {
       if (!keys.length && scopes !== undefined) detached('Outer operand scope marker reads no reference or collection');
     });
     const J = entry.frames.length ? new Set() : ctx.J ?? new Set();
-    const extra = entry.form === 'quantified' ? 1 : shape ? (emptinessScopePaths(shape, path).frames.length ? 1 : 0) : ctx.quantifiers === true ? steps.filter((step, index) => step.kind === 'collection'
+    const extra = entry.form === 'quantified' ? 1 : shape ? (emptinessScopePaths(shape, path).frames.length ? 1 : 0) : ctx.quantifiers === true ? steps.filter((step, index) => (step.kind === 'collection' || (ctx.elementFrames === true && comparison && step.kind === 'embeddedList'))
       && !J.has(steps.slice(0, index + 1).map(({ name }) => name).join('.'))).length : 0;
     gates.push(() => {
       if (entry.frames.length + extra > getQueryMaxFrameNesting()) fail('Frame nesting too deep (maxFrameNesting)', 'FILTER_DEPTH_EXCEEDED');
@@ -634,9 +615,11 @@ export const frameUnits = (args, ctx) => {
       for (const path of crossingKeys(entry.relative, current)) units.add(joinUnit(frame, path, hasMarker(entry.construct)));
       if (entry.hasValuePath) for (const path of crossingKeys(entry.valuePath, current)) units.add(joinUnit(frame, path, hasMarker(entry.construct)));
       if (entry.operand) {
-        const outer = operandContext(entry, ctx, entry.operand.up);
-        const owner = frameKey({ frames: entry.frames.slice(0, entry.frames.length - entry.operand.up) });
-        for (const path of crossingKeys(entry.operand.path, outer)) units.add(joinUnit(owner, path, Object.hasOwn(entry.operand, 'scopes')));
+        const container = entry.operand.container;
+        const up = container?.up ?? entry.operand.up;
+        const outer = operandContext(entry, ctx, up);
+        const owner = frameKey({ frames: entry.frames.slice(0, entry.frames.length - up) });
+        for (const path of crossingKeys([...(container?.path ?? []), ...entry.operand.path], outer)) units.add(joinUnit(owner, path, Object.hasOwn(entry.operand, 'scopes')));
       }
     }
   }
