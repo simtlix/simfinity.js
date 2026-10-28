@@ -1,23 +1,24 @@
 # @simtlix/eslint-plugin-simfinity
 
 Optional editor/CI checks for **Simfinity 3.8.0**, shared by MongoDB and PostgreSQL.
-Version 0.3.1 provides eleven precise rules, including `valid-policy-expression`.
+Version 0.4.0 provides eleven precise rules, including `valid-policy-expression`.
 It does not execute application
 code or load Simfinity, GraphQL, database drivers or the MCP SDK.
 
-The plugin has its own version (`0.3.1`) and is outside Simfinity's five runtime
+The plugin has its own version (`0.4.0`) and is outside Simfinity's six runtime
 workspaces and their release workflow. Install it from npm in your application:
 
 ```sh
-npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.3.1'
+npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.4.0'
 ```
 
-Version 0.3.1 recognizes Simfinity 3.12.0 `registerView()` calls and preserves type tracking through TypeScript-wrapped options. It adds no rule and does not change the `recommended-3.8` preset contract.
-
-The **unreleased source** also extends `valid-connection-field` to detect a missing
+Version 0.4.0 extends `valid-connection-field` to detect a missing
 child link on a locally proven, writable referenced object collection without its
-own resolver. This adds diagnostics to the same rule in `recommended-3.8`; it is
-not included in the npm 0.3.1 installation above. See the limits below.
+own resolver. Upgrading can report new errors under the same rule in
+`recommended-3.8`; the preset's Simfinity 3.8.0 contract remains unchanged.
+See the limits below.
+
+Version 0.3.1 recognizes Simfinity 3.12.0 `registerView()` calls and preserves type tracking through TypeScript-wrapped options. It adds no rule and does not change the `recommended-3.8` preset contract.
 
 Version 0.3.0 adds `valid-policy-expression` to `recommended-3.8`, so upgrading
 can report malformed policies that earlier plugin versions did not diagnose.
@@ -66,7 +67,7 @@ export default [
 | `no-auth-plugin-as-middleware` | A proven `createAuthPlugin()` result passed to Simfinity `use()` | Install the plugin in the GraphQL server's Envelop plugins |
 | `valid-policy-expression` | Malformed inline policy syntax in `createRuleFromExpression` or configured permission rules | Use valid operators, operands, logical arrays and `parent`/`args`/`ctx` references |
 | `valid-query-limits` | Explicit `maxPageSize` is not a positive safe integer or `undefined` | Set a valid cap; omission/undefined restores 1000 |
-| `valid-connection-field` | A locally registered relation has a dotted or non-string link field under 3.8.0 | Use a field name; declare embedded references on their owning type |
+| `valid-connection-field` | A locally registered relation has a dotted/non-string link, or a proven writable object collection without its own resolver lacks a child link | Use a field name linking the child to its parent; declare embedded references on their owning type |
 
 See the [rule examples and application guidance](https://simtlix.github.io/simfinity.js/guide/linting).
 There are **no automatic fixes or suggestions**: changing permissions, relation
@@ -133,11 +134,10 @@ GraphQL checks require local `connect`/`addNoEndpointType` registration. They fo
 embedded object/list/non-null types and simple field thunks without invoking
 them. Independent GraphQL schemas, dynamic type builders and cross-file type
 registrations are not analyzed. Virtual fields have no added storage requirement.
-In published 0.3.1, omitted/null/empty `connectionField` values and embedded relation
-links preserve the runtime's meaning; this rule does not establish that a target
-field exists.
+Links on embedded relations are not checked. This rule does not establish that a
+target field exists.
 
-In the unreleased source, an omitted, `null`, `undefined` or empty link produces a
+Since 0.4.0, an omitted, `null`, `undefined` or empty link produces a
 `missing` diagnostic when all of these facts are known locally: the owning type is
 directly registered, the field is a non-embedded list of a `GraphQLObjectType`,
 `readOnly` is absent or falsy, and `resolve` is absent, null or undefined. Outer and
@@ -180,7 +180,7 @@ The isolated consumer packs/installs the actual archive, exercises JS/TS flat
 config and TypeScript config declarations, checks rule IDs/locations, and verifies
 that `--fix` changes no source. No runtime dependency is installed or executed.
 The bounded trial lints both Barber backends and injects ten in-memory sentinel
-violations per backend to check coverage. The unreleased source adds one explicit
+violations per backend to check coverage. Version 0.4.0 adds one explicit
 local collection sentinel per backend because Barber's dynamic `getType()` targets
 are outside the new missing-link check. The trial does not run the applications or
 certify their business policies. `.github/workflows/eslint-plugin.yml` owns this

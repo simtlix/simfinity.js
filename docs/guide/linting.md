@@ -6,12 +6,17 @@
 with specific editor/CI diagnostics. It does not evaluate business authorization,
 scopes, state machines or transaction correctness.
 
-The plugin is an independently versioned development tool (`0.3.1`), outside the
+The plugin is an independently versioned development tool (`0.4.0`), outside the
 six runtime packages. Install it from npm in your application:
 
 ```sh
-npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.3.1'
+npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.4.0'
 ```
+
+Version 0.4.0 extends `valid-connection-field` to diagnose missing child links on
+locally proven writable object collections without their own resolver. Upgrading
+can report new errors under the existing `recommended-3.8` rule; the preset's
+Simfinity 3.8.0 contract remains unchanged. See [required collection links](#required-collection-links).
 
 Version 0.3.1 recognizes Simfinity 3.12.0 `registerView()` calls and preserves type tracking through TypeScript-wrapped options. It adds no rule and does not change the `recommended-3.8` preset contract.
 
@@ -320,17 +325,16 @@ belongs to an embedded value, declare it inside that embedded type. Decide which
 model is intended before changing the declaration; moving a stored reference may
 require a data migration. See [relationships](./relationships).
 
-In published plugin 0.3.1, omitted, null and empty link values retain their meaning. Links on embedded
-relations are not checked. Virtual fields have no added storage/relation
+Links on embedded relations are not checked. Virtual fields have no added storage/relation
 requirement, including virtual fields with required arguments introduced in 3.8.0.
 The rule does not establish that a referenced target field exists.
 
-### Required collection links (unreleased source)
+### Required collection links
 
-The source version extends this rule to report an omitted, `null`, `undefined` or
+Version 0.4.0 extends this rule to report an omitted, `null`, `undefined` or
 empty `connectionField` on a directly registered, writable referenced object
 collection without its own resolver. This is an additional diagnostic under the
-same `recommended-3.8` rule; npm 0.3.1 does not include it yet.
+same `recommended-3.8` rule; plugin 0.3.1 and earlier do not include it.
 
 ```javascript
 import { GraphQLID, GraphQLList, GraphQLObjectType, GraphQLString } from 'graphql';
@@ -388,7 +392,7 @@ run during analysis.
 
 The bounded consumer trial lints both Barber backends and checks ten injected
 policy, relation and authorization-contract violations per backend in memory.
-The unreleased source additionally checks a local object-collection sentinel for
+Version 0.4.0 additionally checks a local object-collection sentinel for
 each backend; Barber's dynamic collection targets are outside this new check.
 It does not certify their business policies
 or measure accuracy against the entire candidate catalogue. Native operations
