@@ -10,7 +10,7 @@ import {
 } from './query-operators.js';
 import { collectQueryOperators, validateQueryGroupKeys } from './query-plan.js';
 import { getQueryMaxFrameNesting } from './query-limits.js';
-import { enterQueryFrame, resolveComparisonContext, resolveContainerContext, resolveQueryContext } from './query-context.js';
+import { enterQueryFrame, parentScopePrefix, resolveComparisonContext, resolveContainerContext, resolveQueryContext } from './query-context.js';
 
 export { GROUP_KEYS };
 export const IMPLICIT_KEY = '__implicit';
@@ -152,10 +152,25 @@ const termCondition = (term) => {
 // Public parent syntax is resolved once at its carrier. Rewrites must retain that binding.
 const normalizeParentOperand = (item, frame, prefix = '') => {
   if (!hasValuePath(item) || !item.valuePath.startsWith('$parent.')) return item;
-  const { container, path } = resolveComparisonContext(item.valuePath, frame, prefix);
-  if (container.up === 0) return { ...item, valuePath: [...container.path, ...path].join('.') };
-  const result = { ...item, __operand: { up: 0, path, container } };
-  delete result.valuePath;
+  const { container, path, resolved } = resolveComparisonContext(item.valuePath, frame, prefix);
+  const result = container.up === 0 ? { ...item, valuePath: [...container.path, ...path].join('.') }
+    : { ...item, __operand: { up: 0, path, container } };
+  if (container.up !== 0) delete result.valuePath;
+  if (!hasMarker(item)) return result;
+  const scopePrefix = parentScopePrefix(item.valuePath);
+  if (plain(item.__scope?.scopes)) {
+    const entries = Object.entries(item.__scope.scopes);
+    const parentScopes = Object.fromEntries(entries.filter(([key]) => key.startsWith(scopePrefix)).map(([key, value]) => [key.slice(scopePrefix.length), value]));
+    const localScopes = Object.fromEntries(entries.filter(([key]) => !key.startsWith(scopePrefix)));
+    if (container.up === 0) {
+      for (const [key, value] of Object.entries(parentScopes)) localScopes[[...container.path, key].join('.')] = value;
+    } else if (Object.keys(parentScopes).length) result.__operand.scopes = parentScopes;
+    if (Object.keys(localScopes).length) result.__scope = { ...item.__scope, scopes: localScopes };
+    else delete result.__scope;
+  } else if (container.up !== 0 && comparisonKeys(resolved).length) {
+    // Pending runtime provenance still counts this separately scoped outer read in the budget.
+    result.__operand.scopes = undefined;
+  }
   return result;
 };
 
@@ -197,7 +212,8 @@ export const frameCollectionPaths = (args, ctx) => {
       const rightResolved = hasValuePath(condition) ? resolve(condition.valuePath, frame) : null;
       const rightKeys = rightResolved ? comparisonKeys(rightResolved) : [];
       const keys = hasValuePath(condition) || condition.__operand ? comparisonKeys(resolved) : markerKeys(resolved, J);
-      if (hasMarker(condition) && !hasMarker(bucket)) {
+      if (hasMarker(condition) && !hasMarker(bucket)
+        && [...keys, ...rightKeys].some((key) => key === prefix || prefix.startsWith(`${key}.`))) {
         bucket.__scope = { scopes: prefixScopes(condition.__scope?.scopes, prefix, [...keys, ...rightKeys]) };
       }
       bucket.conditions.push(cutCondition(at.element && operator === 'NE' ? { ...condition, operator: 'EQ' } : condition, resolved.steps.slice(at.index + 1).map(({ name }) => name).join('.'), prefix, keys, rightKeys));
@@ -260,9 +276,13 @@ export const frameCollectionPaths = (args, ctx) => {
     const rewritten = rewriteGroup(group, ctx, ctx.J ?? new Set());
     if (list(rewritten.NONE).length) syntheticGroups.push({ __implicit: true, NONE: rewritten.NONE });
     implicitGroups.push(...list(rewritten.ANY));
-    if (rewritten.conditions.length === value.terms.length) continue;
-    if (!rewritten.conditions.length) delete output[name];
-    else output[name] = { ...value, terms: value.terms.filter((term, index) => rewritten.conditions.includes(group.conditions[index])) };
+    const parentIndices = new Set(value.terms.flatMap((term, index) => parentScopePrefix(term.valuePath) ? [index] : []));
+    const parentConditions = group.conditions.filter((condition, index) => parentIndices.has(index) && rewritten.conditions.includes(condition));
+    if (parentConditions.length) syntheticGroups.push({ __implicit: true, conditions: parentConditions });
+    if (rewritten.conditions.length === value.terms.length && !parentIndices.size) continue;
+    const remaining = value.terms.filter((term, index) => !parentIndices.has(index) && rewritten.conditions.includes(group.conditions[index]));
+    if (!remaining.length) delete output[name];
+    else output[name] = { ...value, terms: remaining };
   }
   if (implicitGroups.length) syntheticGroups.push({ __implicit: true, ANY: implicitGroups });
   for (const key of ['AND', 'OR']) if (Array.isArray(args[key])) output[key] = args[key].map((group) => rewriteGroup(group, ctx, ctx.J ?? new Set()));
@@ -554,7 +574,7 @@ export const validateQuantifiedGroups = (args, ctx) => {
         const paths = emptinessScopePaths(shape, path);
         keys = [...paths.joins, ...paths.frames];
       } else keys = markerKeys(resolved, !entry.frames.length && (implicit || entry.form !== 'quantified') ? ctx.J ?? new Set() : new Set());
-      if (comparison) keys = [...new Set([...comparisonKeys(resolved), ...(!entry.operand ? comparisonKeys(rightResolved) : [])])];
+      if (comparison) keys = [...new Set([...comparisonKeys(resolved), ...(!entry.operand ? comparisonKeys(rightResolved).map((key) => `${parentScopePrefix(entry.valuePath)}${key}`) : [])])];
       const comparisonAnchor = implicit && anchor.length && comparisonInGroup(entry.construct);
       if (comparisonAnchor) keys = comparisonKeys(resolved);
       const scopes = entry.construct.__scope?.scopes;

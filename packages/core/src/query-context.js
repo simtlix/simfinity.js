@@ -102,3 +102,16 @@ export const resolveContainerContext = (container, context) => {
   }
   fail('Comparison container is not an embedded ancestor');
 };
+
+/** Recover a collector entry's bound context without inferring parents from dotted strings. */
+export const queryEntryContext = (entry, context) => {
+  let current = context;
+  for (const frame of entry.frames) {
+    const anchor = frame.construct.__implicit === true && Array.isArray(frame.construct.__anchor) ? frame.construct.__anchor : [];
+    current = enterQueryFrame(current, [...anchor, ...partsOf(frame.path)]);
+  }
+  return current;
+};
+
+/** Distinct marker namespace for a public parent operand before its binding is normalized. */
+export const parentScopePrefix = (valuePath) => typeof valuePath === 'string' ? valuePath.match(/^(?:\$parent\.)+/)?.[0] ?? '' : '';

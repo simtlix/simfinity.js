@@ -30,6 +30,16 @@ beforeEach(() => { vi.spyOn(Math, 'random').mockReturnValue(0); });
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe('SQL plugin binding', () => {
+  it('binds element frames only to the declaring compiler and validates its dependencies', () => {
+    const plugin = stubPlugin();
+    plugin.queryFeatures = { operators: ['EQ'], referenceEmptiness: true, quantifiers: true, valuePath: true, elementFrames: true, compileQuery: plugin.compileQuery };
+    expect(bindPlugin(plugin).queryFeatures.elementFrames).toBe(true);
+    expect(bindPlugin({ ...plugin, compileQuery() {} }).queryFeatures.elementFrames).toBeUndefined();
+    for (const extra of [{ elementFrames: 1 }, { quantifiers: false }, { valuePath: false }, { referenceEmptiness: false }]) {
+      expect(() => bindPlugin({ ...plugin, queryFeatures: { ...plugin.queryFeatures, ...extra } }))
+        .toThrow(expect.objectContaining({ extensions: expect.objectContaining({ code: 'INVALID_SQL_PLUGIN' }) }));
+    }
+  });
   it('rejects missing and malformed plugins eagerly', () => {
     for (const plugin of [undefined, null, {}, { ...stubPlugin(), compileRecord: null }]) {
       expect(() => bindPlugin(plugin)).toThrow(expect.objectContaining({ extensions: expect.objectContaining({ code: 'INVALID_SQL_PLUGIN' }) }));

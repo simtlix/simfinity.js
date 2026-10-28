@@ -154,23 +154,23 @@ const invalidFeatures = (message) => {
 };
 
 /**
- * Reads an adapter's `queryFeatures` declaration into `{ operators, referenceEmptiness, quantifiers, valuePath }`:
+ * Reads an adapter's `queryFeatures` declaration into `{ operators, referenceEmptiness, quantifiers, valuePath, elementFrames }`:
  * the operators it compiles and whether it compiles reference emptiness and collection frames.
  * Without a declaration (undefined or null) the adapter supports {@link LEGACY_QUERY_OPERATORS}
  * and neither feature. A declaration is an object whose `operators`
  * is an array of operator names, whose names this version does not know are ignored, and whose
- * optional `referenceEmptiness`, `quantifiers` and `valuePath` are booleans, undefined or null (false). A name
+ * optional `referenceEmptiness`, `quantifiers`, `valuePath` and `elementFrames` are booleans, undefined or null (false). A name
  * counts once this version knows it: a declaration that listed `CONTAINS_ALL` or `IIN` before
  * #108 part 4 added them receives them on upgrade.
  * Quantifiers and valuePath require reference emptiness for scoped joins. Other members are left for later
- * features. Anything else throws `INVALID_QUERY_FEATURES` (500).
+ * features. Element frames require all three other flags. Anything else throws `INVALID_QUERY_FEATURES` (500).
  */
 export const resolveQueryFeatures = (queryFeatures) => {
-  if (queryFeatures == null) return { operators: new Set(LEGACY_QUERY_OPERATORS), referenceEmptiness: false, quantifiers: false, valuePath: false };
+  if (queryFeatures == null) return { operators: new Set(LEGACY_QUERY_OPERATORS), referenceEmptiness: false, quantifiers: false, valuePath: false, elementFrames: false };
   if (typeof queryFeatures !== 'object' || Array.isArray(queryFeatures)) {
     invalidFeatures('must be an object with an operators array');
   }
-  const { operators, referenceEmptiness, quantifiers, valuePath } = queryFeatures;
+  const { operators, referenceEmptiness, quantifiers, valuePath, elementFrames } = queryFeatures;
   if (!Array.isArray(operators) || operators.some((operator) => typeof operator !== 'string')) {
     invalidFeatures('operators must be an array of operator names');
   }
@@ -185,10 +185,15 @@ export const resolveQueryFeatures = (queryFeatures) => {
   }
   if (valuePath != null && typeof valuePath !== 'boolean') invalidFeatures('valuePath must be a boolean');
   if (valuePath === true && referenceEmptiness !== true) invalidFeatures('valuePath requires referenceEmptiness: true');
+  if (elementFrames != null && typeof elementFrames !== 'boolean') invalidFeatures('elementFrames must be a boolean');
+  if (elementFrames === true && (referenceEmptiness !== true || quantifiers !== true || valuePath !== true)) {
+    invalidFeatures('elementFrames requires quantifiers, referenceEmptiness and valuePath: true');
+  }
   return {
     operators: new Set(operators.filter(isQueryOperator)),
     referenceEmptiness: referenceEmptiness === true,
     quantifiers: quantifiers === true,
     valuePath: valuePath === true,
+    elementFrames: elementFrames === true,
   };
 };

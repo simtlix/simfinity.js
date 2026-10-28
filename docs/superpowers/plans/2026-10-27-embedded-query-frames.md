@@ -66,11 +66,11 @@ New plan operands may add `container: { up: number, path: string[] }` to the exi
 - Consumes: task 1 context resolution and `QueryOperand.container`.
 - Produces: validated effective `QueryFeatures.elementFrames`; path collectors and runtime scope preparation resolve both operands to real absolute field paths. SQL passes the effective flag to every root/child/batch plan.
 
-- [ ] **Step 1: Add failing capability and execution-boundary tests.** Undeclared support returns `UNSUPPORTED_QUERY`; invalid flag/dependencies fail startup; compiler replacement loses inherited support. A read rule denying only the parent RHS rejects the query. A hidden referenced target reads as missing inside the element. Scope callbacks start at their registered type, cannot capture the caller, and may use their own embedded parents. Middleware cloning preserves results; detached restrictions retain `DETACHED_CLIENT_FILTER`.
-- [ ] **Step 2: Run `npm test -- tests/query-element-frame-runtime.test.js tests/sql-plugin.test.js`.** Expect the new cases to fail at capability/origin handling.
-- [ ] **Step 3: Implement capability validation and origin-aware path collection.** Reuse task 1 resolution in provenance and scope filling; retain every real reference crossing in both paths. Lift vector restrictions only for bound element contexts that the compilers will handle. Preserve named-view, get-by-ID, aggregate, session and batching behavior.
-- [ ] **Step 4: Run `npm test -- tests/query-element-frame-runtime.test.js tests/query-field-comparison-runtime.test.js tests/query-path-authorization.test.js tests/sql-plugin.test.js`.** Expect all passing. Add an aliased filter used at two depths to catch accidental context memo reuse.
-- [ ] **Step 5: Commit as `feat(core): preserve scoped embedded query operands`**.
+- [x] **Step 1: Add failing capability and execution-boundary tests.** Undeclared support returns `UNSUPPORTED_QUERY`; invalid flag/dependencies fail startup; compiler replacement loses inherited support. A read rule denying only the parent RHS rejects the query. A hidden referenced target reads as missing inside the element. Scope callbacks start at their registered type, cannot capture the caller, and may use their own embedded parents. Middleware cloning preserves results; detached restrictions retain `DETACHED_CLIENT_FILTER`.
+- [x] **Step 2: Run `npm test -- tests/query-element-frame-runtime.test.js tests/sql-plugin.test.js`.** Expect the new cases to fail at capability/origin handling.
+- [x] **Step 3: Implement capability validation and origin-aware path collection.** Reuse task 1 resolution in provenance and scope filling; retain every real reference crossing in both paths. Lift vector restrictions only for bound element contexts that the compilers will handle. Preserve named-view, get-by-ID, aggregate, session and batching behavior.
+- [x] **Step 4: Run `npm test -- tests/query-element-frame-runtime.test.js tests/query-field-comparison-runtime.test.js tests/query-path-authorization.test.js tests/sql-plugin.test.js`.** Expect all passing. Add an aliased filter used at two depths to catch accidental context memo reuse.
+- [x] **Step 5: Commit as `feat(core): preserve scoped embedded query operands`**.
 
 ### Task 3: MongoDB execution
 

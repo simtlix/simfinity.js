@@ -2,7 +2,7 @@ import { GROUP_KEYS, QUANTIFIED_LISTS } from './const/QLQuantifier.js';
 import { aggregateJoinPrefixes, crossingKeys, frameCollectionPaths, validateQuantifiedGroups } from './query-frames.js';
 import { paginationStages } from './query-limits.js';
 import SimfinityError from './errors/simfinity.error.js';
-import { enterQueryFrame, resolveComparisonContext, resolveContainerContext, resolveQueryContext } from './query-context.js';
+import { enterQueryFrame, queryEntryContext, resolveComparisonContext, resolveContainerContext, resolveQueryContext } from './query-context.js';
 import {
   describeEmptiness, describeModelEmptiness, emptinessMemberPaths, emptinessScopeTargets, isEmptinessOperator, isQueryOperator,
   hasValuePath, takesListValue, textQueryOperator, validateComparisonOperand, validateContainsAllValue, validateTextFilterValue, validateTextListFilterValue,
@@ -105,10 +105,15 @@ const walkQueryEntries = (args, operation, { paths = false, gqltype, expandMembe
       comparison ? { role: 'left', comparison: true } : {});
     if (!comparison) return;
     let origin = frame;
-    if (item.__operand) {
-      for (let up = item.__operand.up; up > 0 && origin.parent; up--) origin = origin.parent;
+    let right = item.__operand ? item.__operand.path?.join('.') : operandPath(item, prefix);
+    let binding = item.__operand?.container;
+    if (!item.__operand && gqltype && typeof item.valuePath === 'string' && item.valuePath.startsWith('$parent.')) {
+      const resolved = resolveComparisonContext(item.valuePath, queryEntryContext(frame, { gqltype }), prefix);
+      binding = resolved.container;
+      right = resolved.path.join('.');
     }
-    const right = item.__operand ? item.__operand.path?.join('.') : operandPath(item, prefix);
+    for (let up = binding?.up ?? item.__operand?.up ?? 0; up > 0 && origin.parent; up--) origin = origin.parent;
+    if (binding?.path.length) right = [...binding.path, right].join('.');
     addPath(right, origin, container, group, item.operator ?? 'EQ', item, { role: 'right', comparison: true });
   };
   const addOperator = (item, form, field, rawPath, depth, frame, container, relativePath, quantifier, prefix = '') => {
@@ -398,7 +403,7 @@ export const createQueryPlan = (models, entityName, source = {}, {
       const anchors = (paths, entity) => [...new Set(paths.flatMap((parts) => modelSteps(entity, parts)
         .flatMap((step, index) => step.kind === 'collection' ? [parts.slice(0, index + 1).join('.')] : [])))];
       if (hasMarker(construct)) {
-        const paths = up ? [segments] : [segments, rightPath];
+        const paths = up || container ? [segments] : [segments, rightPath];
         node.joins = liftScopes(construct.__scope, scopeTargets(paths, frameContext), segments, op, anchors(paths, frameContext));
       }
       if (internal && Object.hasOwn(internal, 'scopes')) {

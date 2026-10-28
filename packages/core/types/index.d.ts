@@ -164,6 +164,8 @@ export interface QueryFeatures {
   quantifiers?: boolean | null | undefined;
   /** Field operands, including scoped references. Requires referenceEmptiness: true. */
   valuePath?: boolean | null | undefined;
+  /** Embedded element frames and structural parent operands. Requires all three preceding flags. */
+  elementFrames?: boolean | null | undefined;
 }
 
 export interface ModelRegistration {
