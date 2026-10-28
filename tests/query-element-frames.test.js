@@ -22,6 +22,14 @@ const quantified = (path, conditions, quantifier = 'ALL') => ({ AND: [{ [quantif
 const fault = (args, code) => expect(() => plan(args)).toThrowError(expect.objectContaining({ extensions: expect.objectContaining({ code }) }));
 
 describe('embedded query frames', () => {
+  it('keeps an embedded String id distinct from an entity identity', () => {
+    const localModels = { entities: [{ name: 'Root', fields: [
+      { name: 'key', kind: 'scalar', scalar: 'String' },
+      { name: 'items', kind: 'embedded', list: true, fields: [{ name: 'id', kind: 'scalar', scalar: 'String' }] },
+    ] }] };
+    expect(() => createQueryPlan(localModels, 'Root', quantified('items', [condition('id', '$parent.key', 'EQ')]))).not.toThrow();
+  });
+
   it('plans an embedded list body in its own field context', () => {
     expect(plan(quantified('lineas', [condition('cantidad', 'maxCantidad')]))).toEqual({
       kind: 'quantified', quantifier: 'ALL', path: ['lineas'], scope: null,

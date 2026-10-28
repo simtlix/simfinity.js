@@ -1,6 +1,7 @@
 import { QLQuantifier, resolveModelPath, SimfinityError } from '@simtlix/simfinity-core';
 import {
-  assertContainsAllPath, crossingKeys, describeEmptiness, describeModelEmptiness, emptinessScopePaths, isEmptinessOperator, textQueryOperator,
+  assertContainsAllPath, crossingKeys, describeEmptiness, describeModelEmptiness, emptinessScopePaths, enterQueryFrame, isEmptinessOperator,
+  resolveContainerContext, resolveQueryContext, textQueryOperator,
   validateComparisonTypes, validateContainsAllValue, validateQuantifiedGroups, validateTextFilterValue, validateTextListFilterValue,
 } from '@simtlix/simfinity-core/internal/query-operators';
 import { identifier as q, literal, qualified } from '../schema/sql.js';
@@ -119,6 +120,9 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
   // reads a frame of its own, whose joins go into the subquery's FROM. Aliases and parameters stay numbered across
   // the whole statement, so no alias shadows another one that an inner subquery reads.
   const rootFrame = { entity: plan.entity, table: root, alias: 't0', joins: new Map() };
+  const logical = (frame) => frame.logical ?? { models, entity: frame.entity };
+  const stepsOf = (frame, parts) => frame.logical ? resolveQueryContext(parts, frame.logical).raw : resolveModelPath(models, frame.entity, parts);
+  const contextOf = (frame) => frame.context ?? { table: frame.table, alias: frame.alias, json: null, vector: null };
   const identities = new Map();
   const bind = (value, type) => { values.push(value); return `$${values.length}::${type}`; };
   const col = (name, field) => `${name}.${q(field)}`;
@@ -181,14 +185,14 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
     return `CASE WHEN jsonb_typeof(${value}) = 'array' THEN (SELECT COALESCE(jsonb_agg(${child} ORDER BY ${name}.ordinality) FILTER (WHERE ${child} IS NOT NULL), '[]'::jsonb) FROM ${jsonItems(value)} WITH ORDINALITY ${name}(value, ordinality)) END`;
   };
   const sortPath = (parts, frame = rootFrame) => {
-    const steps = resolveModelPath(models, frame.entity, parts);
+    const steps = stepsOf(frame, parts);
     const index = steps.findIndex((field) => field.kind === 'collection');
     if (index >= 0) throw new SimfinityError(`Sort path ${parts.join('.')} crosses the collection ${index ? steps[index - 1].target : frame.entity}.${steps[index].name}; a record has no single value there`, 'INVALID_FILTER_PATH', 400);
     return steps;
   };
   const path = (parts, usage = 'filter', frame = rootFrame, joins = null, bound = null) => {
-    const steps = usage === 'sort' ? sortPath(parts, frame) : resolveModelPath(models, frame.entity, parts);
-    let context = bound ? bound.context : joins && usage !== 'cross' ? cross(frame, parts.slice(0, -1), joins) : { table: frame.table, alias: frame.alias, json: null, vector: null };
+    const steps = usage === 'sort' ? sortPath(parts, frame) : stepsOf(frame, parts);
+    let context = bound ? bound.context : joins && usage !== 'cross' ? cross(frame, parts.slice(0, -1), joins) : contextOf(frame);
     const chain = bound?.chain ?? [];
     let scoped = chain.some((scope) => scope !== null);
     const chainKey = (key) => `scoped ${key} ${scopeIdentity(chain, identities)}`;
@@ -461,7 +465,7 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
   // Reuse legacy vector/owned traversal while applying the validated scoped chain in this frame.
   const cross = (frame, parts, joins) => (parts.length
     ? path(parts, 'cross', frame, joins)
-    : { table: frame.table, alias: frame.alias, json: null, vector: null });
+    : contextOf(frame));
   /**
    * NONE over a reference or a collection (#108 part 2b), the IS_EMPTY form, or with `empty` false the IS_NOT_EMPTY
    * form, EXISTS: whether a record that `scope` admits is the one the reference `field` of the row `context` points
@@ -544,10 +548,10 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
    */
   const emptiness = (node, frame) => {
     const { path: parts, operator, value } = node;
-    const steps = resolveModelPath(models, frame.entity, parts);
+    const steps = stepsOf(frame, parts);
     const label = parts.join('.');
     const options = { operator, value, path: label, referenceEmptiness: REFERENCE_EMPTINESS };
-    const gqltype = models.entities.find((item) => item.name === frame.entity)?.gqltype;
+    const gqltype = !frame.element && models.entities.find((item) => item.name === frame.entity)?.gqltype;
     const shape = gqltype ? describeEmptiness(gqltype, parts, options) : describeModelEmptiness(steps, options);
     const scopes = scopesOf(node, shape, `${operator} on ${label}`);
     const context = cross(frame, parts.slice(0, -1), scopes);
@@ -559,7 +563,7 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
     if (node.anchor) return { reason: 'A quantified anchor has joins' };
     const { joins } = node;
     if (!joins || typeof joins !== 'object' || Array.isArray(joins) || ![Object.prototype, null].includes(Object.getPrototypeOf(joins))) return { reason: 'A predicate has joins that are not a plain object' };
-    for (const key of new Set(paths.flatMap((parts) => crossingKeys(parts, { models, entity: frame.entity })))) {
+    for (const key of new Set(paths.flatMap((parts) => crossingKeys(parts, logical(frame))))) {
       if (!Object.hasOwn(joins, key) || !queryScope(joins[key])) return { reason: `A predicate has no valid join scope for ${key}` };
     }
     return { joins };
@@ -571,10 +575,10 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
   };
   // Visibility of references already crossed by aggregate J aliases. Only references get scoped
   // joins; collection rows stay attached to their original legacy aliases and their cardinality.
-  const visibilityGuards = (frame, parts, scopes) => crossingKeys(parts, { models, entity: frame.entity })
+  const visibilityGuards = (frame, parts, scopes) => crossingKeys(parts, logical(frame))
     .filter((key) => scopeAt(scopes, key) !== null).map((key) => {
       const parts = key.split('.');
-      const reference = resolveModelPath(models, frame.entity, parts).at(-1);
+      const reference = stepsOf(frame, parts).at(-1);
       const source = cross(frame, parts.slice(0, -1), null);
       const name = scopedJoin(frame, `anchor ${key} ${scopeIdentity(scopes, identities)}`, reference, source, scopes[key]);
       return `${col(name, 'id')} IS NOT NULL`;
@@ -584,12 +588,12 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
     const parts = node.path;
     if (node.anchor && Object.hasOwn(node, 'joins') && !hasComparison(node.where)) detached('A quantified anchor has joins without a field comparison');
     // Resolve before crossing so malformed client metadata cannot fall back to trusted joins.
-    const targetEntity = node.anchor ? resolveModelPath(models, frame.entity, node.anchor).at(-1).target : frame.entity;
-    const steps = resolveModelPath(models, targetEntity, parts);
+    const targetContext = node.anchor ? resolveQueryContext(node.anchor, logical(frame)).end : logical(frame);
+    const steps = resolveQueryContext(parts, targetContext).raw;
     const field = steps.at(-1);
-    if (field?.kind === 'embedded' && field.list) unsupported('Quantified groups over embedded lists are not supported by this query compiler');
-    if (!field || field.inferred || !['reference', 'collection'].includes(field.kind) || field.list && field.kind !== 'collection') {
-      throw new SimfinityError('A quantified path must end at a reference or collection', 'INVALID_FILTER_PATH', 400);
+    const element = field?.kind === 'embedded' && field.list;
+    if (!field || field.inferred || !element && (!['reference', 'collection'].includes(field.kind) || field.list && field.kind !== 'collection')) {
+      throw new SimfinityError('A quantified path must end at a reference, collection or embedded object list', 'INVALID_FILTER_PATH', 400);
     }
     if (!QLQuantifier.getValue(node.quantifier)) throw new SimfinityError('Unknown quantifier', 'INVALID_FILTER_VALUE', 400);
     if (node.anchor && parts.length !== 1) detached('An anchored quantified path must name the collection or reference alone');
@@ -601,11 +605,14 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
     const isolatedPrefix = !node.anchor && steps.slice(0, -1).some((step) => step.list);
     const prefix = isolatedPrefix ? { ...frame, joins: new Map(), multiplying: false } : frame;
     const context = node.anchor ? cross(frame, node.anchor, null) : cross(prefix, parts.slice(0, -1), joins);
-    if (!context.table) unsupported('Unnormalized embedded reference');
+    if (!element && !context.table) unsupported('Unnormalized embedded reference');
     const correlation = field.kind === 'reference'
       ? (row) => `${col(row, 'id')} = ${col(context.alias, field.storageName)}`
       : (row) => `${col(row, field.connectionField)} = ${col(context.alias, context.table.primaryKey.columns[0])}`;
+    const childLogical = enterQueryFrame(logical(frame), [...(node.anchor ?? []), ...parts]);
     const body = node.where === null ? undefined : (child) => {
+      child.logical = childLogical;
+      child.parentJoins = joins;
       // A scope admits the child independently of the body's vector witness. Otherwise retain shared
       // nonmultiplying joins and their aliases; complete compounds within each body still share one map.
       const scopedVector = child.multiplying === true;
@@ -618,22 +625,38 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
       child.joins = positiveFrame.joins;
       return node.quantifier === 'ALL' ? `NOT ${positive}` : positive;
     };
-    const candidate = `EXISTS (SELECT 1 ${subquery(field.target, correlation, node.scope, body, frame).from})`;
+    let candidate;
+    if (element) {
+      if (node.scope != null) detached('An embedded element cannot have an entity scope');
+      const name = alias();
+      const owned = ownedOf(context, field);
+      const json = context.json ? `(${context.json} -> ${literal(field.storageName)})` : col(context.alias, field.storageName);
+      const source = owned ? `${qualified(database.schema, owned.name)} ${name}` : `${jsonItems(json)} ${name}(value)`;
+      const present = owned
+        ? `${col(name, '__owner_id')} = ${col(context.alias, context.table.primaryKey.columns[0])} AND ${col(context.alias, owned.ownership.stateColumn)} = 'present'${owned.ownership.nullableItems ? ` AND ${col(name, '__item_present')}` : ''}`
+        : `jsonb_typeof(${name}.value) = 'object'`;
+      const child = { entity: frame.entity, table: owned ?? null, alias: name, joins: new Map(), parent: frame, element: true,
+        logical: childLogical, parentJoins: joins, context: { table: owned ?? null, alias: name, json: owned ? null : `${name}.value`, vector: null } };
+      const condition = body ? ` AND ${body(child)}` : '';
+      const childJoins = joinsOf(child);
+      const from = context.vector ? `${context.vector.from} CROSS JOIN LATERAL ${source}` : source;
+      candidate = `EXISTS (SELECT 1 FROM ${from}${childJoins ? ` ${childJoins}` : ''} WHERE ${present}${context.vector ? ` AND ${context.vector.where}` : ''}${condition})`;
+    } else candidate = `EXISTS (SELECT 1 ${subquery(field.target, correlation, node.scope, body, frame).from})`;
     const result = `(${node.quantifier === 'ANY' ? '' : 'NOT '}${isolatedPrefix ? witness(prefix, candidate) : candidate})`;
     if (!node.anchor || !joins) return result;
     // An aggregate's J aliases still own cardinality. Scoped references before its anchor only guard
     // that joined row's visibility; following their scoped aliases through J would add fresh witnesses.
-    const keys = crossingKeys([...node.anchor, ...parts], { models, entity: frame.entity });
+    const keys = crossingKeys([...node.anchor, ...parts], logical(frame));
     if (Object.keys(joins).some((key) => !keys.includes(key))) detached('A quantified anchor has an unrelated join scope');
     const guards = visibilityGuards(frame, [...node.anchor, ...parts], joins);
     return guards.length ? `(${guards.join(' AND ')} AND ${result})` : result;
   };
   // Field operands are validated independently of literal predicates, including plans built by hand. A
   // collection may occur here only on an aggregate's already joined row chain; other collection reads are
-  // explicit quantified frames. Embedded lists need element frames, which this language version does not expose.
+  // explicit quantified frames. Embedded lists must already be bound to element frames.
   const comparisonPath = (parts, frame, right = false, leftCollections = null) => {
     if (!Array.isArray(parts)) throw new SimfinityError('A comparison operand requires a path array', 'INVALID_FILTER_PATH', 400);
-    const steps = resolveModelPath(models, frame.entity, parts);
+    const steps = stepsOf(frame, parts);
     const leaf = steps.at(-1);
     if (leaf.kind !== 'scalar' && !leaf.inferred || right && leaf.list) {
       throw new SimfinityError(`Comparison path ${parts.join('.')} must end at a scalar${right ? ' right operand' : ' field'}`, 'INVALID_FILTER_PATH', 400);
@@ -650,17 +673,17 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
         collections.push(prefix);
       }
     }
-    const identity = ['id', '_id'].includes(leaf.name) && (steps.length === 1 ? !frame.table.ownership : steps.at(-2).kind !== 'embedded');
+    const identity = ['id', '_id'].includes(leaf.name) && (steps.length === 1 ? !frame.element && !frame.table?.ownership : steps.at(-2).kind !== 'embedded');
     return { field: { ...leaf, identity }, collections };
   };
   const comparisonRead = (parts, frame, joins) => {
-    const steps = resolveModelPath(models, frame.entity, parts);
+    const steps = stepsOf(frame, parts);
     const index = steps.findLastIndex((field) => field.kind === 'collection');
     if (index < 0) return path(parts, 'filter', frame, joins);
     const anchor = parts.slice(0, index + 1);
     const context = cross(frame, anchor, null);
     const guards = visibilityGuards(frame, anchor, joins);
-    const chain = crossingKeys(anchor, { models, entity: frame.entity }).map((key) => scopeAt(joins, key));
+    const chain = crossingKeys(anchor, logical(frame)).map((key) => scopeAt(joins, key));
     const expression = path(parts, 'filter', frame, joins, { context, index: index + 1, chain });
     return guards.length ? { ...expression, sql: `CASE WHEN ${guards.join(' AND ')} THEN ${expression.sql} END` } : expression;
   };
@@ -668,34 +691,53 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
     const operand = node.operand;
     const operator = node.operator ?? 'EQ';
     if (!operand || typeof operand !== 'object' || Array.isArray(operand) || ![Object.prototype, null].includes(Object.getPrototypeOf(operand))
-      || !Number.isSafeInteger(operand.up) || operand.up < 0 || Object.keys(operand).some((key) => !['up', 'path', 'joins'].includes(key))) {
+      || !Number.isSafeInteger(operand.up) || operand.up < 0 || Object.keys(operand).some((key) => !['up', 'path', 'joins', 'container'].includes(key))) {
       throw new SimfinityError('A comparison operand requires a nonnegative integer up and a path', 'INVALID_FILTER_VALUE', 400);
     }
     if (node.value !== null) invalidValue('A field-comparison predicate requires a null value placeholder');
+    if (!Array.isArray(operand.path)) throw new SimfinityError('A comparison operand requires a path array', 'INVALID_FILTER_PATH', 400);
+    const container = operand.container;
+    const containerContext = container === undefined ? null : resolveContainerContext(container, logical(frame));
+    if (container && operand.up !== 0) throw new SimfinityError('A structural operand must have up zero', 'INVALID_FILTER_PATH', 400);
+    const up = container?.up ?? operand.up;
+    const rightPath = [...(container?.path ?? []), ...operand.path];
     let origin = frame;
+    let entering = frame;
     const anchors = [];
-    for (let index = 0; index < operand.up; index++) {
+    for (let index = 0; index < up; index++) {
+      entering = origin;
       if (origin.aggregateAnchor) anchors.push({ frame: origin.parent, path: origin.aggregateAnchor });
       origin = origin.parent;
       if (!origin) throw new SimfinityError('A comparison operand names an unavailable ancestor frame', 'INVALID_FILTER_PATH', 400);
     }
     const left = comparisonPath(node.path, frame);
-    const anchoredCollections = anchors.filter((anchor) => anchor.frame === origin).flatMap((anchor) => resolveModelPath(models, origin.entity, anchor.path)
+    const anchoredCollections = anchors.filter((anchor) => anchor.frame === origin).flatMap((anchor) => stepsOf(origin, anchor.path)
       .flatMap((field, index) => field.kind === 'collection' ? [anchor.path.slice(0, index + 1).join('.')] : []));
-    const right = comparisonPath(operand.path, origin, true, origin === frame ? left.collections : anchoredCollections);
+    const right = comparisonPath(rightPath, origin, true, origin === frame ? left.collections : anchoredCollections);
     validateComparisonTypes(left.field, right.field, operator, node.path.join('.'), operand.path.join('.'));
     if (Object.hasOwn(node, 'scopes')) detached('A field comparison has scopes instead of joins');
-    if (operand.up === 0 && Object.hasOwn(operand, 'joins')) detached('A same-frame field operand must share its predicate joins');
-    const leftJoins = inspectJoins(node, frame, operand.up === 0 ? [node.path, operand.path] : [node.path]);
+    const sharedJoins = up === 0 && !container;
+    if (sharedJoins && Object.hasOwn(operand, 'joins')) detached('A same-frame field operand must share its predicate joins');
+    const leftJoins = inspectJoins(node, frame, sharedJoins ? [node.path, operand.path] : [node.path]);
     if (leftJoins.reason) detached(leftJoins.reason);
-    const rightJoins = operand.up === 0 ? leftJoins : inspectJoins(operand, origin);
+    const rightOwner = container ? { ...origin, logical: containerContext } : origin;
+    const rightJoins = sharedJoins ? leftJoins : inspectJoins(operand, rightOwner);
     if (rightJoins.reason) detached(rightJoins.reason);
-    for (const [checked, paths, owner] of [[leftJoins, operand.up === 0 ? [node.path, operand.path] : [node.path], frame], ...(operand.up === 0 ? [] : [[rightJoins, [operand.path], origin]])]) {
-      const expected = new Set(paths.flatMap((parts) => crossingKeys(parts, { models, entity: owner.entity })));
+    for (const [checked, paths, owner] of [[leftJoins, sharedJoins ? [node.path, operand.path] : [node.path], frame], ...(sharedJoins ? [] : [[rightJoins, [operand.path], rightOwner]])]) {
+      const expected = new Set(paths.flatMap((parts) => crossingKeys(parts, logical(owner))));
       if (checked.joins && Object.keys(checked.joins).some((key) => !expected.has(key))) detached('A field comparison has an unrelated join scope');
     }
     const a = comparisonRead(node.path, frame, leftJoins.joins);
-    const b = comparisonRead(operand.path, origin, rightJoins.joins);
+    let scopes = rightJoins.joins;
+    if (container) {
+      const prefix = container.path.join('.');
+      const inherited = Object.entries(entering.parentJoins ?? {}).filter(([key]) => key === prefix || prefix.startsWith(`${key}.`));
+      scopes = scopes || inherited.length ? {
+        ...Object.fromEntries(inherited),
+        ...Object.fromEntries(Object.entries(scopes ?? {}).map(([key, value]) => [[prefix, key].filter(Boolean).join('.'), value])),
+      } : null;
+    }
+    const b = comparisonRead(rightPath, origin, scopes);
     // Native dates and jsonb dates use the same epoch-millisecond unit. Literals retain their existing
     // timestamp bindings and SQL unchanged; only comparisons normalize the two physical representations.
     const normalize = (expression) => {
@@ -728,17 +770,17 @@ const compileSelect = (models, database, plan, extra, configuration, batched) =>
     if (node.kind === 'predicate' && isEmptinessOperator(node.operator)) return `(${emptiness(node, frame)})`;
     // CONTAINS_ALL's path and leaf rules (#108 part 4), with core's codes, before any join or alias, so that a plan built
     // by hand never compiles to the legacy collection join or the multiplying vector join, or raises 42883.
-    if (node.kind === 'predicate' && node.operator === 'CONTAINS_ALL') assertContainsAllPath(resolveModelPath(models, frame.entity, node.path));
+    if (node.kind === 'predicate' && node.operator === 'CONTAINS_ALL') assertContainsAllPath(stepsOf(frame, node.path));
     if (node.kind === 'predicate') {
       // Check ordinary paths and values before the new client metadata, without creating joins or aliases.
-      if (Object.hasOwn(node, 'joins')) validateQuantifiedGroups({ AND: [{ conditions: [{ field: node.path.join('.'), operator: node.operator, value: node.value }] }] }, { models, entity: frame.entity, referenceEmptiness: true, quantifiers: true });
+      if (Object.hasOwn(node, 'joins')) validateQuantifiedGroups({ AND: [{ conditions: [{ field: node.path.join('.'), operator: node.operator, value: node.value }] }] }, { ...logical(frame), referenceEmptiness: true, quantifiers: true, elementFrames: true });
       const checked = inspectJoins(node, frame);
       if (checked.reason) {
         // Only this already-rejected request needs a non-crossing native-value checkpoint. Accepted
         // requests retain path/scope compilation before encoding, including its bind order and single coercion.
-        const steps = resolveModelPath(models, frame.entity, node.path);
+        const steps = stepsOf(frame, node.path);
         const leaf = steps.at(-1);
-        const identity = ['id', '_id'].includes(leaf.name) && (steps.length === 1 ? !frame.table.ownership : steps.at(-2).kind !== 'embedded');
+        const identity = ['id', '_id'].includes(leaf.name) && (steps.length === 1 ? !frame.element && !frame.table?.ownership : steps.at(-2).kind !== 'embedded');
         const field = operandField(leaf, identity);
         // The placeholders are never emitted: detached() follows. They must be non-empty, because textPredicate and the IIN
         // branch fold `uncollated` with caseFoldExpression, which rejects an empty expression (case-fold.js:60).

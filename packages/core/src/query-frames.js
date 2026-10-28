@@ -29,11 +29,11 @@ const nonemptyPath = (path) => typeof path === 'string' && path.length > 0;
 const partsOf = (path) => (Array.isArray(path) ? path : typeof path === 'string' ? path.split('.') : []);
 const resolve = (path, ctx, onStep, virtualLabel, ordinaryCondition = false) => resolveQueryContext(path, ctx, { onStep, virtualLabel, ordinaryCondition });
 
-const comparisonDescriptor = (resolved) => {
+const comparisonDescriptor = (resolved, context) => {
   const last = resolved.steps.at(-1);
   const previous = resolved.steps.at(-2);
   return { ...last, list: last.kind === 'scalarList', identity: ['id', '_id'].includes(last.name)
-    && (!previous || relation(previous)), version: last.version || ['Version', 'RecordVersion'].includes(last.scalar) };
+    && (previous ? relation(previous) : !context.parent), version: last.version || ['Version', 'RecordVersion'].includes(last.scalar) };
 };
 const operandContext = (entry, ctx, up) => inFrames({ frames: entry.frames.slice(0, entry.frames.length - up) }, ctx);
 const validateInternalOperand = (entry, current) => {
@@ -522,7 +522,7 @@ export const validateQuantifiedGroups = (args, ctx) => {
           && !collections.has(right.slice(0, index + 1).map(({ name }) => name).join('.')))) {
           fail('The right operand introduces an unbound collection; use an explicit group', 'INVALID_FILTER_PATH');
         }
-        validateComparisonTypes(comparisonDescriptor(resolved), comparisonDescriptor(rightResolved), entry.operator, path.join('.'), rightPath.join('.'));
+        validateComparisonTypes(comparisonDescriptor(resolved, current), comparisonDescriptor(rightResolved, rightCurrent), entry.operator, path.join('.'), rightPath.join('.'));
         gates.push(() => {
           if (ctx.elementFrames !== true && ([...steps, ...rightResolved.steps].some((step) => step.kind === 'embeddedList') || publicOperand?.container || entry.operand?.container)) fail('Field comparisons through embedded lists require element frames', 'UNSUPPORTED_QUERY');
           if (ctx.valuePath !== true || ctx.referenceEmptiness !== true) fail('Field comparisons require valuePath and referenceEmptiness support from this query compiler', 'UNSUPPORTED_QUERY');

@@ -15,6 +15,7 @@ export {
   ANCHOR_KEY, GROUP_KEYS, IMPLICIT_KEY, aggregateJoinPrefixes, crossingKeys, frameCollectionPaths, frameUnits, validateQuantifiedGroups,
 } from './query-frames.js';
 export { hasValuePath, validateComparisonOperand, validateComparisonTypes } from './query-comparisons.js';
+export { enterQueryFrame, resolveContainerContext, resolveQueryContext } from './query-context.js';
 export { effectiveScalarName } from './metadata.js';
 
 /** Every `QLOperator` value, in declaration order. QLOperator is the only list of operators. */

@@ -100,11 +100,11 @@ New plan operands may add `container: { up: number, path: string[] }` to the exi
 - Consumes: portable element plans and `QueryOperand.container` from tasks 1–2.
 - Produces: existing `compileQuery`/`compileChildrenQuery` statements for element frames across JSONB, inline and owned storage; plugin declares `elementFrames: true` only with complete execution.
 
-- [ ] **Step 1: Add failing compiler and real database tests.** Apply the task 3 literal ID expectations to logical models stored as JSONB and owned tables. Cover owner keys, null item presence, duplicate positions, inline→owned→JSONB containers, scoped references, temporal/enum codecs, aggregate J rows and child batches.
-- [ ] **Step 2: Run `npm test -- tests/element-frames-postgres.test.js tests/integration/element-frames-postgres.test.js` with a disposable PostgreSQL URI.** Expect embedded plan rejection/execution failures; verify tests actually execute.
-- [ ] **Step 3: Extend existing frame/path compilation.** Use correlated guarded `jsonb_array_elements` sources or owned rows filtered by owner/presence. Resolve `container` against the retained bound context without changing legacy `up`. Reuse reference joins and codecs inside witnesses; ALL uses the complete two-valued predicate. Do not add schema tables or columns.
-- [ ] **Step 4: Run the task's five test files.** Expect all passing. Confirm physical schema golden tests remain unchanged and batch setup still uses `SET LOCAL jit = off` with the existing transaction contract.
-- [ ] **Step 5: Commit as `feat(postgres): execute embedded frames across storage layouts`**.
+- [x] **Step 1: Add failing compiler and real database tests.** Apply the task 3 literal ID expectations to logical models stored as JSONB and owned tables. Cover owner keys, null item presence, duplicate positions, inline→owned→JSONB containers, scoped references, temporal/enum codecs, aggregate J rows and child batches.
+- [x] **Step 2: Run `npm test -- tests/element-frames-postgres.test.js tests/integration/element-frames-postgres.test.js` with a disposable PostgreSQL URI.** Expect embedded plan rejection/execution failures; verify tests actually execute.
+- [x] **Step 3: Extend existing frame/path compilation.** Use correlated guarded `jsonb_array_elements` sources or owned rows filtered by owner/presence. Resolve `container` against the retained bound context without changing legacy `up`. Reuse reference joins and codecs inside witnesses; ALL uses the complete two-valued predicate. Do not add schema tables or columns.
+- [x] **Step 4: Run the task's five test files.** Expect all passing. Confirm physical schema golden tests remain unchanged and batch setup still uses `SET LOCAL jit = off` with the existing transaction contract.
+- [x] **Step 5: Commit as `feat(postgres): execute embedded frames across storage layouts`**.
 
 ### Task 5: Cross-engine API and security acceptance
 
