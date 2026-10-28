@@ -487,7 +487,8 @@ export const validateQuantifiedGroups = (args, ctx) => {
         if (ctx.operation !== 'aggregate' || entry.frames.length
           || !crossed.some((step) => step.kind === 'collection')
           || crossed.some((step, index) => step.kind === 'collection' && !prefixes.has(prefix(index)))
-          || partsOf(entry.construct.path).length !== 1 || last.kind !== 'collection') {
+          || partsOf(entry.construct.path).length !== 1
+          || (last.kind !== 'collection' && !(ctx.elementFrames === true && last.kind === 'embeddedList' && comparisonInGroup(entry.construct)))) {
           fail('An implicit quantified anchor must name the aggregate\'s join prefixes', 'INVALID_FILTER_PATH');
         }
       }

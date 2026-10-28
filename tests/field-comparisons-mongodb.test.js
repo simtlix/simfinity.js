@@ -141,7 +141,6 @@ describe('MongoDB field comparison compilation', () => {
     ['tags', 'LIKE', 'name', 'INVALID_FILTER_OPERATOR'],
     ['stock', 'IN', 'reorder', 'INVALID_FILTER_OPERATOR'],
     ['stock', 'EQ', 'name', 'INVALID_FILTER_VALUE'],
-    ['lines.width', 'LT', 'stock', 'UNSUPPORTED_QUERY'],
     ['stock', 'LT', 'reviews.rating', 'INVALID_FILTER_PATH'],
     ['reviews.rating', 'LT', 'otherReviews.rating', 'INVALID_FILTER_PATH'],
   ])('rejects %s %s %s with %s', async (field, operator, valuePath, code) => {

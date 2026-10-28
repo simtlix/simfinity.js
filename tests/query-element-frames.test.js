@@ -8,11 +8,12 @@ const bundle = { name: 'bultos', kind: 'embedded', list: true, fields: [scalar('
 const lines = { name: 'lineas', kind: 'embedded', list: true, fields: [scalar('cantidad'), scalar('maxCantidad'), bundle,
   { name: 'proveedor', kind: 'reference', target: 'Proveedor' }] };
 const models = { entities: [
-  { name: 'Pedido', fields: [scalar('maxCantidadPorLinea'), lines,
+  { name: 'Pedido', fields: [scalar('id'), scalar('maxCantidadPorLinea'), lines,
     { ...lines, name: 'otrasLineas' },
     { name: 'envio', kind: 'embedded', fields: [scalar('maxCantidadPorLinea'), scalar('cantidad'), lines] },
     { name: 'proveedor', kind: 'reference', target: 'Proveedor' }] },
-  { name: 'Proveedor', fields: [scalar('maxCantidadPorLinea'), lines] },
+  { name: 'Proveedor', fields: [scalar('maxCantidadPorLinea'), lines,
+    { name: 'pedidos', kind: 'collection', target: 'Pedido', connectionField: 'proveedor' }] },
 ] };
 const context = { models, entity: 'Pedido', quantifiers: true, referenceEmptiness: true, valuePath: true, elementFrames: true };
 const plan = (args, options) => createQueryPlan(models, 'Pedido', args, options).where;
@@ -114,5 +115,15 @@ describe('embedded query frames', () => {
     { up: 1, path: ['maxCantidadPorLinea'], container: { up: 1, path: [] } },
   ])('rejects hand-built containers outside the structural chain: %j', (__operand) => {
     fault(quantified('lineas', [{ field: 'cantidad', operator: 'LTE', __operand }]), 'INVALID_FILTER_PATH');
+  });
+
+  it('validates normalized element witnesses below an aggregate collection anchor', () => {
+    const args = { AND: [{ conditions: [condition('pedidos.lineas.cantidad', 'pedidos.maxCantidadPorLinea')] }],
+      aggregation: { groupId: 'pedidos.id', facts: [{ operation: 'COUNT', factName: 'n', path: 'pedidos.id' }] } };
+    const ctx = { ...context, entity: 'Proveedor', operation: 'aggregate', J: new Set(['pedidos']) };
+    const normalized = frameCollectionPaths(args, ctx);
+    expect(() => validateQuantifiedGroups(normalized, ctx)).not.toThrow();
+    expect(frameCollectionPaths(normalized, ctx)).toEqual(normalized);
+    expect(createQueryPlan(models, 'Proveedor', normalized, { mode: 'aggregate' }).where).toMatchObject({ path: ['lineas'], anchor: ['pedidos'] });
   });
 });
