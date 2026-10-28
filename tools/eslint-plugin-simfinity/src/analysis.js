@@ -117,6 +117,35 @@ export const analyze = context => {
     return callee?.kind === 'runtime-function' && callee.name === 'registerView';
   };
 
+  // Lists, non-null wrappers and object fields retain their type objects. A
+  // known constructor is safe only while the resulting container stays stable:
+  // mutating wrapper.ofType or container.getFields() can mutate the input type.
+  const stableGraphQLContainer = (input, seen, depth = 0) => {
+    if (depth >= 40) return false;
+    let expression = input;
+    while (wrappers.has(expression.parent?.type) && expression.parent.expression === expression) expression = expression.parent;
+    const parent = expression.parent;
+    if (parent?.type === 'VariableDeclarator' && parent.init === expression) {
+      return parent.parent.kind === 'const' && parent.id.type === 'Identifier'
+        && source.getDeclaredVariables(parent).every(variable => stable(variable, seen));
+    }
+    if (['CallExpression', 'NewExpression'].includes(parent?.type) && parent.callee !== expression) {
+      const callee = origin(parent.callee);
+      if (callee?.kind === 'runtime-function') return true;
+      return parent.type === 'NewExpression' && callee?.kind === 'graphql'
+        && stableGraphQLContainer(parent, seen, depth + 1);
+    }
+    if (parent?.type === 'Property' && parent.value === expression && keyName(parent) === 'type') {
+      if (isViewType(parent)) return true;
+      let constructor = parent;
+      while (constructor && !['NewExpression', 'Program'].includes(constructor.type)) constructor = constructor.parent;
+      return constructor?.type === 'NewExpression' && origin(constructor.callee, new Set(), false)?.kind === 'graphql'
+        && stableGraphQLContainer(constructor, seen, depth + 1);
+    }
+    // External mutation through exports is outside the local proof model.
+    return ['ExpressionStatement', 'ExportDefaultDeclaration'].includes(parent?.type);
+  };
+
   const inspectStable = (variable, seen) => {
     const [definition] = variable.defs;
     const rawOrigin = definition?.type === 'ImportBinding'
@@ -145,6 +174,7 @@ export const analyze = context => {
         // replace methods or mutate a type's field configuration.
         const callee = origin(parent.callee);
         if (!callee || !['auth-function', 'runtime-function', 'cloner', 'graphql'].includes(callee.kind)) return false;
+        if (container && callee.kind === 'graphql' && !stableGraphQLContainer(parent, seen)) return false;
       }
       if (parent?.type === 'CallExpression' && parent.callee === expression && expression.type === 'MemberExpression') {
         const name = memberName(expression);
@@ -161,7 +191,8 @@ export const analyze = context => {
         let constructor = parent;
         while (constructor && !['NewExpression', 'Program'].includes(constructor.type)) constructor = constructor.parent;
         if (!isViewType(parent) && (keyName(parent) !== 'type' || constructor?.type !== 'NewExpression'
-          || origin(constructor.callee, new Set(), false)?.kind !== 'graphql')) return false;
+          || origin(constructor.callee, new Set(), false)?.kind !== 'graphql'
+          || !stableGraphQLContainer(constructor, seen))) return false;
       }
     }
     return true;

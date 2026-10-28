@@ -2939,6 +2939,8 @@ The optional [application ESLint plugin](docs/guide/linting.md) provides eleven 
 
 Plugin 0.3.1 recognizes `registerView()` without adding rules or changing the preset contract. Plugin 0.3.0 adds `valid-policy-expression` to the recommended preset, following 0.2.0's checks for async authorization extractors and Envelop plugins passed to runtime middleware. These three contracts were revalidated against Simfinity 3.8.0 and 3.10.0. Upgrading can introduce diagnostics for malformed policies. See the linting guide for examples and analysis limits.
 
+The unreleased plugin source also diagnoses missing child links on locally proven writable object collections without their own resolver. This extends `valid-connection-field`; it is not part of npm 0.3.1. See [required collection links](docs/guide/linting.md#required-collection-links-unreleased-source) for examples and exclusions.
+
 ## 🤖 MCP Generation
 
 Simfinity can automatically expose every generated GraphQL operation as a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) tool. For each connected type you get one MCP tool per generated query and mutation — exactly mirroring the GraphQL surface:

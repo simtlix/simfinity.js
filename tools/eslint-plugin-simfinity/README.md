@@ -14,6 +14,11 @@ npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.3.1'
 
 Version 0.3.1 recognizes Simfinity 3.12.0 `registerView()` calls and preserves type tracking through TypeScript-wrapped options. It adds no rule and does not change the `recommended-3.8` preset contract.
 
+The **unreleased source** also extends `valid-connection-field` to detect a missing
+child link on a locally proven, writable referenced object collection without its
+own resolver. This adds diagnostics to the same rule in `recommended-3.8`; it is
+not included in the npm 0.3.1 installation above. See the limits below.
+
 Version 0.3.0 adds `valid-policy-expression` to `recommended-3.8`, so upgrading
 can report malformed policies that earlier plugin versions did not diagnose.
 Version 0.2.0 added `no-async-auth-extractor` and `no-auth-plugin-as-middleware`;
@@ -128,8 +133,26 @@ GraphQL checks require local `connect`/`addNoEndpointType` registration. They fo
 embedded object/list/non-null types and simple field thunks without invoking
 them. Independent GraphQL schemas, dynamic type builders and cross-file type
 registrations are not analyzed. Virtual fields have no added storage requirement.
-Omitted/null/empty `connectionField` values and embedded relation links preserve
-the runtime's meaning; this rule does not establish that a target field exists.
+In published 0.3.1, omitted/null/empty `connectionField` values and embedded relation
+links preserve the runtime's meaning; this rule does not establish that a target
+field exists.
+
+In the unreleased source, an omitted, `null`, `undefined` or empty link produces a
+`missing` diagnostic when all of these facts are known locally: the owning type is
+directly registered, the field is a non-embedded list of a `GraphQLObjectType`,
+`readOnly` is absent or falsy, and `resolve` is absent, null or undefined. Outer and
+item `GraphQLNonNull` wrappers are supported. Singular references, embedded lists,
+virtual declarations, scalar/nested lists and unknown values stay outside the new
+check. Whitespace-only links retain the runtime's existing meaning.
+
+The list's object target must be a local declaration: imported targets and dynamic
+`getType()` calls remain unknown. Merely reaching an unregistered embedded type
+does not enable the missing-link check; explicitly registering it does. Read-only
+or own-resolver collections are skipped even when an engine's storage metadata
+would reject them. This is the shared core error check, not backend initialization
+validation. The 3.8.0 contract was also rechecked against current 3.18.0 core and
+both adapters. Broader MOD-03 variants and the rest of
+[issue #116](https://github.com/simtlix/simfinity.js/issues/116) remain open.
 
 This is bounded syntax analysis, not whole-program interpretation. Alias chains
 are bounded to 40 and type traversal to 200 nodes per file. Reflection, mutations
@@ -157,7 +180,9 @@ The isolated consumer packs/installs the actual archive, exercises JS/TS flat
 config and TypeScript config declarations, checks rule IDs/locations, and verifies
 that `--fix` changes no source. No runtime dependency is installed or executed.
 The bounded trial lints both Barber backends and injects ten in-memory sentinel
-violations per backend to check coverage; it does not run the applications or
+violations per backend to check coverage. The unreleased source adds one explicit
+local collection sentinel per backend because Barber's dynamic `getType()` targets
+are outside the new missing-link check. The trial does not run the applications or
 certify their business policies. `.github/workflows/eslint-plugin.yml` owns this
 package's checks. `release-eslint-plugin.yml` publishes stable plugin tags via OIDC
 and tests the exact packed archive before publication. Runtime releases do not
