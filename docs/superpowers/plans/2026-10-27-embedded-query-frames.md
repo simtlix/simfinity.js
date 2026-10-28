@@ -117,11 +117,11 @@ New plan operands may add `container: { up: number, path: string[] }` to the exi
 - Consumes: complete core/runtime and both bundled compilers.
 - Produces: common hand-derived fixtures and exact public GraphQL/MCP result assertions, without substituting a memory adapter for database execution.
 
-- [ ] **Step 1: Add acceptance tests before any remaining fixes.** Run the same queries through lists, counts, pagination, aggregates, selected collection arguments (batch on/off), named views, trusted scopes and MCP. Assert complete result objects, untrimmed arrays, no fact multiplication, target-scope admission and rejection of root/selection-owner `$parent`. Include same-element two-condition counterexamples and scalar-list operators inside elements.
-- [ ] **Step 2: Run `npm test -- tests/integration/element-frames-parity.test.js tests/mcp-field-comparisons.test.js tests/client-descriptor-backends.test.js tests/core-subpath-types.test.js`.** Diagnose any mismatch with a reproducer before fixing it. Expect both actual engines to pass the common assertions.
-- [ ] **Step 3: Extend packed TypeScript consumers for the capability and container operand.** Compile existing subpath/root aliases without changing export identity; run `npm run test:packages` and expect all consumers/archive checks passing.
-- [ ] **Step 4: Verify the legacy embedded fixture in a non-UTC timezone.** Run `TZ=America/New_York npm test -- tests/integration/embedded-query-parity.test.js tests/integration/element-frames-parity.test.js`; expect all applicable database cases passing.
-- [ ] **Step 5: Commit as `test: verify embedded frame parity and read contracts`**.
+- [x] **Step 1: Add acceptance tests before any remaining fixes.** Run the same queries through lists, counts, pagination, aggregates, selected collection arguments (batch on/off), named views, trusted scopes and MCP. Assert complete result objects, untrimmed arrays, no fact multiplication, target-scope admission and rejection of root/selection-owner `$parent`. Include same-element two-condition counterexamples and scalar-list operators inside elements.
+- [x] **Step 2: Run `npm test -- tests/integration/element-frames-parity.test.js tests/mcp-field-comparisons.test.js tests/client-descriptor-backends.test.js tests/core-subpath-types.test.js`.** Diagnose any mismatch with a reproducer before fixing it. Expect both actual engines to pass the common assertions.
+- [x] **Step 3: Extend packed TypeScript consumers for the capability and container operand.** Compile existing subpath/root aliases without changing export identity; run `npm run test:packages` and expect all consumers/archive checks passing.
+- [x] **Step 4: Verify the legacy embedded fixture in a non-UTC timezone.** Run `TZ=America/New_York npm test -- tests/integration/embedded-query-parity.test.js tests/integration/element-frames-parity.test.js`; expect all applicable database cases passing.
+- [x] **Step 5: Commit as `test: verify embedded frame parity and read contracts`**.
 
 ### Task 6: Documentation, full verification and review delivery
 

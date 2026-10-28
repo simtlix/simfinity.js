@@ -1,9 +1,10 @@
 import { GraphQLBoolean, GraphQLEnumType, GraphQLID, GraphQLInt, GraphQLList, GraphQLObjectType, GraphQLScalarType, GraphQLString } from 'graphql';
 
+const DateTime = new GraphQLScalarType({ name: 'DateTime', serialize: (value) => new Date(value).toISOString(), parseValue: (value) => new Date(value), parseLiteral: (node) => new Date(node.value) });
+
 const embedded = { relation: { embedded: true } };
 export const elementGroup = (quantifier = 'ANY', path = 'lines', conditions = [{ field: 'quantity', operator: 'LTE', valuePath: '$parent.limit' }], extra = {}) => ({ AND: [{ [quantifier]: [{ path, conditions, ...extra }] }] });
 export const elementFixture = (prefix, owned = false) => {
-  const DateTime = new GraphQLScalarType({ name: 'DateTime', serialize: (value) => new Date(value).toISOString(), parseValue: (value) => new Date(value), parseLiteral: (node) => new Date(node.value) });
   const Kind = new GraphQLEnumType({ name: `${prefix}Kind`, values: { ONE: { value: 'two' }, TWO: { value: 2 } } });
   const ref = { relation: { embedded: false, connectionField: 'providerKey' } };
   const Bundle = new GraphQLObjectType({ name: `${prefix}Bundle`, fields: () => ({ quantity: { type: GraphQLInt }, ...(owned ? { provider: { type: Provider, extensions: ref } } : {}) }) });

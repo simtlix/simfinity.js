@@ -1193,6 +1193,13 @@ const quantifierEnum: GraphQLEnumType = QLQuantifier;
 const quantifier: QueryQuantifier = 'ALL';
 const comparisonOperand: QueryOperand = { up: 1, path: ['stock'], joins: { shop: null } };
 const comparisonFeatures: QueryFeatures = { operators: ['EQ'], referenceEmptiness: true, valuePath: true };
+const elementFeatures: QueryFeatures = { operators: ['EQ'], referenceEmptiness: true, quantifiers: true, valuePath: true, elementFrames: true };
+const elementOperand: QueryOperand = { up: 0, path: ['limit'], container: { up: 1, path: ['shipping'] } };
+const elementFeatureType: Equals<QueryFeatures['elementFrames'], boolean | null | undefined> = true;
+const elementContainerType: Equals<QueryOperand['container'], { up: number; path: string[] } | undefined> = true;
+// @ts-expect-error Structural containers require a path array.
+const invalidElementOperand: QueryOperand = { up: 0, path: ['limit'], container: { up: 1, path: 'shipping' } };
+void [elementFeatures, elementOperand, elementFeatureType, elementContainerType, invalidElementOperand];
 const comparisonCondition: QLFilterCondition = { field: 'stock', valuePath: 'minimum' };
 const comparisonTerm: QLTypeFilterExpression = { terms: [{ path: 'stock', valuePath: 'minimum' }] };
 const comparisonPredicate: QueryPredicate = { kind: 'predicate', path: ['stock'], operator: 'LT', value: null, operand: comparisonOperand };

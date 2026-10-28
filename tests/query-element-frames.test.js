@@ -125,9 +125,10 @@ describe('embedded query frames', () => {
     fault(quantified('lineas', [{ field: 'cantidad', operator: 'LTE', __operand }]), 'INVALID_FILTER_PATH');
   });
 
-  it('validates normalized element witnesses below an aggregate collection anchor', () => {
+  it.each([false, true])('validates normalized element witnesses below an aggregate collection anchor (client=%s)', (client) => {
     const args = { AND: [{ conditions: [condition('pedidos.lineas.cantidad', 'pedidos.maxCantidadPorLinea')] }],
       aggregation: { groupId: 'pedidos.id', facts: [{ operation: 'COUNT', factName: 'n', path: 'pedidos.id' }] } };
+    if (client) args.AND[0].conditions[0].__scope = { scopes: { pedidos: null } };
     const ctx = { ...context, entity: 'Proveedor', operation: 'aggregate', J: new Set(['pedidos']) };
     const normalized = frameCollectionPaths(args, ctx);
     expect(() => validateQuantifiedGroups(normalized, ctx)).not.toThrow();

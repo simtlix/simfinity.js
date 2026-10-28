@@ -460,7 +460,8 @@ export const createQueryPlan = (models, entityName, source = {}, {
         const crossings = anchor?.length && !hasComparisonNode(node.where) ? [] : crossingKeys(fullPath, frameContext);
         const targets = Object.fromEntries(crossings.map((prefix) => [prefix, modelSteps(frameContext, prefix).at(-1).target]));
         if (target) targets[key] = target;
-        const scopes = liftScopes(item.__scope, targets, fullPath, quantifier);
+        const anchors = anchor?.length ? modelSteps(frameContext, anchor).flatMap((field, index) => field.kind === 'collection' ? [anchor.slice(0, index + 1).join('.')] : []) : [];
+        const scopes = liftScopes(item.__scope, targets, fullPath, quantifier, anchors);
         node.scope = target ? scopes[key] : null;
         if (anchor?.length) {
           for (const prefix of J) if (key.startsWith(`${prefix}.`)) {
