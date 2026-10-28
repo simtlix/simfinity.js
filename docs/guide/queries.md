@@ -193,7 +193,7 @@ query ShopRange {
 }
 ```
 
-A field filter and an `AND`/`OR` condition resolve `valuePath` from the containing record. A relation term resolves it from the related object: the final example compares two Shop fields. Explicit `ANY`/`ALL`/`NONE` bodies resolve both paths from their element; collection-field arguments start at the queried child. Boolean groups do not change that origin. Paths contain dot-separated GraphQL names, with no expressions or dollar prefixes.
+A field filter and an `AND`/`OR` condition resolve `valuePath` from the containing record. A relation term resolves it from the related object: the final example compares two Shop fields. Explicit `ANY`/`ALL`/`NONE` bodies resolve both paths from their element; collection-field arguments start at the queried child. Boolean groups do not change that origin. Ordinary paths contain dot-separated GraphQL names and no expressions. The unreleased `elementFrames` extension adds leading structural [`$parent` prefixes](#embedded-object-lists-and-parent).
 
 `value` is supplied when it is not `undefined`; `valuePath` is supplied when neither `undefined` nor `null`. Supplying both, including `value: null`, gives `INVALID_FILTER_VALUE` (400). `valuePath: null` preserves the existing literal-filter behavior. An omitted operator means `EQ`.
 
@@ -205,9 +205,9 @@ A field filter and an `AND`/`OR` condition resolve `valuePath` from the containi
 
 Validated scalars follow their supported base. Record identities remain identities even if declared String; name a reference identity with `.id` or `._id` where the engine permits it. Different enum types stay incompatible even with identical members, and nontrivial internal enum values compare by semantic member. Managed `RecordVersion`/`Version` fields are unsupported. Case-insensitive operators, `IN`, `NIN`, `BTW`, `CONTAINS_ALL` and emptiness operators cannot take `valuePath` (`INVALID_FILTER_OPERATOR`). Incompatible scalar pairs give `INVALID_FILTER_VALUE`.
 
-Missing and null normalize to null: `EQ` matches two null operands, `NE` is its exact complement, and ordering/text comparisons are false if either operand is null. Empty strings are values; a non-null string contains, starts with and ends with `""`. A scalar-list left operand supports only `EQ` membership and its complement `NE`. A null right operand matches a missing/null list or `[null]`, but never `[]`. The right operand must be scalar (`INVALID_FILTER_PATH` for a list). Whole objects, references and collections are not scalar endpoints. Crossing an embedded list with either operand requires future element-frame support and gives `UNSUPPORTED_QUERY`, including references reached inside that list.
+Missing and null normalize to null: `EQ` matches two null operands, `NE` is its exact complement, and ordering/text comparisons are false if either operand is null. Empty strings are values; a non-null string contains, starts with and ends with `""`. A scalar-list left operand supports only `EQ` membership and its complement `NE`. A null right operand matches a missing/null list or `[null]`, but never `[]`. The right operand must be scalar (`INVALID_FILTER_PATH` for a list). Whole objects, references and collections are not scalar endpoints. Crossing an embedded list with either operand requires `queryFeatures.elementFrames: true`; otherwise it gives `UNSUPPORTED_QUERY`.
 
-Collection shorthand binds the same visible child for both paths. In a Product condition, `reviews.rating LT valuePath: "reviews.maxRating"` compares one review's own values, while `reviews.rating LT valuePath: "stock"` compares that review with its containing Product. Every collection crossed by the right path must already be bound by the left chain. An unrelated `otherReviews.rating`, or a right-only collection, gives `INVALID_FILTER_PATH`; use an explicit group to choose an element. Conditions sharing a collection prefix in one group use that child, while separate groups can use different children. Normalization preserves outer origins internally; public `$parent`/`$root` paths remain unsupported. Aggregate group/fact prefixes retain their existing joined-row cardinality, and comparisons select those rows before grouping.
+Collection shorthand binds the same visible child for both paths. In a Product condition, `reviews.rating LT valuePath: "reviews.maxRating"` compares one review's own values, while `reviews.rating LT valuePath: "stock"` compares that review with its containing Product. Every collection crossed by the right path must already be bound by the left chain. An unrelated `otherReviews.rating`, or a right-only collection, gives `INVALID_FILTER_PATH`; use an explicit group to choose an element. Conditions sharing a collection prefix in one group use that child, while separate groups can use different children. Normalization preserves outer origins internally; `$parent` is available only for embedded containment with `elementFrames`, and `$root` remains unsupported. Aggregate group/fact prefixes retain their existing joined-row cardinality, and comparisons select those rows before grouping.
 
 Both paths need read permission, including a right field omitted from the selection, and obey stored/queryable/virtual restrictions. Client references read targets through their `find` scopes; a hidden or missing target contributes null. Comparison-only references add no legacy group-level joined restriction. Literal filters, sorts and facts keep their established scope behavior beside comparisons. Middleware and scope conditions read stored data; see [query scopes](./query-scope) and [marker-preserving edits](./middleware#keep-client-filter-objects).
 
@@ -253,6 +253,70 @@ query {
 Existing aggregate scope restrictions still apply: a nonempty target find scope on a joined collection returns `FORBIDDEN_FILTER_PATH` (403). For a caller restricted to visible services, use `services_aggregate` as the root, compare `price` with `durationMinutes`, group by `barbershop.address.city`, and use `id`/`price` as the fact paths. This applies the service scope at the root.
 
 Field comparisons have no general ordinary-index guarantee. Combine them with selective literal filters, inspect representative database plans, and use an application-maintained derived field when a measured hot path needs its own index. No data migration or generated index is required for this feature.
+
+## Embedded object lists and `$parent`
+
+::: info Unreleased source feature
+This extension is implemented in the source branch and is not available in the published 3.17.0 packages. Both bundled adapters declare `queryFeatures.elementFrames: true`; a custom adapter must declare it together with `quantifiers`, `referenceEmptiness` and `valuePath`, all `true`.
+:::
+
+`ANY`, `ALL` and `NONE` bind one embedded object at a time. Every condition in their body reads that same element. For this illustrative model:
+
+```javascript
+const Line = new GraphQLObjectType({
+  name: 'Line',
+  fields: { quantity: { type: GraphQLInt }, limit: { type: GraphQLInt } },
+});
+const Order = new GraphQLObjectType({
+  name: 'Order',
+  fields: {
+    id: { type: GraphQLID },
+    limit: { type: GraphQLInt },
+    lines: {
+      type: new GraphQLList(Line),
+      extensions: { relation: { embedded: true } },
+    },
+  },
+});
+simfinity.addNoEndpointType(Line);
+simfinity.connect(null, Order, 'order', 'orders');
+```
+
+The following query selects orders whose every line is within the order's limit:
+
+```graphql
+{
+  orders(AND: [{ ALL: [{
+    path: "lines"
+    conditions: [{ field: "quantity", operator: LTE, valuePath: "$parent.limit" }]
+  }] }]) {
+    id
+    lines { quantity limit }
+  }
+}
+```
+
+`valuePath: "limit"` reads the selected line's limit. `$parent.limit` reads the containing order. The equivalent field form is `lines: { quantifier: ALL, terms: [{ path: "quantity", operator: LTE, valuePath: "$parent.limit" }] }`.
+
+Containment includes single embedded objects. If Order instead contains `shipping: Shipping`, and Shipping has `limit` and `lines`, a group on `shipping.lines` uses `$parent.limit` for Shipping and `$parent.$parent.limit` for Order. A nested group on a line's `bundles` uses `$parent` for the **selected line**, even if another line has identical values or no ID. Array containers add no object level. A missing single object supplies null fields; comparing through it does not impose an extra existence condition.
+
+The origin belongs to the filter carrier: `shipping: { terms: [{ path: "limit", valuePath: "$parent.limit" }] }` compares Shipping with Order, while a root condition on `shipping.limit` remains in Order and must use ordinary `valuePath: "limit"`. Boolean groups do not change the origin.
+
+| Embedded list value | Elements tested | `ANY` | `ALL` | `NONE` |
+| --- | --- | --- | --- | --- |
+| Missing, `null`, `[]`, `[null]` | None | `false` | `true` | `true` |
+| `[{}]` | One empty object | Body result | Body result | Complement of body |
+| Non-null objects | Each object, ignoring null items | Some body matches | Every complete body matches | No body matches |
+
+An empty body matches every element. `ALL` negates the complete body when looking for a counterexample; nullable ordered/text comparisons remain false. This membership rule differs from `IS_EMPTY`, which tests the list value itself and considers `[null]` nonempty.
+
+Dotted comparisons such as `lines.quantity LTE valuePath: "lines.limit"` bind the same line for both operands; `valuePath: "limit"` there reads Order. The right operand cannot introduce another unbound list. Separate dotted conditions keep independent embedded witnesses; use an explicit group for shared-element correlation. Implicit dotted `NE` means no element satisfies equality; explicit `ANY` with local `NE` means some element differs. Literal filters keep their existing behavior.
+
+`$parent` stops at entity references and collections. Inside a group on `provider.lines`, it means Provider, and cannot climb back to the order that references Provider. Continue using declared reference paths across entities. Root `$parent`, `$root`, a bare `$parent`, and excessive upward prefixes fail with `INVALID_FILTER_PATH`. Collection fields in a selection start at each queried child: an embedded line may read that child's parent container, but `$parent` cannot name the document owning the selection.
+
+Both operands retain read rules, queryability and target `find` scopes; hidden referenced targets read as null. Trusted scope callbacks start at their own registered type and may use their own embedded containers. They cannot capture a caller's context. These filters work in lists, counted pages, aggregates, selected collection arguments with batching on or off, named views and MCP. They select records without trimming the returned embedded arrays or adding arguments to embedded selection fields. Aggregate collection rows keep their existing identity and cardinality. MongoDB collation behavior remains as described above.
+
+No storage migration is required. PostgreSQL uses correlated JSONB elements or existing owned rows, including their owner and null-item markers. MongoDB evaluates captured objects through correlated lookups without requiring embedded IDs or unwinding the outer result stream; the MongoDB 5.0 lookup minimum is unchanged. Each actual bound element frame counts toward the configured frame limits; single embedded containers and `$parent` prefixes add no frame by themselves.
 
 ## Empty values
 
@@ -527,7 +591,7 @@ query {
 
 `ANY` needs some matching element, `ALL` needs every element to match, and `NONE` needs no matching element. With no visible elements they return false, true and true respectively. With no conditions, `ANY` tests existence, `NONE` tests absence and `ALL` is always true. The field-filter form `seasons: { quantifier: ALL, terms: [{ path: "year", operator: GTE, value: 2020 }] }` expands into an explicit group; terms may be omitted or empty, but every supplied term needs a non-empty `path`, including emptiness terms. Plain shorthand still needs non-empty terms.
 
-Each explicit `path` is relative to its containing frame, may cross single references and single embedded objects, and must end at a collection or single reference without crossing a list. Nest groups to traverse two collections, or use a dotted shorthand such as `seasons.episodes.duration`. Paths ending at an embedded list give `UNSUPPORTED_QUERY` until embedded element frames are supported; scalar, scalar-list, single embedded object, interface and union ends give `INVALID_FILTER_PATH`. `IS_EMPTY`, `IS_NOT_EMPTY` and `CONTAINS_ALL` remain excluded on a leaf through shorthand collections; move the condition into an explicit group, retaining the operator's own validity rules. `IIN`, like `IN`, is covered by the shorthand. On an adapter that declares `quantifiers`, test the list of a collection's element with an explicit group, such as `ANY: [{ path: "reviews", conditions: [{ field: "tags", operator: CONTAINS_ALL, value: ["x", "y"] }] }]`.
+Each explicit `path` is relative to its containing frame, may cross single references and single embedded objects, and must end at a collection or single reference without crossing a list. Nest groups to traverse two collections, or use a dotted shorthand such as `seasons.episodes.duration`. Paths ending at an embedded object list require the unreleased `elementFrames` capability; scalar, scalar-list, single embedded object, interface and union ends give `INVALID_FILTER_PATH`. `IS_EMPTY`, `IS_NOT_EMPTY` and `CONTAINS_ALL` remain excluded on a leaf through shorthand collections; move the condition into an explicit group, retaining the operator's own validity rules. `IIN`, like `IN`, is covered by the shorthand. On an adapter that declares `quantifiers`, test the list of a collection's element with an explicit group, such as `ANY: [{ path: "reviews", conditions: [{ field: "tags", operator: CONTAINS_ALL, value: ["x", "y"] }] }]`.
 
 One group shares one frame for each collection prefix. A single `terms` set or `conditions` list with `seasons.year EQ 2025` and `seasons.number EQ 1` requires one season with both properties. Put the conditions in separate `AND` groups to allow different seasons. Each `OR` branch has its own frames; a longer prefix nests inside its shorter prefix in the same group. Appending a server restriction as a separate group preserves both filters but allows different witnesses; merge conditions into one group when they must hold for the same child.
 
@@ -548,7 +612,7 @@ In filters, sorts and aggregation paths, `id` names the record identity at the r
 Filter, sort, `groupId` and fact paths supplied by the client are collected before middleware and scopes run, so the paths those add are trusted:
 
 - No path segment may name a field with `extensions.queryable: false`, or a field with an application-defined `resolve`. This includes masking resolvers, relationship fields with a manual resolver, and a custom `id` resolver; only the resolvers Simfinity generates keep a field queryable. Set `extensions.queryable: true` to let clients query a stored field that has its own resolver. Such paths fail with `FORBIDDEN_FILTER_PATH` (403); unknown fields still fail with `INVALID_FILTER_FIELD` (400).
-- On a quantifier-capable adapter, collection filters apply the target's `find` scope inside the frame, and references crossed inside frames use scoped joins. A path into a type whose scope filters through collections is allowed when its prefix crosses no embedded list. `groupId` and fact paths into a scoped collection still fail with `FORBIDDEN_FILTER_PATH`, as do scopes reaching a reference inside an embedded list, and joined scopes through an embedded-list prefix that use collections or quantified groups. A client path crossing a reference inside an embedded list before or inside a collection frame also gives 403 when that reference's scope adds conditions. Adapters without `quantifiers` retain their earlier scoped-collection restrictions. Legacy paths through single references outside frames keep group/query-level joined scopes; see [query scope](./query-scope#relationship-paths-in-filters-sorts-and-aggregations).
+- On a quantifier-capable adapter, collection filters apply the target's `find` scope inside the frame, and references crossed inside frames use scoped joins. A path into a type whose scope filters through collections is allowed when its prefix crosses no embedded list. `groupId` and fact paths into a scoped collection still fail with `FORBIDDEN_FILTER_PATH`, as do scopes reaching a reference inside an embedded list, and joined scopes through an embedded-list prefix that use collections or quantified groups. A legacy unbound literal path crossing a reference inside an embedded list before or inside a collection frame also gives 403 when that reference's scope adds conditions. Bound element frames and new embedded comparisons apply scoped joins with `elementFrames`, as described above. Adapters without `quantifiers` retain their earlier scoped-collection restrictions. Legacy paths through single references outside frames keep group/query-level joined scopes; see [query scope](./query-scope#relationship-paths-in-filters-sorts-and-aggregations).
 - No path segment may name a [virtual field](#virtual-fields), which holds no stored value. Such paths fail with `FORBIDDEN_FILTER_PATH` (403) too, whatever `queryable` says.
 - An `IS_EMPTY` or `IS_NOT_EMPTY` condition on a whole embedded object, with or without a path, reads every member that the object stores, at any depth through single embedded objects, so each member path counts as a client path too. A member with `extensions.queryable: false` or an application-defined `resolve` fails with `FORBIDDEN_FILTER_PATH` (403), naming the member path, such as `director.salary`, and the authorization plugin checks each member's read rule. Virtual members are not read and not checked. These 403s come before the 400s of [rejected emptiness conditions](#rejected-emptiness-conditions), also for a reference or collection member, which is checked without being entered. Neither members nor named emptiness paths get the `find`-scope checks of the second bullet. An emptiness condition reads each reference and collection it reaches through a scoped join or a frame on the target's own `find` scope, as [references and collections](#references-and-collections) describes, which never repeats a record, so the scope cannot be misapplied: a restricted caller's `seasons: { terms: [{ operator: IS_EMPTY }] }` counts only the seasons that the `Season` scope admits instead of failing with 403, and `serie IS_EMPTY` gets no 403 when the `Serie` scope filters through a collection. On an adapter that does not declare `referenceEmptiness`, an emptiness condition that enters a reference or a collection fails with a 400 before any scope runs.
 - With the [authorization plugin](./authorization#filter-sort-and-aggregation-paths), every field a path names also needs a read rule.

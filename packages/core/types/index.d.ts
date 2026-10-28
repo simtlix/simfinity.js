@@ -1004,9 +1004,9 @@ export interface QueryPlan {
  * `valuePath` selects a compatible stored scalar operand instead of a literal value. It defaults
  * like `quantifiers`; a comparison node has `value: null` and `operand: { up, path, joins? }`.
  * Same-frame operands use the union of scoped paths in `joins`; internal shorthand outer bindings
- * use positive `up` and their own operand joins. Public inputs do not accept outer-frame syntax.
+ * use positive `up` and their own operand joins. Structural $parent operands add container: { up, path } with outer up zero; existing up semantics stay unchanged.
  * Null equality is two-valued, and a left scalar list uses null-safe EQ/NE membership.
- * Embedded-list comparisons, right scalar lists and incompatible logical types fail explicitly.
+ * Embedded-list comparisons require elementFrames; right scalar lists and incompatible logical types fail explicitly.
  *
  * `referenceEmptiness` defaults to true when `operators` is omitted and to false when it is given.
  * When it is false, an emptiness condition that crosses or ends at a reference or a collection, or

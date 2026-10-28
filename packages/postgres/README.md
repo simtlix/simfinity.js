@@ -147,3 +147,5 @@ pinned to the facade's exact version, including under pnpm or Yarn PnP. A late
 call fails without deleting installed metadata. Migrate clients selecting
 `__Field.extensions` before opting out. See the [descriptor reference](https://simtlix.github.io/simfinity.js/reference/client-descriptor.html)
 for the format, protected HTTP access and composition limits.
+
+The unreleased source adds `queryFeatures.elementFrames: true` for embedded object `ANY`/`ALL`/`NONE` and structural `$parent` operands. It requires `quantifiers`, `referenceEmptiness` and `valuePath`, all true. Missing/null lists and null items contribute no elements; `ALL` and `NONE` are true without elements. Parent traversal includes single embedded containers and stops at entity boundaries. Filters preserve selected arrays and outer row cardinality. See [the syntax and examples](https://simtlix.github.io/simfinity.js/guide/queries.html#embedded-object-lists-and-parent); published 3.17.0 does not support this extension.

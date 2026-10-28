@@ -36,3 +36,5 @@ handle operation kinds exhaustively must accept `transaction`. User-registered
 mutations retain `customMutation`.
 
 The descriptor also traverses the generated nullable `valuePath: String` field on `QLFilter`, `QLTypeFilter` and `QLFilterCondition` with format version 1 unchanged. This describes input shape, not adapter capabilities; `value`/`valuePath` mutual exclusion and `queryFeatures.valuePath` support are runtime validation rules.
+
+The unreleased embedded-frame extension reuses those input shapes and format version 1. `$parent` is a value-path string validated against structural containment at execution. Input presence does not advertise `queryFeatures.elementFrames`, and embedded selection fields gain no arguments.
