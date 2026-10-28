@@ -441,7 +441,7 @@ const clientScopes = (construct, label, paths, anchors = []) => {
 // the term or group condition that holds it, the only objects whose client scope marker is read, or null. Its joins
 // and frames are added to `lookups` as entries by alias, which the caller appends before the $match. A crossing, end
 // or member whose target has no model fails with INVALID_FILTER_PATH before any entry is added.
-const buildEmptinessClause = async (gqltype, path, operator, value, construct, lookups, aggregationsIncluded) => {
+const buildEmptinessClause = async (gqltype, path, operator, value, construct, lookups, aggregationsIncluded, origin) => {
   const segments = path.split('.');
   const shape = describeEmptiness(gqltype, segments, { operator, value, path });
   const { joins, frames } = emptinessScopePaths(shape, segments);
@@ -457,13 +457,13 @@ const buildEmptinessClause = async (gqltype, path, operator, value, construct, l
     for (const relationPath of paths) compiled.set(relationPath, await compileTargetScope(build, scopes[relationPath], targets.get(relationPath)));
   }
   const ctx = {
-    build, lookups, scopes: compiled, chain: [], model: getModel(gqltype),
+    build, lookups, scopes: compiled, chain: [], model: origin?.model ?? getModel(gqltype),
   };
   // Crossings: a plain lookup, shared with the other operators, while every crossing so far is trusted or has a null
   // scope; from the first scoped crossing on, a scoped join keyed by the scopes of every crossing up to it, also when
   // its own scope is null, correlated through the joins before it.
   const crossings = new Set(joins);
-  let parent = { key: '', schemaPath: '', path: '' };
+  let parent = { key: '', schemaPath: '', path: '', ...origin?.parent };
   let type = gqltype;
   let scoped = false;
   for (const name of segments.slice(0, -1)) {
@@ -513,7 +513,7 @@ const buildEmptinessClause = async (gqltype, path, operator, value, construct, l
 // A build keeps one rewrite context; aggregate J paths must survive every logical-group pass.
 const rewriteContext = (gqltype, operation = 'find', aggregation) => {
   const ctx = {
-    gqltype, operation, quantifiers: true, referenceEmptiness: true, valuePath: true,
+    gqltype, operation, quantifiers: true, referenceEmptiness: true, valuePath: true, elementFrames: true,
     operators: new Set(MONGO_QUERY_OPERATORS), base: '', inFrame: false, ancestors: [], bindings: new Map(),
   };
   // Ordinary root markers reject at the existing post-value guards, preserving native order.
@@ -525,10 +525,10 @@ const rewriteContext = (gqltype, operation = 'find', aggregation) => {
 // Cross references in the containing pipeline. Collection steps occur here only for an aggregate
 // anchor, or inside the prefix witness of a hand-built implicit group that crosses a collection
 // before its end: all ordinary collection crossings have already become frames in the shared rewrite.
-const crossFramePath = async (gqltype, segments, scopes, build, lookups, included, comparison = false, J = new Set()) => {
+const crossFramePath = async (gqltype, segments, scopes, build, lookups, included, comparison = false, J = new Set(), origin) => {
   let type = gqltype;
-  let parent = { key: '', schemaPath: '', path: '' };
-  let model = getModel(type);
+  let parent = { key: '', schemaPath: '', path: '', ...origin?.parent };
+  let model = origin?.model ?? getModel(type);
   const chain = [];
   const guards = [];
   let scoped = false;
@@ -590,21 +590,83 @@ const crossFramePath = async (gqltype, segments, scopes, build, lookups, include
 // A non-emptiness marker is legal only inside a frame, on a condition crossing references. Its
 // keys are relative to the element, just like 2b emptiness keys in the same sub-build.
 const resolveConditionPath = async (gqltype, path, construct, included, ctx) => {
-  if (!hasScopeMarker(construct)) return resolveQueryPath(gqltype, path, included);
+  if (!hasScopeMarker(construct)) return resolveQueryPath(gqltype, path, included, ctx?.origin);
   // buildQueryTerms rejects the marker immediately after buildMatchesClause; group conditions
   // also retain their raw-condition guard. No accepted path parses or casts a value twice.
-  if (!ctx?.inFrame && ctx?.deferOrdinaryRootMarkers === true) return resolveQueryPath(gqltype, path, included);
+  if (!ctx?.inFrame && ctx?.deferOrdinaryRootMarkers === true) return resolveQueryPath(gqltype, path, included, ctx?.origin);
   if (!ctx?.inFrame) throw detachedFilter(`${construct.operator ?? 'EQ'} on ${joinPath(ctx?.base, path)} carries a client scope marker, but is not an emptiness condition`);
   const paths = crossingKeys(path.split('.'), { gqltype });
   const scopes = clientScopes(construct, `${construct.operator ?? 'EQ'} on ${joinPath(ctx.base, path)}`, paths);
   const aggregateClauses = {};
-  const crossed = await crossFramePath(gqltype, path.split('.').slice(0, -1), scopes, relationBuild(included), aggregateClauses, included);
+  const crossed = await crossFramePath(gqltype, path.split('.').slice(0, -1), scopes, relationBuild(included), aggregateClauses, included, false, new Set(), ctx?.origin);
   const resolved = resolveQueryPath(crossed.type, path.split('.').at(-1), included, crossed);
   return { ...resolved, aggregateClauses: { ...aggregateClauses, ...resolved.aggregateClauses } };
 };
 
 const groupHasComparison = (group) => group.conditions?.some((condition) => hasValuePath(condition) || condition.__operand)
   || ['AND', 'OR', 'ANY', 'ALL', 'NONE'].some((key) => group[key]?.some(groupHasComparison));
+
+// Seed an isolated pipeline from its owning stored record, then use only captured object
+// values. This retains MongoDB 5.0 compatibility and never requires an embedded _id.
+const elementSource = (ctx, documents, bindings) => {
+  const model = ctx.elementSource?.model ?? getModel(ctx.gqltype);
+  if (!model) throw filterError('An embedded frame requires its owning stored record', 'INVALID_FILTER_PATH');
+  const build = relationBuild(ctx.included);
+  const owner = `sf_owner${build.counts.binding++}`;
+  const items = `sf_items${build.counts.binding++}`;
+  bindings.set(owner, ctx.elementSource?.id ?? '$_id');
+  bindings.set(items, documents);
+  return { from: model.collection.collectionName, source: { model, id: `$$${owner}` }, pipeline: [
+    { $match: { $expr: { $eq: ['$_id', `$$${owner}`] } } }, { $limit: 1 },
+    { $project: { _id: 0, __sf_elements: `$$${items}` } },
+    { $unwind: '$__sf_elements' }, { $replaceWith: '$__sf_elements' },
+  ] };
+};
+
+// The isolated witness consumes actual array values. All of its joins remain local to one
+// concrete element; equal elements and nullable members do not need synthetic identities.
+const compileElementFrame = async (ctx, quantifier, group, crossed, scopes, lookups) => {
+  const build = relationBuild(ctx.included);
+  if (!build.serials.has(group)) build.serials.set(group, build.counts.serial++);
+  const alias = allocateRelationAlias(build, 'frame', `element:${build.serials.get(group)}`);
+  const name = group.path.split('.').at(-1);
+  const type = getNamedType(crossed.type.getFields()[name].type);
+  const source = `$${joinPath(crossed.parent.key, name)}`;
+  const stages = [];
+  const included = {};
+  relationBuilds.set(included, { ...relationBuild(included), counts: build.counts, scopes: build.scopes });
+  const childCtx = {
+    ...rewriteContext(type), base: joinPath(ctx.base, group.path), inFrame: true, element: true,
+    ancestors: [...ctx.ancestors, ctx], stages, included, parentScopes: scopes,
+    origin: { model: crossed.model, parent: { key: '', schemaPath: joinPath(crossed.parent.schemaPath, name), path: '' } },
+  };
+  const seed = elementSource(ctx, { $filter: {
+    input: { $cond: [{ $isArray: source }, source, []] }, as: 'sf_element',
+    cond: { $eq: [{ $type: '$$sf_element' }, 'object'] },
+  } }, childCtx.bindings);
+  childCtx.elementSource = seed.source;
+  const body = await buildFilterGroupMatch(group, type, stages, included, 0, childCtx);
+  if (quantifier === 'ALL' && body === null) return {};
+  let bodyStages = stages;
+  let match = quantifier === 'ALL' ? { $nor: [body] } : body;
+  if (quantifier === 'ALL' && multiplyingBuilds.has(included)) {
+    const witness = allocateRelationAlias(build, 'frame', `element-body:${build.serials.get(group)}`);
+    const bindings = new Map();
+    const bodySeed = elementSource(childCtx, ['$$ROOT'], bindings);
+    bodyStages = [{ $lookup: { from: bodySeed.from, let: Object.fromEntries(bindings),
+      pipeline: [...bodySeed.pipeline, ...stages, { $match: body }, { $limit: 1 }], as: witness,
+    } }];
+    match = { [`${witness}.0`]: { $exists: false } };
+  }
+  lookups[alias] = { stages: [{ $lookup: {
+    from: seed.from, let: Object.fromEntries(childCtx.bindings),
+    pipeline: [...seed.pipeline, ...bodyStages,
+      ...(body === null ? [] : [{ $match: match }]), { $limit: 1 }, { $project: { _id: 1 } }],
+    as: alias,
+  } }] };
+  appendLookups(ctx.stages, ctx.included, lookups);
+  return { [`${alias}.0`]: { $exists: quantifier === 'ANY' } };
+};
 
 const compileFrame = async (ctx, quantifier, group) => {
   const build = relationBuild(ctx.included);
@@ -642,7 +704,7 @@ const compileFrame = async (ctx, quantifier, group) => {
   // looks for a prefix whose complete ALL test fails, including vacuous empty prefixes.
   if (multiplyingPrefix && !anchor.length && !ctx.prefixIsolated && !emptyAll) {
     const model = getModel(ctx.gqltype);
-    if (!model) throw filterError(`Related model is not available for ${ctx.gqltype.name}`, 'INVALID_FILTER_PATH');
+    if (!model && !ctx.element) throw filterError(`Related model is not available for ${ctx.gqltype.name}`, 'INVALID_FILTER_PATH');
     if (!build.serials.has(group)) build.serials.set(group, build.counts.serial++);
     const alias = allocateRelationAlias(build, 'frame', `prefix:${build.serials.get(group)}`);
     const stages = [];
@@ -650,19 +712,24 @@ const compileFrame = async (ctx, quantifier, group) => {
     relationBuilds.set(included, { ...relationBuild(included), counts: build.counts, scopes: build.scopes });
     const positive = await compileFrame({ ...ctx, stages, included, prefixIsolated: true }, quantifier === 'NONE' ? 'ANY' : quantifier, group);
     if (quantifier === 'ALL' && !Object.keys(positive).length) return {};
+    const bindings = new Map();
+    const seed = ctx.element ? elementSource(ctx, ['$$ROOT'], bindings) : null;
     ctx.stages.push({ $lookup: {
-      from: model.collection.collectionName, localField: '_id', foreignField: '_id',
-      pipeline: [...stages, { $match: quantifier === 'ALL' ? { $nor: [positive] } : positive }, { $limit: 1 }, { $project: { _id: 1 } }],
+      ...(seed ? { from: seed.from, let: Object.fromEntries(bindings) } : { from: model.collection.collectionName, localField: '_id', foreignField: '_id' }),
+      pipeline: [...(seed?.pipeline ?? []), ...stages, { $match: quantifier === 'ALL' ? { $nor: [positive] } : positive }, { $limit: 1 }, { $project: { _id: 1 } }],
       as: alias,
     } });
     ctx.included[alias] = true;
     return { [`${alias}.0`]: { $exists: quantifier === 'ANY' } };
   }
   const lookups = {};
-  const crossed = await crossFramePath(ctx.gqltype, segments.slice(0, -1), anchor.length && !anchoredComparison ? null : scopes, build, lookups, ctx.included, anchoredComparison, ctx.J);
+  const crossed = await crossFramePath(ctx.gqltype, segments.slice(0, -1), anchor.length && !anchoredComparison ? null : scopes, build, lookups, ctx.included, anchoredComparison, ctx.J, ctx.origin);
   const name = segments.at(-1);
   const field = crossed.type.getFields()[name];
   const targetType = getNamedType(field.type);
+  if ((!field.extensions?.relation || field.extensions.relation.embedded) && getListShape(field.type)) {
+    return compileElementFrame(ctx, quantifier, group, crossed, scopes, lookups);
+  }
   const path = segments.join('.');
   const scope = scopes ? await compileTargetScope(build, scopes[path], targetType) : null;
   if (emptyAll) return {};
@@ -675,7 +742,7 @@ const compileFrame = async (ctx, quantifier, group) => {
   relationBuilds.set(included, { ...relationBuild(included), counts: build.counts, scopes: build.scopes });
   const childCtx = {
     ...rewriteContext(targetType), base: joinPath(ctx.base, path), inFrame: true,
-    ancestors: [...ctx.ancestors, ctx], stages, included,
+    ancestors: [...ctx.ancestors, ctx], stages, included, parentScopes: scopes,
   };
   const body = await buildFilterGroupMatch(group, targetType, stages, included, 0, childCtx);
   if (quantifier === 'ALL' && body === null) return {};
@@ -831,7 +898,7 @@ const normalizeComparisonValue = (value, enumEntries, resolved) => {
 // separate scoped alias even when its target has no restriction, so legacy joins cannot narrow it.
 const resolveComparisonPath = async (ctx, path, scopes, included, lookups) => {
   const parts = path.split('.');
-  const crossed = await crossFramePath(ctx.gqltype, parts.slice(0, -1), scopes, relationBuild(included), lookups, included, true, ctx.J);
+  const crossed = await crossFramePath(ctx.gqltype, parts.slice(0, -1), scopes, relationBuild(included), lookups, included, true, ctx.J, ctx.origin);
   const resolved = resolveQueryPath(crossed.type, parts.at(-1), included, crossed);
   Object.assign(lookups, resolved.aggregateClauses);
   return { ...resolved, guards: crossed.guards };
@@ -842,11 +909,12 @@ const comparisonValue = (resolved) => (resolved.guards.length
 
 const buildComparisonClause = async (gqltype, path, rightPath, condition, included, ctx) => {
   const lookups = {};
-  const up = condition.__operand?.up ?? 0;
+  const container = condition.__operand?.container;
+  const up = container?.up ?? condition.__operand?.up ?? 0;
   if (!Number.isInteger(up) || up < 0 || up > ctx.ancestors.length) {
     throw filterError('A field operand requires an available outer frame', 'INVALID_FILTER_PATH');
   }
-  const operandPath = condition.__operand ? condition.__operand.path?.join('.') : rightPath;
+  const operandPath = condition.__operand ? [...(container?.path ?? []), ...condition.__operand.path].join('.') : rightPath;
   assertValidFilterPath(operandPath);
   const leftCrossings = crossingKeys(path.split('.'), { gqltype });
   const rightCrossings = up ? [] : crossingKeys(operandPath.split('.'), { gqltype });
@@ -859,7 +927,16 @@ const buildComparisonClause = async (gqltype, path, rightPath, condition, includ
   let rightValue;
   if (up) {
     const ancestor = ctx.ancestors.at(-up);
-    const outerScopes = condition.__operand.scopes;
+    let outerScopes = condition.__operand.scopes;
+    if (container) {
+      const entering = [...ctx.ancestors, ctx].at(-up);
+      const prefix = container.path.join('.');
+      const inherited = Object.entries(entering.parentScopes ?? {}).filter(([key]) => key === prefix || prefix.startsWith(`${key}.`));
+      if (inherited.length || outerScopes !== undefined) outerScopes = {
+        ...Object.fromEntries(inherited),
+        ...Object.fromEntries(Object.entries(outerScopes ?? {}).map(([key, value]) => [joinPath(prefix, key), value])),
+      };
+    }
     const outerAnchors = anchorsFor(ancestor, [operandPath]);
     const outerPaths = [...crossingKeys(operandPath.split('.'), { gqltype: ancestor.gqltype }), ...outerAnchors];
     if (outerScopes !== undefined) clientScopes({ __scope: { scopes: outerScopes } }, `Outer field comparison on ${operandPath}`, outerPaths, outerAnchors);
@@ -1001,7 +1078,7 @@ const buildQueryTerms = async (filterField, qlField, fieldName, gqltype, aggrega
       if (pathed) assertValidFilterPath(term.path);
       matchesClauses.push(await buildEmptinessClause(
         gqltype, pathed ? `${fieldName}.${term.path}` : fieldName, term.operator, term.value, isObject ? term : null,
-        aggregateClauses, aggregationsIncluded,
+        aggregateClauses, aggregationsIncluded, ctx?.origin,
       ));
       continue;
     }
@@ -1059,7 +1136,7 @@ const buildFilterGroupMatch = async (rawFilterGroup, gqltype, aggregateClauses, 
       const path = rawCondition.path ? `${rawCondition.field}.${rawCondition.path}` : rawCondition.field;
       if (isEmptinessOperator(condition.operator)) {
         const lookups = {};
-        const match = await buildEmptinessClause(gqltype, path, condition.operator, condition.value, rawCondition, lookups, aggregationsIncluded);
+        const match = await buildEmptinessClause(gqltype, path, condition.operator, condition.value, rawCondition, lookups, aggregationsIncluded, ctx.origin);
         appendLookups(aggregateClauses, aggregationsIncluded, lookups);
         parts.push(match);
         continue;

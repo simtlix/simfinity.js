@@ -30,6 +30,7 @@ const firstError = (result) => JSON.parse(result.content[0].text).errors[0];
 const undeclaredTools = (adapter) => {
   const queryFeatures = { ...adapter.queryFeatures };
   delete queryFeatures.quantifiers;
+  delete queryFeatures.elementFrames;
   const reads = [];
   const rejectRead = (method) => () => { reads.push(method); throw new Error(`Unexpected ${method} on undeclared adapter`); };
   const api = createRuntime({

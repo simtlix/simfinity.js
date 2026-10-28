@@ -65,7 +65,7 @@ describe('field comparison walkers and plans', () => {
     fault(condition('stock', 'label'), 'INVALID_FILTER_VALUE');
     fault(condition('stock', 'missing'), 'INVALID_FILTER_FIELD');
     fault(condition('stock', 'tags'), 'INVALID_FILTER_PATH');
-    fault(condition('items.amount', 'items.ceiling'), 'UNSUPPORTED_QUERY');
+    fault(condition('items.amount', 'items.ceiling'), 'UNSUPPORTED_QUERY', { elementFrames: false });
     fault(condition('stock', 'maximum'), 'UNSUPPORTED_QUERY', { operators: ['EQ'] });
     fault(condition('stock', 'maximum'), 'UNSUPPORTED_QUERY', { operators: ['EQ'], valuePath: true });
     expect(plan(condition('stock', 'maximum'), { operators: ['EQ'], valuePath: true, referenceEmptiness: true })).toEqual(pred('stock', 'maximum'));

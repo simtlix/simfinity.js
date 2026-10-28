@@ -22,7 +22,7 @@ export const createSQLAdapter = (sourcePlugin) => {
   // UNSUPPORTED_QUERY, also for reads that do not go through the runtime, such as model.find().
   // createQueryPlan defaults feature flags to false when `operators` is given, so each flag
   // is passed explicitly.
-  const { operators, referenceEmptiness = false, quantifiers = false, valuePath = false } = plugin.queryFeatures;
+  const { operators, referenceEmptiness = false, quantifiers = false, valuePath = false, elementFrames = false } = plugin.queryFeatures;
   let configured = options ? Object.freeze({ ...options }) : null;
   let prepared = false;
   let ready = false;
@@ -58,7 +58,7 @@ export const createSQLAdapter = (sourcePlugin) => {
   };
   const execute = async (model, gqltype, args, session, mode, extra) => {
     const name = nameOf(model);
-    const plan = createQueryPlan(models, name, args, { mode, operators, referenceEmptiness, quantifiers, valuePath });
+    const plan = createQueryPlan(models, name, args, { mode, operators, referenceEmptiness, quantifiers, valuePath, elementFrames });
     const compiled = plugin.compileQuery(models, database, plan, extra, configured);
     const { rows } = await query(compiled, session);
     if (mode === 'count') return Number(rows[0]?.size || 0);
@@ -110,7 +110,7 @@ export const createSQLAdapter = (sourcePlugin) => {
     const keys = parentIds.map((id) => castId(id));
     const ids = [...new Set(keys)];
     if (!ids.length) return [];
-    const plan = createQueryPlan(models, name, args, { mode: 'find', operators, referenceEmptiness, quantifiers, valuePath });
+    const plan = createQueryPlan(models, name, args, { mode: 'find', operators, referenceEmptiness, quantifiers, valuePath, elementFrames });
     const chunks = [];
     for (let start = 0; start < ids.length; start += CHILDREN_BATCH_SIZE) {
       const chunk = ids.slice(start, start + CHILDREN_BATCH_SIZE);

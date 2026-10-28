@@ -78,12 +78,17 @@ export const bindPlugin = (plugin) => {
   if (queryFeatures?.quantifiers === true && queryFeatures.referenceEmptiness !== true) {
     invalid('SQL plugin queryFeatures.quantifiers requires referenceEmptiness');
   }
+  if (queryFeatures?.elementFrames != null && typeof queryFeatures.elementFrames !== 'boolean') invalid('SQL plugin queryFeatures.elementFrames must be a boolean');
+  if (queryFeatures?.elementFrames === true && (queryFeatures.referenceEmptiness !== true || queryFeatures.quantifiers !== true || queryFeatures.valuePath !== true)) {
+    invalid('SQL plugin queryFeatures.elementFrames requires quantifiers, referenceEmptiness and valuePath');
+  }
   const declared = queryFeatures != null && (queryFeatures.compileQuery === undefined || queryFeatures.compileQuery === bound.compileQuery);
   bound.queryFeatures = Object.freeze({
     operators: Object.freeze([...(declared ? queryFeatures.operators : LEGACY_QUERY_OPERATORS)]),
     ...(declared && queryFeatures.referenceEmptiness === true ? { referenceEmptiness: true } : {}),
     ...(declared && queryFeatures.quantifiers === true ? { quantifiers: true } : {}),
     ...(declared && queryFeatures.valuePath === true ? { valuePath: true } : {}),
+    ...(declared && queryFeatures.elementFrames === true ? { elementFrames: true } : {}),
   });
   for (const [group, names] of Object.entries(methods)) {
     const members = {};

@@ -76,8 +76,9 @@ describe('field comparisons in public clients', () => {
     const tool = byName(tools, 'mcpFcProducts');
     expect(tool.description).toContain('valuePath');
     expect(tool.description).toContain('queryFeatures.valuePath');
-    expect(tool.description).toContain('embedded-list crossings');
-    expect(tool.description).toContain('$parent/$root');
+    expect(tool.description).toContain('queryFeatures.elementFrames: true');
+    expect(tool.description).toContain('$parent.');
+    expect(tool.description).toContain('$root remains unsupported');
     for (const type of ['QLFilter', 'QLTypeFilter', 'QLFilterCondition']) {
       expect(tool.inputSchema.$defs[type].description).toContain('valuePath');
       expect(tool.inputSchema.$defs[type].description).toContain('mutually exclusive');

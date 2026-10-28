@@ -14,8 +14,11 @@ describe('field comparison operands', () => {
     error(() => operators.validateComparisonOperand({ value: null, valuePath: 'stock' }), 'INVALID_FILTER_VALUE');
     error(() => operators.validateComparisonOperand({ value: 0, valuePath: 'stock' }), 'INVALID_FILTER_VALUE');
   });
-  it.each(['', 'a..b', '$parent.a', 'a.$root', '.a', 'a.', 'a[0]', 'a b'])('rejects non-field syntax %j', (path) => {
+  it.each(['', 'a..b', '$root.a', 'a.$root', '.a', 'a.', 'a[0]', 'a b'])('rejects non-field syntax %j', (path) => {
     error(() => operators.validateComparisonOperand({ valuePath: path }), 'INVALID_FILTER_PATH');
+  });
+  it('accepts embedded parent syntax for subsequent context validation', () => {
+    expect(operators.validateComparisonOperand({ valuePath: '$parent.$parent.amount' })).toBe('$parent.$parent.amount');
   });
   it.each([[false], [0], [[]], [{}]])('rejects non-string path %j', (path) => {
     error(() => operators.validateComparisonOperand({ valuePath: path }), 'INVALID_FILTER_VALUE');

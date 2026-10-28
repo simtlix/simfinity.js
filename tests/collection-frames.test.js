@@ -61,13 +61,13 @@ describe('collection frames: features', () => {
 
   it.each([false, null, undefined])('normalizes quantifiers %j to false', (quantifiers) => {
     expect(resolveQueryFeatures({ operators: ['EQ'], quantifiers })).toEqual({
-      operators: new Set(['EQ']), referenceEmptiness: false, quantifiers: false, valuePath: false,
+      operators: new Set(['EQ']), referenceEmptiness: false, quantifiers: false, valuePath: false, elementFrames: false,
     });
   });
 
   it('enables quantifiers only with reference emptiness and retains known operators', () => {
     expect(resolveQueryFeatures({ operators: ['EQ', 'FUTURE', 'IS_EMPTY'], referenceEmptiness: true, quantifiers: true })).toEqual({
-      operators: new Set(['EQ', 'IS_EMPTY']), referenceEmptiness: true, quantifiers: true, valuePath: false,
+      operators: new Set(['EQ', 'IS_EMPTY']), referenceEmptiness: true, quantifiers: true, valuePath: false, elementFrames: false,
     });
   });
 

@@ -132,7 +132,7 @@ describe('PostgreSQL collection frame statements', () => {
     expect(result.text).toContain('AND NOT (');
     expect(result.values).toEqual([value]);
   });
-  it.each([['olines', 'UNSUPPORTED_QUERY'], ['odim', 'INVALID_FILTER_PATH']])('classifies the hand-built terminal path %s as %s', (path, expected) => {
+  it.each([['odim', 'INVALID_FILTER_PATH']])('classifies the hand-built terminal path %s as %s', (path, expected) => {
     const error = caught(() => compile(frame(path, null)));
     expect(error?.extensions, error?.stack).toMatchObject({ code: expected, status: 400 });
   });
@@ -214,7 +214,7 @@ describe('PostgreSQL collection frame statements', () => {
   });
   it.each([false, null, undefined])('pin: leaves quantifiers undeclared for %s', (quantifiers) => {
     const plugin = postgresPlugin();
-    expect(bindPlugin({ ...plugin, queryFeatures: { ...plugin.queryFeatures, quantifiers } }).queryFeatures).toEqual({ operators: plugin.queryFeatures.operators, referenceEmptiness: true, valuePath: true });
+    expect(bindPlugin({ ...plugin, queryFeatures: { ...plugin.queryFeatures, quantifiers, elementFrames: false } }).queryFeatures).toEqual({ operators: plugin.queryFeatures.operators, referenceEmptiness: true, valuePath: true });
   });
   it('requires referenceEmptiness and binds quantifiers only to the declared compiler', () => {
     const plugin = postgresPlugin();

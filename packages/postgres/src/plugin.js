@@ -28,6 +28,7 @@ export const postgresPlugin = (options) => ({
     referenceEmptiness: true,
     quantifiers: true,
     valuePath: true,
+    elementFrames: true,
     compileQuery,
   },
   naming: { validateIdentifier: identifier, generatedName },
