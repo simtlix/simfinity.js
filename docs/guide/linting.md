@@ -320,10 +320,54 @@ belongs to an embedded value, declare it inside that embedded type. Decide which
 model is intended before changing the declaration; moving a stored reference may
 require a data migration. See [relationships](./relationships).
 
-Omitted, null and empty link values retain their meaning. Links on embedded
+In published plugin 0.3.1, omitted, null and empty link values retain their meaning. Links on embedded
 relations are not checked. Virtual fields have no added storage/relation
 requirement, including virtual fields with required arguments introduced in 3.8.0.
 The rule does not establish that a referenced target field exists.
+
+### Required collection links (unreleased source)
+
+The source version extends this rule to report an omitted, `null`, `undefined` or
+empty `connectionField` on a directly registered, writable referenced object
+collection without its own resolver. This is an additional diagnostic under the
+same `recommended-3.8` rule; npm 0.3.1 does not include it yet.
+
+```javascript
+import { GraphQLID, GraphQLList, GraphQLObjectType, GraphQLString } from 'graphql';
+import * as simfinity from '@simtlix/simfinity-postgres';
+
+const Line = new GraphQLObjectType({
+  name: 'Line',
+  fields: { id: { type: GraphQLID }, label: { type: GraphQLString } },
+});
+const Order = new GraphQLObjectType({
+  name: 'Order',
+  fields: {
+    id: { type: GraphQLID },
+    lines: {
+      type: new GraphQLList(Line),
+      extensions: { relation: {} }, // missing-link diagnostic
+      // Set relation: { connectionField: 'orderId' } to declare the child link.
+    },
+  },
+});
+simfinity.connect(null, Line, 'line', 'lines');
+simfinity.connect(null, Order, 'order', 'orders');
+```
+
+The check follows local aliases and outer/item non-null wrappers. It requires a
+known object target, so imported types and `simfinity.getType()` results remain
+unknown. It skips dynamic configuration, fields with `readOnly` or their own
+resolver, virtual declarations, singular references and embedded/scalar/nested
+lists. An embedded type receives this check only if it is also registered itself.
+Whitespace-only links preserve the runtime's behavior; the rule does not trim them.
+
+Core permits some missing-link combinations with `readOnly` or a resolver, while
+PostgreSQL or transactional MongoDB storage metadata can still reject them. Those
+engine-specific checks and the contextual warnings remain outside this delivery.
+The shared startup error was revalidated against 3.8.0 source and current 3.18.0
+core, MongoDB and PostgreSQL tests. This only extends bounded MOD-03 coverage;
+[issue #116](https://github.com/simtlix/simfinity.js/issues/116) remains open.
 
 ## Supported analysis and limits
 
@@ -344,6 +388,8 @@ run during analysis.
 
 The bounded consumer trial lints both Barber backends and checks ten injected
 policy, relation and authorization-contract violations per backend in memory.
+The unreleased source additionally checks a local object-collection sentinel for
+each backend; Barber's dynamic collection targets are outside this new check.
 It does not certify their business policies
 or measure accuracy against the entire candidate catalogue. Native operations
 remain an application option; consult [server-side operations](./server-side-operations)

@@ -39,7 +39,7 @@ export default [
 ];
 `);
   const prelude = `import * as sf from '@simtlix/simfinity-js';
-import { GraphQLObjectType } from 'graphql';
+import { GraphQLObjectType, GraphQLList } from 'graphql';
 import { createAuthPlugin, createRuleFromExpression, requireAuth, anyRule, requireRole } from '@simtlix/simfinity-core/auth';
 import { mapSchema } from '@graphql-tools/utils';
 `;
@@ -56,6 +56,8 @@ requireAuth(async context => context.user);
 sf.use(createAuthPlugin({}));
 createRuleFromExpression({ eq: [{ ref: 'context.id' }, 1] });
 createAuthPlugin({ Book: { title: { anyOf: [true, { unknown: true }] } } });
+const Child = new GraphQLObjectType({ name: 'Child', fields: {} });
+sf.connect(null, new GraphQLObjectType({ name: 'Owner', fields: { children: { type: new GraphQLList(Child), extensions: { relation: {} } } } }), 'owner', 'owners');
 throw new Error('Linting must not execute application code');
 `);
   await writeFile(join(directory, 'fixtures/valid.js'), prelude + `const schema = sf.createSchema();
@@ -69,10 +71,21 @@ requireAuth(context => context.user);
 createYoga({ schema, plugins: [createAuthPlugin({})] });
 createRuleFromExpression({ eq: [{ ref: 'ctx.id' }, 1] });
 createAuthPlugin({ Book: { title: { anyOf: [true, { allOf: [] }] } } });
+const Child = new GraphQLObjectType({ name: 'Child', fields: {} });
+sf.connect(null, new GraphQLObjectType({ name: 'Owner', fields: { children: { type: new GraphQLList(Child), extensions: { relation: {}, readOnly: true }, resolve: () => [] } } }), 'owner', 'owners');
 throw new Error('Linting must not execute application code');
 `);
   await writeFile(join(directory, 'fixtures/invalid.ts'), "import { configureQueryLimits, auth, createRuntime } from '@simtlix/simfinity-core';\nconst cap = 0 as const; configureQueryLimits({ maxPageSize: cap });\nauth.createAuthPlugin({ Book: { title: [] } } satisfies Permissions);\nauth.createRule(false as const);\nauth.requirePermission(['read', ''] as const);\nauth.isOwner((async p => p.ownerId) as Extractor);\ncreateRuntime(adapter).use(auth.createAuthPlugin({}) as unknown as Middleware);\nauth.createRuleFromExpression({ eq: [{ ref: 'context.id' as const }, 1] });\nauth.createAuthPlugin({ Book: { title: { allOf: false } } } satisfies Permissions);\n");
   await writeFile(join(directory, 'fixtures/valid.ts'), "import { configureQueryLimits, auth, createRuntime } from '@simtlix/simfinity-core';\nconst cap = 100 as const; configureQueryLimits({ maxPageSize: cap });\nauth.createAuthPlugin({ Book: { title: true } } satisfies Permissions);\nauth.createRule(async () => true);\nauth.requirePermission(['read', 'write'] as const);\nauth.isOwner((p => p.ownerId) as Extractor);\ncreateRuntime(adapter).use(middleware as Middleware);\nauth.createRuleFromExpression({ eq: [{ ref: 'ctx.id' as const }, 1] });\nauth.createAuthPlugin({ Book: { title: { allOf: [] } } } satisfies Permissions);\n");
+  const collectionTs = `import { GraphQLObjectType, GraphQLList, GraphQLNonNull } from 'graphql';
+import * as sf from '@simtlix/simfinity-postgres';
+const Child = new GraphQLObjectType({ name: 'Child', fields: {} });
+sf.connect(null, new GraphQLObjectType({ name: 'Owner', fields: { children: { type: new GraphQLNonNull(new GraphQLList(Child)), extensions: { relation: { connectionField: LINK } as const } } } }), 'owner', 'owners');
+`;
+  for (const [name, link] of [['invalid', 'null'], ['valid', "'owner'"]]) {
+    const path = join(directory, `fixtures/${name}.ts`);
+    await writeFile(path, await readFile(path, 'utf8') + collectionTs.replace('LINK', link));
+  }
   let output;
   try {
     output = execute(process.execPath, ['node_modules/eslint/bin/eslint.js', 'fixtures', '--format', 'json', '--fix']);
@@ -97,6 +110,7 @@ throw new Error('Linting must not execute application code');
     ['simfinity/no-auth-plugin-as-middleware', 14],
     ['simfinity/valid-policy-expression', 15],
     ['simfinity/valid-policy-expression', 16],
+    ['simfinity/valid-connection-field', 18],
   ]);
   const ts = reports.find(report => report.filePath.endsWith('/invalid.ts'));
   assert.deepEqual(ts.messages.map(message => [message.ruleId, message.line]), [
@@ -108,6 +122,7 @@ throw new Error('Linting must not execute application code');
     ['simfinity/no-auth-plugin-as-middleware', 7],
     ['simfinity/valid-policy-expression', 8],
     ['simfinity/valid-policy-expression', 9],
+    ['simfinity/valid-connection-field', 13],
   ]);
   for (const report of reports) {
     assert.equal(report.fatalErrorCount, 0);
@@ -126,7 +141,7 @@ export default config;
   const installedVersion = execute(process.execPath, ['--input-type=module', '-e', "import plugin from '@simtlix/eslint-plugin-simfinity'; console.log(plugin.meta.version);"]).trim();
   assert.equal(installedVersion, manifest.version, 'Packed plugin metadata must match the package version');
   execute(process.execPath, ['node_modules/typescript/bin/tsc', '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext', 'config.ts']);
-  console.log('Packed consumer passed: thirteen JS and eight TS diagnostics, config/rule types, valid fixtures, no runtime dependencies or source fixes.');
+  console.log('Packed consumer passed: fourteen JS and nine TS diagnostics, config/rule types, valid fixtures, no runtime dependencies or source fixes.');
 } finally {
   await rm(directory, { recursive: true, force: true });
 }

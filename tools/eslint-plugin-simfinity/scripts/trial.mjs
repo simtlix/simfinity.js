@@ -51,6 +51,18 @@ for (const engine of ['mongodb', 'postgres']) {
   }
   const middleware = linter.verify(application + '\nsimfinity.use(authPlugin);', [plugin.configs['recommended-3.8']]);
   assert.deepEqual(middleware.map(message => message.ruleId), ['simfinity/no-auth-plugin-as-middleware']);
+  // Barber's actual collection targets use dynamic getType calls. Use an
+  // explicit local declaration to exercise the new bounded object-list check.
+  const localCollection = `
+import { GraphQLObjectType, GraphQLList } from 'graphql';
+const LintChild = new GraphQLObjectType({ name: 'LintChild', fields: {} });
+simfinity.connect(null, new GraphQLObjectType({ name: 'LintOwner', fields: {
+  children: { type: new GraphQLList(LintChild), extensions: { relation: { connectionField: null } } },
+} }), 'lintOwner', 'lintOwners');
+`;
+  const missing = linter.verify(application + localCollection, [plugin.configs['recommended-3.8']]);
+  assert.deepEqual(missing.map(message => [message.ruleId, message.messageId]), [['simfinity/valid-connection-field', 'missing']]);
   console.log(`${engine}: ten injected policy, relation and authorization-contract violations detected in existing application files.`);
+  console.log(`${engine}: one additional local collection sentinel detected; dynamic getType targets remain outside the missing-link check.`);
 }
 console.log('Bounded trial only: cross-file permission maps, dynamic configuration, lifecycle, scopes and transaction ownership are not certified. No application code was executed.');
