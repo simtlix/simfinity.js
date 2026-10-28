@@ -203,7 +203,7 @@ A plugin must declare the `optimisticConcurrency` capability when a protected ty
 
 A spread copy of `postgresPlugin()` retains this capability when it overrides `compileRecord`; the override must honor `operation.version` or delegate versioned `update`/`deleteById` to the original. SQL checks returned updates for `expected + 1` and checks that a versioned delete returned a row after its locked read, raising `DATABASE_ERROR` on inconsistent results. These are defensive diagnostics, not proof an arbitrary compiler honored the predicate. Core adds its own observed-advancement check for lifecycle writes; native model handles have no extra pre-read merely to reproduce it. See [optimistic concurrency](./concurrency).
 
-### Embedded element frames (unreleased)
+### Embedded element frames (3.18.0)
 
 `queryFeatures.elementFrames: true` requires `quantifiers`, `referenceEmptiness` and `valuePath` all true. The flag follows the exact `compileQuery` identity, including child batches. Core rejects a valid new form with `UNSUPPORTED_QUERY` if the compiler does not declare it; malformed declarations fail with `INVALID_SQL_PLUGIN`.
 

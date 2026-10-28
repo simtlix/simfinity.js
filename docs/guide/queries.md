@@ -193,7 +193,7 @@ query ShopRange {
 }
 ```
 
-A field filter and an `AND`/`OR` condition resolve `valuePath` from the containing record. A relation term resolves it from the related object: the final example compares two Shop fields. Explicit `ANY`/`ALL`/`NONE` bodies resolve both paths from their element; collection-field arguments start at the queried child. Boolean groups do not change that origin. Ordinary paths contain dot-separated GraphQL names and no expressions. The unreleased `elementFrames` extension adds leading structural [`$parent` prefixes](#embedded-object-lists-and-parent).
+A field filter and an `AND`/`OR` condition resolve `valuePath` from the containing record. A relation term resolves it from the related object: the final example compares two Shop fields. Explicit `ANY`/`ALL`/`NONE` bodies resolve both paths from their element; collection-field arguments start at the queried child. Boolean groups do not change that origin. Ordinary paths contain dot-separated GraphQL names and no expressions. The 3.18.0 `elementFrames` extension adds leading structural [`$parent` prefixes](#embedded-object-lists-and-parent).
 
 `value` is supplied when it is not `undefined`; `valuePath` is supplied when neither `undefined` nor `null`. Supplying both, including `value: null`, gives `INVALID_FILTER_VALUE` (400). `valuePath: null` preserves the existing literal-filter behavior. An omitted operator means `EQ`.
 
@@ -256,8 +256,8 @@ Field comparisons have no general ordinary-index guarantee. Combine them with se
 
 ## Embedded object lists and `$parent`
 
-::: info Unreleased source feature
-This extension is implemented in the source branch and is not available in the published 3.17.0 packages. Both bundled adapters declare `queryFeatures.elementFrames: true`; a custom adapter must declare it together with `quantifiers`, `referenceEmptiness` and `valuePath`, all `true`.
+::: info Available from 3.18.0
+This extension is available from 3.18.0 and is not supported by versions through 3.17.0. Both bundled adapters declare `queryFeatures.elementFrames: true`; a custom adapter must declare it together with `quantifiers`, `referenceEmptiness` and `valuePath`, all `true`.
 :::
 
 `ANY`, `ALL` and `NONE` bind one embedded object at a time. Every condition in their body reads that same element. For this illustrative model:
@@ -591,7 +591,7 @@ query {
 
 `ANY` needs some matching element, `ALL` needs every element to match, and `NONE` needs no matching element. With no visible elements they return false, true and true respectively. With no conditions, `ANY` tests existence, `NONE` tests absence and `ALL` is always true. The field-filter form `seasons: { quantifier: ALL, terms: [{ path: "year", operator: GTE, value: 2020 }] }` expands into an explicit group; terms may be omitted or empty, but every supplied term needs a non-empty `path`, including emptiness terms. Plain shorthand still needs non-empty terms.
 
-Each explicit `path` is relative to its containing frame, may cross single references and single embedded objects, and must end at a collection or single reference without crossing a list. Nest groups to traverse two collections, or use a dotted shorthand such as `seasons.episodes.duration`. Paths ending at an embedded object list require the unreleased `elementFrames` capability; scalar, scalar-list, single embedded object, interface and union ends give `INVALID_FILTER_PATH`. `IS_EMPTY`, `IS_NOT_EMPTY` and `CONTAINS_ALL` remain excluded on a leaf through shorthand collections; move the condition into an explicit group, retaining the operator's own validity rules. `IIN`, like `IN`, is covered by the shorthand. On an adapter that declares `quantifiers`, test the list of a collection's element with an explicit group, such as `ANY: [{ path: "reviews", conditions: [{ field: "tags", operator: CONTAINS_ALL, value: ["x", "y"] }] }]`.
+Each explicit `path` is relative to its containing frame, may cross single references and single embedded objects, and must end at a collection or single reference without crossing a list. Nest groups to traverse two collections, or use a dotted shorthand such as `seasons.episodes.duration`. Paths ending at an embedded object list require the `elementFrames` capability introduced in 3.18.0; scalar, scalar-list, single embedded object, interface and union ends give `INVALID_FILTER_PATH`. `IS_EMPTY`, `IS_NOT_EMPTY` and `CONTAINS_ALL` remain excluded on a leaf through shorthand collections; move the condition into an explicit group, retaining the operator's own validity rules. `IIN`, like `IN`, is covered by the shorthand. On an adapter that declares `quantifiers`, test the list of a collection's element with an explicit group, such as `ANY: [{ path: "reviews", conditions: [{ field: "tags", operator: CONTAINS_ALL, value: ["x", "y"] }] }]`.
 
 One group shares one frame for each collection prefix. A single `terms` set or `conditions` list with `seasons.year EQ 2025` and `seasons.number EQ 1` requires one season with both properties. Put the conditions in separate `AND` groups to allow different seasons. Each `OR` branch has its own frames; a longer prefix nests inside its shorter prefix in the same group. Appending a server restriction as a separate group preserves both filters but allows different witnesses; merge conditions into one group when they must hold for the same child.
 
