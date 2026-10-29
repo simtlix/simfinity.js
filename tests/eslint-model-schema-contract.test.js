@@ -143,6 +143,67 @@ const second = createRuntime(adapter); second.connect(null, Target, 'target', 't
     expect(lint(librarySource + 'const Copy = new Type({ name: \'Copy\', fields: Owner.toConfig().fields }); api.createSchema(); second.connect(null, Copy, \'copy\', \'copies\'); second.createSchema();')).toEqual([]);
   });
 
+  test('separate types made from one toConfig snapshot keep independent field objects', () => {
+    const { first, owner, target } = library();
+    const fields = owner.toConfig().fields;
+    const copy = object(fields);
+    first.createSchema();
+    const second = memory(); connect(second, target); connect(second, copy);
+    expect(validateSchema(second.createSchema())).toEqual([]);
+    const another = object(fields);
+    const third = memory(); connect(third, target); connect(third, another);
+    expect(validateSchema(third.createSchema())).toEqual([]);
+    expect(lint(librarySource + 'const fields = Owner.toConfig().fields; const Copy = new Type({ name: "Copy", fields }); api.createSchema(); second.connect(null, Copy, "copy", "copies"); second.createSchema(); const third = createRuntime(adapter); const Another = new Type({ name: "Another", fields }); third.connect(null, Target, "target", "targets"); third.connect(null, Another, "another", "anothers"); third.createSchema();')).toEqual([]);
+  });
+
+  test('an earlier getFields alias observes later binding while an earlier field spread stays independent', () => {
+    const { first, owner, target } = library();
+    const fields = owner.getFields();
+    const eager = object({ target: { ...fields.target, args: {} } });
+    first.createSchema();
+    const late = object({ target: { ...fields.target, args: {} } });
+    const second = memory(); connect(second, target); connect(second, late);
+    expect(() => second.createSchema()).toThrow(error('TYPE_BOUND_TO_OTHER_RUNTIME'));
+    const third = memory(); connect(third, target); connect(third, eager);
+    expect(validateSchema(third.createSchema())).toEqual([]);
+    const alias = 'const fields = Owner.getFields();';
+    const copy = 'const Copy = new Type({ name: \'Copy\', fields: { target: { ...fields.target, args: {} } } });';
+    const finish = 'second.connect(null, Copy, \'copy\', \'copies\'); second.createSchema();';
+    expect(lint(librarySource + alias + 'api.createSchema();' + copy + finish)).toEqual(['schemaBoundField']);
+    expect(lint(librarySource + alias + copy + 'api.createSchema();' + finish)).toEqual([]);
+  });
+
+  test('a resolver property read before binding retains its earlier value', () => {
+    const { first, owner, target } = library();
+    const fields = owner.getFields();
+    const earlyResolver = fields.target.resolve;
+    first.createSchema();
+    const copy = object({ target: { ...fields.target, args: {}, resolve: earlyResolver, extensions: reference } });
+    const second = memory(); connect(second, target); connect(second, copy);
+    expect(validateSchema(second.createSchema())).toEqual([]);
+    expect(lint(librarySource + 'const fields = Owner.getFields(); const earlyResolver = fields.target.resolve; api.createSchema(); const Copy = new Type({ name: "Copy", fields: { target: { ...fields.target, args: {}, resolve: earlyResolver, extensions: { relation: { connectionField: "owner" } } } } }); second.connect(null, Copy, "copy", "copies"); second.createSchema();')).toEqual([]);
+  });
+
+  test('replaced mutation outputs neither retain foreign bindings nor reserve earlier outputs', () => {
+    const { first, owner, target } = library();
+    first.createSchema();
+    const second = memory(); connect(second, target);
+    second.registerMutation('pick', 'pick', null, owner, () => null);
+    second.registerMutation('pick', 'pick', null, target, () => null);
+    expect(validateSchema(second.createSchema())).toEqual([]);
+    expect(lint(librarySource + 'api.createSchema(); second.registerMutation("pick", "pick", null, Owner, () => null); second.registerMutation("pick", "pick", null, Target, () => null); second.createSchema();')).toEqual([]);
+
+    const unbound = object({ target: { type: target, extensions: reference } });
+    const third = memory(); connect(third, target);
+    third.registerMutation('pick', 'pick', null, unbound, () => null);
+    third.registerMutation('pick', 'pick', null, target, () => null);
+    expect(validateSchema(third.createSchema())).toEqual([]);
+    const fourth = memory(); connect(fourth, target); connect(fourth, unbound);
+    expect(validateSchema(fourth.createSchema())).toEqual([]);
+    expect(lint(librarySource.replace('api.connect(null, Owner, \'owner\', \'owners\');', '')
+      + 'api.registerMutation("pick", "pick", null, Owner, () => null); api.registerMutation("pick", "pick", null, Target, () => null); api.createSchema(); second.connect(null, Owner, "owner", "owners"); second.createSchema();')).toEqual([]);
+  });
+
   test('changing only a copied resolver retains the foreign extensions ownership', () => {
     const { first, owner, target } = library();
     first.createSchema();
@@ -160,5 +221,61 @@ const second = createRuntime(adapter); second.connect(null, Target, 'target', 't
     const source = 'import * as api from \'@simtlix/simfinity-js\'; import { buildClientSchema, introspectionFromSchema, GraphQLSchema } from \'graphql\'; const schema = api.createSchema(); ';
     expect(lint(source + 'buildClientSchema(introspectionFromSchema(schema));', cloning)).toEqual(['introspection']);
     expect(lint(source + 'new GraphQLSchema(schema.toConfig());', cloning)).toEqual([]);
+  });
+});
+
+describe('managed state input lint contracts', () => {
+  const stateMachine = { initialState: { value: 'ready' }, actions: {} };
+  const machineSource = '{ initialState: { value: \'ready\' }, actions: {} }';
+  const declarations = imports + `const Empty = new Type({ name: 'Empty', fields: { stamp: { type: StringType, extensions: { readOnly: true } } } });
+const Owner = new Type({ name: 'Owner', fields: { label: { type: StringType }, state: { type: new NonNull(Empty), extensions: { relation: { embedded: true } } } } });`;
+
+  test.each([true, false])('a managed embedded state is omitted with target registered=%s', registered => {
+    const runtime = memory();
+    const target = object({ stamp: { type: GraphQLString, extensions: { readOnly: true } } });
+    const owner = object({ label: { type: GraphQLString }, state: { type: new GraphQLNonNull(target), extensions: embedded } });
+    if (registered) runtime.addNoEndpointType(target);
+    runtime.connect(null, owner, 'owner', 'owners', null, null, stateMachine);
+    expect(validateSchema(runtime.createSchema())).toEqual([]);
+    expect(lint(declarations + (registered ? 'api.addNoEndpointType(Empty);' : '')
+      + `api.connect(null, Owner, 'owner', 'owners', null, null, ${machineSource}); api.createSchema();`)).toEqual([]);
+  });
+
+  test('output collection resolution still needs its target when state input is managed', () => {
+    const runtime = memory();
+    const target = object({ stamp: { type: GraphQLString, extensions: { readOnly: true } } });
+    const owner = object({ label: { type: GraphQLString }, state: { type: new GraphQLList(target), extensions: reference } });
+    runtime.connect(null, owner, 'owner', 'owners', null, null, stateMachine);
+    expect(() => runtime.createSchema()).toThrow(error(code));
+    expect(lint(declarations.replace('new NonNull(Empty)', 'new List(Empty)').replace('embedded: true', 'connectionField: "owner"')
+      + `api.connect(null, Owner, 'owner', 'owners', null, null, ${machineSource}); api.createSchema();`)).toEqual(['schemaUnregisteredTarget']);
+  });
+
+  test('runtime reachability still visits required empty descendants below managed state', () => {
+    const runtime = memory();
+    const target = object({ stamp: { type: GraphQLString, extensions: { readOnly: true } } });
+    const child = object({ required: { type: new GraphQLNonNull(target), extensions: embedded } });
+    const owner = object({ label: { type: GraphQLString }, state: { type: child, extensions: embedded } });
+    runtime.addNoEndpointType(target); runtime.addNoEndpointType(child);
+    runtime.connect(null, owner, 'owner', 'owners', null, null, stateMachine);
+    expect(() => runtime.createSchema(undefined, [owner])).toThrow(error('INVALID_MODEL'));
+    expect(lint(declarations.replace('const Owner =', 'const Child = new Type({ name: "Child", fields: { required: { type: new NonNull(Empty), extensions: { relation: { embedded: true } } } } }); const Owner =')
+      .replace('state: { type: new NonNull(Empty)', 'state: { type: Child')
+      + `api.addNoEndpointType(Empty); api.addNoEndpointType(Child); api.connect(null, Owner, 'owner', 'owners', null, null, ${machineSource}); api.createSchema(undefined, [Owner]);`)).toEqual(['schemaRequiredEmpty']);
+  });
+
+  test('a successful managed state build still binds its other generated relation fields', () => {
+    const runtime = memory();
+    const empty = object({ stamp: { type: GraphQLString, extensions: { readOnly: true } } });
+    const target = object({ label: { type: GraphQLString } });
+    const owner = object({ label: { type: GraphQLString }, state: { type: new GraphQLNonNull(empty), extensions: embedded }, target: { type: target, extensions: reference } });
+    connect(runtime, target);
+    runtime.connect(null, owner, 'owner', 'owners', null, null, stateMachine);
+    expect(validateSchema(runtime.createSchema())).toEqual([]);
+    const second = memory();
+    expect(() => connect(second, owner)).toThrow(error('TYPE_BOUND_TO_OTHER_RUNTIME'));
+    expect(lint(declarations.replace('const Owner =', 'const Target = new Type({ name: "Target", fields: { label: { type: StringType } } }); const Owner =')
+      .replace('state: { type:', 'target: { type: Target, extensions: { relation: { connectionField: "owner" } } }, state: { type:')
+      + `api.connect(null, Target, 'target', 'targets'); api.connect(null, Owner, 'owner', 'owners', null, null, ${machineSource}); api.createSchema(); const second = createRuntime(adapter); second.connect(null, Owner, 'owner', 'owners');`)).toEqual(['schemaBoundType']);
   });
 });

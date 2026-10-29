@@ -61,8 +61,19 @@ tester.run('model schema registrations', rule, {
 const empty = "const Empty = new Type({ name: 'Empty', fields: { stamp: { type: StringType, extensions: { readOnly: true } } } }); api.addNoEndpointType(Empty);\n";
 const required = (type = 'new NonNull(Empty)') => embedded(type);
 const emptyCode = (field, ending = 'api.createSchema();', prefix = empty) => imports + runtime + prefix + owner(field) + connect('Owner') + ending;
+const machine = "{ initialState: { value: 'ready' }, actions: {} }";
+const stateCode = (field, stateMachine = machine, registerTarget = true) => imports + runtime
+  + (registerTarget ? empty : empty.replace(' api.addNoEndpointType(Empty);', ''))
+  + `const Owner = new Type({ name: 'Owner', fields: { label: { type: StringType }, state: ${field} } });
+api.connect(null, Owner, 'owner', 'owners', null, null, ${stateMachine}); api.createSchema();`;
 tester.run('model schema empty generated inputs', rule, {
   valid: [
+    stateCode(required()),
+    stateCode(required(), machine, false),
+    stateCode(required(), 'unknownMachine'),
+    stateCode(required(), 'unknownMachine', false),
+    stateCode(ref('new List(Empty)', 'resolve: () => []'), machine, false),
+    stateCode(required(), 'null').replace('api.createSchema();', `api.connect(null, Owner, 'owner', 'owners', null, null, ${machine}); api.createSchema();`),
     emptyCode(embedded('Empty')),
     emptyCode(embedded('new List(new NonNull(Empty))')),
     emptyCode(required(), 'api.createSchema(undefined, []);'),
@@ -76,6 +87,16 @@ tester.run('model schema empty generated inputs', rule, {
     emptyCode(embedded('Empty'), 'api.createSchema();', "const Empty = new Type({ name: 'Empty', fields: { id: { type: ID } } }); api.addNoEndpointType(Empty);\n"),
   ],
   invalid: [
+    invalid(stateCode(required()).replace('api.createSchema();', "api.connect(null, Owner, 'owner', 'owners'); api.createSchema();"), 'schemaRequiredEmpty'),
+    invalid(stateCode(required(), 'null'), 'schemaRequiredEmpty'),
+    invalid(stateCode(required(), 'false'), 'schemaRequiredEmpty'),
+    invalid(stateCode(ref('new List(Empty)'), machine, false), 'schemaUnregisteredTarget'),
+    invalid(stateCode(ref('new List(Empty)'), 'unknownMachine', false), 'schemaUnregisteredTarget'),
+    invalid(imports + runtime + empty
+      + `const Child = new Type({ name: 'Child', fields: { required: ${required()} } });
+const Owner = new Type({ name: 'Owner', fields: { label: { type: StringType }, state: ${embedded('Child')} } });
+api.addNoEndpointType(Child); api.connect(null, Owner, 'owner', 'owners', null, null, ${machine});
+api.createSchema(undefined, [Owner]);`, 'schemaRequiredEmpty'),
     invalid(emptyCode(required()), 'schemaRequiredEmpty'),
     invalid(emptyCode(required('new NonNull(new List(Empty))')), 'schemaRequiredEmpty'),
     invalid(emptyCode(required(), 'api.createSchema(undefined, []); api.createSchema();'), 'schemaRequiredEmpty'),
@@ -91,6 +112,10 @@ const bind = 'first.createSchema();\n';
 const clone = fields => `const Copy = new Type({ name: 'Copy', fields: ${fields} });\n`;
 tester.run('model schema runtime-bound identity and field copies', rule, {
   valid: [
+    boundSetup + bind + 'second.registerMutation("pick", "pick", null, Owner, () => null); second.registerMutation("pick", "pick", null, Value, () => null); second.createSchema();',
+    boundSetup.replace(connect('Owner', 'first'), 'first.registerMutation("pick", "pick", null, Owner, () => null); first.registerMutation("pick", "pick", null, Value, () => null);') + bind + connect('Owner', 'second') + 'second.createSchema();',
+    boundSetup + bind + 'second.registerMutation("pick", "pick", null, Owner, () => null); second.registerMutation(unknownName, "pick", null, Value, () => null); second.createSchema();',
+    boundSetup.replace(connect('Owner', 'first'), 'first.registerMutation("pick", "pick", null, Owner, () => null); first.registerMutation(unknownName, "pick", null, Value, () => null);') + bind + connect('Owner', 'second') + 'second.createSchema();',
     boundSetup + connect('Owner', 'second'),
     boundSetup + bind + 'first.createSchema();',
     boundSetup.replace(owner(ref()), owner(ref('Value', 'resolve: () => null'))) + bind + connect('Owner', 'second') + 'second.createSchema();',
@@ -111,6 +136,12 @@ tester.run('model schema runtime-bound identity and field copies', rule, {
     boundSetup + 'registerLater(() => first.connect(null, Owner, "other", "others"));' + bind + connect('Owner', 'second'),
     boundSetup + bind + 'const Copy = new Type({ name: "Copy", fields: Owner.getFields() });' + connect('Copy', 'second') + 'second.createSchema();',
     boundSetup + bind + 'const Copy = new Type({ name: "Copy", fields: () => ({ ...Owner.getFields() }) });' + connect('Copy', 'second') + 'second.createSchema();',
+    boundSetup + 'const fields = Owner.getFields();' + clone('({ field: { ...fields.field, args: {} } })') + bind + connect('Copy', 'second') + 'second.createSchema();',
+    boundSetup + 'const fields = Owner.toConfig().fields;' + bind + clone('({ field: { ...fields.field } })') + connect('Copy', 'second') + 'second.createSchema();',
+    boundSetup + 'const fields = Owner.getFields();' + bind + clone('({ field: { ...fields.field, args: {}, resolve: undefined } })') + connect('Copy', 'second') + 'second.createSchema();',
+    boundSetup + 'const fields = Owner.toConfig().fields;' + clone('fields') + bind + connect('Copy', 'second') + 'second.createSchema(); const third = createRuntime(adapter); const Another = new Type({ name: "Another", fields });' + connect('Value', 'third') + connect('Another', 'third') + 'third.createSchema();',
+    boundSetup + 'const fields = Owner.getFields(); const earlyResolver = fields.field.resolve;' + bind + clone('({ field: { ...fields.field, args: {}, resolve: earlyResolver, extensions: { relation: { connectionField: "owner" } } } })') + connect('Copy', 'second') + 'second.createSchema();',
+    boundSetup + 'const fields = Owner.getFields(); const earlyExtensions = fields.field.extensions;' + bind + clone('({ field: { ...fields.field, args: {}, resolve: () => null, extensions: earlyExtensions } })') + connect('Copy', 'second') + 'second.createSchema();',
   ],
   invalid: [
     invalid(boundSetup + bind + connect('Owner', 'second'), 'schemaBoundType'),
@@ -131,6 +162,15 @@ tester.run('model schema runtime-bound identity and field copies', rule, {
     invalid(boundSetup + bind + 'const U = new Union({ name: "U", types: [Owner] }); second.registerMutation("pick", "pick", null, U, () => null); second.createSchema();', 'schemaBoundType'),
     invalid(boundSetup + bind + clone('() => ({ ...Owner.toConfig().fields, extra: { type: StringType } })') + connect('Copy', 'second') + 'second.createSchema();', 'schemaBoundField'),
     invalid(boundSetup + bind + clone('() => ({ ...Owner.toConfig().fields, extra: { type: Value, resolve: () => null } })') + connect('Copy', 'second') + 'second.createSchema();', 'schemaBoundField'),
+    invalid(boundSetup + 'const fields = Owner.getFields();' + bind + clone('({ field: { ...fields.field, args: {} } })') + connect('Copy', 'second') + 'second.createSchema();', 'schemaBoundField'),
+    invalid(boundSetup + 'const fields = Owner.getFields(); const alias = fields;' + bind + clone('() => ({ field: { ...alias.field, args: {} } })') + connect('Copy', 'second') + 'second.createSchema();', 'schemaBoundField'),
+    invalid(boundSetup + 'const fields = Owner.getFields(); const field = fields.field;' + bind + clone('() => ({ field: { ...field, args: {} } })') + connect('Copy', 'second') + 'second.createSchema();', 'schemaBoundField'),
+    invalid(boundSetup + 'const fields = Owner.getFields();' + bind + 'const lateResolver = fields.field.resolve;' + clone('({ field: { ...fields.field, args: {}, resolve: lateResolver, extensions: {} } })') + connect('Copy', 'second') + 'second.createSchema();', 'schemaBoundField'),
+    invalid(boundSetup + 'const fields = Owner.getFields();' + bind + 'const lateExtensions = fields.field.extensions;' + clone('({ field: { ...fields.field, args: {}, resolve: () => null, extensions: lateExtensions } })') + connect('Copy', 'second') + 'second.createSchema();', 'schemaBoundField'),
+    invalid(boundSetup.replace(owner(ref()), owner(ref()).replace('field: ', `state: ${required()}, field: `))
+      .replace(connect('Owner', 'first'), `first.connect(null, Owner, 'owner', 'owners', null, null, ${machine});`)
+      .replace(valueType, valueType + empty.replace(' api.addNoEndpointType(Empty);', ''))
+      + bind + connect('Owner', 'second'), 'schemaBoundType'),
   ],
 });
 
@@ -140,8 +180,12 @@ tester.run('model schema accepted input omissions are opt-in advice', advice, {
     imports + runtime + valueType + connect('Value') + 'api.createSchema();',
     emptyCode(required(), 'api.createSchema(undefined, []);'),
     code(ref('Value', 'resolve: () => null')),
+    stateCode(required()),
+    stateCode(required(), 'unknownMachine'),
   ],
   invalid: [
+    invalid(stateCode(ref('Empty'), machine, false), 'schemaUnregisteredReference'),
+    invalid(stateCode(ref('Empty'), 'unknownMachine', false), 'schemaUnregisteredReference'),
     invalid(imports + runtime + "const OnlyId = new Type({ name: 'OnlyId', fields: { id: { type: ID } } });" + connect('OnlyId') + 'api.createSchema();', 'schemaEmptyCreate'),
     invalid(code(ref()), 'schemaUnregisteredReference'),
     {

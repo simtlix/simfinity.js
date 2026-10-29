@@ -16,9 +16,16 @@ export const messages = {
 const known = value => ({ known: true, value });
 const key = node => !node.computed && (node.key?.name ?? node.key?.value);
 const member = (node, name) => node?.type === 'MemberExpression' && !node.computed && node.property.name === name;
+const position = node => node?.range?.[0] ?? Infinity;
 
 const writable = field => field.virtual === true || (field.readOnly.known && field.readOnly.value) ? false
   : field.virtual === false && field.readOnly.known ? true : null;
+const inputWritable = (graph, field, stateMachine) => {
+  const writing = writable(field);
+  if (writing === false || field.name !== 'state') return writing;
+  const machine = graph.constant(stateMachine);
+  return !machine.known ? null : machine.value ? false : writing;
+};
 const relationDeclared = field => field.extensions ? field.extensions.has('relation') : null;
 
 function projections(graph, registrations) {
@@ -31,16 +38,11 @@ function projections(graph, registrations) {
       if (!type?.fields || results.has(type)) continue;
       const create = new Set();
       const update = new Set();
-      const machine = graph.constant(registration.stateMachine);
       let complete = true;
       for (const field of type.fields.values()) {
-        const writing = writable(field);
+        const writing = inputWritable(graph, field, registration.stateMachine);
         if (writing === false) continue;
         if (writing === null) { complete = false; continue; }
-        if (field.name === 'state') {
-          if (!machine.known) { complete = false; continue; }
-          if (machine.value) continue;
-        }
         const shape = graph.shape(field.type);
         if (!shape) { complete = false; continue; }
         const target = shape.named;
@@ -89,6 +91,8 @@ function reachableInputs(graph, roots, byName) {
     if (!type || reached.has(type)) continue;
     reached.add(type);
     for (const field of type.fields?.values() || []) {
+      // Match runtime typesWithReachableInputs: even a managed state can
+      // reach another registered type's required empty embedded input.
       if (writable(field) !== true) continue;
       const shape = graph.shape(field.type);
       if (shape?.named.kind === 'object' && (shape.listDepth === 1 || (field.embedded.known && field.embedded.value))) {
@@ -120,7 +124,7 @@ function inspectInputs(graph, errors, warnings) {
         const target = shape.named;
         if (!target.name) continue;
         const child = byName.get(target.name);
-        const writing = writable(field);
+        const writing = inputWritable(graph, field, registration.stateMachine);
         const relation = relationDeclared(field);
         const embedded = field.embedded.known ? !!field.embedded.value : null;
         const generatedCollection = shape.listDepth === 1 && relation === true && embedded === false
@@ -175,12 +179,17 @@ function inspectOwnership(graph, errors) {
   const analysis = graph.analysis;
   const materialized = new Map();
   const snapshots = new Map();
+  const generated = new WeakMap();
   const bound = new Map();
   const names = new Map();
   let budget = 10000;
   const resolving = new Set();
   const regions = new Map();
   const fieldValue = field => ({ ...field, resolverOwner: null, extensionsOwner: null });
+  const fieldAt = (field, at) => {
+    const before = generated.get(field);
+    return before && position(at) < position(before.node) ? before.field : field;
+  };
   const resolve = input => analysis.resolve(unwrap(input));
   const typeOf = input => graph.type(input);
   const typeName = type => names.get(type) || type?.name || 'copied type';
@@ -194,7 +203,10 @@ function inspectOwnership(graph, errors) {
   const snapshot = (reflection, at) => {
     if (snapshots.has(reflection.node)) return snapshots.get(reflection.node);
     const fields = materialize(reflection.type, at);
-    return fields && new Map([...fields].map(([name, field]) => [name, { ...field }]));
+    // getFields returns the cached, live GraphQL field map. toConfig returns
+    // fresh field configs that retain only the resolver identities at that call.
+    if (reflection.method === 'getFields') return fields;
+    return fields && new Map([...fields].map(([name, field]) => [name, { ...fieldAt(field, at) }]));
   };
   const reflectedFields = (input, at) => {
     const node = resolve(input);
@@ -211,11 +223,13 @@ function inspectOwnership(graph, errors) {
     if (node?.type !== 'MemberExpression' || node.computed) return null;
     const from = reflectedFields(node.object, at);
     const field = from?.fields?.get(node.property.name);
-    return field ? { ...field, raw: from.raw } : null;
+    return field ? { ...(from.raw ? fieldAt(field, at) : field), raw: from.raw } : null;
   };
   const copiedMember = (input, name, at) => {
     const node = resolve(input);
-    return member(node, name) ? sourceField(node.object, at) : null;
+    // A stable alias of field.resolve/extensions stores the value read at its
+    // own declaration; unlike the field/map alias, it is not a live property.
+    return member(node, name) ? sourceField(node.object, graph.block(node) ? node : at) : null;
   };
   const parseField = (input, at, name) => {
     if (--budget < 0) return null;
@@ -223,11 +237,15 @@ function inspectOwnership(graph, errors) {
     if (copied) return { ...copied, name, node: input };
     const node = resolve(input);
     if (node?.type !== 'ObjectExpression') return null;
+    // An eager field spread reads a live view when its literal is evaluated,
+    // even if GraphQL materializes the receiving type's fields much later.
+    // A literal in a pure thunk instead uses that first materialization event.
+    const evaluatedAt = graph.block(node) ? node : at;
     let base = null;
     const own = new Map();
     for (const entry of node.properties) {
       if (entry.type === 'SpreadElement') {
-        const other = sourceField(entry.argument, at);
+        const other = sourceField(entry.argument, evaluatedAt);
         if (!other) return null;
         base = { ...other }; own.clear();
       } else {
@@ -252,12 +270,12 @@ function inspectOwnership(graph, errors) {
       });
     }
     if (own.has('resolve')) {
-      const previous = copiedMember(own.get('resolve'), 'resolve', at);
+      const previous = copiedMember(own.get('resolve'), 'resolve', evaluatedAt);
       base.resolve = previous?.resolve || graph.constant(own.get('resolve'));
       base.resolverOwner = previous?.resolverOwner || null;
     }
     if (own.has('extensions')) {
-      const previous = copiedMember(own.get('extensions'), 'extensions', at);
+      const previous = copiedMember(own.get('extensions'), 'extensions', evaluatedAt);
       if (previous) {
         base.extensionsOwner = previous.extensionsOwner;
         base.extensions = previous.extensions;
@@ -269,7 +287,7 @@ function inspectOwnership(graph, errors) {
         const extensions = new Map();
         for (const property of extensionNode.properties) {
           if (property.type === 'SpreadElement') {
-            const inherited = copiedMember(property.argument, 'extensions', at);
+            const inherited = copiedMember(property.argument, 'extensions', evaluatedAt);
             if (!inherited?.extensions) return null;
             for (const [name, value] of inherited.extensions) extensions.set(name, value);
           } else {
@@ -347,9 +365,12 @@ function inspectOwnership(graph, errors) {
     if (materialized.has(type)) return materialized.get(type);
     if (resolving.has(type) || !type || --budget < 0) return null;
     resolving.add(type);
-    const fields = type.fields && [...type.fields.values()].every(field => field.config)
+    let fields = type.fields && [...type.fields.values()].every(field => field.config)
       ? new Map([...type.fields].map(([name, field]) => [name, fieldValue(field)]))
       : configFields(type, at);
+    // GraphQL constructs separate field objects for every type, even when
+    // several constructors share one toConfig field-config map.
+    if (fields) fields = new Map([...fields].map(([name, field]) => [name, { ...field }]));
     resolving.delete(type);
     materialized.set(type, fields);
     return fields;
@@ -395,7 +416,7 @@ function inspectOwnership(graph, errors) {
     if (callee?.kind !== 'runtime-function') continue;
     const runtime = graph.runtime(callee);
     if (!runtime) continue;
-    const state = regions.get(runtime) || { registrations: new Map(), outputs: [], complete: true, failed: false };
+    const state = regions.get(runtime) || { registrations: new Map(), machines: new Map(), outputs: new Map(), complete: true, failed: false };
     regions.set(runtime, state);
     if (!region || graph.block(runtime.node) !== region) {
       // A declaration in an unmodeled callback/conditional can replace a name
@@ -414,12 +435,17 @@ function inspectOwnership(graph, errors) {
       if (!type.name && !names.has(type)) configFields(type, node);
       const name = names.get(type) || type.name;
       if (!name) state.complete = false;
-      else state.registrations.set(name, type);
+      else {
+        state.registrations.set(name, type);
+        state.machines.set(name, callee.name === 'connect' ? node.arguments[6] : undefined);
+      }
     } else if (callee.name === 'registerMutation') {
+      const name = graph.constant(node.arguments[0]);
       const output = typeOf(node.arguments[3]);
-      if (output) state.outputs.push(output);
+      if (!name.known || typeof name.value !== 'string' || !output) state.complete = false;
+      else state.outputs.set(name.value, output);
     } else if (callee.name === 'createSchema' && state.complete) {
-      const types = outputGraph([...state.registrations.values(), ...state.outputs], node);
+      const types = outputGraph([...state.registrations.values(), ...state.outputs.values()], node);
       let failed = false;
       for (const type of types) {
         if (diagnoseType(type, runtime, node)) { failed = true; continue; }
@@ -439,7 +465,7 @@ function inspectOwnership(graph, errors) {
           const shape = graph.shape(field.type);
           if (shape?.named.kind !== 'object' || shape.listDepth > 1 || field.virtual !== false
             || state.registrations.has(shape.named.name)) return false;
-          return (writable(field) === true && (shape.listDepth === 1
+          return (inputWritable(graph, field, state.machines.get(typeName(type))) === true && (shape.listDepth === 1
             || (relationDeclared(field) === true && field.embedded.known && field.embedded.value)))
             || (shape.listDepth === 1 && relationDeclared(field) === true && field.embedded.known
               && !field.embedded.value && field.resolve.known && !field.resolve.value);
@@ -455,6 +481,7 @@ function inspectOwnership(graph, errors) {
           const shape = graph.shape(field.type);
           if (!shape || shape.named.kind !== 'object' || shape.listDepth > 1) continue;
           if (shape.listDepth && !state.registrations.has(shape.named.name)) continue;
+          generated.set(field, { node, field: { ...field } });
           field.resolve = known(true);
           field.resolverOwner = runtime;
           field.extensionsOwner = runtime;
