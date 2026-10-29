@@ -180,7 +180,8 @@ export const inspect = graph => {
           if (kind === 'embedded' && unique.known && unique.value === true) error(at(field, 'unique'), 'storageEmbeddedUnique');
           if (physical && !embedded && ['id', '_id'].includes(entry.name)) {
             if (kind !== 'scalar' || entry.list || (entry.scalar && !['ID', 'String'].includes(entry.scalar))) error(field.node, 'storageIdentity');
-          } else if (physical && storageName.startsWith('__')) error(field.node, 'storagePrivateColumn');
+          } else if (physical && !embedded && storageName === 'id') error(field.node, 'storageCollision');
+          else if (physical && storageName.startsWith('__')) error(field.node, 'storagePrivateColumn');
         }
         if (mode === 'mongo') {
           if (storageName === 'constructor' || (kind === 'embedded' && entry.name in Object.prototype)) error(field.node, 'storageMongoName');
@@ -225,11 +226,13 @@ export const inspect = graph => {
             if (inverse.kind === 'scalar' && inverse.scalar === 'ID' && !inverse.list) {
               inverse.kind = 'reference';
               inverse.target = parent.name;
+              if (isSQL(runtime) && ['id', '_id'].includes(inverse.name)) error(at(entry.field, 'connectionField'), 'storageIdentity');
             }
             if (inverse.kind !== 'reference' || (inverse.target && parent.name && inverse.target !== parent.name)) error(at(entry.field, 'connectionField'), 'storageInverse');
           } else if (complete(child)) {
             childFields.push({ name: link, storageName: link, kind: 'reference', target: parent.name });
             if (isSQL(runtime) && link.startsWith('__')) error(at(entry.field, 'connectionField'), 'storagePrivateColumn');
+            if (isSQL(runtime) && ['id', '_id'].includes(link)) error(at(entry.field, 'connectionField'), 'storageIdentity');
           }
         }
       }

@@ -122,6 +122,17 @@ describe('ESLint modeling storage contract evidence', () => {
     expect(() => describeDatabase([{ gqltype: Private }])).toThrow(/Reserved private column/);
   });
 
+  it('rejects inverse inference or reference aliases that consume SQL entity identity', () => {
+    const Child = object('Child', { id: { type: GraphQLID }, label: scalar });
+    const Parent = object('Parent', { children: relation(new GraphQLList(Child), 'id') });
+    expect(() => describeDatabase([{ gqltype: Parent }])).toThrow(/Reserved identity/);
+    const Private = object('Private', { label: scalar });
+    const Other = object('Other', { children: relation(new GraphQLList(Private), '_id') });
+    expect(() => describeDatabase([{ gqltype: Other }])).toThrow(/Reserved identity/);
+    const Alias = object('Alias', { owner: relation(Private, 'id') });
+    expect(() => describeDatabase([{ gqltype: Alias }])).toThrow(/Column collision/);
+  });
+
   it('rejects Mongo constructor storage but permits an aliased reference and other prototype scalars', () => {
     const Bad = object('Bad', { constructor: scalar });
     expect(() => generated(Bad)).toThrow(/Mongoose drops a stored path named constructor/);

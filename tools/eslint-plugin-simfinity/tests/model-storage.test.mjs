@@ -87,6 +87,10 @@ describe('SQL index and physical storage boundaries', () => {
   check('accepts owned embedded Int id', source(child(`id: { type: I }, owner: ${ref('Root')}`) + root(`value: ${emb('Child')}`)), []);
   check('rejects private reference column', source(child() + root(`owner: ${ref('Child', '__owner')}`)), ['storagePrivateColumn']);
   check('rejects inferred private SQL link', source(child() + root(`children: ${ref('new L(Child)', '__owner')}`)), ['storagePrivateColumn']);
+  check('SQL rejects promoting a declared identity into an inverse reference', source(child('id: { type: ID }, label: { type: S }') + root(`children: ${ref('new L(Child)', 'id')}`)), ['storageIdentity']);
+  check('SQL rejects a private inverse taking the identity field', source(child() + root(`children: ${ref('new L(Child)', '_id')}`)), ['storageIdentity']);
+  check('SQL reference aliases cannot overwrite the generated root identity column', source(child() + root(`owner: ${ref('Child', 'id')}`)), ['storageCollision']);
+  check('owned embedded reference aliases may use an ordinary id column', source(child(`owner: ${ref('Root', 'id')}`) + root(`value: ${emb('Child')}`)), []);
   check('keeps private-looking value-only JSON keys out of SQL column analysis', source(child('__note: { type: S }') + root(`value: ${emb('Child')}`)), []);
   check('rejects private-looking physical owned fields', source(child(`__note: { type: S }, owner: ${ref('Root')}`) + root(`value: ${emb('Child')}`)), ['storagePrivateColumn']);
   check('rejects whole embedded uniqueness', source(child() + root(`value: ${emb('new L(Child)', 'unique: true')}`)), ['storageEmbeddedUnique']);
