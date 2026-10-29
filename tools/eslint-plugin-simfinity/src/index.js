@@ -9,9 +9,13 @@ import validRequiredClaims from './rules/valid-required-claims.js';
 import noAsyncAuthExtractor from './rules/no-async-auth-extractor.js';
 import noAuthPluginAsMiddleware from './rules/no-auth-plugin-as-middleware.js';
 import validPolicyExpression from './rules/valid-policy-expression.js';
+import validModelFields from './rules/valid-model-fields.js';
+import validModelStorage from './rules/valid-model-storage.js';
+import validModelSchema from './rules/valid-model-schema.js';
+import modelingAdvice from './rules/modeling-advice.js';
 
 const plugin = {
-  meta: { name: '@simtlix/eslint-plugin-simfinity', version: '0.4.0', namespace: 'simfinity' },
+  meta: { name: '@simtlix/eslint-plugin-simfinity', version: '0.5.0', namespace: 'simfinity' },
   rules: {
     'no-schema-cloning': noSchemaCloning,
     'no-uncalled-auth-factory': noUncalledAuthFactory,
@@ -24,6 +28,10 @@ const plugin = {
     'no-async-auth-extractor': noAsyncAuthExtractor,
     'no-auth-plugin-as-middleware': noAuthPluginAsMiddleware,
     'valid-policy-expression': validPolicyExpression,
+    'valid-model-fields': validModelFields,
+    'valid-model-storage': validModelStorage,
+    'valid-model-schema': validModelSchema,
+    'modeling-advice': modelingAdvice,
   },
   configs: {},
 };
@@ -31,7 +39,13 @@ const plugin = {
 plugin.configs['recommended-3.8'] = {
   name: 'simfinity/recommended-3.8',
   plugins: { simfinity: plugin },
-  rules: Object.fromEntries(Object.keys(plugin.rules).map(name => [`simfinity/${name}`, 'error'])),
+  rules: Object.fromEntries(Object.keys(plugin.rules).filter(name => name !== 'modeling-advice').map(name => [`simfinity/${name}`, 'error'])),
+};
+
+plugin.configs['advice-3.8'] = {
+  name: 'simfinity/advice-3.8',
+  plugins: { simfinity: plugin },
+  rules: { 'simfinity/modeling-advice': 'warn' },
 };
 
 export default plugin;

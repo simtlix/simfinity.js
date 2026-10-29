@@ -47,6 +47,9 @@ const isWriteTarget = expression => {
 
 const moduleInfo = source => {
   if (roots.has(source)) return { kind: 'module', name: roots.get(source) };
+  if (/^@simtlix\/(?:simfinity-core\/scalars|simfinity-js\/src\/scalars)(?:\.js)?$/.test(source)) return { kind: 'module', name: 'scalars' };
+  if (/^@simtlix\/simfinity-js\/src\/mongo\/adapter(?:\.js)?$/.test(source)) return { kind: 'module', name: 'mongo-adapter' };
+  if (source === 'graphql-iso-date') return { kind: 'module', name: 'dates' };
   if (['graphql', 'graphql-middleware', '@graphql-tools/utils'].includes(source)) return { kind: 'module', name: source };
   const match = source.match(/^@simtlix\/(?:simfinity-core\/auth|simfinity-js\/src\/auth)(?:\/(index|rules|expressions)(?:\.js)?)?$/);
   return match ? { kind: 'auth', subset: match[1] || 'index' } : null;
@@ -63,24 +66,31 @@ const member = (object, name) => {
   }
   if (object.kind === 'runtime') {
     if (name === 'auth' && object.auth) return { kind: 'auth', subset: 'index' };
+    if (name === 'scalars' && object.auth) return { kind: 'module', name: 'scalars' };
     return runtimeMembers.has(name) || otherRuntimeMembers.has(name) || (object.auth && sqlMembers.has(name))
-      ? { kind: 'runtime-function', name } : null;
+      ? { kind: 'runtime-function', name, owner: object } : null;
   }
   if (object.kind !== 'module') return null;
   if (['core', 'mongo', 'sql', 'postgres'].includes(object.name) && name === 'auth') return { kind: 'auth', subset: 'index' };
   if ((['mongo', 'postgres'].includes(object.name) && (runtimeMembers.has(name) || otherRuntimeMembers.has(name)))
     || (object.name === 'postgres' && sqlMembers.has(name))
-    || (object.name === 'core' && name === 'configureQueryLimits')) return { kind: 'runtime-function', name };
+    || (object.name === 'core' && name === 'configureQueryLimits')) return { kind: 'runtime-function', name, owner: object };
   if ((['core', 'mongo'].includes(object.name) && name === 'createRuntime')
     || (object.name === 'sql' && name === 'createSQL')
-    || (object.name === 'postgres' && name === 'createPostgres')) return { kind: 'runtime-factory', auth: name !== 'createRuntime' };
-  if (object.name === 'graphql' && ['GraphQLObjectType', 'GraphQLList', 'GraphQLNonNull'].includes(name)) return { kind: 'graphql', name };
+    || (object.name === 'postgres' && name === 'createPostgres')) return { kind: 'runtime-factory', name, module: object.name, auth: name !== 'createRuntime' };
+  if (['mongo', 'mongo-adapter'].includes(object.name) && name === 'createMongoAdapter') return { kind: 'adapter-factory', name };
+  if (['core', 'mongo', 'sql', 'postgres'].includes(object.name) && name === 'scalars') return { kind: 'module', name: 'scalars' };
+  if ((['core', 'mongo', 'sql', 'postgres'].includes(object.name) && name === 'createValidatedScalar')
+    || (object.name === 'scalars' && ['createBoundedStringScalar', 'createPatternStringScalar', 'createBoundedIntScalar', 'createBoundedFloatScalar'].includes(name))) return { kind: 'scalar-factory', name };
+  if (object.name === 'scalars' && ['EmailScalar', 'URLScalar', 'PositiveIntScalar', 'PositiveFloatScalar'].includes(name)) return { kind: 'scalar', name };
+  if (object.name === 'dates' && ['GraphQLDateTime', 'GraphQLDate', 'GraphQLTime'].includes(name)) return { kind: 'date-scalar', name: name.slice(7) };
+  if (object.name === 'graphql' && ['GraphQLObjectType', 'GraphQLList', 'GraphQLNonNull', 'GraphQLScalarType', 'GraphQLEnumType', 'GraphQLInterfaceType', 'GraphQLUnionType', 'GraphQLSchema', 'GraphQLString', 'GraphQLID', 'GraphQLInt', 'GraphQLFloat', 'GraphQLBoolean', 'buildClientSchema', 'introspectionFromSchema', 'getIntrospectionQuery', 'graphqlSync'].includes(name)) return { kind: 'graphql', name };
   if ((object.name === 'graphql-middleware' && name === 'applyMiddleware')
     || (object.name === '@graphql-tools/utils' && name === 'mapSchema')) return { kind: 'cloner', name };
   return null;
 };
 
-export const analyze = context => {
+export const analyze = (context, options = {}) => {
   const source = context.sourceCode;
   const variableFor = node => {
     for (let scope = source.getScope(node); scope; scope = scope.upper) {
@@ -117,11 +127,34 @@ export const analyze = context => {
     return callee?.kind === 'runtime-function' && callee.name === 'registerView';
   };
 
+  const isIntrospectionSchema = property => {
+    if (property.type !== 'Property' || keyName(property) !== 'schema') return false;
+    const options = property.parent;
+    const call = options?.parent;
+    if (call?.type !== 'CallExpression' || call.arguments.length !== 1 || call.arguments[0] !== options
+      || origin(call.callee)?.name !== 'graphqlSync') return false;
+    const query = resolve(properties(options)?.get('source'));
+    return query?.type === 'CallExpression' && origin(query.callee)?.name === 'getIntrospectionQuery';
+  };
+
+  const callContainer = input => {
+    let node = resolve(input, new Set(), false);
+    for (let depth = 0; node && depth < 40; depth++) {
+      if (node.type === 'CallExpression') return true;
+      if (node.type !== 'MemberExpression') return false;
+      node = resolve(node.object, new Set(), false);
+    }
+    return false;
+  };
+
   // Lists, non-null wrappers and object fields retain their type objects. A
   // known constructor is safe only while the resulting container stays stable:
   // mutating wrapper.ofType or container.getFields() can mutate the input type.
   const stableGraphQLContainer = (input, seen, depth = 0) => {
     if (depth >= 40) return false;
+    // Introspection produces data, not aliases to the original type objects.
+    if (options.model && input.type === 'CallExpression'
+      && origin(input.callee)?.name === 'introspectionFromSchema') return true;
     let expression = input;
     while (wrappers.has(expression.parent?.type) && expression.parent.expression === expression) expression = expression.parent;
     const parent = expression.parent;
@@ -132,6 +165,8 @@ export const analyze = context => {
     if (['CallExpression', 'NewExpression'].includes(parent?.type) && parent.callee !== expression) {
       const callee = origin(parent.callee);
       if (callee?.kind === 'runtime-function') return true;
+      if (options.model && (callee?.kind === 'cloner'
+        || (callee?.kind === 'graphql' && callee.name === 'introspectionFromSchema'))) return true;
       return parent.type === 'NewExpression' && callee?.kind === 'graphql'
         && stableGraphQLContainer(parent, seen, depth + 1);
     }
@@ -146,12 +181,83 @@ export const analyze = context => {
     return ['ExpressionStatement', 'ExportDefaultDeclaration'].includes(parent?.type);
   };
 
+  const stableReflection = (input, seen, depth = 0) => {
+    if (depth >= 40) return false;
+    let expression = input;
+    while ((expression.parent?.type === 'MemberExpression' && expression.parent.object === expression)
+      || (wrappers.has(expression.parent?.type) && expression.parent.expression === expression)) expression = expression.parent;
+    const parent = expression.parent;
+    if (isWriteTarget(expression)) return false;
+    if (parent?.type === 'VariableDeclarator' && parent.init === expression) {
+      return parent.parent.kind === 'const' && source.getDeclaredVariables(parent).every(alias => stable(alias, seen));
+    }
+    if (['CallExpression', 'NewExpression'].includes(parent?.type)) {
+      if (parent.callee === expression) return false;
+      return origin(parent.callee)?.kind === 'graphql' && stableGraphQLContainer(parent, seen);
+    }
+    if (parent?.type === 'ExpressionStatement') return true;
+    // Only field/config copies retained by a stable GraphQL constructor are
+    // understood. Arbitrary helpers, returned aliases and exports may mutate.
+    let owner = parent;
+    while (owner && !['NewExpression', 'Program', 'VariableDeclarator'].includes(owner.type)) owner = owner.parent;
+    if (owner?.type === 'NewExpression' && origin(owner.callee)?.kind === 'graphql') return stableGraphQLContainer(owner, seen);
+    if (owner?.type === 'VariableDeclarator' && owner.parent.kind === 'const') return source.getDeclaredVariables(owner).every(alias => stable(alias, seen));
+    return false;
+  };
+
+  const scalarHintTarget = (assignment, seen) => {
+    const target = assignment.left;
+    if (assignment.operator !== '=' || target.type !== 'MemberExpression'
+      || memberName(target) !== 'baseScalarType' || target.object.type !== 'Identifier') return false;
+    const variable = variableFor(target.object);
+    const allocated = resolve(target.object, new Set(), false);
+    if (!variable || !['NewExpression', 'CallExpression'].includes(allocated?.type)) return false;
+    const callee = origin(allocated.callee);
+    return (callee?.name === 'GraphQLScalarType' || callee?.kind === 'scalar-factory') && stable(variable, seen);
+  };
+
+  const getterSafe = (input, seen = new Set()) => {
+    let expression = input;
+    let depth = 0;
+    while (++depth < 40) {
+      const parent = expression.parent;
+      if ((parent?.type === 'MemberExpression' && parent.object === expression)
+        || (wrappers.has(parent?.type) && parent.expression === expression)) { expression = parent; continue; }
+      if (parent?.type === 'CallExpression' && parent.callee === expression
+        && expression.type === 'MemberExpression' && ['getFields', 'toConfig'].includes(memberName(expression))
+        && !parent.arguments.length) { expression = parent; continue; }
+      break;
+    }
+    if (depth >= 40 || isWriteTarget(expression)) return false;
+    const parent = expression.parent;
+    if (parent?.type === 'ExpressionStatement') return true;
+    if (parent?.type === 'VariableDeclarator' && parent.init === expression) {
+      return parent.parent.kind === 'const' && source.getDeclaredVariables(parent).every(alias => stable(alias, seen));
+    }
+    if (['CallExpression', 'NewExpression'].includes(parent?.type) && parent.callee !== expression) {
+      const callee = origin(parent.callee);
+      return callee?.kind === 'runtime-function'
+        || (callee?.kind === 'graphql' && stableGraphQLContainer(parent, seen));
+    }
+    if (parent?.type === 'Property' && keyName(parent) === 'type') {
+      if (isViewType(parent)) return true;
+      let constructor = parent;
+      while (constructor && !['NewExpression', 'Program'].includes(constructor.type)) constructor = constructor.parent;
+      return constructor?.type === 'NewExpression' && origin(constructor.callee)?.kind === 'graphql'
+        && stableGraphQLContainer(constructor, seen);
+    }
+    return false;
+  };
+
   const inspectStable = (variable, seen) => {
     const [definition] = variable.defs;
     const rawOrigin = definition?.type === 'ImportBinding'
       ? importOrigin(definition)
       : declarationOrigin(definition, variable.name, new Set(), false);
     const container = ['module', 'auth', 'runtime'].includes(rawOrigin?.kind)
+      || (options.model && callContainer(definition?.node.init))
+      || (options.model && (['scalar', 'date-scalar'].includes(rawOrigin?.kind)
+        || (rawOrigin?.kind === 'graphql' && ['GraphQLString', 'GraphQLID', 'GraphQLInt', 'GraphQLFloat', 'GraphQLBoolean'].includes(rawOrigin.name))))
       || resolve(definition?.node.init, new Set(), false)?.type === 'NewExpression';
     for (const ref of variable.references) {
       if (ref.isWrite() && !ref.init) return false;
@@ -163,7 +269,17 @@ export const analyze = context => {
         expression = parent;
         parent = expression.parent;
       }
-      if (isWriteTarget(expression)) return false;
+      if (isWriteTarget(expression)) {
+        // Model analysis separately validates the unique, ordered scalar hint.
+        // All other member writes still invalidate the object identity.
+        const allocated = resolve(definition?.node.init, new Set(), false);
+        const allocatedOrigin = ['NewExpression', 'CallExpression'].includes(allocated?.type) ? origin(allocated.callee, new Set(), false) : null;
+        const scalarHint = options.model && (allocatedOrigin?.name === 'GraphQLScalarType' || allocatedOrigin?.kind === 'scalar-factory')
+          && expression.type === 'MemberExpression'
+          && expression.object === ref.identifier && memberName(expression) === 'baseScalarType'
+          && parent?.type === 'AssignmentExpression' && parent.operator === '=';
+        if (!scalarHint) return false;
+      }
       if (parent?.type === 'VariableDeclarator' && parent.init === expression) {
         if (!['Identifier', 'ObjectPattern'].includes(parent.id.type) || parent.parent.kind !== 'const') return false;
         const aliases = source.getDeclaredVariables(parent);
@@ -173,24 +289,48 @@ export const analyze = context => {
         // These known consumers read declarations/functions; arbitrary calls may
         // replace methods or mutate a type's field configuration.
         const callee = origin(parent.callee);
-        if (!callee || !['auth-function', 'runtime-function', 'cloner', 'graphql'].includes(callee.kind)) return false;
+        if (!callee || !['auth-function', 'runtime-function', 'runtime-factory', 'adapter-factory', 'scalar-factory', 'cloner', 'graphql'].includes(callee.kind)) return false;
         if (container && callee.kind === 'graphql' && !stableGraphQLContainer(parent, seen)) return false;
+        if (options.model && container && callee.kind === 'scalar-factory' && !stableGraphQLContainer(parent, seen)) return false;
       }
       if (parent?.type === 'CallExpression' && parent.callee === expression && expression.type === 'MemberExpression') {
         const name = memberName(expression);
-        if (!name || ![...runtimeMembers, ...otherRuntimeMembers, ...sqlMembers, ...factories, 'createAuthPlugin', 'createRuntime', 'createSQL', 'createPostgres'].includes(name)) return false;
+        const reflection = options.model && ['getFields', 'toConfig'].includes(name)
+          && parent.arguments.length === 0;
+        if (reflection && !stableReflection(parent, seen)) return false;
+        if (!reflection && (!name || ![...runtimeMembers, ...otherRuntimeMembers, ...sqlMembers, ...factories, 'createAuthPlugin', 'createRuntime', 'createSQL', 'createPostgres', 'createMongoAdapter', 'createValidatedScalar', 'createBoundedStringScalar', 'createBoundedIntScalar', 'createBoundedFloatScalar', 'createPatternStringScalar'].includes(name))) return false;
       }
-      if (parent?.type === 'ReturnStatement' || parent?.type === 'SpreadElement'
-        || (parent?.type === 'AssignmentExpression' && parent.right === expression)) return false;
+      if (parent?.type === 'ReturnStatement' || (parent?.type === 'SpreadElement'
+        && !(options.model && stableReflection(expression, seen)))
+        || (parent?.type === 'AssignmentExpression' && parent.right === expression
+          && !(options.model && scalarHintTarget(parent, seen)))) return false;
       const exposesContainer = expression === ref.identifier ? container
         : ['module', 'auth', 'runtime'].includes(origin(expression, new Set(), false)?.kind);
       if (exposesContainer && (parent?.type === 'Property' || parent?.type === 'ArrayExpression')) {
+        if (options.model && isIntrospectionSchema(parent)) continue;
+        if (options.model && parent.type === 'ArrayExpression') {
+          const consumer = parent.parent;
+          const called = consumer?.type === 'CallExpression' ? origin(consumer.callee) : null;
+          if (called?.kind === 'runtime-function' && called.name === 'createSchema'
+            && consumer.arguments.slice(0, 2).includes(parent)) continue;
+          let arrayOwner = consumer;
+          if (arrayOwner?.type === 'ArrowFunctionExpression' && arrayOwner.body === parent
+            && !arrayOwner.async && !arrayOwner.params.length) arrayOwner = arrayOwner.parent;
+          if (arrayOwner?.type === 'Property' && ['interfaces', 'types'].includes(keyName(arrayOwner))
+            && arrayOwner.parent?.parent?.type === 'NewExpression'
+            && origin(arrayOwner.parent.parent.callee)?.kind === 'graphql'
+            && stableGraphQLContainer(arrayOwner.parent.parent, seen)) continue;
+        }
         // A type in a local GraphQL field declaration, or as the `type` of
         // registerView's options, is a known read. Other containers may expose
         // this object to arbitrary mutation through aliases.
         let constructor = parent;
         while (constructor && !['NewExpression', 'Program'].includes(constructor.type)) constructor = constructor.parent;
-        if (!isViewType(parent) && (keyName(parent) !== 'type' || constructor?.type !== 'NewExpression'
+        const reflectionMember = options.model && ['fields', 'resolve', 'extensions'].includes(keyName(parent));
+        let fieldConfig = parent;
+        while (fieldConfig && fieldConfig !== constructor && !(fieldConfig.type === 'Property' && keyName(fieldConfig) === 'fields')) fieldConfig = fieldConfig.parent;
+        const inFields = options.model && fieldConfig && fieldConfig !== constructor;
+        if (!isViewType(parent) && ((!reflectionMember && !inFields && keyName(parent) !== 'type') || constructor?.type !== 'NewExpression'
           || origin(constructor.callee, new Set(), false)?.kind !== 'graphql'
           || !stableGraphQLContainer(constructor, seen))) return false;
       }
@@ -213,7 +353,7 @@ export const analyze = context => {
     if (def.parent.importKind === 'type' || def.node.importKind === 'type') return null;
     const module = moduleInfo(def.parent.source.value);
     if (def.node.type === 'ImportNamespaceSpecifier') return module;
-    if (def.node.type === 'ImportDefaultSpecifier') return module?.kind === 'auth' ? module : null;
+    if (def.node.type === 'ImportDefaultSpecifier') return module?.kind === 'auth' || module?.name === 'scalars' ? module : null;
     return member(module, def.node.imported.name ?? def.node.imported.value);
   }
 
@@ -243,8 +383,8 @@ export const analyze = context => {
     if (node.type === 'CallExpression') {
       if (node.arguments.some(argument => argument.type === 'SpreadElement')) return null;
       const callee = origin(node.callee, seen, checkStability);
-      if (callee?.kind === 'runtime-factory') return { kind: 'runtime', auth: callee.auth };
-      if (callee?.kind === 'runtime-function' && callee.name === 'createSchema') return { kind: 'schema' };
+      if (callee?.kind === 'runtime-factory') return { kind: 'runtime', auth: callee.auth, factory: callee.name, module: callee.module, node };
+      if (callee?.kind === 'runtime-function' && callee.name === 'createSchema') return { kind: 'schema', owner: callee.owner, node };
     }
     return null;
   }
@@ -281,5 +421,5 @@ export const analyze = context => {
     return entries;
   };
 
-  return { origin, resolve, value, properties };
+  return { origin, resolve, value, properties, variableFor, stable, getterSafe };
 };

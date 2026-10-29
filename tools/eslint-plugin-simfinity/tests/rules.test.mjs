@@ -154,10 +154,13 @@ describe('flat preset and TypeScript', () => {
     const code = "import { configureQueryLimits as a0 } from '@simtlix/simfinity-core';\n" + aliases + '\na0({ maxPageSize: 0 });';
     assert.deepEqual(new Linter().verify(code, [plugin.configs['recommended-3.8']]), []);
   });
-  it('exports eleven errors and the explicit 3.8 preset without automatic fixes', () => {
-    assert.equal(Object.keys(plugin.rules).length, 11);
-    assert.deepEqual(Object.keys(plugin.configs), ['recommended-3.8']);
+  it('exports fourteen errors and opt-in advice for the explicit 3.8 contract without fixes', () => {
+    assert.equal(Object.keys(plugin.rules).length, 15);
+    assert.deepEqual(Object.keys(plugin.configs), ['recommended-3.8', 'advice-3.8']);
+    assert.equal(Object.keys(plugin.configs['recommended-3.8'].rules).length, 14);
     assert.ok(Object.values(plugin.configs['recommended-3.8'].rules).every(level => level === 'error'));
+    assert.equal(plugin.configs['recommended-3.8'].rules['simfinity/modeling-advice'], undefined);
+    assert.deepEqual(plugin.configs['advice-3.8'].rules, { 'simfinity/modeling-advice': 'warn' });
     for (const rule of Object.values(plugin.rules)) {
       assert.equal(rule.meta.fixable, undefined);
       assert.equal(rule.meta.hasSuggestions, undefined);

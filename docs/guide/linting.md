@@ -1,22 +1,24 @@
 # Optional application linting
 
-`@simtlix/eslint-plugin-simfinity` provides eleven optional ESLint rules for the
+`@simtlix/eslint-plugin-simfinity` provides fourteen error rules and one opt-in advice rule for the
 **Simfinity 3.8.0** contract, shared by MongoDB and PostgreSQL. It complements the
 [application skills](./ai-project-bootstrap) and [usage guidance](./anti-patterns)
 with specific editor/CI diagnostics. It does not evaluate business authorization,
 scopes, state machines or transaction correctness.
 
-The plugin is an independently versioned development tool (`0.4.0`), outside the
+The plugin is an independently versioned development tool (`0.5.0`), outside the
 six runtime packages. Install it from npm in your application:
 
 ```sh
-npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.4.0'
+npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.5.0'
 ```
 
-Version 0.4.0 extends `valid-connection-field` to diagnose missing child links on
-locally proven writable object collections without their own resolver. Upgrading
-can report new errors under the existing `recommended-3.8` rule; the preset's
-Simfinity 3.8.0 contract remains unchanged. See [required collection links](#required-collection-links).
+Version 0.5.0 completes the bounded modeling catalogue in #116. It adds
+`valid-model-fields`, `valid-model-storage` and `valid-model-schema`, and extends
+`valid-connection-field` and `no-schema-cloning`. Upgrading can report new errors
+in `recommended-3.8`. Accepted but potentially surprising modeling choices are
+reported only by `modeling-advice` in the opt-in `advice-3.8` preset. Both presets
+retain the explicit Simfinity 3.8.0 contract.
 
 Version 0.3.1 recognizes Simfinity 3.12.0 `registerView()` calls and preserves type tracking through TypeScript-wrapped options. It adds no rule and does not change the `recommended-3.8` preset contract.
 
@@ -50,7 +52,16 @@ export default [
 ];
 ```
 
-All included rules are errors in the preset. To opt out of a rule, add a later flat
+All fourteen recommended rules are errors. Advice is separately opt-in:
+
+```javascript
+export default [
+  simfinity.configs['recommended-3.8'],
+  simfinity.configs['advice-3.8'], // enables only modeling-advice at warning severity
+];
+```
+
+Both presets use the same plugin instance. To opt out of a rule, add a later flat
 config entry, for example `{ rules: { 'simfinity/valid-query-limits': 'off' } }`.
 Each diagnostic reports the rule ID, source location, violated contract and
 suggested action. None supplies automatic source fixes.
@@ -71,8 +82,13 @@ mapSchema(schema, {}); // simfinity/no-schema-cloning
 ```
 
 The same check follows `createRuntime`, `createSQL` and `createPostgres` instances.
-It does not report transformations of independent GraphQL schemas or schemas
-whose provenance is unknown.
+It also reports `buildClientSchema(introspectionFromSchema(schema))` when the
+same-process schema provenance is proven, including stable aliases. The 3.8
+introspection metadata causes duplicate type identities during reconstruction.
+A `new GraphQLSchema(schema.toConfig())` copy preserves identities and is accepted;
+passing that copy to a known cloner is still diagnosed. External/JSON introspection,
+pre-import independent schemas, SDL roundtrips and unknown provenance are not
+reported. The preset does not assume later runtime introspection opt-out features.
 
 ## no-uncalled-auth-factory
 
@@ -359,19 +375,139 @@ simfinity.connect(null, Line, 'line', 'lines');
 simfinity.connect(null, Order, 'order', 'orders');
 ```
 
-The check follows local aliases and outer/item non-null wrappers. It requires a
-known object target, so imported types and `simfinity.getType()` results remain
-unknown. It skips dynamic configuration, fields with `readOnly` or their own
-resolver, virtual declarations, singular references and embedded/scalar/nested
-lists. An embedded type receives this check only if it is also registered itself.
-Whitespace-only links preserve the runtime's behavior; the rule does not trim them.
+The check follows local aliases and outer/item non-null wrappers. Imported types
+and dynamic `simfinity.getType()` targets remain unknown. Singular references,
+embedded and scalar lists do not require collection child links. Whitespace-only
+links retain their runtime meaning, and missing child fields can be legitimate
+private inverse links.
 
-Core permits some missing-link combinations with `readOnly` or a resolver, while
-PostgreSQL or transactional MongoDB storage metadata can still reject them. Those
-engine-specific checks and the contextual warnings remain outside this delivery.
-The shared startup error was revalidated against 3.8.0 source and current 3.18.0
-core, MongoDB and PostgreSQL tests. This only extends bounded MOD-03 coverage;
-[issue #116](https://github.com/simtlix/simfinity.js/issues/116) remains open.
+In 0.5.0, proven SQL/PostgreSQL or transactional MongoDB storage also requires a
+link for readOnly collections and collections with an application resolver.
+`readOnly` changes generated inputs; an own resolver changes reads; neither removes
+storage. Valid virtual fields remain excluded. Outside metadata mode, a missing
+link with exactly one of readOnly/own resolver receives opt-in advice because
+nested writes are rejected; both together are accepted silently.
+
+## valid-model-fields
+
+Checks the field shapes that generated inputs and proven storage backends accept:
+missing object relation metadata, nested lists, stored interfaces/unions,
+unsupported or cyclic scalar bases, enum values that collide after storage
+conversion, and a SQL machine's present non-enum state field.
+
+```javascript
+import { createPostgres } from '@simtlix/simfinity-postgres';
+import { GraphQLObjectType, GraphQLString } from 'graphql';
+const api = createPostgres();
+const Address = new GraphQLObjectType({ name: 'Address', fields: { street: { type: GraphQLString } } });
+const Customer = new GraphQLObjectType({ name: 'Customer', fields: {
+  address: { type: Address }, // storage requires extensions.relation
+} });
+api.addNoEndpointType(Address);
+api.connect(null, Customer, 'customer', 'customers');
+```
+
+Use `relation: { embedded: true }` for an owned value, a nonembedded relation for
+an independent entity, or a valid virtual declaration with an own resolver for a
+computed output. A resolver alone does not remove a field from storage or inputs.
+Core permits readOnly nested-list outputs and omits abstract inputs; those cases
+are not blanket errors. Mongo uses GraphQL scalar identity plus date-name fallback,
+while SQL metadata uses supported scalar names and an acyclic base chain. The
+analyzer recognizes imported validated-scalar factories and one ordered static
+`baseScalarType` assignment; arbitrary callbacks are never invoked. Equal enum
+aliases remain legal; distinct primitive values with the same stored text do not.
+SQL state machines may omit `state` or use an enum list.
+
+## valid-model-storage
+
+Checks proven storage constraints: inverse target/kind and alias conflicts,
+collection-to-collection links, duplicate stored paths, embedded storage/input
+cycles, collections inside embedded values, declarative indexes, SQL identity
+and reserved physical columns, Mongo generated-path names and SQL uniqueness of
+whole embedded values.
+
+Engine distinctions matter. Transactional Mongo validates metadata index shape;
+SQL additionally checks index targets. SQL physical-column rules do not apply to
+keys inside an embedded JSON value. Mongo naming checks apply to generated
+models, with a separate check for a synthesized private `constructor` link.
+Supplying all models can make a readOnly embedded cycle legal. Scalar lists and
+leaf uniqueness remain supported where the engine supports them. Use explicit
+link entities for stored many-to-many relationships.
+
+## valid-model-schema
+
+At a fresh, closed local runtime's schema build, this rule checks required target
+registrations by **type name**, not constructor identity. Writable embedded/list
+targets and generated collection resolvers need registration; readOnly embedded
+outputs and readOnly collections with own resolvers can remain unregistered.
+A dynamic/imported bootstrap cannot establish that a target is absent.
+
+Empty generated inputs usually cause operation omission and are accepted. A
+required embedded value with an empty create projection is an error only when
+included generated mutation roots reach its inputs. Excluded roots, update IDs,
+collection `deleted` operations and singular-reference input boundaries are
+preserved. The opt-in advice rule explains omitted add/update/added inputs.
+
+The rule also follows runtime ownership through ordered schema builds. Sharing
+ordinary value types is legal; generated/reserved nonembedded relation resolvers
+bind an object type to their runtime. Supported copies include `toConfig()`
+configs/maps, known field spreads and explicit resolver/extensions overrides.
+It preserves eager snapshots and first materialization of lazy field thunks.
+Captured `getFields()` maps remain live; captured resolver values and `toConfig()`
+field configurations retain the values present when they were read.
+Clearing a copied resolver is accepted; replacing it while retaining foreign
+tagged extensions can still fail. Interface-field copies are exempt. Whole-map
+`getFields()` copies are outside the supported config grammar because GraphQL's
+runtime `args` arrays are not field-config argument objects; explicit individual
+field copies with corrected `args` can be analyzed. Dynamic transforms, arbitrary
+helpers and copy/delete/rest transforms remain unknown.
+
+## modeling-advice
+
+This opt-in rule reports **accepted behavior** that may differ from the author's
+intent: misplaced metadata, nonboolean flags, omitted object/abstract inputs,
+ignored Mongo mappings/uniqueness, storage overwrite, partially unlinked
+collections, empty generated operations, bare state-machine flags and shared
+embedded/entity IDs. It does not prescribe client write access or native indexes.
+Controllers, custom mutations, supplied models and output-only types are valid
+application choices. Review each warning in that context.
+
+## Modeling catalogue coverage
+
+This matrix accounts for every candidate in [#116](https://github.com/simtlix/simfinity.js/issues/116).
+**Metadata mode** means SQL/PostgreSQL or explicitly transactional MongoDB;
+**generated Mongo** requires a proven model-generation path. Error/advice describes
+the default preset severity. Unknown syntax or context remains undiagnosed.
+
+| Candidate | Rule / behavior | Important accepted alternative or limit |
+| --- | --- | --- |
+| MOD-01 metadata placement | `modeling-advice` | Unrelated custom metadata is allowed |
+| MOD-02 missing relation | `valid-model-fields` in metadata mode; advice for input/Mongo omissions | Core object lists can still have inputs; virtual outputs are exempt |
+| MOD-03 missing/invalid link | `valid-connection-field`; partial-output advice | Private links and whitespace names are valid; readOnly + resolver is legal outside metadata mode |
+| MOD-04 target registration | `valid-model-schema`; singular-reference advice | Requires complete local history; lookup is by name |
+| MOD-05 inverse conflict | `valid-model-storage` in metadata mode | Singular IDs infer references; absent links synthesize private fields |
+| MOD-06 collection inverse | `valid-model-storage` in metadata mode | Explicit join entities and Mongo-off patterns remain allowed |
+| MOD-07 stored-name collision | `valid-model-storage`; generated-Mongo overwrite advice | Collections occupy no parent storage slot |
+| MOD-08 embedded cycles | `valid-model-storage` | Input/storage traversal differ; sibling reuse and all-supplied Mongo models can be legal |
+| MOD-09 nested lists | `valid-model-fields` | ReadOnly/virtual core outputs and abstract output lists are preserved |
+| MOD-10 embedded collections | `valid-model-storage` in metadata mode | Embedded lists and singular references are supported |
+| MOD-11 abstract fields | `valid-model-fields` in metadata mode; input advice | Independent or intentional core output types remain legal |
+| MOD-12 scalar storage | `valid-model-fields`; generated-Mongo mapping advice | Supported validated bases, date-name fallback and unknown callbacks are distinguished |
+| MOD-13 enum encoding | `valid-model-fields` in metadata mode | Same-value aliases and undefined/default enum names remain valid |
+| MOD-14 indexes | `valid-model-storage` | Metadata checks shape; only SQL checks stored targets; native Mongo indexes are not inferred |
+| MOD-15 identity/private names | `valid-model-storage` in SQL | Embedded JSON keys and owned-value IDs do not inherit root identity restrictions |
+| MOD-16 Mongo path names | `valid-model-storage` | Generated-model and private-link cases differ; supplied models and valid aliases are preserved |
+| MOD-17 uniqueness | `valid-model-storage` for whole SQL embedded values; Mongo advice | Supported leaf/native constraints remain application choices |
+| MOD-18 boolean flags | `modeling-advice` | Known truthiness/exact-boolean behavior is described; unknowns are skipped |
+| MOD-19 empty inputs | `valid-model-schema` for reachable required empty embedded create input; omission advice | Empty operations, update IDs and collection deleted operations are otherwise accepted |
+| MOD-20 bound types/copies | `valid-model-schema` | Same-runtime rebuilds, unbound types, early copies and resolver-cleared copies remain legal |
+| MOD-21 schema cloning | `no-schema-cloning` | Identity-preserving toConfig copies and unknown/external introspection remain legal |
+| MOD-22 machine fields | `valid-model-fields` for present SQL non-enum state; bare-flag advice | Missing state and enum-list state are accepted |
+| MOD-23 shared embedded ID | `modeling-advice` | Shared identity can be intentional; own ID resolvers and embedded-only types are exempt |
+
+The rules do not execute application code or promise complete detection of
+arbitrary JavaScript. The published scope is the finite syntax and proof model
+below, with paired accepted/rejected runtime fixtures in the repository.
 
 ## Supported analysis and limits
 
@@ -380,24 +516,35 @@ packages, local constant aliases, simple namespace destructuring and supported
 MongoDB legacy `src` imports. It respects shadowing and skips recognized writes
 and escapes. Configuration objects must be inline plain literals; primitive
 constants and simple TypeScript assertions are supported. Duplicate literal
-properties use their final value. Spreads, computed keys, getters, mutable object
-aliases and dynamic values remain unknown.
+properties use their final value. General spreads, computed keys, getters, mutable object
+aliases and dynamic values remain unknown; the schema-copy grammar above is an
+explicit, bounded exception.
 
-Type checks require registration in the same file. Simple `fields` thunks are
-read as syntax, never invoked. Cross-file permission maps and types, CommonJS,
-arbitrary bootstrap code, reflection and mutations through external exports are
-outside this first release. Alias analysis is bounded to 40 and type traversal
-to 200 nodes per file. No application imports, factories or database connections
+Type checks require local provenance. Simple `fields` thunks are read as syntax,
+never invoked. Scalar hints must be one direct, unconditional assignment before
+registration/schema use. SQL/PostgreSQL constructors and facade imports prove
+the engine; `createRuntime(createMongoAdapter({ referentialIntegrity:
+'transactional' }))` proves transactional Mongo. Unknown adapters/options do not
+prove engine-specific restrictions. Imported singleton registrations, callbacks
+and conditional bootstraps cannot prove a complete registry or execution order.
+Writes or unknown escapes through runtime getters (`getType`, `getRegistrations`,
+`getInputType`) or schema getters invalidate the file's model proofs, since type
+objects can be shared between runtimes. Local field/configuration views likewise
+lose provenance when passed through unsupported mutable containers.
+
+Cross-file maps/types, CommonJS, arbitrary bootstrap code and mutations through
+external exports remain outside the model. Bounds per file are 40 alias steps,
+200 types, 10,000 fields/copy steps, 2,000 calls and 100,000 AST nodes. Exhausted
+proofs remain unknown. No application imports, factories or database connections
 run during analysis.
 
-The bounded consumer trial lints both Barber backends and checks ten injected
-policy, relation and authorization-contract violations per backend in memory.
-Version 0.4.0 additionally checks a local object-collection sentinel for
-each backend; Barber's dynamic collection targets are outside this new check.
-It does not certify their business policies
-or measure accuracy against the entire candidate catalogue. Native operations
-remain an application option; consult [server-side operations](./server-side-operations)
-for their lifecycle and transaction responsibilities.
+The packed JS/TS consumer checks all new error rules and advice severity as well
+as the existing authorization contracts. The bounded Barber trial lints both
+backends, with ten existing in-memory sentinels plus five local modeling sentinels
+per backend. Dynamic `getType()` collection targets remain outside local proofs.
+This trial checks diagnostics; it does not certify application business policies.
+Native operations remain an application option; consult [server-side operations](./server-side-operations)
+for lifecycle and transaction responsibilities.
 
 The [source and verification commands](https://github.com/simtlix/simfinity.js/tree/master/tools/eslint-plugin-simfinity)
 include an isolated packed JS/TS consumer. The broader candidates in

@@ -1,4 +1,6 @@
 import { analyze, unwrap } from '../analysis.js';
+import { buildModelGraph } from '../model-analysis.js';
+import { messages, connectionDiagnostics } from '../model-storage.js';
 
 export default {
   meta: {
@@ -8,12 +10,19 @@ export default {
     messages: {
       invalid: 'Simfinity 3.8 connectionField must name a field, not a dotted path or a non-string value. Declare a reference belonging to an embedded value inside that embedded type.',
       missing: 'A writable referenced object collection without its own resolver requires a nonempty connectionField. Declare the child field that links each item to its parent.',
+      storageMissingConnection: messages.storageMissingConnection,
     },
   },
   create(context) {
     const analysis = analyze(context);
+    const calls = [];
     const visited = new Set();
     const registered = new Set();
+    const reported = new Set();
+    const report = diagnostic => {
+      if (!reported.has(diagnostic.node)) context.report(diagnostic);
+      reported.add(diagnostic.node);
+    };
     const constructed = (input, name) => {
       const node = analysis.resolve(input);
       if (node?.type !== 'NewExpression' || node.arguments.some(argument => argument.type === 'SpreadElement')) return null;
@@ -68,7 +77,7 @@ export default {
         const result = valueOrAbsent(connection);
         if (result.known && result.value !== null && result.value !== undefined
           && (typeof result.value !== 'string' || result.value.includes('.'))) {
-          if (!seen) context.report({ node: connection, messageId: 'invalid' });
+          if (!seen) report({ node: connection, messageId: 'invalid' });
           continue;
         }
         // Core checks missing links only on registered types. Embedded traversal
@@ -80,17 +89,25 @@ export default {
         const readOnly = valueOrAbsent(extension.get('readOnly'));
         const resolver = valueOrAbsent(config.get('resolve'));
         if (readOnly.known && !readOnly.value && resolver.known && resolver.value == null) {
-          context.report({ node: connection || extension.get('relation'), messageId: 'missing' });
+          report({ node: connection || extension.get('relation'), messageId: 'missing' });
         }
       }
     };
     return {
+      'Program:exit'() {
+        const graph = buildModelGraph(context);
+        if (graph.truncated) return;
+        for (const node of calls) {
+          if (node.arguments.some(argument => argument.type === 'SpreadElement')) continue;
+          const callee = analysis.origin(node.callee);
+          if (callee?.kind !== 'runtime-function' || !graph.runtime(callee)) continue;
+          if (callee.name === 'connect') inspectType(node.arguments[1], true);
+          if (callee.name === 'addNoEndpointType') inspectType(node.arguments[0], true);
+        }
+        for (const diagnostic of connectionDiagnostics(graph)) report(diagnostic);
+      },
       CallExpression(node) {
-        if (node.arguments.some(argument => argument.type === 'SpreadElement')) return;
-        const callee = analysis.origin(node.callee);
-        if (callee?.kind !== 'runtime-function') return;
-        if (callee.name === 'connect') inspectType(node.arguments[1], true);
-        if (callee.name === 'addNoEndpointType') inspectType(node.arguments[0], true);
+        calls.push(node);
       },
     };
   },

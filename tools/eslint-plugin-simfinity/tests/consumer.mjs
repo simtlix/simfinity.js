@@ -35,6 +35,7 @@ import plugin from '@simtlix/eslint-plugin-simfinity';
 import parser from '@typescript-eslint/parser';
 export default [
   { ...plugin.configs['recommended-3.8'], files: ['**/*.{js,ts}'] },
+  { ...plugin.configs['advice-3.8'], files: ['fixtures/advice.*'] },
   { files: ['**/*.ts'], languageOptions: { parser } },
 ];
 `);
@@ -86,6 +87,28 @@ sf.connect(null, new GraphQLObjectType({ name: 'Owner', fields: { children: { ty
     const path = join(directory, `fixtures/${name}.ts`);
     await writeFile(path, await readFile(path, 'utf8') + collectionTs.replace('LINK', link));
   }
+  const modeling = {
+    fields: `import { createPostgres } from '@simtlix/simfinity-postgres';
+import { GraphQLObjectType as Obj, GraphQLString as Text } from 'graphql';
+const api=createPostgres(); const Value=new Obj({name:'Value',fields:{text:{type:Text}}});
+const Root=new Obj({name:'Root',fields:{value:{type:Value}}}); api.connect(null,Root);`,
+    storage: `import { createPostgres } from '@simtlix/simfinity-postgres';
+import { GraphQLObjectType as Obj, GraphQLInt } from 'graphql';
+const api=createPostgres(); const Root=new Obj({name:'Root',fields:{id:{type:GraphQLInt}}}); api.connect(null,Root);`,
+    schema: `import { createRuntime } from '@simtlix/simfinity-core';
+import { GraphQLObjectType as Obj, GraphQLString as Text } from 'graphql';
+const api=createRuntime(adapter); const Value=new Obj({name:'Value',fields:{text:{type:Text}}});
+const Root=new Obj({name:'Root',fields:{value:{type:Value,extensions:{relation:{embedded:true}}}}}); api.connect(null,Root); api.createSchema();`,
+    advice: `import { createRuntime } from '@simtlix/simfinity-core';
+import { GraphQLObjectType as Obj, GraphQLString as Text } from 'graphql';
+const api=createRuntime(adapter); const Root=new Obj({name:'Root',fields:{text:{type:Text,readOnly:true}}}); api.connect(null,Root);`,
+  };
+  for (const [name, fixture] of Object.entries(modeling)) {
+    for (const extension of ['js', 'ts']) {
+      const code = extension === 'ts' ? fixture.replace("name:'Root'", "name:'Root' as const") : fixture;
+      await writeFile(join(directory, `fixtures/${name}.${extension}`), code + "\nthrow new Error('Linting must not execute application code');\n");
+    }
+  }
   let output;
   try {
     output = execute(process.execPath, ['node_modules/eslint/bin/eslint.js', 'fixtures', '--format', 'json', '--fix']);
@@ -130,18 +153,29 @@ sf.connect(null, new GraphQLObjectType({ name: 'Owner', fields: { children: { ty
     if (report.filePath.endsWith('/valid.js') || report.filePath.endsWith('/valid.ts')) assert.equal(report.messages.length, 0);
     for (const message of report.messages) assert.equal(message.fix, undefined);
   }
+  for (const [name, rule] of [['fields', 'valid-model-fields'], ['storage', 'valid-model-storage'], ['schema', 'valid-model-schema'], ['advice', 'modeling-advice']]) {
+    for (const extension of ['js', 'ts']) {
+      const report=reports.find(item=>item.filePath.endsWith(`/${name}.${extension}`));
+      assert.deepEqual(report.messages.map(message=>[message.ruleId,message.severity]), [[`simfinity/${rule}`,name === 'advice' ? 1 : 2]], report.filePath);
+    }
+  }
   await writeFile(join(directory, 'config.ts'), `import plugin from '@simtlix/eslint-plugin-simfinity';
 import type { Linter, Rule } from 'eslint';
 const config: Linter.Config = plugin.configs['recommended-3.8'];
 const extractor: Rule.RuleModule = plugin.rules['no-async-auth-extractor'];
 const middleware: Rule.RuleModule = plugin.rules['no-auth-plugin-as-middleware'];
 const expression: Rule.RuleModule = plugin.rules['valid-policy-expression'];
+const fields: Rule.RuleModule = plugin.rules['valid-model-fields'];
+const storage: Rule.RuleModule = plugin.rules['valid-model-storage'];
+const schema: Rule.RuleModule = plugin.rules['valid-model-schema'];
+const advice: Rule.RuleModule = plugin.rules['modeling-advice'];
+const advisoryConfig: Linter.Config = plugin.configs['advice-3.8'];
 export default config;
 `);
   const installedVersion = execute(process.execPath, ['--input-type=module', '-e', "import plugin from '@simtlix/eslint-plugin-simfinity'; console.log(plugin.meta.version);"]).trim();
   assert.equal(installedVersion, manifest.version, 'Packed plugin metadata must match the package version');
   execute(process.execPath, ['node_modules/typescript/bin/tsc', '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext', 'config.ts']);
-  console.log('Packed consumer passed: fourteen JS and nine TS diagnostics, config/rule types, valid fixtures, no runtime dependencies or source fixes.');
+  console.log('Packed consumer passed: fourteen legacy JS and nine legacy TS diagnostics, eight JS/TS modeling diagnostics with error/advice severities, both preset types, valid fixtures, no runtime dependencies or source fixes.');
 } finally {
   await rm(directory, { recursive: true, force: true });
 }
