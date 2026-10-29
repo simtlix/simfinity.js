@@ -184,6 +184,17 @@ export const analyze = (context, options = {}) => {
     return false;
   };
 
+  const scalarHintTarget = (assignment, seen) => {
+    const target = assignment.left;
+    if (assignment.operator !== '=' || target.type !== 'MemberExpression'
+      || memberName(target) !== 'baseScalarType' || target.object.type !== 'Identifier') return false;
+    const variable = variableFor(target.object);
+    const allocated = resolve(target.object, new Set(), false);
+    if (!variable || !['NewExpression', 'CallExpression'].includes(allocated?.type)) return false;
+    const callee = origin(allocated.callee);
+    return (callee?.name === 'GraphQLScalarType' || callee?.kind === 'scalar-factory') && stable(variable, seen);
+  };
+
   const inspectStable = (variable, seen) => {
     const [definition] = variable.defs;
     const rawOrigin = definition?.type === 'ImportBinding'
@@ -233,7 +244,7 @@ export const analyze = (context, options = {}) => {
       }
       if (parent?.type === 'ReturnStatement' || parent?.type === 'SpreadElement'
         || (parent?.type === 'AssignmentExpression' && parent.right === expression
-          && !(options.model && parent.operator === '=' && parent.left.type === 'MemberExpression' && memberName(parent.left) === 'baseScalarType'))) return false;
+          && !(options.model && scalarHintTarget(parent, seen)))) return false;
       const exposesContainer = expression === ref.identifier ? container
         : ['module', 'auth', 'runtime'].includes(origin(expression, new Set(), false)?.kind);
       if (exposesContainer && (parent?.type === 'Property' || parent?.type === 'ArrayExpression')) {

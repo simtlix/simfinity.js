@@ -1,22 +1,23 @@
 # @simtlix/eslint-plugin-simfinity
 
 Optional editor/CI checks for **Simfinity 3.8.0**, shared by MongoDB and PostgreSQL.
-Version 0.4.0 provides eleven precise rules, including `valid-policy-expression`.
+Version 0.5.0 provides fourteen error rules and one opt-in modeling advice rule.
 It does not execute application
 code or load Simfinity, GraphQL, database drivers or the MCP SDK.
 
-The plugin has its own version (`0.4.0`) and is outside Simfinity's six runtime
+The plugin has its own version (`0.5.0`) and is outside Simfinity's six runtime
 workspaces and their release workflow. Install it from npm in your application:
 
 ```sh
-npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.4.0'
+npm install --save-dev 'eslint@^9.30.1' '@simtlix/eslint-plugin-simfinity@0.5.0'
 ```
 
-Version 0.4.0 extends `valid-connection-field` to detect a missing
-child link on a locally proven, writable referenced object collection without its
-own resolver. Upgrading can report new errors under the same rule in
-`recommended-3.8`; the preset's Simfinity 3.8.0 contract remains unchanged.
-See the limits below.
+Version 0.5.0 completes the bounded modeling catalogue in issue #116. It adds
+`valid-model-fields`, `valid-model-storage` and `valid-model-schema`, extends
+`valid-connection-field` and `no-schema-cloning`, and adds opt-in
+`modeling-advice`. Upgrading can introduce errors in `recommended-3.8` for
+previously undiagnosed declarations. The runtime contract remains Simfinity 3.8.0;
+plugin and runtime versions are independent.
 
 Version 0.3.1 recognizes Simfinity 3.12.0 `registerView()` calls and preserves type tracking through TypeScript-wrapped options. It adds no rule and does not change the `recommended-3.8` preset contract.
 
@@ -40,8 +41,16 @@ Selecting `recommended-3.8` explicitly selects the **3.8.0 runtime contract**.
 The plugin does not discover your installed runtime version, infer a database,
 or claim compatibility with older/newer contracts. The authorization checks added
 in 0.2.0 and 0.3.0 were also revalidated against Simfinity
-3.10.0; their runtime contracts are unchanged. All eleven rules are errors
+3.10.0; their runtime contracts are unchanged. Fourteen rules are errors
 in this preset and can be individually disabled using normal ESLint config.
+Accepted modeling choices remain silent unless you also opt into advice:
+
+```javascript
+export default [
+  simfinity.configs['recommended-3.8'],
+  simfinity.configs['advice-3.8'], // only simfinity/modeling-advice: warn
+];
+```
 
 For TypeScript, install `@typescript-eslint/parser` in the application and add:
 
@@ -57,7 +66,7 @@ export default [
 
 | Rule (`simfinity/` prefix) | Proven violation | Suggested action |
 | --- | --- | --- |
-| `no-schema-cloning` | Imported `applyMiddleware`/`mapSchema` receives a locally proven Simfinity schema | Use Envelop or in-place resolver wrapping |
+| `no-schema-cloning` | Imported schema cloners or a proven same-process introspection reconstruction receive a Simfinity schema | Use Envelop or in-place resolver wrapping |
 | `no-uncalled-auth-factory` | A known factory is passed as a permission rule or composition argument | Call the factory with the intended arguments |
 | `valid-default-policy` | Explicit `defaultPolicy` is neither `ALLOW`, `DENY` nor `undefined` | Choose the intended policy; omission defaults to `DENY` |
 | `valid-permissions` | A proven invalid top-level/type permission map or a configured rule that is a nonboolean primitive, empty object, empty/sparse rule array | Supply maps and valid rules; omission means using the default policy |
@@ -67,7 +76,11 @@ export default [
 | `no-auth-plugin-as-middleware` | A proven `createAuthPlugin()` result passed to Simfinity `use()` | Install the plugin in the GraphQL server's Envelop plugins |
 | `valid-policy-expression` | Malformed inline policy syntax in `createRuleFromExpression` or configured permission rules | Use valid operators, operands, logical arrays and `parent`/`args`/`ctx` references |
 | `valid-query-limits` | Explicit `maxPageSize` is not a positive safe integer or `undefined` | Set a valid cap; omission/undefined restores 1000 |
-| `valid-connection-field` | A locally registered relation has a dotted/non-string link, or a proven writable object collection without its own resolver lacks a child link | Use a field name linking the child to its parent; declare embedded references on their owning type |
+| `valid-connection-field` | A locally registered relation has a dotted/non-string link, or a proven required object collection lacks a child link (including readOnly/resolver collections in storage metadata mode) | Use a field name linking the child to its parent; declare embedded references on their owning type |
+| `valid-model-fields` | Unsupported stored/input field shapes, scalar bases, enum encodings or SQL machine state | Use a supported explicit model shape |
+| `valid-model-storage` | Conflicting inverse links/storage names, cycles, indexes or engine storage restrictions | Choose a compatible relation and physical mapping |
+| `valid-model-schema` | Proven absent registrations, reachable required empty inputs or foreign runtime-bound fields | Register dependencies or create the intended runtime-owned types |
+| `modeling-advice` (opt-in) | Ignored metadata, accepted omissions and potentially surprising mappings | Confirm the application's intended behavior |
 
 See the [rule examples and application guidance](https://simtlix.github.io/simfinity.js/guide/linting).
 There are **no automatic fixes or suggestions**: changing permissions, relation
@@ -80,8 +93,9 @@ paths, local `const` aliases, simple namespace destructuring and runtime factori
 (`createRuntime`, `createSQL`, `createPostgres`). It respects binding identity,
 shadowing, direct/alias writes and recognized escapes. It reads inline plain
 configuration objects and primitive constants. Duplicate literal properties use
-the last value. Spreads, computed keys, getters, mutable configuration objects,
-imported permission maps and unknown values are skipped.
+the last value. General spreads, computed keys, getters, mutable configuration objects,
+imported permission maps and unknown values are skipped; schema field copies
+have the narrowly defined exception below.
 
 Calling the known runtime member `configureAfterCommit` preserves tracking for
 subsequent schema and relation checks. The plugin does not validate its options
@@ -130,36 +144,40 @@ Yoga/Envelop plugins and MCP `schemaPlugins` are valid destinations. Unknown
 wrappers, mutable aliases, spread calls and a bare factory passed to `use` are
 outside this batch. Neither rule decides an application's permissions.
 
-GraphQL checks require local `connect`/`addNoEndpointType` registration. They follow
-embedded object/list/non-null types and simple field thunks without invoking
-them. Independent GraphQL schemas, dynamic type builders and cross-file type
-registrations are not analyzed. Virtual fields have no added storage requirement.
-Links on embedded relations are not checked. This rule does not establish that a
-target field exists.
+Modeling checks read local GraphQL declarations and simple zero-argument field
+thunks without invoking them. They retain exact runtime/type identities, replace
+registrations by type name, and distinguish SQL/PostgreSQL, explicit
+transactional MongoDB, default MongoDB and unknown adapters. Storage checks follow
+entity references and embedded values. Mongo generator checks require evidence
+that the model is generated; supplied models and unknown hooks cannot establish
+missing native constraints. Virtual fields have no storage requirement.
 
-Since 0.4.0, an omitted, `null`, `undefined` or empty link produces a
-`missing` diagnostic when all of these facts are known locally: the owning type is
-directly registered, the field is a non-embedded list of a `GraphQLObjectType`,
-`readOnly` is absent or falsy, and `resolve` is absent, null or undefined. Outer and
-item `GraphQLNonNull` wrappers are supported. Singular references, embedded lists,
-virtual declarations, scalar/nested lists and unknown values stay outside the new
-check. Whitespace-only links retain the runtime's existing meaning.
+`valid-connection-field` keeps the 0.4.0 shared core missing-link error. In 0.5.0,
+SQL/transactional Mongo also require links on stored readOnly/own-resolver
+collections. Outside metadata mode, exactly one of these flags yields opt-in
+advice; both together remain accepted. Private child links need not be declared,
+and whitespace is not trimmed.
 
-The list's object target must be a local declaration: imported targets and dynamic
-`getType()` calls remain unknown. Merely reaching an unregistered embedded type
-does not enable the missing-link check; explicitly registering it does. Read-only
-or own-resolver collections are skipped even when an engine's storage metadata
-would reject them. This is the shared core error check, not backend initialization
-validation. The 3.8.0 contract was also rechecked against current 3.18.0 core and
-both adapters. Broader MOD-03 variants and the rest of
-[issue #116](https://github.com/simtlix/simfinity.js/issues/116) remain open.
+Schema absence/empty-input checks require a fresh local runtime and complete,
+straight-line registration history. Imported singleton bootstraps and unknown or
+conditional registrations cannot prove absence. Empty generated inputs are
+usually permitted and only receive advice; a reachable required empty embedded
+create input is an error. Runtime-bound type checks follow ordered schema builds
+and bounded `toConfig()` field copies, preserving eager snapshot versus lazy
+field-thunk materialization and resolver-clearing exceptions. Arbitrary helpers,
+copy/delete transforms and external introspection remain unknown.
 
-This is bounded syntax analysis, not whole-program interpretation. Alias chains
-are bounded to 40 and type traversal to 200 nodes per file. Reflection, mutations
-through external exports, arbitrary callbacks and application bootstrap ordering
-are outside its proof model. An undiagnosed file is not evidence of correct
-authorization, row visibility, lifecycle hooks, concurrency or transaction safety.
-Legitimate native database operations remain supported.
+See the [23-candidate coverage matrix](https://simtlix.github.io/simfinity.js/guide/linting#modeling-catalogue-coverage)
+for engine applicability, accepted alternatives and message groups. The matrix
+accounts for every MOD-01–MOD-23 candidate within these explicit static limits;
+it is not a whole-program certification.
+
+Alias chains are bounded to 40, type descriptors to 200, fields and copy-analysis
+steps to 10,000, calls to 2,000 and AST nodes to 100,000 per file. Exhausted proofs
+stay unknown. Unsupported reflection, cross-file mutation, external exports and
+arbitrary bootstrap ordering are outside this model. A clean file does not
+certify authorization, row visibility, lifecycle hooks, concurrency or transaction
+safety. Legitimate native database operations remain supported.
 
 ## Contributing and verification
 
@@ -180,9 +198,8 @@ The isolated consumer packs/installs the actual archive, exercises JS/TS flat
 config and TypeScript config declarations, checks rule IDs/locations, and verifies
 that `--fix` changes no source. No runtime dependency is installed or executed.
 The bounded trial lints both Barber backends and injects ten in-memory sentinel
-violations per backend to check coverage. Version 0.4.0 adds one explicit
-local collection sentinel per backend because Barber's dynamic `getType()` targets
-are outside the new missing-link check. The trial does not run the applications or
+violations per backend to check coverage. There are also five local sentinels per backend for a missing collection link,
+field shape, engine storage, schema registration and opt-in advice. Barber's dynamic `getType()` targets remain outside local target proofs. The trial does not run the applications or
 certify their business policies. `.github/workflows/eslint-plugin.yml` owns this
 package's checks. `release-eslint-plugin.yml` publishes stable plugin tags via OIDC
 and tests the exact packed archive before publication. Runtime releases do not

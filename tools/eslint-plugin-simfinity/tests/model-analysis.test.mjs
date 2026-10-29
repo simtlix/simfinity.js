@@ -107,6 +107,8 @@ test('reflection and scalar hints never hide writes or unknown escapes', () => {
     'const fields=T.getFields(); fields.name.type=Other;',
     'mutate(T.getFields());',
     'const fields=T.toConfig().fields; mutate(fields);',
+    'const box={}; box.baseScalarType=T; mutate(box);',
+    "const S=new Scalar({name:'S',serialize:x=>x}); S.baseScalarType=T; mutate(S);",
   ]) {
     const graph=graphOf(`const rt=createRuntime(adapter); const T=new Obj({name:'T',fields:{name:{type:Str}}}); ${mutation} rt.connect(null,T);`);
     assert.equal(graph.registrations[0].type === null,true,mutation);

@@ -62,7 +62,28 @@ simfinity.connect(null, new GraphQLObjectType({ name: 'LintOwner', fields: {
 `;
   const missing = linter.verify(application + localCollection, [plugin.configs['recommended-3.8']]);
   assert.deepEqual(missing.map(message => [message.ruleId, message.messageId]), [['simfinity/valid-connection-field', 'missing']]);
+  const localFields = `
+import { GraphQLObjectType as LintObject, GraphQLList as LintList, GraphQLString as LintString, GraphQLInt as LintInt } from 'graphql';
+simfinity.connect(null,new LintObject({name:'LintNested',fields:{rows:{type:new LintList(new LintList(LintString))}}}),'lintNested','lintNesteds');
+simfinity.createSchema();
+`;
+  assert.deepEqual(linter.verify(application + localFields, [plugin.configs['recommended-3.8']]).map(message => message.ruleId), ['simfinity/valid-model-fields']);
+  const localStorage = localFields.replace("rows:{type:new LintList(new LintList(LintString))}", engine === 'mongodb' ? 'constructor:{type:LintString}' : 'id:{type:LintInt}');
+  assert.deepEqual(linter.verify(application + localStorage, [plugin.configs['recommended-3.8']]).map(message => message.ruleId), ['simfinity/valid-model-storage']);
+  const localSchema = `
+import { createRuntime as createLintRuntime } from '@simtlix/simfinity-core';
+import { GraphQLObjectType as LintObject, GraphQLString as LintString } from 'graphql';
+const lintRuntime=createLintRuntime(adapter);
+const LintValue=new LintObject({name:'LintValue',fields:{text:{type:LintString}}});
+const LintRoot=new LintObject({name:'LintRoot',fields:{value:{type:LintValue,extensions:{relation:{embedded:true}}}}});
+lintRuntime.connect(null,LintRoot); lintRuntime.createSchema();
+`;
+  assert.deepEqual(linter.verify(application + localSchema, [plugin.configs['recommended-3.8']]).map(message => message.ruleId), ['simfinity/valid-model-schema']);
+  const localAdvice=localFields.replace('rows:{type:new LintList(new LintList(LintString))}', 'text:{type:LintString,readOnly:true}');
+  const advisory = linter.verify(application + localAdvice, [plugin.configs['recommended-3.8'],plugin.configs['advice-3.8']]);
+  assert.deepEqual(advisory.map(message => [message.ruleId,message.severity]), [['simfinity/modeling-advice',1]]);
   console.log(`${engine}: ten injected policy, relation and authorization-contract violations detected in existing application files.`);
   console.log(`${engine}: one additional local collection sentinel detected; dynamic getType targets remain outside the missing-link check.`);
+  console.log(`${engine}: field, storage, schema and opt-in advice sentinels detected with expected severities.`);
 }
 console.log('Bounded trial only: cross-file permission maps, dynamic configuration, lifecycle, scopes and transaction ownership are not certified. No application code was executed.');
