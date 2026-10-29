@@ -27,16 +27,21 @@ const truthy = value => value?.known ? !!value.value : null;
 const missing = value => value?.known && (value.value == null || value.value === '');
 const plainLink = value => value?.known && typeof value.value === 'string' && value.value !== '' && !value.value.includes('.');
 const at = (field, key) => field.relation?.get(key) || field.extensions?.get(key) || field.node;
-const scalarRoot = type => {
+const scalarRoot = (type, mongo = false) => {
   const visited = new Set();
   let root = type;
   while (root?.kind === 'scalar') {
-    if (visited.has(root) || visited.size >= LIMIT || root.base === undefined) return null;
+    // Mongo stops at the repeated value and still tests its builtin identity or
+    // date name. Metadata rejects the cycle instead; unknown bases stay unknown.
+    if (visited.has(root)) return mongo ? root : null;
+    if (visited.size >= LIMIT || root.base === undefined) return null;
     visited.add(root);
     if (!root.base) return root;
     root = root.base;
   }
-  return null;
+  // resolveStorageScalar also stops at a base that is not a GraphQLScalarType;
+  // getEffectiveTypeName can still recognize that value's temporal name.
+  return mongo ? root : null;
 };
 
 const describe = (graph, field) => {
@@ -167,7 +172,7 @@ export const inspect = graph => {
         // Mongo only defines mappings for its known builtins, enums/date scalars,
         // references and embedded values. Unknown scalar mappings store nothing
         // provable, and a relation-marked scalar list takes a different branch.
-        const root = kind === 'scalar' && named.kind === 'scalar' ? scalarRoot(named) : null;
+        const root = kind === 'scalar' && named.kind === 'scalar' ? scalarRoot(named, mode === 'mongo') : null;
         const mongoMapped = kind !== 'scalar' || named.kind === 'enum'
           || (root && ((root.builtin && ['String', 'ID', 'Int', 'Float', 'Boolean'].includes(root.name))
             || ['DateTime', 'Date', 'Time'].includes(root.name)));

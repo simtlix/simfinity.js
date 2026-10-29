@@ -107,9 +107,16 @@ describe('Mongo mapping and opt-in modeling advice', () => {
   check('supplied Mongo models skip generator-only name errors', source(root('constructor: { type: S }'), mongo, "sf.connect(model, Root, 'root', 'roots');"), []);
   check('private constructor link fails even with supplied models', source(child() + root(`children: ${ref('new L(Child)', 'constructor')}`), mongo, "sf.connect(modelA, Root, 'root', 'roots');sf.connect(modelB, Child, 'child', 'children');"), ['storageMongoName']);
   check('unknown custom scalar does not prove stored constructor', source("const Custom = new Scalar({ name: 'Custom' });" + root('constructor: { type: Custom }'), mongo), []);
+  for (const type of ['DateValue', 'new L(DateValue)']) {
+    check(`cyclic temporal storage still rejects Mongo constructor (${type})`, source("const DateValue = new Scalar({ name: 'DateTime', serialize: value => value }); DateValue.baseScalarType = DateValue;" + root(`constructor: { type: ${type} }`), mongo), ['storageMongoName']);
+  }
+  check('a repeated temporal scalar still maps through a longer base cycle', source("const DateValue = new Scalar({ name: 'DateTime' }); const Other = new Scalar({ name: 'Other' }); DateValue.baseScalarType = Other; Other.baseScalarType = DateValue;" + root('constructor: { type: DateValue }'), mongo), ['storageMongoName']);
+  check('a temporal intermediate does not map a repeated non-temporal scalar', source("const DateValue = new Scalar({ name: 'DateTime' }); const Other = new Scalar({ name: 'Other' }); DateValue.baseScalarType = Other; Other.baseScalarType = DateValue;" + root('constructor: { type: Other }'), mongo), []);
+  check('Mongo temporal fallback also applies to a known non-scalar base', source("const DateBase = new Enum({ name: 'DateTime', values: { ONE: {} } }); const DateValue = new Scalar({ name: 'Value' }); DateValue.baseScalarType = DateBase;" + root('constructor: { type: DateValue }'), mongo), ['storageMongoName']);
   check('an unannotated object has no generated Mongo constructor path', source(child() + root('constructor: { type: Child }'), mongo), []);
   check('transactional Mongo still uses generated Mongo naming rules', source(root('constructor: { type: S }'), strict), ['storageMongoName']);
   check('ignored Mongo unique is advice only', source(root('key: { type: ID, extensions: { unique: true } }'), mongo), []);
+  check('cyclic temporal mapping still ignores Mongo unique', source("const DateValue = new Scalar({ name: 'DateTime' }); DateValue.baseScalarType = DateValue;" + root('key: { type: DateValue, extensions: { unique: true } }'), mongo), ['storageIgnoredUnique'], advice);
   for (const type of ['ID', 'B', 'new L(S)']) {
     check(`warns on ignored unique for ${type}`, source(root(`key: { type: ${type}, extensions: { unique: true } }`), mongo), ['storageIgnoredUnique'], advice);
   }

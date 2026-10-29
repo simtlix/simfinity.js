@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import mongoose from 'mongoose';
 import {
-  GraphQLBoolean, GraphQLID, GraphQLInt, GraphQLList, GraphQLObjectType, GraphQLString,
+  GraphQLBoolean, GraphQLEnumType, GraphQLID, GraphQLInt, GraphQLList, GraphQLObjectType, GraphQLScalarType, GraphQLString,
 } from 'graphql';
 import { createRuntime } from '../packages/core/src/index.js';
 import { describeModels } from '../packages/core/src/metadata.js';
@@ -141,6 +141,28 @@ describe('ESLint modeling storage contract evidence', () => {
     const model = generated(Good);
     expect(model.schema.path('makerId').instance).toBe('ObjectId');
     expect(model.schema.path('toString').instance).toBe('String');
+  });
+
+  it('keeps Mongo temporal fallback at repeated scalar and known non-scalar storage roots', () => {
+    const DateValue = new GraphQLScalarType({ name: 'DateTime', serialize: (value) => value });
+    DateValue.baseScalarType = DateValue;
+    for (const type of [DateValue, new GraphQLList(DateValue)]) {
+      expect(() => generated(object('DateConstructor', { constructor: { type } }))).toThrow(/Mongoose drops a stored path named constructor/);
+    }
+    const Temporal = object('Temporal', { date: { type: DateValue, extensions: { unique: true } } });
+    const model = generated(Temporal);
+    expect(model.schema.path('date').instance).toBe('Date');
+    expect(model.schema.path('date').options.unique).toBeUndefined();
+    expect(() => describeModels([{ gqltype: Temporal }])).toThrow(/Cyclic base scalar/);
+
+    const Other = new GraphQLScalarType({ name: 'Other', serialize: (value) => value });
+    DateValue.baseScalarType = Other;
+    Other.baseScalarType = DateValue;
+    expect(() => generated(object('LongDateCycle', { constructor: { type: DateValue } }))).toThrow(/Mongoose drops a stored path named constructor/);
+    expect(generated(object('NonDateCycle', { constructor: { type: Other } })).schema.path('constructor')).toBeUndefined();
+
+    DateValue.baseScalarType = new GraphQLEnumType({ name: 'DateTime', values: { ONE: {} } });
+    expect(() => generated(object('EnumDateBase', { constructor: { type: DateValue } }))).toThrow(/Mongoose drops a stored path named constructor/);
   });
 
   it('demonstrates Mongo ignored unique versus SQL supported list uniqueness', () => {
