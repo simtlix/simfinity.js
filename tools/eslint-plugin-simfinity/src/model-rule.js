@@ -9,7 +9,10 @@ export const makeModelRule = (name, description, messages, inspect, mode = 'erro
   create(context) {
     return {
       'Program:exit'() {
-        const diagnostics = inspect(buildModelGraph(context))[mode];
+        const graph = buildModelGraph(context);
+        if (graph.truncated) return;
+        const diagnostics = inspect(graph)[mode];
+        if (graph.truncated) return;
         const seen = new Set();
         for (const diagnostic of diagnostics) {
           const identity = `${diagnostic.node.range?.join(':')}:${diagnostic.messageId}:${JSON.stringify(diagnostic.data)}`;

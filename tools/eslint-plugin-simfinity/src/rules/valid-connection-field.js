@@ -96,6 +96,7 @@ export default {
     return {
       'Program:exit'() {
         const graph = buildModelGraph(context);
+        if (graph.truncated) return;
         for (const node of calls) {
           if (node.arguments.some(argument => argument.type === 'SpreadElement')) continue;
           const callee = analysis.origin(node.callee);

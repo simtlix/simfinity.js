@@ -78,3 +78,16 @@ Wrapped.baseScalarType.name='String';
 const Owner=new Obj({name:'Owner',fields:{value:{type:Base}}});api.connect(null,Owner);`;
   assert.deepEqual(lint(code),[]);
 });
+
+test('exhausted call budgets cannot retain stale storage or connection facts', () => {
+  for (const [fields, change] of [
+    ['id:{type:new Scalar({name:"Int",serialize:x=>x})}', "api.getType('Owner').getFields().id.type=Str;"],
+    ["children:{type:new List(Child),extensions:{relation:{}}}", "api.getType('Owner').getFields().children.extensions.relation.connectionField='owner';"],
+  ]) {
+    const code = `import { createPostgres } from '@simtlix/simfinity-postgres';const api=createPostgres();
+const Child=new Obj({name:'Child',fields:{text:{type:Str}}});
+const Owner=new Obj({name:'Owner',fields:{${fields}}});api.connect(null,Owner);
+${change}const unrelated=()=>{};${'unrelated();'.repeat(2010)}api.connect(null,Owner);api.createSchema();`;
+    assert.deepEqual(lint(code), []);
+  }
+});

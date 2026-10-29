@@ -87,6 +87,7 @@ const ordered = (graph, build, registrations) => {
 // syntax errors it already found on registered and embedded local types.
 export const connectionDiagnostics = graph => {
   const result = [];
+  if (graph.truncated) return result;
   for (const { runtime, registrations } of scopes(graph)) {
     if (!graph.metadata(runtime)) continue;
     const visited = new Set();
@@ -114,12 +115,13 @@ export const connectionDiagnostics = graph => {
     };
     for (const type of graph.entities(runtime, registrations)) visit(type);
   }
-  return result;
+  return graph.truncated ? [] : result;
 };
 
 export const inspect = graph => {
   const errors = [];
   const warnings = [];
+  if (graph.truncated) return { errors, warnings };
   const seen = new Set();
   const report = (destination, node, messageId) => {
     if (!node) return;
@@ -365,5 +367,5 @@ export const inspect = graph => {
   for (const [type, sites] of embeddedSites) {
     if (identities.has(type)) for (const node of sites) warn(node, 'storageEmbeddedIdentity');
   }
-  return { errors, warnings };
+  return graph.truncated ? { errors: [], warnings: [] } : { errors, warnings };
 };

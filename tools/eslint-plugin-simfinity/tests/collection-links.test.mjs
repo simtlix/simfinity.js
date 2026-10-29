@@ -73,12 +73,11 @@ tester.run('required collection connectionField', plugin.rules['valid-connection
 });
 
 describe('missing-link diagnostic locations', () => {
-  it('bounds checks on directly registered types', () => {
+  it('discards partial model proofs when directly registered types exceed the budget', () => {
     const types = Array.from({ length: 205 }, (_, index) =>
       `const Owner${index} = new ObjectType({ name: 'Owner${index}', fields: { children: ${field()} } }); sf.connect(null, Owner${index});`).join('\n');
     const messages = new Linter().verify(mongo + gql + child + types, [plugin.configs['recommended-3.8']]);
-    assert.equal(messages.length, 200);
-    assert.ok(messages.every(message => message.messageId === 'missing'));
+    assert.deepEqual(messages, []);
   });
   it('points to the absent-link relation and the explicit invalid value', () => {
     const source = mongo + gql + child + `const Owner = new ObjectType({ name: 'Owner', fields: {
