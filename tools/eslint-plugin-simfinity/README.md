@@ -166,6 +166,9 @@ create input is an error. Runtime-bound type checks follow ordered schema builds
 and bounded `toConfig()` field copies, preserving eager snapshot versus lazy
 field-thunk materialization and resolver-clearing exceptions. Arbitrary helpers,
 copy/delete transforms and external introspection remain unknown.
+Captured `getFields()` maps stay live; resolver values and `toConfig()` field
+configurations are snapshots. Writes or unknown escapes through runtime/schema
+getters invalidate model proofs for the file because runtimes may share types.
 
 See the [23-candidate coverage matrix](https://simtlix.github.io/simfinity.js/guide/linting#modeling-catalogue-coverage)
 for engine applicability, accepted alternatives and message groups. The matrix

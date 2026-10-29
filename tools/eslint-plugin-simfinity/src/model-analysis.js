@@ -63,7 +63,9 @@ export function buildModelGraph(context) {
     return region;
   };
   const runtimeCache = new Map();
+  let escapedGetter = false;
   const runtime = input => {
+    if (escapedGetter) return null;
     const origin = input?.kind ? input : analysis.origin(input);
     if (!origin) return null;
     if (origin.kind === 'runtime-function' || origin.kind === 'schema') return runtime(origin.owner);
@@ -217,6 +219,22 @@ export function buildModelGraph(context) {
   };
   const registrations = [];
   const builds = [];
+  // getType/getRegistrations expose the very objects described above. A local
+  // declaration is no longer a shape proof after a write or unknown escape via
+  // those views, including a separately imported method of the same facade.
+  // Types may be shared between runtimes, so an unknown mutable view invalidates
+  // the file's model proofs rather than only the getter's immediate receiver.
+  for (const node of calls) {
+    const callee = analysis.origin(node.callee, new Set(), false);
+    const runtimeView = callee?.kind === 'runtime-function' && ['getType', 'getRegistrations', 'getInputType'].includes(callee.name);
+    const receiver = node.callee.type === 'MemberExpression' ? node.callee.object : null;
+    const receiverOrigin = analysis.origin(receiver, new Set(), false);
+    const allocated = analysis.resolve(receiver, new Set(), false);
+    const schemaView = receiver && (receiverOrigin?.kind === 'schema'
+      || (allocated?.type === 'NewExpression' && analysis.origin(allocated.callee, new Set(), false)?.name === 'GraphQLSchema'));
+    if (!runtimeView && !schemaView) continue;
+    if (!analysis.getterSafe(node)) escapedGetter = true;
+  }
   for (const node of calls) {
     const callee = analysis.origin(node.callee);
     if (callee?.kind !== 'runtime-function') continue;

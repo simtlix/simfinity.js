@@ -453,6 +453,8 @@ ordinary value types is legal; generated/reserved nonembedded relation resolvers
 bind an object type to their runtime. Supported copies include `toConfig()`
 configs/maps, known field spreads and explicit resolver/extensions overrides.
 It preserves eager snapshots and first materialization of lazy field thunks.
+Captured `getFields()` maps remain live; captured resolver values and `toConfig()`
+field configurations retain the values present when they were read.
 Clearing a copied resolver is accepted; replacing it while retaining foreign
 tagged extensions can still fail. Interface-field copies are exempt. Whole-map
 `getFields()` copies are outside the supported config grammar because GraphQL's
@@ -525,6 +527,10 @@ the engine; `createRuntime(createMongoAdapter({ referentialIntegrity:
 'transactional' }))` proves transactional Mongo. Unknown adapters/options do not
 prove engine-specific restrictions. Imported singleton registrations, callbacks
 and conditional bootstraps cannot prove a complete registry or execution order.
+Writes or unknown escapes through runtime getters (`getType`, `getRegistrations`,
+`getInputType`) or schema getters invalidate the file's model proofs, since type
+objects can be shared between runtimes. Local field/configuration views likewise
+lose provenance when passed through unsupported mutable containers.
 
 Cross-file maps/types, CommonJS, arbitrary bootstrap code and mutations through
 external exports remain outside the model. Bounds per file are 40 alias steps,

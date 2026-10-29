@@ -15,6 +15,7 @@ export default {
   },
   create(context) {
     const analysis = analyze(context);
+    const calls = [];
     const visited = new Set();
     const registered = new Set();
     const reported = new Set();
@@ -94,14 +95,18 @@ export default {
     };
     return {
       'Program:exit'() {
-        for (const diagnostic of connectionDiagnostics(buildModelGraph(context))) report(diagnostic);
+        const graph = buildModelGraph(context);
+        for (const node of calls) {
+          if (node.arguments.some(argument => argument.type === 'SpreadElement')) continue;
+          const callee = analysis.origin(node.callee);
+          if (callee?.kind !== 'runtime-function' || !graph.runtime(callee)) continue;
+          if (callee.name === 'connect') inspectType(node.arguments[1], true);
+          if (callee.name === 'addNoEndpointType') inspectType(node.arguments[0], true);
+        }
+        for (const diagnostic of connectionDiagnostics(graph)) report(diagnostic);
       },
       CallExpression(node) {
-        if (node.arguments.some(argument => argument.type === 'SpreadElement')) return;
-        const callee = analysis.origin(node.callee);
-        if (callee?.kind !== 'runtime-function') return;
-        if (callee.name === 'connect') inspectType(node.arguments[1], true);
-        if (callee.name === 'addNoEndpointType') inspectType(node.arguments[0], true);
+        calls.push(node);
       },
     };
   },

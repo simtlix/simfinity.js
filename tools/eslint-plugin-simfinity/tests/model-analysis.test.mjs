@@ -132,3 +132,22 @@ const T=new Obj({name:'T',fields:{money:{type:S}}}); rt.connect(null,T);`);
     assert.equal(graph.registrations[0].type.fields.get('money').type.base,null,value);
   }
 });
+
+test('mutating or escaping runtime getter results invalidates local shape proofs', () => {
+  for(const mutation of [
+    "rt.getType('T').getFields().name.extensions.readOnly=false;",
+    "const types=rt.getRegistrations(); mutate(types);",
+    "const target=rt.getType('T'); target.getFields().name.extensions.readOnly=false;",
+  ]) {
+    const graph=graphOf(`const rt=createRuntime(adapter); const T=new Obj({name:'T',fields:{name:{type:Str,extensions:{readOnly:true}}}});
+rt.connect(null,T); ${mutation} rt.createSchema();`);
+    assert.equal(graph.registrations.length,0,mutation);
+  }
+  const named=graphOf(`import { getType, connect, createSchema } from '@simtlix/simfinity-js';
+const T=new Obj({name:'T',fields:{name:{type:Str,extensions:{readOnly:true}}}}); connect(null,T);
+getType('T').getFields().name.extensions.readOnly=false; createSchema();`);
+  assert.equal(named.registrations.length,0);
+  const read=graphOf(`const rt=createRuntime(adapter); const T=new Obj({name:'T',fields:{name:{type:Str}}});
+rt.connect(null,T); rt.getModel(rt.getType('T')); rt.createSchema();`);
+  assert.equal(read.registrations.length,1);
+});
