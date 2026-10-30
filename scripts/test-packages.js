@@ -2669,10 +2669,47 @@ createServer(createClientDescriptorHandler(schema, { authorize: 'public' }));`,
     // typesVersions.
     moduleResolutions: ['NodeNext', 'Node16', 'Bundler', 'Node10'],
   },
+  {
+    name: 'client',
+    archives: ({ client }) => [client],
+    dependencies: [],
+    moduleResolutions: ['NodeNext', 'Node16', 'Bundler', 'Node10'],
+    forbiddenPackages: ['graphql', 'pg', 'mongoose', 'mongodb', '@modelcontextprotocol/sdk', '@simtlix/simfinity-core', '@simtlix/simfinity-descriptor'],
+    source: `import assert from 'node:assert/strict';
+delete globalThis.fetch;
+const { default: SimfinityClient } = await import('@simtlix/simfinity-js-client');
+const descriptor = { formatVersion: 1, roots: { query: 'Query', mutation: null }, types: {
+ Query: { kind: 'object', fields: [] }, ID: { kind: 'scalar' }, String: { kind: 'scalar' },
+ Item: { kind: 'entity', endpoints: { list: 'items' }, fields: [{ name: 'id', type: 'ID', kind: 'scalar' }, { name: 'name', type: 'String', kind: 'scalar' }] },
+}, operations: { query: { items: { operation: 'list', type: 'Item', args: [], returns: '[Item]' } }, mutation: {} } };
+const client = new SimfinityClient('/graphql', { descriptor, fetch: async () => new Response(JSON.stringify({ data: { items: [{ id: 'opaque', name: 'packed' }] } })) });
+await client.init(); assert.deepEqual(await client.find('Item').fields('id name').exec(), [{ id: 'opaque', name: 'packed' }]);`,
+    types: `import SimfinityClient, { type SimfinityClientOptions, type FilterGroup, type ClientDescriptorDocument } from '@simtlix/simfinity-js-client';
+const options: SimfinityClientOptions = { fetch: globalThis.fetch, prepareHeaders: async (headers) => { headers.Authorization = 'Bearer test'; } };
+const client = new SimfinityClient('/graphql', options);
+type ClientInstance = InstanceType<typeof SimfinityClient>;
+const instance: ClientInstance = client;
+const group: FilterGroup = { ALL: [{ path: 'lines', conditions: [{ field: 'qty', operator: 'LTE', valuePath: '$parent.limit' }] }] };
+const builder = client.find('booking').filter(group).where('name', { operator: 'IS_NOT_EMPTY' }).joinCollection('lines', 'id').collectionArgs('lines', { pagination: { page: 1, size: 2 } });
+void builder.execWithMeta(); void instance.getFieldsOfType('booking');
+void instance.getTypes().Named.possibleTypes?.map((name) => name.toLowerCase());
+void instance.getTypes().Person.interfaces?.map((name) => name.toLowerCase()); void client.getAvailableTransitions('booking');
+void client.transformCollectionDelta('line', { deleted: [{ id: 'opaque', version: 1 }, null] });
+void client.update('booking', 'id', { version: 1 }, 'id version', { transform: true });
+void client.delete('booking', 'id', 'id', { version: 1 });
+void client.transaction([{ addbooking: {} }]);
+void client.findView('upcoming', { date: '2026-10-30' });
+declare const descriptor: ClientDescriptorDocument; new SimfinityClient('/graphql', { descriptor });
+void descriptor.types.Named.possibleTypes; void descriptor.types.Person.stateMachine?.actions;
+void descriptor.types.Person.fields?.[0].rootInputUsage?.update;
+// @ts-expect-error A version is a number, never a string.
+client.delete('booking', 'id', 'id', { version: '1' });`,
+  },
 ];
 
 try {
   const archives = releaseArchives();
+  const client = check(archives, '@simtlix/simfinity-js-client');
   const core = check(archives, '@simtlix/simfinity-core');
   const sql = check(archives, '@simtlix/simfinity-sql');
   const mcp = check(archives, '@simtlix/simfinity-mcp');
@@ -2692,8 +2729,8 @@ try {
       '--ignore-scripts',
       '--no-audit',
       '--no-fund',
-      ...testCase.archives({ core, sql, mcp, descriptor, postgres, mongo }),
-      'graphql@16',
+      ...testCase.archives({ core, sql, mcp, descriptor, postgres, mongo, client }),
+      ...(testCase.name === 'client' ? [] : ['graphql@16']),
       'typescript@5',
       ...(testCase.dependencies || []),
       ...(testCase.typeDependencies || []),
@@ -2726,6 +2763,12 @@ try {
       `], cwd);
     }
 
+    if (testCase.name === 'client') {
+      const entry = join(cwd, 'browser.js');
+      writeFileSync(entry, 'import Client from \'@simtlix/simfinity-js-client\'; globalThis.Client = Client;');
+      run(join(root, 'node_modules/.bin/esbuild'), [entry, '--bundle', '--platform=browser', `--outfile=${join(cwd, 'browser-bundle.js')}`], cwd);
+    }
+
     if (testCase.name === 'mongo') {
       run(process.execPath, [join(root, 'tests/fixtures/mongodb-package-resolution.js')], cwd);
     }
@@ -2750,8 +2793,8 @@ try {
         throw error;
       }
     }
-    if (['core', 'mongo', 'postgres', 'descriptor'].includes(testCase.name)) {
-      const packageName = testCase.name === 'mongo' ? '@simtlix/simfinity-js' : `@simtlix/simfinity-${testCase.name}`;
+    if (['core', 'mongo', 'postgres', 'descriptor', 'client'].includes(testCase.name)) {
+      const packageName = testCase.name === 'mongo' ? '@simtlix/simfinity-js' : testCase.name === 'client' ? '@simtlix/simfinity-js-client' : `@simtlix/simfinity-${testCase.name}`;
       writeFileSync(join(cwd, 'no-ambient.ts'), `import * as api from '${packageName}'; void api;`);
       writeFileSync(join(cwd, 'tsconfig.core-only.json'), JSON.stringify({
         compilerOptions: {
