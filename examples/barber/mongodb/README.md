@@ -1,6 +1,6 @@
 # Barber MongoDB backend
 
-An independent, private application using `@simtlix/simfinity-js@3.15.0`, Mongoose, Express, and GraphQL Yoga. It installs released packages from npm and is outside the monorepo's library workspaces. Use the [Barber quick start](../README.md) to run the complete Docker stack with the shared frontend.
+An independent, private application using `@simtlix/simfinity-js@3.18.0`, Mongoose, Express, and GraphQL Yoga. It installs released packages from npm and is outside the monorepo's library workspaces. Use the [Barber quick start](../README.md) to run the complete Docker stack with the shared frontend.
 
 ## Host development
 
