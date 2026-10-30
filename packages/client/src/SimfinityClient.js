@@ -1,5 +1,6 @@
 import { normalizeDescriptor, introspectionQuery } from './metadata.js';
 import { SelectionTree } from './selection.js';
+import { transformRootInput, transformDelta } from './inputs.js';
 
 function unwrapType(typeRef) {
   let isList = false;
@@ -504,6 +505,11 @@ export default class SimfinityClient {
 
   _classifyMutation(mutationInfo, knownTypeNames) {
     const name = mutationInfo.name;
+    for (const kind of ['add', 'update', 'delete']) {
+      if (mutationInfo.description === kind && name.startsWith(kind) && knownTypeNames.includes(mutationInfo.returnType.name)) {
+        Object.assign(mutationInfo, { category: kind, typeName: mutationInfo.returnType.name }); return;
+      }
+    }
     for (const typeName of knownTypeNames) {
       if (name === `add${typeName}`) {
         Object.assign(mutationInfo, { category: 'add', typeName });
@@ -673,7 +679,7 @@ export default class SimfinityClient {
           searchField = 'name';
         } else {
           const firstScalar = typeInfo.fields.find(f =>
-            isScalarOrEnum(f.type.kind) && f.name !== 'id'
+            isScalarOrEnum(f.type.kind) && f.name !== 'id',
           );
           searchField = firstScalar?.name || 'id';
         }
@@ -739,7 +745,7 @@ export default class SimfinityClient {
     const transformedInput = options.transform
       ? this.transformInput(typeName, input, { mode: 'create', ...options })
       : input;
-    return this._executeMutation(`add${typeName}`, typeName, { input: transformedInput }, fields);
+    return this._executeMutation(this._mutationName(typeName, 'add'), typeName, { input: transformedInput }, fields);
   }
 
   async update(typeName, id, input, fields, options = {}) {
@@ -748,15 +754,39 @@ export default class SimfinityClient {
       ? this.transformInput(typeName, input, { mode: 'update', ...options })
       : input;
     return this._executeMutation(
-      `update${typeName}`, typeName,
+      this._mutationName(typeName, 'update'), typeName,
       { input: { id, ...transformedInput } },
       fields,
     );
   }
 
-  async delete(typeName, id, fields) {
+  async delete(typeName, id, fields, options = {}) {
     this._ensureInitialized();
-    return this._executeMutation(`delete${typeName}`, typeName, { id }, fields);
+    return this._executeMutation(this._mutationName(typeName, 'delete'), typeName, { id, ...(options.version !== undefined ? { version: options.version } : {}) }, fields);
+  }
+
+  _mutationName(typeName, kind) {
+    if (this._descriptor) {
+      const name = this._descriptor.types[typeName]?.endpoints?.[kind];
+      if (!name) throw new Error(`No ${kind} mutation for '${typeName}'`);
+      return name;
+    }
+    return [...this._mutations.values()].find((info) => info.category === kind && info.typeName === typeName)?.name || `${kind}${typeName}`;
+  }
+
+  _inputTypeName(typeName, kind) {
+    const descriptor = this._descriptor?.types[typeName]?.inputs?.[kind];
+    if (descriptor) return descriptor;
+    const info = this._mutations.get(this._mutationName(typeName, kind));
+    const input = info?.args.find((arg) => arg.name === 'input');
+    return input ? unwrapType(input.type).name : null;
+  }
+
+  async transaction(operations, fields = 'id', options = {}) {
+    this._ensureInitialized();
+    const info = options.name ? this._mutations.get(options.name) : [...this._mutations.values()].find((item) => item.category === 'transaction');
+    if (!info || (this._descriptor && info.category !== 'transaction') || (!this._descriptor && !options.name)) throw new Error('Generated transaction not found; introspection requires an explicit transaction name');
+    return this._executeMutation(info.name, info.returnType.name, { operations }, fields);
   }
 
   // -- State Machine -------------------------------------------------------
@@ -897,7 +927,7 @@ export default class SimfinityClient {
           chosenDisplay = 'name';
         } else {
           const firstScalar = objFields.find(f =>
-            isScalarOrEnum(f.type.kind) && !f.type.isList
+            isScalarOrEnum(f.type.kind) && !f.type.isList,
           );
           chosenDisplay = firstScalar?.name || null;
         }
@@ -966,7 +996,7 @@ export default class SimfinityClient {
     if (objFieldNames.includes('name')) return 'name';
 
     const firstScalar = objectType.fields.find(f =>
-      isScalarOrEnum(f.type.kind) && !f.type.isList
+      isScalarOrEnum(f.type.kind) && !f.type.isList,
     );
     return firstScalar?.name || null;
   }
@@ -1079,8 +1109,12 @@ export default class SimfinityClient {
   // -- Mutation Input Transformation -----------------------------------------
 
   transformInput(typeName, rawInput, options = {}) {
+    this._ensureInitialized(); return transformRootInput(this, typeName, rawInput, options);
+  }
+
+  _legacyTransformInput(typeName, rawInput, options = {}) {
     this._ensureInitialized();
-    const { skipFields = [], transientFields = [], mode = 'create' } = options;
+    const { skipFields = [], transientFields = [] } = options;
     const typeInfo = this._types.get(typeName);
     if (!typeInfo) return { ...rawInput };
 
@@ -1114,7 +1148,7 @@ export default class SimfinityClient {
     return this._deepRemoveTypename(transformed);
   }
 
-  _transformEmbeddedInput(objectTypeName, value, options = {}) {
+  _transformEmbeddedInput(objectTypeName, value) {
     if (!value || typeof value !== 'object') return value;
     const typeInfo = this._types.get(objectTypeName);
     if (!typeInfo?.fields) return value;
@@ -1173,93 +1207,7 @@ export default class SimfinityClient {
   // -- Collection Delta Mutations --------------------------------------------
 
   transformCollectionDelta(collectionTypeName, delta, options = {}) {
-    this._ensureInitialized();
-    const { connectionField = null } = options;
-    const result = {};
-
-    if (delta.added && delta.added.length > 0) {
-      result.added = delta.added.map(item => {
-        let clean = { ...item };
-
-        delete clean.__status;
-        delete clean.__originalData;
-
-        if (connectionField && clean[connectionField] !== undefined) {
-          delete clean[connectionField];
-        }
-
-        if (clean.id && typeof clean.id === 'string' && clean.id.startsWith('temp_')) {
-          delete clean.id;
-        }
-
-        clean = this._cleanCollectionItem(collectionTypeName, clean);
-        clean = this._deepRemoveTypename(clean);
-        return clean;
-      });
-    }
-
-    if (delta.updated && delta.updated.length > 0) {
-      result.updated = delta.updated.map(item => {
-        let clean = { ...item };
-
-        delete clean.__status;
-        delete clean.__originalData;
-
-        if (connectionField && clean[connectionField] !== undefined) {
-          delete clean[connectionField];
-        }
-
-        clean = this._cleanCollectionItem(collectionTypeName, clean);
-        clean = this._deepRemoveTypename(clean);
-        return clean;
-      });
-    }
-
-    if (delta.deleted && delta.deleted.length > 0) {
-      result.deleted = delta.deleted.map(item => {
-        if (typeof item === 'string') return item;
-        if (typeof item === 'object' && item.id) return item.id;
-        return item;
-      });
-    }
-
-    return result;
-  }
-
-  _cleanCollectionItem(collectionTypeName, item) {
-    const typeInfo = this._types.get(collectionTypeName);
-    if (!typeInfo?.fields) return item;
-
-    const cleaned = { ...item };
-
-    for (const field of typeInfo.fields) {
-      const { name, type: unwrapped, rawType, extensions } = field;
-      if (cleaned[name] === undefined) continue;
-
-      if (extensions?.stateMachine === true) {
-        delete cleaned[name];
-        continue;
-      }
-
-      if (unwrapped.kind === 'OBJECT' && !extensions?.relation?.embedded) {
-        const val = cleaned[name];
-        if (val && typeof val === 'object' && 'id' in val) {
-          cleaned[name] = { id: val.id };
-        }
-        continue;
-      }
-
-      if (isNumericScalar(unwrapped.name) && typeof cleaned[name] === 'string') {
-        cleaned[name] = Number(cleaned[name]);
-      }
-      if (isDateTimeScalar(unwrapped.name) && typeof cleaned[name] === 'string') {
-        if (/^\d{4}-\d{2}-\d{2}$/.test(cleaned[name])) {
-          cleaned[name] = `${cleaned[name]}T00:00:00.000Z`;
-        }
-      }
-    }
-
-    return cleaned;
+    this._ensureInitialized(); return transformDelta(this, collectionTypeName, delta, options);
   }
 
   // -- Guard ---------------------------------------------------------------

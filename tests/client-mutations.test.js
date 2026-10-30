@@ -1,0 +1,55 @@
+import { describe, expect, test } from 'vitest';
+import SimfinityClient from '../packages/client/src/SimfinityClient.js';
+import { clientWriteSchema } from './helpers/client-writes.js';
+import { clientSchema, schemaFetch } from './helpers/client-schema.js';
+const setup = async () => {
+  const fixture = clientWriteSchema(); const requests = [];
+  const client = new SimfinityClient('/graphql', { descriptor: fixture.descriptor, fetch: schemaFetch(fixture.schema, fixture.descriptor, requests) }); await client.init();
+  return { ...fixture, client, requests };
+};
+describe('client managed writes', () => {
+  test('uses exact generated roots and preserves versions through transformed updates and actions', async () => {
+    const { client } = await setup();
+    const added = await client.add('ClientEntry', { name: 'one' }, 'id name version state');
+    expect(added).toMatchObject({ name: 'one', version: 1, state: 'OPEN' });
+    const updated = await client.update('ClientEntry', added.id, { name: 'two', version: 1 }, 'id name version', { transform: true });
+    expect(updated).toMatchObject({ name: 'two', version: 2 });
+    expect(await client.transition('ClientEntry', 'close', added.id, { version: 2 }, 'id version state')).toMatchObject({ version: 3, state: 'CLOSED' });
+    expect(await client.delete('ClientEntry', added.id, 'id version', { version: 3 })).toMatchObject({ id: added.id, version: 3 });
+  });
+  test('transforms actual nested inputs and rolls back on a stale protected child', async () => {
+    const { client } = await setup(); const input = { name: 'parent', lines: { added: [{ id: 'temp_1', title: 'child', __status: 'added' }] } }; const snapshot = structuredClone(input);
+    const added = await client.add('ClientEntry', input, 'id name version lines { id title version }', { transform: true, includeCollections: true });
+    expect(input).toEqual(snapshot); expect(added.lines[0]).toMatchObject({ title: 'child', version: 1 });
+    const child = added.lines[0];
+    await expect(client.update('ClientEntry', added.id, { name: 'rejected', version: 1, lines: { deleted: [{ id: child.id, version: 9 }] } }, 'id version', { transform: true, includeCollections: true })).rejects.toMatchObject({ graphQLErrors: [expect.objectContaining({ extensions: expect.objectContaining({ code: 'VERSION_CONFLICT' }) })] });
+    expect(await client.getById('ClientEntry', added.id, 'name version lines { id version }')).toMatchObject({ name: 'parent', version: 1, lines: [{ id: child.id, version: 1 }] });
+    const changed = await client.update('ClientEntry', added.id, { version: 1, lines: { deleted: [{ id: child.id, version: 1 }] } }, 'id version lines { id }', { transform: true, includeCollections: true });
+    expect(changed).toMatchObject({ version: 2, lines: [] });
+  });
+  test('keeps protected delete references and opaque IDs, and rejects lost preconditions', async () => {
+    const { client } = await setup();
+    expect(client.transformCollectionDelta('ClientLine', { deleted: [{ id: 'uuid-or-$0', version: 7 }, null] })).toEqual({ deleted: [{ id: 'uuid-or-$0', version: 7 }, null] });
+    expect(() => client.transformCollectionDelta('ClientLine', { deleted: ['uuid'] })).toThrow(/version/i);
+    expect(() => client.transformInput('ClientEntry', { version: '1' }, { mode: 'update' })).toThrow(/version/i);
+    const old = clientSchema(); const unprotected = new SimfinityClient('/g', { descriptor: old.descriptor }); await unprotected.init();
+    expect(unprotected.transformCollectionDelta('book', { deleted: [{ id: 'opaque' }] })).toEqual({ deleted: ['opaque'] });
+    await expect(unprotected.delete('book', 'opaque', 'id', { version: 1 })).rejects.toThrow(/version/i);
+  });
+  test('preserves clears and scalar list shape only with explicit form-cleaning options', async () => {
+    const { client } = await setup();
+    const input = { name: null, tags: [], numbers: ['1', '2'], detail: { text: '', count: '2' }, version: 1, __typename: 'ClientEntry' };
+    expect(client.transformInput('ClientEntry', input, { mode: 'update', preserveEmpty: true })).toEqual({ name: null, tags: [], numbers: [1, 2], detail: { text: '', count: 2 }, version: 1 });
+    expect(input.numbers).toEqual(['1', '2']);
+    expect(client.transformInput('ClientEntry', { id: 'id', name: '', lines: { added: [] }, state: 'OPEN', unknown: 'x' })).toEqual({});
+  });
+  test('sends one transaction mutation with explicit versions and unmodified reference tokens', async () => {
+    const { client, requests } = await setup();
+    const operations = [{ addentry: { name: '$0' } }, { updateentry: { id: '$0', name: 'updated', version: 1 } }, { addline: { title: '$$0', entry: { id: '$0' } } }];
+    const result = await client.transaction(operations, 'id addentry { name version } updateentry { name version } addline { title version }');
+    expect(result).toHaveLength(3); expect(result[0].addentry).toEqual({ name: '$0', version: 1 }); expect(result[1].updateentry).toEqual({ name: 'updated', version: 2 });
+    expect(result[2].addline).toMatchObject({ title: '$$0', version: 1 });
+    expect(JSON.parse(requests[0].body).variables.operations).toEqual(operations);
+    await expect(client.transaction([{ updateentry: { id: result[0].id, version: 1, name: 'stale' } }])).rejects.toMatchObject({ graphQLErrors: [expect.objectContaining({ extensions: expect.objectContaining({ code: 'VERSION_CONFLICT', operationIndex: 0, operation: 'updateentry' }) })] });
+  });
+});
