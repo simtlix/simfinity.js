@@ -1,4 +1,5 @@
 import { normalizeDescriptor, introspectionQuery } from './metadata.js';
+import { SelectionTree } from './selection.js';
 
 function unwrapType(typeRef) {
   let isList = false;
@@ -66,77 +67,14 @@ function typeRefToString(typeRef) {
 // into a GraphQL selection set string.
 // ---------------------------------------------------------------------------
 
-class SelectionTree {
-  constructor() {
-    this.scalars = new Set();
-    this.children = new Map();
-  }
-
-  addScalars(fieldNames) {
-    for (const name of fieldNames.trim().split(/\s+/)) {
-      if (name) this.scalars.add(name);
-    }
-  }
-
-  addSelection(selectionString) {
-    const tokens = selectionString.trim().split(/\s+/);
-    let i = 0;
-    while (i < tokens.length) {
-      const token = tokens[i];
-      if (token === '{' || token === '}') { i++; continue; }
-      if (i + 1 < tokens.length && tokens[i + 1] === '{') {
-        let depth = 1;
-        let j = i + 2;
-        while (j < tokens.length && depth > 0) {
-          if (tokens[j] === '{') depth++;
-          else if (tokens[j] === '}') depth--;
-          j++;
-        }
-        const inner = tokens.slice(i + 2, j - 1).join(' ');
-        if (!this.children.has(token)) {
-          this.children.set(token, new SelectionTree());
-        }
-        this.children.get(token).addSelection(inner);
-        i = j;
-      } else {
-        this.scalars.add(token);
-        i++;
-      }
-    }
-  }
-
-  addNested(dottedPath, fieldNames) {
-    const segments = dottedPath.split('.');
-    let node = this;
-    for (const segment of segments) {
-      if (!node.children.has(segment)) {
-        node.children.set(segment, new SelectionTree());
-      }
-      node = node.children.get(segment);
-    }
-    node.addScalars(fieldNames);
-  }
-
-  serialize() {
-    const parts = [...this.scalars];
-    for (const [name, child] of this.children) {
-      const childStr = child.serialize();
-      if (childStr) parts.push(`${name} { ${childStr} }`);
-    }
-    return parts.join(' ');
-  }
-
-  isEmpty() {
-    return this.scalars.size === 0 && this.children.size === 0;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // QueryBuilder -- chainable builder returned by SimfinityClient.find()
 // ---------------------------------------------------------------------------
 
 class QueryBuilder {
-  constructor(client, typeName) {
+  constructor(client, typeName, queryInfo = null) {
+    this._queryInfo = queryInfo;
+    this._collectionArguments = new Map();
     this._client = client;
     this._typeName = typeName;
     this._variables = {};
@@ -148,7 +86,9 @@ class QueryBuilder {
   // -- Filtering -----------------------------------------------------------
 
   where(field, operatorOrTerms, value, value2) {
-    if (Array.isArray(operatorOrTerms)) {
+    if (operatorOrTerms && typeof operatorOrTerms === 'object' && !Array.isArray(operatorOrTerms)) {
+      this._variables[field] = { ...operatorOrTerms };
+    } else if (Array.isArray(operatorOrTerms)) {
       if (this._variables[field]?.terms) {
         this._variables[field].terms.push(...operatorOrTerms);
       } else {
@@ -160,6 +100,11 @@ class QueryBuilder {
       this._variables[field] = filter;
     }
     return this;
+  }
+
+  filter(group) {
+    if (!group || typeof group !== 'object' || Array.isArray(group)) throw new Error('filter() expects a QLFilterGroup');
+    return this.and([group]);
   }
 
   or(groups) {
@@ -243,99 +188,28 @@ class QueryBuilder {
 
   // -- Execution -----------------------------------------------------------
 
+  collectionArgs(path, args) {
+    if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('collectionArgs expects an argument object');
+    this._collectionArguments.set(path, { ...args }); return this;
+  }
+
   async exec() {
-    const queryInfo = this._client._findPluralQuery(this._typeName);
-    if (!queryInfo) {
-      throw new Error(`No plural query found for type '${this._typeName}'`);
-    }
-
-    if (!this._hasExplicitFields) {
-      const autoFields = this._client._getScalarFields(this._typeName);
-      this._selectionTree.addScalars(autoFields);
-    }
-
-    const selectionSet = this._autoSelection || this._selectionTree.serialize();
-    if (!selectionSet) {
-      throw new Error(`No fields to select for type '${this._typeName}'`);
-    }
-
-    const varDefs = [];
-    const variables = {};
-    const argMappings = [];
-
-    for (const [key, val] of Object.entries(this._variables)) {
-      const arg = queryInfo.args.find(a => a.name === key);
-      if (arg) {
-        varDefs.push(`$${key}: ${typeRefToString(arg.type)}`);
-        variables[key] = val;
-        argMappings.push(`${key}: $${key}`);
-      }
-    }
-
-    const varDefsStr = varDefs.length > 0 ? `(${varDefs.join(', ')})` : '';
-    const argsBlock = argMappings.length > 0 ? `(${argMappings.join(', ')})` : '';
-    const query = `query${varDefsStr} { ${queryInfo.name}${argsBlock} { ${selectionSet} } }`;
-
-    const response = await this._client._sendRequest(query, variables);
-    if (response.errors && !response.data?.[queryInfo.name]) {
-      const error = new Error(`GraphQL errors: ${JSON.stringify(response.errors)}`);
-      error.graphQLErrors = response.errors;
-      throw error;
-    }
-
-    const result = response.data[queryInfo.name];
-
-    if (response.extensions) {
-      result.__extensions = response.extensions;
-    }
-
-    return result;
+    const { data, extensions } = await this.execWithMeta();
+    if (data !== null && typeof data === 'object' && extensions) data.__extensions = extensions;
+    return data;
   }
 
   async execWithMeta() {
-    const queryInfo = this._client._findPluralQuery(this._typeName);
-    if (!queryInfo) {
-      throw new Error(`No plural query found for type '${this._typeName}'`);
-    }
-
-    if (!this._hasExplicitFields) {
-      const autoFields = this._client._getScalarFields(this._typeName);
-      this._selectionTree.addScalars(autoFields);
-    }
-
-    const selectionSet = this._autoSelection || this._selectionTree.serialize();
-    if (!selectionSet) {
-      throw new Error(`No fields to select for type '${this._typeName}'`);
-    }
-
-    const varDefs = [];
-    const variables = {};
-    const argMappings = [];
-
-    for (const [key, val] of Object.entries(this._variables)) {
-      const arg = queryInfo.args.find(a => a.name === key);
-      if (arg) {
-        varDefs.push(`$${key}: ${typeRefToString(arg.type)}`);
-        variables[key] = val;
-        argMappings.push(`${key}: $${key}`);
-      }
-    }
-
-    const varDefsStr = varDefs.length > 0 ? `(${varDefs.join(', ')})` : '';
-    const argsBlock = argMappings.length > 0 ? `(${argMappings.join(', ')})` : '';
-    const query = `query${varDefsStr} { ${queryInfo.name}${argsBlock} { ${selectionSet} } }`;
-
-    const response = await this._client._sendRequest(query, variables);
-    if (response.errors && !response.data?.[queryInfo.name]) {
-      const error = new Error(`GraphQL errors: ${JSON.stringify(response.errors)}`);
-      error.graphQLErrors = response.errors;
-      throw error;
-    }
-    return {
-      data: response.data[queryInfo.name],
-      extensions: response.extensions || null,
-    };
+    const queryInfo = this._queryInfo || this._client._findPluralQuery(this._typeName);
+    if (!queryInfo) throw new Error(`No plural query found for type '${this._typeName}'`);
+    if (!this._hasExplicitFields) this._selectionTree.addScalars(this._client._getScalarFields(this._typeName));
+    const tree = this._autoSelection ? new SelectionTree() : this._selectionTree;
+    if (this._autoSelection) tree.addSelection(this._autoSelection);
+    const response = await this._client._requestOperation('query', queryInfo, this._variables, tree, this._collectionArguments);
+    this._client._checkErrors(response, queryInfo.name, true);
+    return { data: response.data?.[queryInfo.name], extensions: response.extensions || null };
   }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -363,7 +237,9 @@ class AggregateBuilder {
   }
 
   where(field, operatorOrTerms, value, value2) {
-    if (Array.isArray(operatorOrTerms)) {
+    if (operatorOrTerms && typeof operatorOrTerms === 'object' && !Array.isArray(operatorOrTerms)) {
+      this._variables[field] = { ...operatorOrTerms };
+    } else if (Array.isArray(operatorOrTerms)) {
       if (this._variables[field]?.terms) {
         this._variables[field].terms.push(...operatorOrTerms);
       } else {
@@ -375,6 +251,11 @@ class AggregateBuilder {
       this._variables[field] = filter;
     }
     return this;
+  }
+
+  filter(group) {
+    if (!group || typeof group !== 'object' || Array.isArray(group)) throw new Error('filter() expects a QLFilterGroup');
+    return this.and([group]);
   }
 
   or(groups) {
@@ -432,29 +313,9 @@ class AggregateBuilder {
       facts: this._facts,
     };
 
-    const varDefs = [];
-    const variables = {};
-    const argMappings = [];
+    const response = await this._client._requestOperation('query', queryInfo, this._variables, 'groupId facts');
+    this._client._checkErrors(response, queryInfo.name);
 
-    for (const [key, val] of Object.entries(this._variables)) {
-      const arg = queryInfo.args.find(a => a.name === key);
-      if (arg) {
-        varDefs.push(`$${key}: ${typeRefToString(arg.type)}`);
-        variables[key] = val;
-        argMappings.push(`${key}: $${key}`);
-      }
-    }
-
-    const varDefsStr = varDefs.length > 0 ? `(${varDefs.join(', ')})` : '';
-    const argsBlock = argMappings.length > 0 ? `(${argMappings.join(', ')})` : '';
-    const query = `query${varDefsStr} { ${queryInfo.name}${argsBlock} { groupId facts } }`;
-
-    const response = await this._client._sendRequest(query, variables);
-    if (response.errors) {
-      const error = new Error(`GraphQL errors: ${JSON.stringify(response.errors)}`);
-      error.graphQLErrors = response.errors;
-      throw error;
-    }
     return response.data[queryInfo.name];
   }
 }
@@ -602,6 +463,13 @@ export default class SimfinityClient {
       }
     }
 
+    for (const query of this._queries.values()) {
+      if (!query.returnType.isList || query.args.some((a) => a.name === 'aggregation')) continue;
+      if (this._queries.has(`${query.name}_aggregate`)) {
+        this._typeNameToPlural.set(query.returnType.name, query.name);
+        this._typeNameToAggregate.set(query.returnType.name, `${query.name}_aggregate`);
+      }
+    }
     this._queryNameToType = new Map();
     for (const [typeName, queryName] of this._typeNameToPlural) {
       this._queryNameToType.set(queryName, typeName);
@@ -670,7 +538,7 @@ export default class SimfinityClient {
     const typeInfo = this._types.get(typeName);
     if (!typeInfo) return 'id';
     const scalars = typeInfo.fields
-      .filter(f => f.type.kind === 'SCALAR' || f.type.kind === 'ENUM')
+      .filter(f => (f.type.kind === 'SCALAR' || f.type.kind === 'ENUM') && !f.args?.some((arg) => arg.type.kind === 'NON_NULL' && arg.defaultValue == null))
       .map(f => f.name);
     return scalars.length > 0 ? scalars.join(' ') : 'id';
   }
@@ -712,7 +580,64 @@ export default class SimfinityClient {
       headers,
       body: JSON.stringify(body),
     });
-    return response.json();
+    let envelope;
+    try { envelope = await response.json(); } catch { throw new Error(`Invalid JSON response (HTTP ${response.status})`); }
+    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)
+      || (envelope.errors !== undefined && (!Array.isArray(envelope.errors) || envelope.errors.length === 0 || envelope.errors.some((error) => !error || typeof error.message !== 'string')))
+      || (!Object.hasOwn(envelope, 'data') && !envelope.errors)
+      || (envelope.data !== undefined && envelope.data !== null && (typeof envelope.data !== 'object' || Array.isArray(envelope.data)))) throw new Error('Invalid GraphQL response');
+    if (!response.ok && !envelope.errors) throw new Error(`HTTP request failed (${response.status})`);
+    return envelope;
+  }
+
+  _checkErrors(response, name, partial = false) {
+    if (response.errors && (!partial || !response.data?.[name])) {
+      const error = new Error(`GraphQL errors: ${JSON.stringify(response.errors)}`);
+      error.graphQLErrors = response.errors; throw error;
+    }
+  }
+
+  async _requestOperation(kind, info, provided = {}, selection, collectionArguments = new Map()) {
+    const definitions = []; const variables = {}; const mappings = [];
+    for (const [name, value] of Object.entries(provided)) {
+      if (value === undefined) continue;
+      const arg = info.args.find((item) => item.name === name);
+      if (!arg) throw new Error(`Unknown ${kind} argument ${info.name}.${name}`);
+      definitions.push(`$${name}: ${typeRefToString(arg.type)}`); variables[name] = value; mappings.push(`${name}: $${name}`);
+    }
+    const context = { types: this._types, arguments: collectionArguments, used: new Set(), variable: (ref, value) => {
+      let name = `c${definitions.length}`; while (Object.hasOwn(variables, name)) name += '_';
+      variables[name] = value; definitions.push(`$${name}: ${typeRefToString(ref)}`); return name;
+    } };
+    const composite = ['OBJECT', 'INTERFACE', 'UNION'].includes(info.returnType.kind);
+    let fields = '';
+    if (composite) {
+      const tree = selection instanceof SelectionTree ? selection : new SelectionTree();
+      if (!(selection instanceof SelectionTree)) tree.addSelection(selection || this._getScalarFields(info.returnType.name));
+      fields = tree.serialize(context, info.returnType.name);
+      if (!fields) throw new Error(`No fields to select for ${info.name}`);
+    }
+    for (const path of collectionArguments.keys()) if (!context.used.has(path)) throw new Error(`Collection path is not selected: ${path}`);
+    const document = `${kind}${definitions.length ? `(${definitions.join(', ')})` : ''} { ${info.name}${mappings.length ? `(${mappings.join(', ')})` : ''}${fields ? ` { ${fields} }` : ''} }`;
+    return this._sendRequest(document, variables);
+  }
+
+  async query(name, args = {}, fields) {
+    this._ensureInitialized(); const info = this._queries.get(name);
+    if (!info) throw new Error(`Query '${name}' not found`);
+    const response = await this._requestOperation('query', info, args, fields);
+    this._checkErrors(response, name); return response.data?.[name];
+  }
+
+  getViews(typeName) {
+    this._ensureInitialized();
+    return [...this._queries.values()].filter((info) => info.view && (!typeName || info.typeName === typeName));
+  }
+
+  findView(name, params = {}) {
+    this._ensureInitialized(); const info = this._queries.get(name);
+    if (!info?.returnType.isList || (this._descriptor && !info.view)) throw new Error(`View '${name}' not found`);
+    const builder = new QueryBuilder(this, info.returnType.name, info); builder._variables = { ...params }; return builder;
   }
 
   // -- Query Methods -------------------------------------------------------
@@ -914,35 +839,10 @@ export default class SimfinityClient {
   // -- Shared Mutation Executor --------------------------------------------
 
   async _executeMutation(mutationName, typeName, providedArgs, fields) {
-    const mutationInfo = this._mutations.get(mutationName);
-    if (!mutationInfo) {
-      throw new Error(`Mutation '${mutationName}' not found`);
-    }
-
-    const selectionSet = this._resolveFields(typeName, fields);
-    const varDefs = [];
-    const variables = {};
-    const argMappings = [];
-
-    for (const arg of mutationInfo.args) {
-      if (providedArgs[arg.name] !== undefined) {
-        varDefs.push(`$${arg.name}: ${typeRefToString(arg.type)}`);
-        variables[arg.name] = providedArgs[arg.name];
-        argMappings.push(`${arg.name}: $${arg.name}`);
-      }
-    }
-
-    const varDefsStr = varDefs.length > 0 ? `(${varDefs.join(', ')})` : '';
-    const argsBlock = argMappings.length > 0 ? `(${argMappings.join(', ')})` : '';
-    const query = `mutation${varDefsStr} { ${mutationName}${argsBlock} { ${selectionSet} } }`;
-
-    const response = await this._sendRequest(query, variables);
-    if (response.errors) {
-      const error = new Error(`GraphQL errors: ${JSON.stringify(response.errors)}`);
-      error.graphQLErrors = response.errors;
-      throw error;
-    }
-    return response.data[mutationName];
+    const info = this._mutations.get(mutationName);
+    if (!info) throw new Error(`Mutation '${mutationName}' not found`);
+    const response = await this._requestOperation('mutation', info, providedArgs, fields);
+    this._checkErrors(response, mutationName); return response.data?.[mutationName];
   }
 
   // -- Schema Getters ------------------------------------------------------
@@ -976,7 +876,7 @@ export default class SimfinityClient {
     for (const field of typeInfo.fields) {
       const { name, type: unwrapped, rawType, extensions } = field;
 
-      if (isListType(rawType)) continue;
+      if (isListType(rawType) || field.args?.some((arg) => arg.type.kind === 'NON_NULL' && arg.defaultValue == null)) continue;
 
       if (isScalarOrEnum(unwrapped.kind)) {
         fieldSelections.push(name);

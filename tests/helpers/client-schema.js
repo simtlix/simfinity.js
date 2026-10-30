@@ -3,7 +3,7 @@ import { createRuntime } from '../../packages/core/src/index.js';
 import { buildClientDescriptor } from '../../packages/descriptor/src/index.js';
 
 export const clientSchema = ({ singular = 'book', plural = 'books', protectedRecords = false } = {}) => {
-  const adapter = { createModel: (type) => ({ name: type.name }), writeFeatures: { optimisticConcurrency: true }, assertTransactionModels() {} };
+  const adapter = { createModel: (type) => ({ name: type.name }), writeFeatures: { optimisticConcurrency: true }, assertTransactionModels() {}, withTransaction: async (session, body) => body(session || {}) };
   const runtime = createRuntime(adapter);
   const Book = new GraphQLObjectType({ name: 'book', extensions: protectedRecords ? { concurrency: { mode: 'optimistic' } } : {}, fields: {
     id: { type: GraphQLID }, title: { type: new GraphQLNonNull(GraphQLString) },
