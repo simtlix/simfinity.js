@@ -66,6 +66,18 @@ const admin = await mutate('login', { email: 'admin@demo.com', password: 'demo12
 const owner = await mutate('registerOwner', { email: `${prefix}-owner@example.test`, name: 'Parity owner', password: 'demo1234' }, authSelection);
 const outsider = await mutate('registerOwner', { email: `${prefix}-outsider@example.test`, name: 'Other owner', password: 'demo1234' }, authSelection);
 const client = await mutate('register', { email: `${prefix}-client@example.test`, name: 'Parity client', password: 'demo1234' }, authSelection);
+for (const [label, actor] of [['owner', owner], ['admin', admin]]) {
+  await check(`a new ${label}-created shop starts in review and stays private`, async () => {
+    const slug = `${prefix}-onboarding-${label}`;
+    const created = await mutate('addbarbershop', { name: slug, slug, owner: { id: owner.user.id } }, 'id state', actor.accessToken);
+    assert.equal(created.state, 'PENDING_REVIEW');
+    const query = `query($id:ID!){barbershop(id:$id){id state} barbershops(slug:{value:${literal(slug)}}){id state}}`;
+    for (const token of [undefined, client.accessToken, outsider.accessToken]) {
+      assert.deepEqual((await execute(query, { id: created.id }, token)).data, { barbershop: null, barbershops: [] });
+    }
+    assert.deepEqual((await execute(query, { id: created.id }, owner.accessToken)).data, { barbershop: created, barbershops: [created] });
+  });
+}
 const fixture = [
   { key: 'A', price: 10, durationMinutes: 15, isActive: true, priceType: 'FIXED', description: null },
   { key: 'B', price: 20, durationMinutes: 30, isActive: true, priceType: 'FIXED', description: 'clip' },
@@ -86,7 +98,6 @@ for (const [index, keys, city, actor] of [[0, ['A', 'B', 'C'], 'Cordoba', owner]
   }, shopSelection, actor.accessToken);
   shops.push(shop);
   if (index < 2) {
-    await mutate('submitforreview_barbershop', { id: shop.id }, 'id state', actor.accessToken);
     await mutate('approve_barbershop', { id: shop.id }, 'id state', admin.accessToken);
   }
 }
@@ -221,33 +232,32 @@ await check('client ID scope intersects requested list and single-record IDs', a
   assert.deepEqual(read.data, { user: null, users: [] });
 });
 await check('public state scope intersects requested state in lists and aggregates', async () => {
-  const read = await execute(`{barbershops(${shopFilter},state:{value:"DRAFT"}){id} barbershops_aggregate(${shopFilter},state:{value:"DRAFT"},aggregation:{groupId:"state",facts:[{operation:COUNT,factName:"total",path:"id"}]}){groupId facts}}`);
+  const read = await execute(`{barbershops(${shopFilter},state:{value:"PENDING_REVIEW"}){id} barbershops_aggregate(${shopFilter},state:{value:"PENDING_REVIEW"},aggregation:{groupId:"state",facts:[{operation:COUNT,factName:"total",path:"id"}]}){groupId facts}}`);
   assert.deepEqual(read.data, { barbershops: [], barbershops_aggregate: [] });
 });
 // #53: owners see approved shops plus their own in any state, never another owner's unpublished shops.
 await check('owner shop scope hides other owners\' unpublished shops in lists, reads by ID and aggregates', async () => {
-  // shops[0] and shops[1] are the owner's APPROVED shops; shops[2] is the outsider's DRAFT shop.
+  // shops[0] and shops[1] are the owner's APPROVED shops; shops[2] is the outsider's PENDING_REVIEW shop.
   const slugs = (rows) => rows.map((row) => row.slug.slice(prefix.length + 1));
   const query = `query($id:ID!){ barbershop(id:$id){ id state } barbershops(${shopFilter},sort:{terms:[{field:"slug",order:ASC}]}){ slug }
-    drafts: barbershops(${shopFilter},state:{value:"DRAFT"}){ slug }
+    pending: barbershops(${shopFilter},state:{value:"PENDING_REVIEW"}){ slug }
     barbershops_aggregate(${shopFilter},aggregation:{groupId:"state",facts:[{operation:COUNT,factName:"total",path:"id"}]},sort:{terms:[{field:"groupId",order:ASC}]}){ groupId facts } }`;
   const asOwner = (await execute(query, { id: shops[2].id }, owner.accessToken)).data;
   assert.equal(asOwner.barbershop, null);
   assert.deepEqual(slugs(asOwner.barbershops), ['shop-0', 'shop-1']);
-  assert.deepEqual(asOwner.drafts, []);
+  assert.deepEqual(asOwner.pending, []);
   assert.deepEqual(asOwner.barbershops_aggregate, [{ groupId: 'APPROVED', facts: { total: 2 } }]);
-  // The outsider keeps its own draft and the public approved shops.
+  // The outsider keeps its own pending shop and the public approved shops.
   const asOutsider = (await execute(query, { id: shops[2].id }, outsider.accessToken)).data;
-  assert.deepEqual(asOutsider.barbershop, { id: shops[2].id, state: 'DRAFT' });
+  assert.deepEqual(asOutsider.barbershop, { id: shops[2].id, state: 'PENDING_REVIEW' });
   assert.deepEqual(slugs(asOutsider.barbershops), ['shop-0', 'shop-1', 'shop-2']);
-  assert.deepEqual(slugs(asOutsider.drafts), ['shop-2']);
-  assert.deepEqual(asOutsider.barbershops_aggregate, [{ groupId: 'APPROVED', facts: { total: 2 } }, { groupId: 'DRAFT', facts: { total: 1 } }]);
+  assert.deepEqual(slugs(asOutsider.pending), ['shop-2']);
+  assert.deepEqual(asOutsider.barbershops_aggregate, [{ groupId: 'APPROVED', facts: { total: 2 } }, { groupId: 'PENDING_REVIEW', facts: { total: 1 } }]);
 });
 await check('a shop that leaves REJECTED drops its rejection reason before it is public again', async () => {
   // Its slug stays outside shopFilter, so the shop counts of the other checks do not change.
   const rejected = await mutate('addbarbershop', { name: `${prefix}-rejected`, slug: `${prefix}-rejected`, owner: { id: owner.user.id } }, 'id', owner.accessToken);
   const read = `query($id:ID!){ barbershop(id:$id){ state rejectionReason } }`;
-  await mutate('submitforreview_barbershop', { id: rejected.id }, 'id', owner.accessToken);
   assert.deepEqual(await mutate('reject_barbershop', { id: rejected.id, rejectionReason: 'Missing business licence' }, 'state rejectionReason', admin.accessToken), { state: 'REJECTED', rejectionReason: 'Missing business licence' });
   assert.deepEqual((await execute(read, { id: rejected.id }, owner.accessToken)).data.barbershop, { state: 'REJECTED', rejectionReason: 'Missing business licence' });
   assert.deepEqual(await mutate('resubmit_barbershop', { id: rejected.id }, 'state rejectionReason', owner.accessToken), { state: 'PENDING_REVIEW', rejectionReason: null });

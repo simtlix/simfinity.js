@@ -350,7 +350,6 @@ try {
   };
   assert.equal(await deleteCode('deletebooking', booking.id, owner.accessToken), 'RESOURCE_IN_USE', 'A reviewed booking keeps its review');
   inUseShop = await mutate('addbarbershop', { name: 'HTTP contract shop in use', slug: `in-use-${randomUUID()}`, owner: { id: otherOwner.user.id } }, 'id', otherOwner.accessToken);
-  await mutate('submitforreview_barbershop', { id: inUseShop.id }, 'id', otherOwner.accessToken);
   await mutate('approve_barbershop', { id: inUseShop.id }, 'id', admin.accessToken);
   inUseBooking = await mutate('addbooking', { barbershop: { id: inUseShop.id }, scheduledDate, startTime: '10:00', lines: [] }, 'id', otherOwner.accessToken);
   assert.equal(await deleteCode('deletebarbershop', inUseShop.id, owner.accessToken), 'FORBIDDEN');

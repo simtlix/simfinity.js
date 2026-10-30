@@ -214,8 +214,7 @@ export default function OnboardingBarbershopPage() {
           breakEndTime: h.breakEndTime,
         })),
       };
-      const result = await client.add('barbershop', payload) as { id: string };
-      await client.transition('barbershop', 'submitforreview', result.id);
+      await client.add('barbershop', payload);
       router.push('/dashboard');
     } catch (err) {
       setSubmitError(

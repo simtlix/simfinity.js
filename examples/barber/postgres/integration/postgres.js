@@ -53,8 +53,16 @@ try {
   await mutation('updateuser', { id: client.user.id, emailVerified: true }, 'id', client.accessToken, true);
   await mutation('updateuser', { id: otherClient.user.id, name: 'Attack' }, 'id', client.accessToken, true);
   await mutation('updateuser', { id: client.user.id, name: 'Self updated' }, 'id name', client.accessToken);
+  // Legacy DRAFTs keep their explicit state: ownership still governs submission.
+  const legacy = await model('barbershop').create({ name: 'Legacy draft', slug: 'legacy-draft', owner: owner.user.id, state: 'DRAFT' });
+  const deniedDraft = await mutation('submitforreview_barbershop', { id: legacy.id }, 'id state', otherOwner.accessToken, true);
+  assert.equal(deniedDraft.errors[0].extensions.code, 'FORBIDDEN');
+  assert.equal((await model('barbershop').findById(legacy.id)).state, 'DRAFT');
+  const submittedDraft = await mutation('submitforreview_barbershop', { id: legacy.id }, 'id state', owner.accessToken);
+  assert.equal(submittedDraft.state, 'PENDING_REVIEW');
+  await model('barbershop').delete(legacy.id);
   const shop = await mutation('addbarbershop', { name: 'Shop', slug: 'shop', owner: { id: owner.user.id }, services: { added: [{ name: 'Nested cut', price: 20, durationMinutes: 30, isActive: true }] } }, 'id state services { id name }', owner.accessToken);
-  assert.equal(shop.state, 'DRAFT'); assert.equal(shop.services.length, 1);
+  assert.equal(shop.state, 'PENDING_REVIEW'); assert.equal(shop.services.length, 1);
   const service = shop.services[0];
   await mutation('updateservice', { id: service.id, name: 'Attack' }, 'id', otherOwner.accessToken, true);
   await mutation('updateservice', { id: service.id, name: 'Cut' }, 'id name', owner.accessToken);
@@ -62,8 +70,7 @@ try {
   await mutation('updateuser', { id: client.user.id, role: 'CLIENT' }, 'id', adminToken);
   await mutation('updateuser', { id: client.user.id, notifications: { added: [{ title: 'Nested own notification' }] } }, 'id', client.accessToken);
   await mutation('updatebarbershop', { id: shop.id, services: { updated: [{ id: service.id, name: 'Attack' }] } }, 'id', otherOwner.accessToken, true);
-  const draft = await request('{ barbershops { id } }'); assert.equal(draft.errors, undefined); assert.equal(draft.data.barbershops.length, 0);
-  await mutation('submitforreview_barbershop', { id: shop.id }, 'id state', owner.accessToken);
+  const pending = await request('{ barbershops { id } }'); assert.equal(pending.errors, undefined); assert.equal(pending.data.barbershops.length, 0);
   await mutation('approve_barbershop', { id: shop.id }, 'id state', client.accessToken, true);
   await mutation('approve_barbershop', { id: shop.id }, 'id state', adminToken);
   const visible = await request('{ barbershops { id } }'); assert.equal(visible.data.barbershops.length, 1);
