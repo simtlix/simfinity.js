@@ -17,6 +17,7 @@ services:
     environment:
       MONGO: mongodb://db:27017/barber?replicaSet=rs0
       PORT: 4300
+      REMINDER_JOBS_ENABLED: ${REMINDER_JOBS_ENABLED:-false}
       GRAPHQL_ENDPOINT: http://localhost:4300/graphql
       JWT_SECRET: ${JWT_SECRET:-example-barber-access-secret}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-example-barber-refresh-secret}

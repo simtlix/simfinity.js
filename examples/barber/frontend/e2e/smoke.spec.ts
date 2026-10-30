@@ -103,7 +103,7 @@ test('admin dashboard counts more than one page of users', async ({ page, reques
     for (let offset = 0; offset < 105; offset += 15) {
       const fields = Array.from({ length: 15 }, (_, index) => {
         const email = `${prefix}-${offset + index}@example.test`;
-        return `u${index}:adduser(input:{name:"Totals fixture",email:"${email}",role:CLIENT}){id}`;
+        return `u${index}:adduser(input:{name:"${prefix}",email:"${email}",role:CLIENT}){id}`;
       }).join('\n');
       const created = await gql(`mutation { ${fields} }`, login.accessToken);
       ids.push(...Object.values(created as Record<string, { id: string }>).map(({ id }) => id));
@@ -116,6 +116,11 @@ test('admin dashboard counts more than one page of users', async ({ page, reques
     await page.goto('/admin');
     const total = page.getByText('Usuarios Totales', { exact: true }).locator('..').locator('span.font-headline');
     await expect.poll(async () => Number((await total.textContent())?.replace(/\D/g, ''))).toBeGreaterThan(100);
+    await page.goto('/admin/users');
+    await page.getByPlaceholder('Buscar por nombre o email...').fill(prefix);
+    await expect(page.getByText('Mostrando 1–10 de 105', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '11', exact: true }).click();
+    await expect(page.getByText('Mostrando 101–105 de 105', { exact: true })).toBeVisible();
   } finally {
     if (ids.length) {
       await gql(`mutation { ${ids.map((id, index) => `u${index}:deleteuser(id:"${id}"){id}`).join('\n')} }`, login.accessToken);
@@ -394,6 +399,68 @@ test('an owner edit after a client reschedule shows the conflict and keeps the n
     const current = await gql('query($id:ID!){booking(id:$id){version}}', { id: booking.id }, admin.accessToken);
     const removed = await gql('mutation($id:ID!,$version:RecordVersion!){deletebooking(id:$id,version:$version){id}}', { id: booking.id, version: current.data.booking.version }, admin.accessToken);
     expect(removed.errors).toBeUndefined();
+  }
+});
+
+test('search filters shops open on the chosen day', async ({ page, request }) => {
+  const { gql, login } = api(request);
+  const owner = await login('propietario@demo.com');
+  const admin = await login('admin@demo.com');
+  const name = `e2e-hours-${Date.now()}`;
+  const city = `${name}-city`;
+  const added = await gql('mutation($input:barbershopInput!){addbarbershop(input:$input){id}}', { input: {
+    name, slug: name, owner: { id: owner.user.id }, address: { city },
+    businessHours: [{ dayOfWeek: 1, isClosed: true }, { dayOfWeek: 2, isClosed: false }, { dayOfWeek: 3 }],
+  } }, owner.accessToken);
+  expect(added.errors).toBeUndefined();
+  const id = added.data.addbarbershop.id;
+  try {
+    expect((await gql('mutation($id:ID!){approve_barbershop(input:{id:$id}){id}}', { id }, admin.accessToken)).errors).toBeUndefined();
+    await page.goto('/search');
+    const day = page.getByLabel('Abierto el día');
+    await expect(day).toBeVisible();
+    const query = page.getByRole('textbox');
+    const search = async () => {
+      const response = page.waitForResponse((result) => result.url() === endpoint && result.request().postData()?.includes('barbershops(') === true);
+      await page.getByRole('button', { name: /BUSCAR/, exact: false }).click();
+      expect((await (await response).json()).errors).toBeUndefined();
+    };
+    await query.fill(name.toUpperCase());
+    await day.selectOption('1');
+    await search();
+    await expect(page.getByRole('heading', { name, exact: true })).toHaveCount(0);
+    await day.selectOption('2');
+    await search();
+    await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
+    await day.selectOption('3');
+    await search();
+    await expect(page.getByRole('heading', { name, exact: true })).toHaveCount(0);
+    await day.selectOption('2');
+    await page.getByRole('button', { name: /Ciudad/ }).click();
+    await query.fill(city.toUpperCase());
+    await search();
+    await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
+    await query.fill(`${city}-missing`);
+    await search();
+    await expect(page.getByRole('heading', { name, exact: true })).toHaveCount(0);
+    await day.selectOption('');
+    await query.fill(city);
+    await search();
+    await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
+    await page.goto('/auth/login');
+    await page.getByLabel('Email', { exact: true }).fill('admin@demo.com');
+    await page.getByLabel('Contraseña', { exact: true }).fill('demo1234');
+    await page.getByRole('button', { name: 'Iniciar Sesión', exact: true }).click();
+    await expect(page).not.toHaveURL(/auth\/login/);
+    await page.goto('/admin/barbershops');
+    await page.getByRole('button', { name: 'Ciudad', exact: true }).click();
+    const countResponse = page.waitForResponse((result) => result.url() === endpoint && result.request().postData()?.includes('barbershops_aggregate') === true && result.request().postData()?.includes(city.toUpperCase()) === true);
+    await page.getByPlaceholder('Buscar por ciudad...').fill(city.toUpperCase());
+    expect((await (await countResponse).json()).errors).toBeUndefined();
+    await expect(page.getByText(name, { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Mostrando 1–1 de 1', { exact: true })).toBeVisible();
+  } finally {
+    expect((await gql('mutation($id:ID!){deletebarbershop(id:$id){id}}', { id }, admin.accessToken)).errors).toBeUndefined();
   }
 });
 

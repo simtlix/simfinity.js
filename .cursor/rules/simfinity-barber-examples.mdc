@@ -16,6 +16,9 @@ alwaysApply: false
 - Keep `auth/ownership.js` and the booking, bundle, service and review controllers mirrored in both backends. `protect()` counts a field as written only when it differs from the stored value (`writtenFields`, `clears`), and refuses a non-admin delete of a shop that bookings or reviews reference, or of a booking that a review references, with `RESOURCE_IN_USE` (409) on both backends. Derive booking and bundle values (line prices and durations, totals, `endTime`, confirmation codes, creation times) on the server from the shop's catalog; never trust client-sent values. A service's duration change or delete refreshes the stored `totalDurationMinutes` of the bundles that list it (`refreshBundleDurationsForService`), and the frontend derives a bundle's duration with the same rule (`src/lib/catalog.ts`).
 - Preserve the same domain concepts, relationship metadata, scopes, controller responsibilities, and state transitions. Native Mongoose and PostgreSQL model/session calls remain separate. Choose the backend at startup; do not add runtime switching or automatic data migration.
 
+- New shops start in `PENDING_REVIEW`; retain `submitforreview` for stored legacy `DRAFT` shops. Booking writes require the version observed by the caller, including deletes and nested writes; never refresh a version to retry an old UI payload. Existing PostgreSQL schemas need the documented explicit version-column migration.
+- Booking reminder logs belong in after-commit callbacks, remain opt-in and best effort, and must not run for rolled-back writes. Opening-day search uses a single embedded `ANY` frame for the weekday and explicit `isClosed: false`, preserving the other search filters.
+
 ## Operation and data
 
 - Run Compose from `examples/barber` with `-f compose.mongodb.yaml` or `-f compose.postgres.yaml`. Retain the distinct project names `simfinity-example-barber-mongodb` and `simfinity-example-barber-postgres`, named volumes, and loopback bindings so both stacks can coexist.
@@ -32,7 +35,7 @@ alwaysApply: false
 
 ## Verification and documentation
 
-- `.github/workflows/barber.yml` owns backend unit tests, the database HTTP/MCP matrix, frontend checks and browser coverage, and database integration checks. Root ESLint and Vitest exclude examples.
+- `.github/workflows/barber.yml` owns backend Simfinity lint and unit tests, the database HTTP/MCP matrix, frontend checks and browser coverage, and database integration checks. Root ESLint and Vitest exclude examples.
 - Each app exposes `npm run test:security` and its CI job audits its own complete lockfile, including development tools. Keep Vitest/browser/coverage versions compatible and do not bypass peer conflicts with `--force` or `--legacy-peer-deps`. Preserve the supported majors and exact released Simfinity dependencies when updating security baselines.
 - `test:query-mutations` runs the shared HTTP filter/aggregate/nested-mutation matrix. Its missing-reference case explicitly distinguishes PostgreSQL FK rejection from MongoDB dangling-reference acceptance. It leaves synthetic fixtures in the disposable API database; CI saves its JSON reports.
 - Run both database HTTP/browser paths for shared contracts. Preserve `test:mongodb` and both `test:dataset` suites for transactions, derived booking/bundle/review values and fixture operations. Keep PostgreSQL native model, FK, transaction and frontend-query regression checks. Do not use library unit tests as a substitute for app validation.

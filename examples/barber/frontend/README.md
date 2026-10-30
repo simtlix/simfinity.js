@@ -207,3 +207,5 @@ These tests delete what they create. The booking screenshot is written to `test-
 ## License
 
 Apache License 2.0 — see `LICENSE` in this folder.
+
+The owner onboarding and admin creation forms create shops directly in review. The owner dashboard displays their state. Booking edit, transition, cancellation and reschedule forms send their observed version and display conflicts instead of overwriting a newer change. The public search can require a weekday with an explicitly open business-hours row; it combines this with name, city and location searches. Playwright covers these flows on both backends, plus dashboard/calendar populations beyond 100 rows.

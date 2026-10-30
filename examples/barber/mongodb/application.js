@@ -5,6 +5,10 @@ import './types/index.js';
 import { permissions } from './auth/permissions.js';
 import { AUTH_OPERATIONS } from './auth/authOperations.js';
 
+simfinity.configureAfterCommit({
+  onError: (error, details) => console.error('[afterCommit]', details.typeName, details.operation, error),
+});
+
 export const schema = simfinity.createSchema();
 export const authPlugin = simfinity.auth.createAuthPlugin(permissions, { defaultPolicy: 'ALLOW' });
 

@@ -33,7 +33,7 @@ export default function AdminBarbershopsPage() {
       let query = client
         .find('barbershop')
         .fields('id name slug state averageRating address { city } owner { id name email }')
-        .sort('name', 'ASC')
+        .sort('name', 'ASC').sort('id', 'ASC')
         .page(pagination.page, pagination.pageSize);
 
       if (statusFilter) {
@@ -45,7 +45,7 @@ export default function AdminBarbershopsPage() {
         } else if (searchField === 'owner') {
           query = query.where('owner', [{ path: 'name', operator: 'ILIKE', value: search.trim() }]);
         } else if (searchField === 'city') {
-          query = query.where('address.city', 'ILIKE', search.trim());
+          query = query.filter({ conditions: [{ field: 'address.city', operator: 'ILIKE', value: search.trim() }] });
         }
       }
 
@@ -55,7 +55,7 @@ export default function AdminBarbershopsPage() {
       setData(filtered);
 
       try {
-        let aggQuery = client.aggregate('barbershop').fact('count', 'total');
+        let aggQuery = client.aggregate<{ facts: { total: number } }>('barbershop').groupBy('state').fact('COUNT', 'total', 'id');
         if (statusFilter) {
           aggQuery = aggQuery.where('state', 'EQ', statusFilter);
         }
@@ -65,11 +65,11 @@ export default function AdminBarbershopsPage() {
           } else if (searchField === 'owner') {
             aggQuery = aggQuery.where('owner', [{ path: 'name', operator: 'ILIKE', value: search.trim() }]);
           } else if (searchField === 'city') {
-            aggQuery = aggQuery.where('address.city', 'ILIKE', search.trim());
+            aggQuery = aggQuery.filter({ conditions: [{ field: 'address.city', operator: 'ILIKE', value: search.trim() }] });
           }
         }
         const agg = await aggQuery.exec();
-        setTotal((agg as { total?: number })?.total ?? filtered.length);
+        setTotal(agg.reduce((total, group) => total + group.facts.total, 0));
       } catch {
         setTotal(filtered.length);
       }
