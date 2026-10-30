@@ -73,8 +73,8 @@ export default function AdminUsersPage() {
       const q = search.trim();
       if (q) {
         query = q.includes('@')
-          ? query.where('email', 'LIKE', q)
-          : query.where('name', 'LIKE', q);
+          ? query.where('email', 'ILIKE', q)
+          : query.where('name', 'ILIKE', q);
       }
 
       const results = await query.exec();
@@ -86,8 +86,8 @@ export default function AdminUsersPage() {
         if (statusFilter) aggQuery = aggQuery.where('status', 'EQ', statusFilter);
         if (q) {
           aggQuery = q.includes('@')
-            ? aggQuery.where('email', 'LIKE', q)
-            : aggQuery.where('name', 'LIKE', q);
+            ? aggQuery.where('email', 'ILIKE', q)
+            : aggQuery.where('name', 'ILIKE', q);
         }
         const agg = await aggQuery.exec();
         setTotal((agg as { total?: number })?.total ?? (results as unknown[]).length);

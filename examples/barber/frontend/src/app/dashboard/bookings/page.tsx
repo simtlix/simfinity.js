@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 import { useSimfinityClient } from '@/lib/simfinity';
+import { fetchAllPages } from '@/lib/fetchAllPages';
 import { useT } from '@/hooks/useT';
 import { useBarbershop } from '@/lib/barbershopContext';
 import { PageHeader, EmptyState } from '@/components/shared/page';
@@ -527,16 +528,16 @@ export default function BookingsCalendarPage() {
         .find<Booking>('booking')
         .fields('id scheduledDate startTime endTime totalPrice state confirmationCode notes client { id name email } professional { id name } lines { service { id name } price durationMinutes }')
         .where('barbershop', [{ path: 'id', operator: 'EQ', value: selectedBarbershop.id }])
-        .where('scheduledDate', 'GTE', dateRange.from)
-        .where('scheduledDate', 'LTE', dateRange.to)
-        .sort('startTime', 'ASC');
+        .where('scheduledDate', 'BTW', [dateRange.from, dateRange.to])
+        .sort('startTime', 'ASC')
+        .sort('id', 'ASC');
 
       if (filterProId) {
         query = query.where('professional', [{ path: 'id', operator: 'EQ', value: filterProId }]);
       }
 
       const [result, pros] = await Promise.all([
-        query.exec(),
+        fetchAllPages(async (page, size) => (await query.page(page, size).exec()) ?? []),
         client.find<Professional>('professional')
           .fields('id name photoUrl bio')
           .where('barbershop', [{ path: 'id', operator: 'EQ', value: selectedBarbershop.id }])

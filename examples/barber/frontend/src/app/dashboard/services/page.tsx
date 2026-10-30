@@ -50,7 +50,7 @@ export default function OwnerServicesPage() {
         .page(page, pageSize);
 
       if (search.trim()) {
-        query = query.where('name', 'LIKE', search.trim());
+        query = query.where('name', 'ILIKE', search.trim());
       }
       if (filter === 'ACTIVE') {
         query = query.where('isActive', 'EQ', true);
