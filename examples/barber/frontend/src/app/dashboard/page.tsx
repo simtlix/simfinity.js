@@ -111,6 +111,7 @@ const BOOKING_FIELDS =
 
 export default function DashboardPage() {
   const t = useT('dashboard');
+  const stateLabel = useT('barbershop.state');
   const router = useRouter();
   const client = useSimfinityClient();
   const { selectedBarbershop, barbershops, loading: barbershopLoading } = useBarbershop();
@@ -382,6 +383,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="flex items-center gap-4">
+          {selectedBarbershop?.state && <StatusChip status={selectedBarbershop.state} label={stateLabel(selectedBarbershop.state, selectedBarbershop.state)} />}
           <PeriodToggle selected={period} onChange={setPeriod} />
         </div>
       </div>

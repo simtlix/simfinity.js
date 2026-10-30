@@ -15,6 +15,51 @@ test('search page renders', async ({ page }) => {
   await expect(page.getByRole('heading', { name: /Resultados de búsqueda/i })).toBeVisible();
 });
 
+test('owner onboarding puts the shop in review with one create', async ({ page, request }) => {
+  const slug = `e2e-onboarding-${Date.now()}`;
+  const email = `${slug}@example.test`;
+  const gql = async (query: string, token?: string) => {
+    const response = await request.post(endpoint, { data: { query }, headers: token ? { authorization: `Bearer ${token}` } : {} });
+    const result = await response.json();
+    expect(result.errors).toBeUndefined();
+    return result.data;
+  };
+  const { registerOwner: owner } = await gql(`mutation { registerOwner(input:{name:"Onboarding owner",email:"${email}",password:"demo1234"}){accessToken user{id}} }`);
+  const { login: admin } = await gql('mutation { login(input:{email:"admin@demo.com",password:"demo1234"}){accessToken} }');
+  try {
+    await page.goto('/auth/login');
+    await page.getByLabel('Email', { exact: true }).fill(email);
+    await page.getByLabel('Contraseña', { exact: true }).fill('demo1234');
+    await page.getByRole('button', { name: 'Iniciar Sesión', exact: true }).click();
+    await expect(page).not.toHaveURL(/auth\/login/);
+    await page.goto('/onboarding/barbershop');
+    await page.getByLabel('Nombre del Negocio').fill(slug);
+    await page.getByRole('button', { name: /Siguiente Paso/ }).click();
+    await page.getByLabel('Calle', { exact: false }).fill('San Martín');
+    await page.getByLabel('Ciudad', { exact: false }).fill('Córdoba');
+    await page.getByRole('button', { name: /Siguiente Paso/ }).click();
+    await page.getByRole('button', { name: /Siguiente Paso/ }).click();
+    const mutations: string[] = [];
+    page.on('request', (req) => {
+      if (req.url() === endpoint && req.method() === 'POST') {
+        const query = req.postDataJSON()?.query as string | undefined;
+        if (query?.includes('mutation')) mutations.push(query);
+      }
+    });
+    await page.getByRole('button', { name: /Crear Barbería/ }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(page.getByText('Pendiente', { exact: true })).toBeVisible();
+    expect(mutations.filter((query) => query.includes('addbarbershop'))).toHaveLength(1);
+    expect(mutations.filter((query) => query.includes('submitforreview_barbershop'))).toHaveLength(0);
+    const { barbershops } = await gql(`{barbershops(slug:{value:"${slug}"}){state}}`, owner.accessToken);
+    expect(barbershops).toEqual([{ state: 'PENDING_REVIEW' }]);
+  } finally {
+    const { barbershops } = await gql(`{barbershops(slug:{value:"${slug}"}){id}}`, admin.accessToken);
+    for (const shop of barbershops) await gql(`mutation { deletebarbershop(id:"${shop.id}"){id} }`, admin.accessToken);
+    await gql(`mutation { deleteuser(id:"${owner.user.id}"){id} }`, admin.accessToken);
+  }
+});
+
 test('admin dashboard counts more than one page of users', async ({ page, request }) => {
   test.setTimeout(60_000);
   const gql = async (query: string, token?: string) => {
@@ -71,7 +116,7 @@ test('owner totals and calendar include all bookings and respect the selected da
     const hours = Array.from({ length: 7 }, (_, dayOfWeek) => `{dayOfWeek:${dayOfWeek},openTime:"00:00",closeTime:"23:59",isClosed:false}`).join(',');
     const { addbarbershop: shop } = await gql(`mutation { addbarbershop(input:{name:"Calendar fixture",slug:"${prefix}",owner:{id:"${owner.user.id}"},slotDurationMinutes:5,bufferMinutes:0,maxAdvanceDays:30,businessHours:[${hours}]}) { id state } }`, owner.accessToken);
     shopId = shop.id;
-    if (shop.state === 'DRAFT') await gql(`mutation { submitforreview_barbershop(input:{id:"${shop.id}"}){id} }`, owner.accessToken);
+    expect(shop.state).toBe('PENDING_REVIEW');
     await gql(`mutation { approve_barbershop(input:{id:"${shop.id}"}){id} }`, admin.accessToken);
     const { addservice: service } = await gql(`mutation { addservice(input:{name:"Calendar service",price:10,durationMinutes:5,barbershop:{id:"${shop.id}"}}){id} }`, owner.accessToken);
     serviceId = service.id;

@@ -52,6 +52,8 @@ Compose waits for database and application health. MongoDB runs a single-node re
 
 ## Explore the booking flow
 
+New shops start in `PENDING_REVIEW` with one create mutation. They remain private until approved. Existing `DRAFT` shops need no migration and can still be submitted by their owner or a platform admin.
+
 The minimal seed creates an approved shop with slug `barber-demo`, a service named “Corte clásico”, and the professional “Alex Demo”. Sign in with one of these synthetic accounts; all use password `demo1234`:
 
 | Account | Role | Example flow |

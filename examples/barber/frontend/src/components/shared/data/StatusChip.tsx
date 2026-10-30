@@ -18,10 +18,11 @@ const defaultColorMap: Record<string, { text: string; bg: string }> = {
 
 interface StatusChipProps {
   status: string;
+  label?: string;
   colorMap?: Record<string, { text: string; bg: string }>;
 }
 
-export function StatusChip({ status, colorMap }: StatusChipProps) {
+export function StatusChip({ status, label, colorMap }: StatusChipProps) {
   const merged = { ...defaultColorMap, ...colorMap };
   const colors = merged[status.toUpperCase()] ?? {
     text: "text-on-surface-variant",
@@ -36,7 +37,7 @@ export function StatusChip({ status, colorMap }: StatusChipProps) {
         colors.bg,
       )}
     >
-      {status}
+      {label ?? status}
     </span>
   );
 }

@@ -23,11 +23,11 @@ export function clearRejectionReason(args) {
 }
 
 export const barbershopStateMachine = {
-  initialState: BarbershopStateEnum.getValue('DRAFT'),
+  initialState: BarbershopStateEnum.getValue('PENDING_REVIEW'),
   actions: {
     submitforreview: {
       description:
-        'Submit a DRAFT barbershop for platform review (DRAFT -> PENDING_REVIEW). Performed by the owner once the profile is complete.',
+        'Submit a barbershop stored as DRAFT by an earlier version for platform review (DRAFT -> PENDING_REVIEW). Available to its owner or a platform admin.',
       from: BarbershopStateEnum.getValue('DRAFT'),
       to: BarbershopStateEnum.getValue('PENDING_REVIEW'),
     },

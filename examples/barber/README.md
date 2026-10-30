@@ -67,6 +67,12 @@ The accounts, passwords, addresses, and dataset are synthetic local demo fixture
 
 Business hours store JavaScript day numbers (`0` = Sunday). Earlier frontend builds labeled every weekday in the hours editor one day late, and hours saved with them are not migrated automatically: review and re-save them, or reset and re-seed the stack.
 
+## Shop lifecycle and upgrading existing shops
+
+Every new shop starts in `PENDING_REVIEW`, whether created through onboarding, the admin page, GraphQL, MCP or the dataset loader. Both create pages use a single `addbarbershop` mutation; there is no second submission that can leave an incomplete draft. The owner dashboard shows the shop's state. Pending shops remain hidden from anonymous callers and clients until a platform admin approves them.
+
+No data migration is needed for this change. Shops already stored as `DRAFT` keep that state. Their owner or a platform admin can still call `submitforreview_barbershop` to move them to `PENDING_REVIEW`; another owner cannot. The admin view keeps its submit button for those legacy drafts, and `seed:demo` still resumes them. A rejection saves its reason in the same state transition; resubmission and approval clear that reason.
+
 ## Booking rules
 
 Both APIs check a confirmed booking when it is created and when an update changes its shop, date, start time, professional or services. They compare stored and new values, so an edit form can resend unchanged fields, for example to save notes on a booking already in progress:

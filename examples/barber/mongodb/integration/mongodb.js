@@ -8,6 +8,7 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { graphql } from 'graphql';
+import { createYoga } from 'graphql-yoga';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import * as simfinity from '@simtlix/simfinity-js';
@@ -16,7 +17,7 @@ const databaseName = `barber_test_${randomUUID().replaceAll('-', '')}`;
 const uri = new URL(process.env.MONGO || 'mongodb://127.0.0.1:57417/barber?replicaSet=rs0&directConnection=true');
 uri.pathname = `/${databaseName}`;
 process.env.MONGO = uri.toString();
-const { schema, initializeApplication } = await import('../application.js');
+const { schema, authPlugin, initializeApplication } = await import('../application.js');
 const { closeDatabase } = await import('../database.js');
 const { resolveMcpUserContext, resolveUserContext } = await import('../auth/context.js');
 const model = (name) => simfinity.getModel(simfinity.getType(name));
@@ -468,4 +469,22 @@ test('stdio MCP refuses bad credentials, renews with MCP_REFRESH_TOKEN and never
     await expiring.client?.close();
     await renewing.client?.close();
   }
+});
+
+test('a stored DRAFT shop can still be submitted only by its owner', async () => {
+  const owner = await model('user').create({ email: `legacy-${randomUUID()}@test.local`, name: 'Legacy owner', role: 'OWNER' });
+  const other = await model('user').create({ email: `other-${randomUUID()}@test.local`, name: 'Other owner', role: 'OWNER' });
+  const shop = await model('barbershop').create({ name: 'Legacy draft', slug: randomUUID(), owner: owner._id, state: 'DRAFT' });
+  const yoga = createYoga({ schema, plugins: [authPlugin], maskedErrors: false, logging: false, context: ({ request }) => resolveUserContext(request.headers.get('authorization')) });
+  const submit = async (actor) => {
+    const token = jwt.sign({ sub: String(actor._id), roles: ['OWNER'] }, process.env.JWT_SECRET || 'dev-jwt-secret-change-in-production');
+    const response = await yoga.fetch('http://localhost/graphql', { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify({ query: `mutation { submitforreview_barbershop(input:{id:"${shop._id}"}){id state} }` }) });
+    return response.json();
+  };
+  const denied = await submit(other);
+  assert.equal(denied.errors?.[0].extensions.code, 'FORBIDDEN');
+  assert.equal((await model('barbershop').findById(shop._id)).state, 'DRAFT');
+  const result = await submit(owner);
+  assert.equal(result.errors, undefined, JSON.stringify(result.errors));
+  assert.equal(result.data.submitforreview_barbershop.state, 'PENDING_REVIEW');
 });

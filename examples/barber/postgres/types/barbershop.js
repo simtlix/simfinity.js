@@ -88,7 +88,7 @@ const barbershopType = new GraphQLObjectType({
     state: {
       type: BarbershopStateEnum,
       description:
-        'Lifecycle state: DRAFT, PENDING_REVIEW, APPROVED, REJECTED or SUSPENDED. Only APPROVED shops are visible to clients. Change it via the state-machine mutations, not direct updates.',
+        'Lifecycle state: new shops start in PENDING_REVIEW. DRAFT is retained for shops saved by earlier versions; other states are APPROVED, REJECTED and SUSPENDED. Only APPROVED shops are visible to clients. Change it via the state-machine mutations, not direct updates.',
     },
     rejectionReason: {
       type: GraphQLString,
