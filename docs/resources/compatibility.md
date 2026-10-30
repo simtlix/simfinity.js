@@ -9,7 +9,11 @@ import library from '../../package.json';
 
 # Compatibility and releases
 
-This documentation covers Simfinity.js **{{ library.version }}**, for **MongoDB and PostgreSQL**. All six packages are versioned and released together.
+This documentation covers Simfinity.js **{{ library.version }}**, for **MongoDB and PostgreSQL**. All seven packages, including the JavaScript client, are versioned together (see the [client guide](../guide/client)).
+
+## Upgrade to 3.19.0
+
+The JavaScript client moves from its separate 1.x repository into the aligned monorepo release set as `@simtlix/simfinity-js-client@3.19.0`. Its default import and existing valid 1.1 calls remain supported. It adds schema descriptors, exact roots and views, current filter and collection-field arguments, concrete mutation inputs, managed versions, transactions and browser-compatible TypeScript declarations. The other six packages retain their 3.18.0 runtime behavior. See the [client guide](../guide/client) for initialization and migration. Existing applications, including Barber, update their own dependency and run their own checks.
 
 ## Upgrade to 3.18.0
 
@@ -232,7 +236,7 @@ Version 3.12.0 adds named views. Every schema, filter, tool and adapter of 3.11.
 - **MCP**: views are read-only list tools titled by their field name. Their descriptions append the generated filter sentence. Params appear beside the generated arguments, and counted pages report `totalCount`. Explicit title and description overrides keep precedence.
 - **TypeScript**: `registerView`, `ViewOptions`, `ViewParam`, `ViewParamType`, `FilterGroup` and `FilterCondition` are declared in core and re-exported by the MongoDB, PostgreSQL and SQL packages.
 - **Linting**: the application ESLint plugin tracks `registerView` as a runtime member and keeps the type passed in its `type` option tracked.
-- **Clients**: `@simtlix/simfinity-js-client` 1.1.0 resolves `client.find(type)` to the last root field returning a list of that type. Applications using that method should wait for a client fix before registering a view over that type. Call views with `client.execute(document, variables)`.
+- **Clients**: `@simtlix/simfinity-js-client` 1.1.0 resolves `client.find(type)` to the last root field returning a list of that type. Upgrade to 3.19.0 to keep canonical lists distinct from views and use `client.findView(name, params)`; legacy clients can call views with `client.execute(document, variables)`.
 
 See [named views](../guide/queries#named-views) and the [`registerView()` reference](../reference/api#registerview).
 
