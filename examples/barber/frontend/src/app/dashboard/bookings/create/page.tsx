@@ -52,13 +52,13 @@ export default function CreateBookingPage() {
     (async () => {
       try {
         const [svcs, pros, shops] = await Promise.all([
-          client.find('service').fields('id name price durationMinutes barbershop { id }').exec(),
-          client.find('professional').fields('id name barbershop { id }').exec(),
-          client.find('barbershop').fields('id name').exec(),
+          client.find<Service>('service').fields('id name price durationMinutes barbershop { id }').exec(),
+          client.find<Professional>('professional').fields('id name barbershop { id }').exec(),
+          client.find<Barbershop>('barbershop').fields('id name').exec(),
         ]);
-        setServices(Array.isArray(svcs) ? (svcs as Service[]) : []);
-        setProfessionals(Array.isArray(pros) ? (pros as Professional[]) : []);
-        const shopList = Array.isArray(shops) ? (shops as Barbershop[]) : [];
+        setServices(svcs ?? []);
+        setProfessionals(pros ?? []);
+        const shopList = shops ?? [];
         setBarbershops(shopList);
         if (shopList.length === 1) setSelectedShop(shopList[0].id);
       } catch {

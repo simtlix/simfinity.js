@@ -13,7 +13,7 @@ This documentation covers Simfinity.js **{{ library.version }}**, for **MongoDB 
 
 ## Upgrade to 3.19.0
 
-The JavaScript client moves from its separate 1.x repository into the aligned monorepo release set as `@simtlix/simfinity-js-client@3.19.0`. Its default import and existing valid 1.1 calls remain supported. It adds schema descriptors, exact roots and views, current filter and collection-field arguments, concrete mutation inputs, managed versions, transactions and browser-compatible TypeScript declarations. The other six packages retain their 3.18.0 runtime behavior. See the [client guide](../guide/client) for initialization and migration. Existing applications, including Barber, update their own dependency and run their own checks.
+The JavaScript client moves from its separate 1.x repository into the aligned monorepo release set as `@simtlix/simfinity-js-client@3.19.0`. Its default import and existing valid 1.1 calls remain supported. It adds schema descriptors, exact roots and views, current filter and collection-field arguments, concrete mutation inputs, managed versions, transactions and browser-compatible TypeScript declarations. The other six packages retain their 3.18.0 runtime behavior. See the [client guide](../guide/client) for initialization and migration. Existing applications update their own dependency and run their own checks. Barber pins both backends and the client to 3.19.0, consumes the bundled client declarations and keeps extended introspection.
 
 ## Upgrade to 3.18.0
 
@@ -196,7 +196,7 @@ Invalid-input validation also happens earlier. Raw joined scopes are validated o
 - **TypeScript.** Core exports `QueryQuantifier`, `QLFilterCondition`, `QLFilterGroup`, `QLQuantifiedGroup`, `QLTypeFilterExpression` and `QueryJoins`; `QueryFeatures`/planner options gain `quantifiers`, `QueryPredicate` gains the quantified variant and join metadata, and `QueryLimitsOptions` gains `maxFrameNesting`. Facade declarations mirror the public inputs and options.
 - **MCP.** Regenerate cached input schemas; every runtime exposes the new inputs even if its adapter rejects them at request time. Tools pass quantifiers unchanged, retain scalar `QLValue` rules and return structured query errors.
 
-The generated reference field uses `get_by_id`, while client frames use the target's `find` scope. Review both when their admission rules must agree. Barber's backends install exact 3.18.0 registry packages and support these scoped collection filters; their append-based `intersectScopeFilter` preserves the client markers.
+The generated reference field uses `get_by_id`, while client frames use the target's `find` scope. Review both when their admission rules must agree. Barber's backends install exact 3.19.0 registry packages and support these scoped collection filters; their append-based `intersectScopeFilter` preserves the client markers.
 
 
 Named views released in 3.12.0 accept these collection frames in both client arguments and `where`. Their copied `where` groups retain client scope provenance, including nested quantifiers; invalid nested shapes or reserved markers remain `INVALID_VIEW`. View MCP descriptions include the quantified language.

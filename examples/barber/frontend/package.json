@@ -16,7 +16,7 @@
     "test:security": "npm audit"
   },
   "dependencies": {
-    "@simtlix/simfinity-js-client": "^1.1.0",
+    "@simtlix/simfinity-js-client": "3.19.0",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
     "leaflet": "^1.9.4",

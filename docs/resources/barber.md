@@ -7,7 +7,7 @@ description: Run a booking app with independent MongoDB and PostgreSQL backends,
 
 The [Barber examples](https://github.com/simtlix/simfinity.js/tree/master/examples/barber) put Simfinity's generated API into a booking application. Run either database backend with the same Next.js frontend, then explore customer booking, the owner dashboard, and shop administration.
 
-Both backends consume released Simfinity runtime packages at exactly **3.18.0** from npm. Each backend and the shared frontend have independent manifests and lockfiles outside the library workspaces. The examples have a dedicated validation workflow and are not npm libraries.
+Both backends consume released Simfinity runtime packages at exactly **3.19.0** from npm; the shared frontend pins `@simtlix/simfinity-js-client` to the same version and uses its bundled TypeScript declarations. Each backend and the shared frontend have independent manifests and lockfiles outside the library workspaces. The examples have a dedicated validation workflow and are not npm libraries.
 
 For a smaller starting point, use the [MongoDB quick start](/guide/getting-started) or [PostgreSQL quick start](/guide/postgresql).
 

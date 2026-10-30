@@ -5,7 +5,7 @@ This file helps coding agents (and humans) work productively and safely in this 
 ## What this project is
 
 - **Workspace**: the root `simfinity-workspace` package is private. All seven publishable libraries, their declarations, licenses and package READMEs live under `packages/`.
-- **Examples**: `examples/barber/{mongodb,postgres,frontend}` are independent private npm applications with their own lockfiles, outside the `packages/*` workspaces. The two backends consume released Simfinity runtime packages at exact version 3.18.0; the Next.js frontend is shared.
+- **Examples**: `examples/barber/{mongodb,postgres,frontend}` are independent private npm applications with their own lockfiles, outside the `packages/*` workspaces. The two backends consume released Simfinity runtime packages at exact version 3.19.0; the shared Next.js frontend consumes the exact released client 3.19.0.
 - **Packages**: `@simtlix/simfinity-js` is the MongoDB/Mongoose facade; `@simtlix/simfinity-core` owns the shared GraphQL runtime; `@simtlix/simfinity-sql` owns driver-free relational planning/runtime; `@simtlix/simfinity-postgres` is the PostgreSQL 15+ plugin and compatible facade; `@simtlix/simfinity-mcp` generates MCP tools from a GraphQL schema.
 - **Optional client metadata**: `@simtlix/simfinity-descriptor` depends on exact core and joins the seven-package aligned release set; its structural HTTP types need no Node ambient declarations.
 - **Browser client**: `packages/client` publishes `@simtlix/simfinity-js-client`, preserving its default class export and 1.1 JavaScript API. It joins the aligned release set, consumes HTTP descriptor/introspection metadata and has no runtime dependencies or Node ambient type requirement. Source integration does not imply npm publication.

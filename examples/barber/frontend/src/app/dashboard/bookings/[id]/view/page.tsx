@@ -54,8 +54,7 @@ export default function ViewBookingPage() {
   const BOOKING_FIELDS = 'id confirmationCode scheduledDate startTime endTime totalPrice paymentMethod state notes cancellationReason createdAt client { id name email } professional { id name } barbershop { id name } lines { service { id name } price durationMinutes }';
 
   const loadBooking = async () => {
-    const result = await client.getById('booking', bookingId, BOOKING_FIELDS);
-    return (result as BookingDetail) ?? null;
+    return client.getById<BookingDetail>('booking', bookingId, BOOKING_FIELDS);
   };
 
   useEffect(() => {
