@@ -4,11 +4,13 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { useSimfinityClient } from '@/lib/simfinity';
 import { useT } from '@/hooks/useT';
+import { bookingErrorCode, bookingErrorMessage } from '@/lib/bookingErrors';
 import { PageHeader } from '@/components/shared/page';
 import { Button } from '@/components/shared/ui';
 
 interface BookingDetail {
   id: string;
+  version: number;
   confirmationCode: string;
   scheduledDate: string;
   startTime: string;
@@ -27,6 +29,7 @@ interface Professional {
 
 export default function EditBookingPage() {
   const t = useT('bookings');
+  const bookingT = useT('booking');
   const router = useRouter();
   const params = useParams();
   const client = useSimfinityClient();
@@ -51,7 +54,7 @@ export default function EditBookingPage() {
           client.getById<BookingDetail>(
             'booking',
             bookingId,
-            'id confirmationCode scheduledDate startTime endTime totalPrice state notes professional { id name } lines { service { id name } price durationMinutes }',
+            'id version confirmationCode scheduledDate startTime endTime totalPrice state notes professional { id name } lines { service { id name } price durationMinutes }',
           ),
           client.find<Professional>('professional').fields('id name').exec(),
         ]);
@@ -80,18 +83,20 @@ export default function EditBookingPage() {
     setError(null);
     try {
       await client.update('booking', booking.id, {
+        version: booking.version,
         scheduledDate: date,
         startTime,
-        professional: { id: selectedPro },
+        professional: selectedPro ? { id: selectedPro } : null,
         notes,
       });
       router.push(`/dashboard/bookings/${booking.id}/view`);
-    } catch {
-      setError(t('errorSaving', 'Error al guardar los cambios'));
+    } catch (error) {
+      const message = bookingErrorMessage(bookingErrorCode(error));
+      setError(bookingT(message.key, message.fallback));
     } finally {
       setSaving(false);
     }
-  }, [client, booking, date, startTime, selectedPro, notes, router, t]);
+  }, [client, booking, date, startTime, selectedPro, notes, router, bookingT]);
 
   if (loading) {
     return (

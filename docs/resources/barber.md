@@ -52,6 +52,8 @@ Compose waits for database and application health. MongoDB runs a single-node re
 
 ## Explore the booking flow
 
+Bookings use optimistic concurrency: the UI sends the version it loaded, so an owner saving an old edit cannot undo a client reschedule. Conflicts require a reload. Existing PostgreSQL installations need the explicit version-column migration in the [example upgrade instructions](https://github.com/simtlix/simfinity.js/tree/master/examples/barber#upgrading-an-existing-booking-database); MongoDB needs no migration.
+
 New shops start in `PENDING_REVIEW` with one create mutation. They remain private until approved. Existing `DRAFT` shops need no migration and can still be submitted by their owner or a platform admin.
 
 The minimal seed creates an approved shop with slug `barber-demo`, a service named “Corte clásico”, and the professional “Alex Demo”. Sign in with one of these synthetic accounts; all use password `demo1234`:

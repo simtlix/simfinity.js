@@ -25,7 +25,23 @@ const introspection = await request('{ __type(name:"Mutation") { fields { name a
 assert.equal(introspection.errors, undefined);
 const fields = introspection.data.__type.fields;
 const typeName = (type) => type.kind === 'NON_NULL' ? `${typeName(type.ofType)}!` : type.kind === 'LIST' ? `[${typeName(type.ofType)}]` : type.name;
+// Ordinary fixture writes read their current revision; conflict tests pass an explicit observed version.
+async function withVersion(id, input, token) {
+  const read = await request('query($id:ID!){booking(id:$id){version}}', { id }, token);
+  assert.equal(read.errors, undefined, JSON.stringify(read.errors));
+  assert.ok(read.data.booking, `Missing booking fixture ${id}`);
+  return { ...input, version: read.data.booking.version };
+}
+async function deleteRecord(name, id, token) {
+  const protectedBooking = name === 'deletebooking';
+  const variables = protectedBooking ? await withVersion(id, { id }, admin.accessToken) : { id };
+  return request(`mutation($id:ID!${protectedBooking ? ',$version:RecordVersion!' : ''}) { ${name}(id:$id${protectedBooking ? ',version:$version' : ''}) { id } }`, variables, token);
+}
 async function mutate(name, input, selection = 'id', token, denied = false) {
+  if ((name === 'updatebooking' || name.endsWith('_booking')) && input.version == null) {
+    // Admin reads fixture metadata only; the mutation still runs as its original actor.
+    input = await withVersion(input.id, input, admin.accessToken);
+  }
   const field = fields.find((candidate) => candidate.name === name);
   assert.ok(field, `Missing mutation ${name}`);
   const arg = field.args.find((argument) => argument.name === 'input');
@@ -295,7 +311,7 @@ try {
   await mutate('updatebooking', { id: booking.id, barbershop: null }, 'id', owner.accessToken, true);
   await mutate('updatebooking', { id: otherBooking.id, client: null }, 'id', otherClient.accessToken, true);
   for (const [id, token] of [[booking.id, client.accessToken], [otherBooking.id, otherClient.accessToken]]) {
-    const clientDelete = await request('mutation($id:ID!) { deletebooking(id:$id) { id } }', { id }, token);
+    const clientDelete = await deleteRecord('deletebooking', id, token);
     checks++;
     assert.equal(clientDelete.errors?.[0]?.extensions?.code, 'FORBIDDEN', `A client cannot delete their booking: ${JSON.stringify(clientDelete)}`);
   }
@@ -346,7 +362,7 @@ try {
   // delete them. Both APIs answer RESOURCE_IN_USE (MongoDB has no foreign key that would refuse it).
   const deleteCode = async (name, id, token) => {
     checks++;
-    return (await request(`mutation($id:ID!) { ${name}(id:$id) { id } }`, { id }, token)).errors?.[0]?.extensions?.code;
+    return (await deleteRecord(name, id, token)).errors?.[0]?.extensions?.code;
   };
   assert.equal(await deleteCode('deletebooking', booking.id, owner.accessToken), 'RESOURCE_IN_USE', 'A reviewed booking keeps its review');
   inUseShop = await mutate('addbarbershop', { name: 'HTTP contract shop in use', slug: `in-use-${randomUUID()}`, owner: { id: otherOwner.user.id } }, 'id', otherOwner.accessToken);
@@ -379,6 +395,11 @@ try {
   await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'barber-contract', version: '1.0.0' } });
   const { tools } = await rpc('tools/list', {});
   for (const name of ['barbershops', 'barbershop', 'barbershop_busyRanges', 'addbooking', 'updateuser', 'reschedule_booking']) assert.ok(tools.some((tool) => tool.name === name));
+  for (const name of ['updatebooking', 'reschedule_booking', 'cancelbyclient_booking', 'cancelbyshop_booking', 'complete_booking', 'noshow_booking']) {
+    const tool = tools.find((entry) => entry.name === name);
+    assert.ok(tool.inputSchema.$defs[tool.inputSchema.properties.input.$ref.split('/').at(-1)].required.includes('version'), `${name} requires an observed version`);
+  }
+  assert.ok(tools.find((entry) => entry.name === 'deletebooking').inputSchema.required.includes('version'));
   // The virtual busyRanges field, whose date is required, is its own read tool: barbershop(id) { busyRanges(...) }.
   const busyRangesTool = tools.find((tool) => tool.name === 'barbershop_busyRanges');
   assert.equal(busyRangesTool.annotations?.readOnlyHint, true);
@@ -479,7 +500,7 @@ try {
   ]) {
     if (!id) continue;
     try {
-      const result = await request(`mutation($id:ID!) { ${name}(id:$id) { id } }`, { id }, admin.accessToken);
+      const result = await deleteRecord(name, id, admin.accessToken);
       if (result.errors) cleanupErrors.push(new Error(`${name} cleanup: ${JSON.stringify(result.errors)}`));
     } catch (error) {
       cleanupErrors.push(error);

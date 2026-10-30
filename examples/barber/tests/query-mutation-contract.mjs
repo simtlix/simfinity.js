@@ -45,7 +45,23 @@ const introspection = await execute('{ __type(name:"Mutation") { fields { name a
 const fields = introspection.data.__type.fields;
 const typeName = (type) => type.kind === 'NON_NULL' ? `${typeName(type.ofType)}!`
   : type.kind === 'LIST' ? `[${typeName(type.ofType)}]` : type.name;
+// Ordinary fixture writes read their current revision; conflict tests pass an explicit observed version.
+async function withVersion(id, input, token) {
+  const read = await request('query($id:ID!){booking(id:$id){version}}', { id }, token);
+  assert.equal(read.errors, undefined, JSON.stringify(read.errors));
+  assert.ok(read.data.booking, `Missing booking fixture ${id}`);
+  return { ...input, version: read.data.booking.version };
+}
+async function deleteRecord(name, id, token) {
+  const protectedBooking = name === 'deletebooking';
+  const variables = protectedBooking ? await withVersion(id, { id }, admin.accessToken) : { id };
+  return request(`mutation($id:ID!${protectedBooking ? ',$version:RecordVersion!' : ''}) { ${name}(id:$id${protectedBooking ? ',version:$version' : ''}) { id } }`, variables, token);
+}
 async function mutate(name, input, selection, token, rejected = false) {
+  if ((name === 'updatebooking' || name.endsWith('_booking')) && input.version == null) {
+    // Admin reads fixture metadata only; the mutation still runs as its original actor.
+    input = await withVersion(input.id, input, admin.accessToken);
+  }
   const field = fields.find((entry) => entry.name === name);
   assert.ok(field, name);
   const arg = field.args.find((entry) => entry.name === 'input');
@@ -366,6 +382,55 @@ await check('nested booking create executes hooks and derives totals', async () 
   assert.equal(booking.endTime, '10:30');
   assert.deepEqual(await readBooking(), booking);
 });
+// Independent schedule, so concurrency assertions do not change the query/operator fixtures.
+const versionShop = await mutate('addbarbershop', { name: `${prefix}-versions`, slug: `${prefix}-versions`, owner: { id: owner.user.id } }, 'id', owner.accessToken);
+await mutate('approve_barbershop', { id: versionShop.id }, 'id', admin.accessToken);
+const versionFields = 'id version state scheduledDate startTime notes';
+const versionDate = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+const versionBooking = (startTime) => mutate('addbooking', { barbershop: { id: versionShop.id }, scheduledDate: versionDate, startTime, lines: [] }, versionFields, client.accessToken);
+const readVersionBooking = async (id) => (await execute(`query($id:ID!){booking(id:$id){${versionFields}}}`, { id }, owner.accessToken)).data.booking;
+await check('accepted booking writes advance the version by one', async () => {
+  const created = await versionBooking('07:00');
+  assert.equal(created.version, 1);
+  const edited = await mutate('updatebooking', { id: created.id, version: created.version, notes: 'Accepted' }, versionFields, owner.accessToken);
+  assert.equal(edited.version, 2);
+  const cancelled = await mutate('cancelbyclient_booking', { id: created.id, version: edited.version }, versionFields, client.accessToken);
+  assert.equal(cancelled.version, 3);
+  assert.deepEqual(await readVersionBooking(created.id), cancelled);
+});
+await check('a stale booking version is rejected and changes nothing', async () => {
+  const created = await versionBooking('08:00');
+  const saved = await mutate('updatebooking', { id: created.id, version: created.version, notes: 'Current' }, versionFields, owner.accessToken);
+  const rejected = await mutate('updatebooking', { id: created.id, version: saved.version - 1, startTime: '08:30', notes: 'Stale' }, versionFields, owner.accessToken, { code: 'VERSION_CONFLICT' });
+  assert.equal(rejected.errors[0].extensions.status, 409);
+  assert.deepEqual(await readVersionBooking(created.id), saved);
+});
+await check('an owner edit after a client reschedule conflicts', async () => {
+  const observed = await versionBooking('09:00');
+  const moved = await mutate('reschedule_booking', { id: observed.id, version: observed.version, startTime: '09:30' }, versionFields, client.accessToken);
+  assert.equal(moved.version, observed.version + 1);
+  const rejected = await mutate('updatebooking', { id: observed.id, version: observed.version, scheduledDate: observed.scheduledDate, startTime: observed.startTime, notes: 'Owner stale form' }, versionFields, owner.accessToken, { code: 'VERSION_CONFLICT' });
+  assert.equal(rejected.errors[0].extensions.status, 409);
+  assert.deepEqual(await readVersionBooking(observed.id), moved);
+});
+await check('nested booking writes require the observed child version and roll back their parent on conflict', async () => {
+  const created = await versionBooking('10:00');
+  await mutate('updatebarbershop', { id: versionShop.id, bookings: { updated: [{ id: created.id, version: created.version, notes: 'Nested' }] } }, 'id', owner.accessToken);
+  const saved = await readVersionBooking(created.id);
+  assert.equal(saved.version, created.version + 1);
+  const readParent = async () => (await execute('query($id:ID!){barbershop(id:$id){name}}', { id: versionShop.id }, owner.accessToken)).data.barbershop;
+  const before = await readParent();
+  for (const bookings of [
+    { updated: [{ id: created.id, version: created.version, notes: 'Stale nested' }] },
+    { deleted: [{ id: created.id, version: created.version }] },
+  ]) {
+    await mutate('updatebarbershop', { id: versionShop.id, name: 'Must roll back', bookings }, 'id', owner.accessToken, { code: 'VERSION_CONFLICT' });
+    assert.deepEqual(await readParent(), before);
+    assert.deepEqual(await readVersionBooking(created.id), saved);
+  }
+  await mutate('updatebarbershop', { id: versionShop.id, bookings: { deleted: [{ id: created.id, version: saved.version }] } }, 'id', owner.accessToken);
+  assert.equal(await readVersionBooking(created.id), null);
+});
 await check('omitted booking lines survive a partial update', async () => {
   await mutate('updatebooking', { id: booking.id, notes: 'Keep lines' }, 'id', owner.accessToken);
   const read = await readBooking();
@@ -486,7 +551,7 @@ await check('clients cannot change or delete completed bookings', async () => {
   for (const input of [{ notes: 'Late note' }, { lines: [{ service: { id: services.A.id }, price: 0 }] }]) {
     await mutate('updatebooking', { id: done.id, ...input }, 'id', client.accessToken, { code: 'FORBIDDEN' });
   }
-  const removed = await request('mutation($id:ID!){deletebooking(id:$id){id}}', { id: done.id }, client.accessToken);
+  const removed = await deleteRecord('deletebooking', done.id, client.accessToken);
   assert.equal(removed.errors?.[0]?.extensions?.code, 'FORBIDDEN', JSON.stringify(removed));
   // The shop's owner still edits the record.
   assert.equal((await mutate('updatebooking', { id: done.id, notes: 'Paid in cash' }, 'notes', owner.accessToken)).notes, 'Paid in cash');
@@ -544,7 +609,7 @@ await check("a bundle's stored duration follows its services' durations, so it m
   assert.equal(await readTotal(bundle.id), database === 'postgresql' ? 30 : 10);
 });
 // Later checks see only the bookings they create.
-for (const id of derivedBookings) await request('mutation($id:ID!){deletebooking(id:$id){id}}', { id }, admin.accessToken);
+for (const id of derivedBookings) await deleteRecord('deletebooking', id, admin.accessToken);
 const report = {
   endpoint, database, requests,
   passed: results.filter((r) => r.passed).length, failed: results.filter((r) => !r.passed).length,

@@ -211,6 +211,7 @@
   "booking.errors.invalidLine": "Alguno de los servicios o paquetes elegidos no está disponible en esta barbería. Revisá la selección.",
   "booking.errors.rescheduleUnavailable": "Este turno ya no está confirmado y no se puede reprogramar. Revisá tus turnos.",
   "booking.errors.originalKept": "Tu turno original no cambió.",
+  "booking.bookingConflict": "Esta reserva cambió mientras la editabas. Recargá para ver los datos actuales.",
   "booking.bookingFailed": "No se pudo confirmar la reserva.",
   "booking.myBookings.title": "Mis Turnos",
   "booking.myBookings.upcoming": "Próximos",

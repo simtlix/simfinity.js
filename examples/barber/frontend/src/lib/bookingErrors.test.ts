@@ -32,6 +32,13 @@ describe("booking error messages", () => {
     expect(bookingErrorMessage("BAD_REQUEST", false)).toBe(BOOKING_FAILED);
   });
 
+  it("explains a version conflict without suggesting that the other actor's change was lost", () => {
+    expect(bookingErrorMessage("VERSION_CONFLICT")).toEqual({
+      key: "bookingConflict",
+      fallback: "Esta reserva cambió mientras la editabas. Recargá para ver los datos actuales.",
+    });
+  });
+
   it("maps API codes to messages and falls back to a generic failure", () => {
     const failure = { graphQLErrors: [{ extensions: { code: "BOOKING_SLOT_UNAVAILABLE" } }] };
     expect(bookingErrorCode(failure)).toBe("BOOKING_SLOT_UNAVAILABLE");

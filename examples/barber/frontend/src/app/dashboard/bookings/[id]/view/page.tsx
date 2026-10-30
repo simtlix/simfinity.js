@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { useSimfinityClient } from '@/lib/simfinity';
 import { useT } from '@/hooks/useT';
+import { bookingErrorCode, bookingErrorMessage } from '@/lib/bookingErrors';
 import { PageHeader } from '@/components/shared/page';
 import { StatusChip } from '@/components/shared/data';
 import { format } from 'date-fns';
@@ -11,6 +12,7 @@ import { es } from 'date-fns/locale';
 
 interface BookingDetail {
   id: string;
+  version: number;
   confirmationCode: string;
   scheduledDate: string;
   startTime: string;
@@ -42,6 +44,7 @@ function InfoRow({ label, value, children }: { label: string; value?: string | R
 
 export default function ViewBookingPage() {
   const t = useT('bookings');
+  const bookingT = useT('booking');
   const router = useRouter();
   const params = useParams();
   const client = useSimfinityClient();
@@ -50,8 +53,9 @@ export default function ViewBookingPage() {
   const [booking, setBooking] = useState<BookingDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  const BOOKING_FIELDS = 'id confirmationCode scheduledDate startTime endTime totalPrice paymentMethod state notes cancellationReason createdAt client { id name email } professional { id name } barbershop { id name } lines { service { id name } price durationMinutes }';
+  const BOOKING_FIELDS = 'id version confirmationCode scheduledDate startTime endTime totalPrice paymentMethod state notes cancellationReason createdAt client { id name email } professional { id name } barbershop { id name } lines { service { id name } price durationMinutes }';
 
   const loadBooking = async () => {
     return client.getById<BookingDetail>('booking', bookingId, BOOKING_FIELDS);
@@ -73,11 +77,13 @@ export default function ViewBookingPage() {
   const handleAction = async (action: string) => {
     if (!booking) return;
     setActionLoading(true);
+    setActionError(null);
     try {
-      await client.transition('booking', action, booking.id);
+      await client.transition('booking', action, booking.id, { version: booking.version });
       setBooking(await loadBooking());
-    } catch {
-      /* handle error */
+    } catch (error) {
+      const message = bookingErrorMessage(bookingErrorCode(error));
+      setActionError(bookingT(message.key, message.fallback));
     } finally {
       setActionLoading(false);
     }
@@ -114,6 +120,7 @@ export default function ViewBookingPage() {
 
   return (
     <div className="max-w-3xl space-y-8">
+      {actionError && <p role="alert" className="text-error">{actionError}</p>}
       <PageHeader
         title={`${t('booking', 'Turno')} #${booking.confirmationCode || bookingId.slice(-6).toUpperCase()}`}
         breadcrumbs={[

@@ -12,6 +12,7 @@ import { PaginationBar } from "@/components/shared/data";
 import { EmptyState } from "@/components/shared/page";
 import { ConfirmModal } from "@/components/shared/modals";
 import { cn } from "@/lib/cn";
+import { bookingErrorCode, bookingErrorMessage } from "@/lib/bookingErrors";
 
 const UPCOMING_STATES = new Set(["CONFIRMED"]);
 const PAST_STATES = new Set([
@@ -29,6 +30,7 @@ type BookingLine = {
 
 type BookingData = {
   id: string;
+  version: number;
   confirmationCode?: string;
   scheduledDate?: string;
   startTime?: string;
@@ -68,6 +70,7 @@ function BookingsContent() {
   const [tab, setTab] = useState<"upcoming" | "past">("upcoming");
   const [bookings, setBookings] = useState<BookingData[]>([]);
   const [loading, setLoading] = useState(true);
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const [cancelTarget, setCancelTarget] = useState<BookingData | null>(null);
 
   useEffect(() => {
@@ -78,7 +81,7 @@ function BookingsContent() {
         const result = await client
           .find("booking")
           .fields(
-            "id confirmationCode scheduledDate startTime endTime totalPrice state barbershop { id name } professional { id name } lines { service { id name } bundle { id name } price durationMinutes }",
+            "id version confirmationCode scheduledDate startTime endTime totalPrice state barbershop { id name } professional { id name } lines { service { id name } bundle { id name } price durationMinutes }",
           )
           .where("client", [{ path: "id", operator: "EQ", value: user.id }])
           .exec();
@@ -121,28 +124,30 @@ function BookingsContent() {
 
   const handleCancel = useCallback(
     async (booking: BookingData) => {
+      setCancelError(null);
       try {
-        await client.transition(
+        const updated = await client.transition<{ version: number; state: string }>(
           "booking",
           "cancelbyclient",
           booking.id,
-          {},
-          "id state",
+          { version: booking.version },
+          "id version state",
         );
         setBookings((prev) =>
           prev.map((b) =>
             b.id === booking.id
-              ? { ...b, state: "CANCELLED_BY_CLIENT" }
+              ? { ...b, ...updated }
               : b,
           ),
         );
-      } catch {
-        /* silent */
+      } catch (error) {
+        const message = bookingErrorMessage(bookingErrorCode(error));
+        setCancelError(t(message.key, message.fallback));
       } finally {
         setCancelTarget(null);
       }
     },
-    [client],
+    [client, t],
   );
 
   const tabs = [
@@ -160,6 +165,7 @@ function BookingsContent() {
 
   return (
     <div className="max-w-3xl mx-auto px-6 lg:px-12 py-8">
+      {cancelError && <p role="alert" className="text-error">{cancelError}</p>}
       <h1 className="font-headline italic text-4xl lg:text-5xl text-on-surface mb-2 leading-tight">
         {t("myBookings", "Mis Turnos")}
       </h1>
