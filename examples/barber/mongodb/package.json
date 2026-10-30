@@ -17,7 +17,8 @@
     "dataset:load": "node dataset/loadDataset.js",
     "dataset:delete": "node dataset/deleteDataset.js",
     "test:query-mutations": "node ../tests/query-mutation-contract.mjs",
-    "test:security": "npm audit"
+    "test:security": "npm audit",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@envelop/core": "^5.3.0",
@@ -38,7 +39,9 @@
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
     "@types/jsonwebtoken": "^9.0.10",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "@simtlix/eslint-plugin-simfinity": "0.5.0",
+    "eslint": "^9.39.5"
   },
   "private": true,
   "engines": {
