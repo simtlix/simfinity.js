@@ -24,7 +24,7 @@ const bookingType = new GraphQLObjectType({
   description:
     "A client's appointment at a barbershop: the selected services/bundles, schedule, pricing and lifecycle state. The total price and end time are derived automatically from the booking lines.",
   extensions: {
-    scope: bookingScopes,
+    scope: bookingScopes, concurrency: { mode: 'optimistic' },
     indexes: [{ fields: ['barbershop', 'scheduledDate'] }, { fields: ['client'] }, { fields: ['confirmationCode'] }],
   },
   fields: () => ({

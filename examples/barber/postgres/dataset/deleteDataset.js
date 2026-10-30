@@ -17,14 +17,14 @@ const deleteAllOfType = async (typeName) => {
 
   do {
     try {
-      batch = await client.find(typeName).fields('id').page(1, PAGE_SIZE).exec();
+      batch = await client.find(typeName).fields(typeName === 'booking' ? 'id version' : 'id').page(1, PAGE_SIZE).exec();
     } catch (e) {
       throw new Error(`Error fetching ${typeName}: ${e.message}`);
     }
 
     for (const item of batch) {
       try {
-        await client.delete(typeName, item.id, 'id');
+        await client.delete(typeName, item.id, 'id', typeName === 'booking' ? { version: item.version } : undefined);
         totalDeleted++;
       } catch (e) {
         throw new Error(`Error deleting ${typeName} ${item.id}: ${e.message}`);

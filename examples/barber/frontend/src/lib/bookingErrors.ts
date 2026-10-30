@@ -14,6 +14,7 @@ const SCHEDULE_BUSY: BookingMessage = {
 };
 
 export const BOOKING_ERRORS: Record<string, BookingMessage> = {
+  VERSION_CONFLICT: { key: "bookingConflict", fallback: "Esta reserva cambió mientras la editabas. Recargá para ver los datos actuales." },
   BOOKING_SLOT_UNAVAILABLE: { key: "errors.slotUnavailable", fallback: "Ese horario ya fue reservado. Elegí otro horario." },
   BOOKING_OUTSIDE_HOURS: {
     key: "errors.outsideHours",

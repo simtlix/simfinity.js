@@ -299,6 +299,7 @@
   "booking.errors.invalidLine": "One of the selected services or bundles is not available at this barbershop. Check your selection.",
   "booking.errors.rescheduleUnavailable": "This booking is no longer confirmed and cannot be rescheduled. Check your bookings.",
   "booking.errors.originalKept": "Your original booking has not changed.",
+  "booking.bookingConflict": "This booking changed while you were editing it. Reload to see the current details.",
   "booking.bookingFailed": "The booking could not be confirmed.",
   "booking.myBookings.title": "Mis Turnos",
   "booking.myBookings.upcoming": "Próximos",

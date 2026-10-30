@@ -75,6 +75,21 @@ No data migration is needed for this change. Shops already stored as `DRAFT` kee
 
 ## Booking rules
 
+Bookings use optimistic concurrency. Reads include numeric `version: RecordVersion!`; a create starts at 1. Updates and state transitions must send the version the caller read, and each accepted write increments it once. Deletes require `deletebooking(id, version)`, and a nested booking deletion uses `{ id, version }`. Other entities, including barbershops, remain unprotected. GraphQL and MCP enforce the same preconditions.
+
+A stale write returns `VERSION_CONFLICT` (409) and changes nothing. The edit, action, cancellation and reschedule pages keep the observed version and explain the conflict; reload to see the current record before deciding what to save. In particular, an owner cannot overwrite a client's newer reschedule by saving an older form. No page silently reads a newer version and retries an outdated payload.
+
+### Upgrading an existing booking database
+
+MongoDB documents without `version` read as version 1; no migration is needed. PostgreSQL refuses startup with `SCHEMA_MISMATCH` until an explicit migration adds the managed column. For the default `DATABASE_SCHEMA=barber`, the tested migration from that diagnostic is:
+
+```sql
+ALTER TABLE "barber"."booking" ADD COLUMN "version" bigint NOT NULL DEFAULT 1;
+```
+
+Use the actual schema name if configured differently. Stop old application instances and apply this migration immediately before starting the protected backend; old instances do not participate in version checks. Fresh databases create the column automatically. There is no automatic migration of existing tables. See the [concurrency guide](../../docs/guide/concurrency.md) for native writes and coordinated rollback requirements.
+
+
 Both APIs check a confirmed booking when it is created and when an update changes its shop, date, start time, professional or services. They compare stored and new values, so an edit form can resend unchanged fields, for example to save notes on a booking already in progress:
 
 - When it is created or moved to another date or start time, it needs a `scheduledDate` (`YYYY-MM-DD`) and a `startTime` (`HH:mm`), and it must start at least `minAdvanceHours` from now and at most `maxAdvanceDays` ahead, in the shop's `timezone` (UTC when the shop has none). The shop must be `APPROVED`, as it must be for a booking moved to another shop. A booking that keeps its time, for example one that gets another service, is checked only against the rules below.
@@ -126,7 +141,7 @@ query BusyTimes {
 
 `busyRanges` is a [virtual field](../../docs/guide/queries.md#virtual-fields) with arguments on the barbershop type (`extensions: { virtual: true }`), not a custom root operation. The read goes through the generated `barbershop(id:)` query, so the barbershop's `get_by_id` scope and the field's own permission rule (`barbershop.busyRanges` in `auth/permissions.js`) apply, and it stays a read-only query. Its resolver reads bookings natively, outside the booking scope that shows clients only their own bookings, and returns no client or booking details. Neither backend stores the field: the barbershop table has no column for it and shop documents have no key for it. It is not part of the query language either: generated inputs leave it out, `barbershops`, `barbershops_aggregate` and `user.barbershops` have no `busyRanges` argument, so a client that sends one fails GraphQL validation (`Unknown argument "busyRanges"`), and a sort or aggregation path through it fails with `FORBIDDEN_FILTER_PATH`. Selected on a list of shops, it runs its reads once per shop. MCP agents read it through the [`barbershop_busyRanges` tool](#mcp). Earlier versions served the same read as the `bookingAvailability` mutation, because Simfinity registers custom mutations but not custom queries; that mutation and its MCP tool were removed.
 
-To reschedule, the booking page calls `reschedule_booking` with its new date, time, professional and services. This `CONFIRMED -> CONFIRMED` action checks the booking's current state inside the transaction, then validates and moves its slot. Its overlap check ignores the booking itself, so the new time may overlap the old one. A rejected slot leaves the booking at its original time; if the shop has cancelled or completed it since the form loaded, the action rejects with `BAD_REQUEST` and the page explains that it can no longer be rescheduled. The booking keeps its ID and confirmation code. A booking already known to be non-confirmed when the page loads only prefills the form; confirming that form creates a new booking. Generic `updatebooking` remains available for historical-record edits by the barbershop's owner and platform admins; clients may change only their `CONFIRMED` bookings.
+To reschedule, the booking page calls `reschedule_booking` with its new date, time, professional and services. This `CONFIRMED -> CONFIRMED` action checks the booking's current state inside the transaction, then validates and moves its slot. Its overlap check ignores the booking itself, so the new time may overlap the old one. A rejected slot leaves the booking at its original time; if the shop has cancelled or completed it since the form loaded, the stale version is rejected with `VERSION_CONFLICT` and the page asks the client to reload. An action sent with the current version in a non-confirmed state still rejects with `BAD_REQUEST`. The booking keeps its ID and confirmation code. A booking already known to be non-confirmed when the page loads only prefills the form; confirming that form creates a new booking. Generic `updatebooking` remains available for historical-record edits by the barbershop's owner and platform admins; clients may change only their `CONFIRMED` bookings.
 
 ## Bundle rules
 

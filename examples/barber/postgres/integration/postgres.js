@@ -27,6 +27,10 @@ async function request(query, variables = {}, token) {
   return response.json();
 }
 async function mutation(name, input, fields = 'id', token, denied = false) {
+  if ((name === 'updatebooking' || name.endsWith('_booking')) && input.version == null) {
+    const stored = await model('booking').findById(input.id);
+    input = { ...input, version: stored.version ?? 1 };
+  }
   const type = schema.getMutationType().getFields()[name].args.find((arg) => arg.name === 'input')?.type;
   const result = await request(`mutation($input:${type}) { ${name}(input:$input) { ${fields} } }`, { input }, token);
   if (denied) { assert.ok(result.errors?.length, `${name} must fail: ${JSON.stringify(result)}`); checks++; return result; }
@@ -160,7 +164,8 @@ try {
   }
   assert.equal((await model('booking').findById(confirmed.id)).barbershop, shop.id);
   for (const [name, id, token] of [['deletefavorite', favorite.id, otherClient.accessToken], ['deleteservice', service.id, otherOwner.accessToken], ['deletebooking', booking.id, otherClient.accessToken], ['deletebooking', booking.id, client.accessToken]]) {
-    const result = await request(`mutation { ${name}(id: "${id}") { id } }`, {}, token);
+    const version = name === 'deletebooking' ? `, version: ${(await model('booking').findById(id)).version}` : '';
+    const result = await request(`mutation { ${name}(id: "${id}"${version}) { id } }`, {}, token);
     assert.equal(result.errors?.[0]?.extensions?.code, 'FORBIDDEN', `${name}: ${JSON.stringify(result)}`);
   }
   const referencedDelete = await request(`mutation { deleteservice(id: "${service.id}") { id } }`, {}, owner.accessToken);

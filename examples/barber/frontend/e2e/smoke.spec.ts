@@ -5,6 +5,32 @@ const shopSlug = process.env.DEMO_SHOP_SLUG || 'barber-demo';
 // Filter by slug on the server: an unfiltered list returns at most 100 shops and could miss the demo shop.
 const shopBySlug = (selection: string) => ({ query: `query($slug: QLFilter) { barbershops(slug: $slug) { ${selection} } }`, variables: { slug: { operator: 'EQ', value: shopSlug } } });
 
+// Current revisions for fixture administration only. UI conflict tests keep their observed revision.
+async function bookingRevision(request: import('@playwright/test').APIRequestContext, id: string, token: string): Promise<number> {
+  const response = await request.post(endpoint, {
+    data: { query: 'query($id:ID!){booking(id:$id){version}}', variables: { id } },
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const result = await response.json();
+  expect(result.errors).toBeUndefined();
+  return result.data.booking.version;
+}
+
+async function deleteBookingFixtures(request: import('@playwright/test').APIRequestContext, ids: string[], token: string) {
+  if (!ids.length) return;
+  const read = await request.post(endpoint, {
+    data: { query: `{${ids.map((id, index) => `b${index}:booking(id:"${id}"){version}`).join('\n')}}` },
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const current = await read.json();
+  expect(current.errors).toBeUndefined();
+  const removed = await request.post(endpoint, {
+    data: { query: `mutation {${ids.map((id, index) => `b${index}:deletebooking(id:"${id}",version:${current.data[`b${index}`].version}){id}`).join('\n')}}` },
+    headers: { authorization: `Bearer ${token}` },
+  });
+  expect((await removed.json()).errors).toBeUndefined();
+}
+
 test('home loads and shows hero', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: /Encontrá tu/i })).toBeVisible();
@@ -150,7 +176,7 @@ test('owner totals and calendar include all bookings and respect the selected da
     await page.getByRole('button', { name: 'chevron_right', exact: true }).click();
     await expect(kpi('Turnos Totales')).toHaveText('105');
   } finally {
-    if (ids.length) await gql(`mutation { ${ids.map((id, index) => `b${index}:deletebooking(id:"${id}"){id}`).join('\n')} }`, admin.accessToken);
+    await deleteBookingFixtures(request, ids, admin.accessToken);
     if (serviceId) await gql(`mutation { deleteservice(id:"${serviceId}"){id} }`, admin.accessToken);
     if (shopId) await gql(`mutation { deletebarbershop(id:"${shopId}"){id} }`, admin.accessToken);
     await gql(`mutation { deleteuser(id:"${owner.user.id}"){id} }`, admin.accessToken);
@@ -290,17 +316,17 @@ test('client reschedules a booking in place and keeps it when the new time is ta
     expect(staleTime).toBeTruthy();
     await time(staleTime!).click();
     await page.getByRole('button', { name: /Continuar/ }).click();
-    const cancellation = await gql('mutation($id: ID!) { cancelbyshop_booking(input: { id: $id }) { id state } }', { id: original!.id }, admin.accessToken);
+    const cancellation = await gql('mutation($id: ID!,$version:RecordVersion!) { cancelbyshop_booking(input: { id: $id, version:$version }) { id state } }', { id: original!.id, version: await bookingRevision(request, original!.id, admin.accessToken) }, admin.accessToken);
     expect(cancellation.errors).toBeUndefined();
     const staleResponse = page.waitForResponse((response) => response.url() === endpoint && response.request().postData()?.includes('reschedule_booking') === true);
     await page.getByRole('button', { name: /Confirmar Reserva/ }).click();
     const staleResult = await (await staleResponse).json();
-    expect(staleResult.errors?.[0]?.extensions?.code).toBe('BAD_REQUEST');
-    await expect(page.getByText(/Este turno ya no está confirmado/)).toBeVisible();
+    expect(staleResult.errors?.[0]?.extensions?.code).toBe('VERSION_CONFLICT');
+    await expect(page.getByText(/Esta reserva cambió mientras la editabas/)).toBeVisible();
     await expect(page.getByRole('heading', { name: '¡Turno Confirmado!' })).toHaveCount(0);
     expect(await readBooking(original!.id, client.accessToken)).toEqual({ id: original!.id, state: 'CANCELLED_BY_SHOP', scheduledDate, startTime: next });
   } finally {
-    for (const id of created) await gql('mutation($id: ID!) { deletebooking(id: $id) { id } }', { id }, admin.accessToken);
+    await deleteBookingFixtures(request, created, admin.accessToken);
     if (rival) await gql('mutation($id: ID!) { deleteuser(id: $id) { id } }', { id: rival.user.id }, admin.accessToken);
   }
 });
@@ -327,6 +353,49 @@ const api = (request: import('@playwright/test').APIRequestContext) => {
   };
   return { gql, login };
 };
+
+test('an owner edit after a client reschedule shows the conflict and keeps the new time', async ({ page, request }) => {
+  const { gql, login } = api(request);
+  const client = await login('cliente@demo.com');
+  const owner = await login('propietario@demo.com');
+  const admin = await login('admin@demo.com');
+  const { query, variables } = shopBySlug('id services { id name } professionals { id name }');
+  const shop = (await gql(query, variables)).data.barbershops[0];
+  const service = shop.services.find((item: { name: string }) => item.name === 'Corte clásico');
+  const professional = shop.professionals.find((item: { name: string }) => item.name === 'Alex Demo');
+  const day = new Date();
+  day.setMonth(day.getMonth() + 1, 17);
+  const scheduledDate = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-17`;
+  const created = await gql('mutation($input:bookingInput!){addbooking(input:$input){id version startTime}}', { input: {
+    barbershop: { id: shop.id }, professional: { id: professional.id }, scheduledDate, startTime: '09:00', lines: [{ service: { id: service.id } }],
+  } }, client.accessToken);
+  expect(created.errors).toBeUndefined();
+  const booking = created.data.addbooking;
+  try {
+    await page.goto('/auth/login');
+    await page.getByLabel('Email', { exact: true }).fill('propietario@demo.com');
+    await page.getByLabel('Contraseña', { exact: true }).fill('demo1234');
+    await page.getByRole('button', { name: 'Iniciar Sesión', exact: true }).click();
+    await expect(page).not.toHaveURL(/auth\/login/);
+    await page.goto(`/dashboard/bookings/${booking.id}/edit`);
+    await expect(page.locator('input[type="time"]')).toHaveValue('09:00');
+    const moved = await gql('mutation($input:bookingInputForUpdate!){reschedule_booking(input:$input){id version startTime}}', {
+      input: { id: booking.id, version: booking.version, startTime: '11:00' },
+    }, client.accessToken);
+    expect(moved.errors).toBeUndefined();
+    await page.locator('textarea').fill('Owner stale note');
+    await page.getByRole('button', { name: 'Guardar Cambios', exact: true }).click();
+    await expect(page.getByText('Esta reserva cambió mientras la editabas. Recargá para ver los datos actuales.', { exact: true })).toBeVisible();
+    const saved = await gql('query($id:ID!){booking(id:$id){version startTime notes}}', { id: booking.id }, owner.accessToken);
+    expect(saved.data.booking).toEqual({ version: moved.data.reschedule_booking.version, startTime: '11:00', notes: null });
+    await page.goto(`/dashboard/bookings/${booking.id}/view`);
+    await expect(page.getByText(/11:00/)).toBeVisible();
+  } finally {
+    const current = await gql('query($id:ID!){booking(id:$id){version}}', { id: booking.id }, admin.accessToken);
+    const removed = await gql('mutation($id:ID!,$version:RecordVersion!){deletebooking(id:$id,version:$version){id}}', { id: booking.id, version: current.data.booking.version }, admin.accessToken);
+    expect(removed.errors).toBeUndefined();
+  }
+});
 
 test('the shop page and booking links offer only active bundles', async ({ page, request }) => {
   const { gql, login } = api(request);
@@ -374,7 +443,8 @@ test.afterEach(async ({ playwright }) => {
     const { gql, login } = api(context);
     const admin = await login('admin@demo.com');
     for (const { mutation, id } of leftovers.splice(0).reverse()) {
-      await gql(`mutation($id: ID!) { ${mutation}(id: $id) { id } }`, { id }, admin.accessToken);
+      if (mutation === 'deletebooking') await deleteBookingFixtures(context, [id], admin.accessToken);
+      else await gql(`mutation($id: ID!) { ${mutation}(id: $id) { id } }`, { id }, admin.accessToken);
     }
   } finally {
     await context.dispose();
@@ -521,7 +591,7 @@ test('admin moderation lists a review that its shop flagged', async ({ page, req
       bookingId = (await gql('mutation($input: bookingInput!) { addbooking(input: $input) { id } }', { input }, client.accessToken)).data?.addbooking?.id;
     }
     expect(bookingId).toBeTruthy();
-    expect((await gql('mutation($id: ID!) { complete_booking(input: { id: $id }) { id } }', { id: bookingId }, owner.accessToken)).errors).toBeUndefined();
+    expect((await gql('mutation($id: ID!,$version:RecordVersion!) { complete_booking(input: { id: $id, version:$version }) { id } }', { id: bookingId, version: await bookingRevision(request, bookingId!, owner.accessToken) }, owner.accessToken)).errors).toBeUndefined();
     const review = await gql('mutation($input: reviewInput!) { addreview(input: $input) { id } }', { input: { rating: 2, comment, client: { id: client.user.id }, barbershop: { id: shop.id }, booking: { id: bookingId } } }, client.accessToken);
     expect(review.errors).toBeUndefined();
     reviewId = review.data.addreview.id;
@@ -538,6 +608,6 @@ test('admin moderation lists a review that its shop flagged', async ({ page, req
     await expect(page.getByText('No hay reseñas reportadas pendientes.')).toHaveCount(0);
   } finally {
     if (reviewId) await gql('mutation($id: ID!) { deletereview(id: $id) { id } }', { id: reviewId }, admin.accessToken);
-    if (bookingId) await gql('mutation($id: ID!) { deletebooking(id: $id) { id } }', { id: bookingId }, admin.accessToken);
+    if (bookingId) await deleteBookingFixtures(request, [bookingId], admin.accessToken);
   }
 });

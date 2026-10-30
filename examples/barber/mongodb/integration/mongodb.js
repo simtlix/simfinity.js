@@ -42,6 +42,10 @@ after(async () => {
 });
 
 async function mutation(name, input, fields = 'id', denied = false) {
+  if ((name === 'updatebooking' || name.endsWith('_booking')) && input.version == null) {
+    const stored = await model('booking').findById(input.id).lean();
+    input = { ...input, version: stored.version ?? 1 };
+  }
   const type = schema.getMutationType().getFields()[name].args.find((arg) => arg.name === 'input').type;
   const result = await graphql({ schema, source: `mutation($input: ${type}) { ${name}(input: $input) { ${fields} } }`, variableValues: { input }, contextValue: context });
   if (denied) {
