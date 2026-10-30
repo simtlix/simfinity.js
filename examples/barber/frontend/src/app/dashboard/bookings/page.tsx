@@ -524,7 +524,7 @@ export default function BookingsCalendarPage() {
     setLoading(true);
     try {
       let query = client
-        .find('booking')
+        .find<Booking>('booking')
         .fields('id scheduledDate startTime endTime totalPrice state confirmationCode notes client { id name email } professional { id name } lines { service { id name } price durationMinutes }')
         .where('barbershop', [{ path: 'id', operator: 'EQ', value: selectedBarbershop.id }])
         .where('scheduledDate', 'GTE', dateRange.from)
@@ -537,14 +537,14 @@ export default function BookingsCalendarPage() {
 
       const [result, pros] = await Promise.all([
         query.exec(),
-        client.find('professional')
+        client.find<Professional>('professional')
           .fields('id name photoUrl bio')
           .where('barbershop', [{ path: 'id', operator: 'EQ', value: selectedBarbershop.id }])
           .exec(),
       ]);
 
-      setBookings(Array.isArray(result) ? (result as Booking[]) : []);
-      setProfessionals(Array.isArray(pros) ? (pros as Professional[]) : []);
+      setBookings(result ?? []);
+      setProfessionals(pros ?? []);
     } catch {
       setBookings([]);
       setProfessionals([]);

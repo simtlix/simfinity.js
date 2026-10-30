@@ -139,7 +139,7 @@ export default function DashboardPage() {
     const [bookings, professionals, reviews, recentBookings] = await Promise.all([
       safe(
         client
-          .find('booking')
+          .find<Booking>('booking')
           .fields(BOOKING_FIELDS)
           .where('barbershop', shopFilter)
           .where('scheduledDate', 'GTE', dateFrom)
@@ -164,7 +164,7 @@ export default function DashboardPage() {
       ),
       safe(
         client
-          .find('booking')
+          .find<Booking>('booking')
           .fields(BOOKING_FIELDS)
           .where('barbershop', shopFilter)
           .sort('scheduledDate', 'DESC')
@@ -174,7 +174,7 @@ export default function DashboardPage() {
       ),
     ]);
 
-    const bookingList = bookings as Booking[];
+    const bookingList = bookings ?? [];
     const totalBookings = bookingList.length;
     const totalRevenue = bookingList.reduce((s, b) => s + (b.totalPrice ?? 0), 0);
     const cancelledCount = bookingList.filter(
@@ -260,7 +260,7 @@ export default function DashboardPage() {
       cancelRate,
       avgRating,
       hasBarbershop: true,
-      recentBookings: recentBookings as Booking[],
+      recentBookings: recentBookings ?? [],
       professionals: profData,
       revenueByDay,
       bookingsByService,

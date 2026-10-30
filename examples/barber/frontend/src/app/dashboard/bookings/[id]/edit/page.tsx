@@ -48,17 +48,17 @@ export default function EditBookingPage() {
     (async () => {
       try {
         const [result, pros] = await Promise.all([
-          client.getById(
+          client.getById<BookingDetail>(
             'booking',
             bookingId,
             'id confirmationCode scheduledDate startTime endTime totalPrice state notes professional { id name } lines { service { id name } price durationMinutes }',
           ),
-          client.find('professional').fields('id name').exec(),
+          client.find<Professional>('professional').fields('id name').exec(),
         ]);
 
-        const b = (result as BookingDetail) ?? null;
+        const b = result;
         setBooking(b);
-        setProfessionals(Array.isArray(pros) ? (pros as Professional[]) : []);
+        setProfessionals(pros ?? []);
 
         if (b) {
           setDate(b.scheduledDate?.slice(0, 10) ?? '');
