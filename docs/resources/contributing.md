@@ -112,7 +112,7 @@ This rule applies when publication is requested or explicitly included in the wo
 
 ## Client package migration
 
-`@simtlix/simfinity-js-client` now lives in `packages/client` and joins the seven-package aligned source release set. Its existing 1.1 JavaScript API and default import remain supported. This integration is unreleased source: aligning a manifest does not publish a package or replace an existing tag. Before the next requested publication, configure this existing npm package's Trusted Publisher for this repository, `release.yml` and `npm-release`, and check GitHub Packages permissions. No one-time new-package bootstrap is needed merely to move an existing npm package. See the [client guide](../guide/client).
+`@simtlix/simfinity-js-client` now lives in `packages/client` and joins the seven-package aligned source release set. Its existing 1.1 JavaScript API and default import remain supported. Version 3.19.0 is the first aligned client release. Its npm Trusted Publisher must authorize this repository, `release.yml` and `npm-release`; verify GitHub Packages permissions too. Aligning a manifest does not publish a package or replace an existing tag. No one-time new-package bootstrap is needed merely to move this existing npm package. See the [client guide](../guide/client).
 
 ## Release a new version
 
@@ -136,7 +136,7 @@ After either release action, the workflow automatically:
 2. Packs the seven archives in a fresh checkout of that commit, with Node.js 24.21.0 and its bundled npm, before any dependency is installed or any test runs. This packing job validates the source again (`release-state.js verify-source`), refuses archives that would include untracked or Git-ignored files, and records the SHA-256 of the archive manifest, which lists every archive hash.
 3. Runs lint, tests, the isolated package/TypeScript consumers on exactly those archives, and the MongoDB/PostgreSQL database matrix. The test job checks the recorded digest for consistency only, since code installed for the tests could change that check.
 4. Rechecks that the existing `vX.Y.Z` tag still points to that exact commit after the tests.
-5. Publishes the same archives in dependency order: core, SQL, MCP, descriptor, PostgreSQL, MongoDB. Each publishing job refuses to start unless the downloaded manifest matches the recorded digest and the validated commit. npm publication and verification finish before GitHub Packages starts, so partial failures cannot leave that registry ahead of npm.
+5. Publishes the same archives in dependency order: core, SQL, MCP, descriptor, PostgreSQL, MongoDB, client. Each publishing job refuses to start unless the downloaded manifest matches the recorded digest and the validated commit. npm publication and verification finish before GitHub Packages starts, so partial failures cannot leave that registry ahead of npm.
 6. Waits for all npm versions and their distribution tags to become visible, and compares registry SHA-512 integrity against the archive manifest. It reads npm's uncached package document, because the plain one can be up to five minutes old. A 404 or a missing version or distribution tag counts as not yet visible and is waited on, as are network failures, timeouts, cut-off or unreadable answers, 429 and 5xx: 20 attempts 15 seconds apart, each request cut at 15 seconds and the whole check at 10 minutes. Integrity conflicts and other 4xx answers (401, 403, ...) fail at once; the final error names the last attempt's registry error.
 7. Checks the archives against the recorded digest again and reads the complete GitHub release list to find the release for the tag (`scripts/github-release.js`, which retries transient API failures). It creates a draft only when no release, draft or published, uses the tag, then attaches only the digest-verified manifest, the seven archives it lists and the npm verification evidence, never other files of the artifact, and publishes the release. A failed lookup, or several releases for one tag, stops the job instead of adding another release.
 8. Deploys the stable release documentation to GitHub Pages through the documentation gate below.
@@ -155,11 +155,9 @@ The deployment job repeats the check just before deploying, because **Re-run fai
 
 npm publication uses [Trusted Publishing with OIDC](https://docs.npmjs.com/trusted-publishers/), with short-lived credentials issued to GitHub Actions. It does not use `NPMJS_TOKEN`, a local npm login, or a maintainer's passkey during releases. GitHub Packages uses the workflow's `GITHUB_TOKEN` with `packages: write`.
 
-The new descriptor package needs this one-time setup before its first aligned
-release. The release workflow still refuses a package missing from the registry;
-adding the workspace does not bootstrap or publish it automatically.
+Each package must already exist on npm and authorize the calling workflow. The release workflow refuses a package missing from the registry; adding a workspace does not bootstrap or publish it automatically.
 
-The repository configuration expects these settings on **each** of `@simtlix/simfinity-core`, `@simtlix/simfinity-sql`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-descriptor`, `@simtlix/simfinity-postgres` and `@simtlix/simfinity-js`:
+The repository configuration expects these settings on **each** of `@simtlix/simfinity-core`, `@simtlix/simfinity-sql`, `@simtlix/simfinity-mcp`, `@simtlix/simfinity-descriptor`, `@simtlix/simfinity-postgres`, `@simtlix/simfinity-js` and `@simtlix/simfinity-js-client`:
 
 | npm Trusted Publisher field | Value |
 | --- | --- |

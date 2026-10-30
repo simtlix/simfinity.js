@@ -5,9 +5,13 @@ description: Browser and Node HTTP client with schema metadata, queries and mana
 
 # JavaScript client
 
-::: warning Unreleased source
-The monorepo now includes `@simtlix/simfinity-js-client` at `packages/client`. The additions on this page are source changes awaiting a requested release. The source version follows the aligned monorepo version; this does not mean a client release with that version is already on npm. Existing applications should keep their published dependency until the next release is verified.
+::: tip Available since 3.19.0
+`@simtlix/simfinity-js-client` is maintained at `packages/client` and follows the aligned Simfinity release version. Version 3.19.0 adds the APIs on this page while preserving existing valid 1.1 JavaScript calls.
 :::
+
+```sh
+npm install @simtlix/simfinity-js-client@3.19.0
+```
 
 The client runs in browsers and Node.js >=18.18.0 and uses HTTP without any dependency on a database driver or Simfinity server package. It retains the default `SimfinityClient` export and the existing 1.1 call signatures. TypeScript declarations ship in the package.
 
@@ -122,4 +126,4 @@ The descriptor supplies the exact transaction name. In introspection mode pass t
 
 The client keeps its public npm name and default import while moving from the separate 1.x repository to the monorepo's aligned release version. This version-policy jump does not require changing existing valid JavaScript calls. New features require the corresponding server schema; introspection alone does not advertise storage-engine support. The package has no runtime dependencies and does not require the descriptor builder in the browser.
 
-Before the first monorepo publication, maintainers must configure this existing npm package's Trusted Publisher for this repository's tag-triggered Release Simfinity workflow and verify both registries. Follow the [contributor release contract](../resources/contributing). The Barber frontend continues to consume its published registry dependency; its local ambient declaration can be removed when the new package is published and its integration checks pass.
+Maintainers publish through this repository's tag-triggered Release Simfinity workflow and verify both registries, following the [contributor release contract](../resources/contributing). Barber can upgrade its independent frontend dependency to 3.19.0 and replace its local ambient declaration with the shipped types after running the application's integration checks; publication does not change the example automatically.

@@ -2,12 +2,12 @@
 
 Introspection-driven GraphQL client for [simfinity-js](https://github.com/simtlix/simfinity.js) APIs. It discovers your schema at runtime via introspection and exposes a chainable query builder, CRUD helpers, aggregate queries, state-machine transitions, schema metadata access, mutation input transformation, and more — no code generation required.
 
-> The monorepo additions below are unreleased source. Its source version follows the aligned release set; wait for a verified client publication before upgrading registry dependencies.
+> Since 3.19.0, the client is maintained in the Simfinity monorepo and follows its aligned release version. Existing valid 1.1 JavaScript calls remain supported.
 
 ## Installation
 
 ```bash
-npm install @simtlix/simfinity-js-client
+npm install @simtlix/simfinity-js-client@3.19.0
 ```
 
 ## Quick Start
@@ -506,4 +506,4 @@ See the [JavaScript client guide](https://simtlix.github.io/simfinity.js/guide/c
 - Transformed updates/actions preserve required managed versions. `delete(type, id, fields?, { version })` supplies the protected delete precondition. `transformInput` adds `preserveEmpty`, `includeCollections` and concrete `inputType` opt-ins. Collection delta transformation keeps `{ id, version }` for protected deletions and IDs for unprotected deletions.
 - `transaction(operations, fields?, { name }?)` sends one generated transaction mutation, preserving reference tokens and explicit versions. Descriptor mode discovers its root; introspection mode requires the exact configured name. Errors preserve all `graphQLErrors` extensions, including transaction positions. Writes are never retried by this client.
 
-The source version joins the seven-package monorepo release set, preserving the package name and existing valid 1.1 JavaScript calls. Before publication, configure the existing package's npm Trusted Publisher for this repository's Release Simfinity workflow. Moving source or aligning its version does not publish it.
+Version 3.19.0 starts the client's aligned monorepo release policy, preserving the package name and existing valid 1.1 JavaScript calls. Releases use this repository's Release Simfinity workflow with npm Trusted Publishing and verified archives in both registries.
