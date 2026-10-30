@@ -492,3 +492,56 @@ test('a stored DRAFT shop can still be submitted only by its owner', async () =>
   assert.equal(result.errors, undefined, JSON.stringify(result.errors));
   assert.equal(result.data.submitforreview_barbershop.state, 'PENDING_REVIEW');
 });
+
+test('reminders follow committed writes, skip rolled-back children and report delivery failures', async () => {
+  const { shop: reminderShop } = await fixture();
+  const writeReminder = mutation;
+  const previousEnabled = process.env.REMINDER_JOBS_ENABLED;
+  const originalError = console.error;
+  const events = [];
+  const failures = [];
+  process.env.REMINDER_JOBS_ENABLED = 'true';
+  console.error = (...args) => { if (args[0] === '[reminderStub]') events.push(args); else if (args[0] === '[afterCommit]') failures.push(args); else originalError(...args); };
+  try {
+    const scheduledDate = new Date(Date.now() + 20 * 86400000).toISOString().slice(0, 10);
+    const input = (startTime) => ({ barbershop: { id: reminderShop.id }, scheduledDate, startTime, lines: [] });
+    const created = await writeReminder('addbooking', input('09:00'), 'id version');
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0], ['[reminderStub]', 'created', { bookingId: created.id, scheduledDate, startTime: '09:00' }]);
+    await writeReminder('reschedule_booking', { id: created.id, version: created.version, startTime: '10:00' }, 'id');
+    await writeReminder('updatebooking', { id: created.id, notes: 'No reminder for ordinary edits' }, 'id');
+    await writeReminder('cancelbyclient_booking', { id: created.id }, 'id');
+    assert.deepEqual(events.map((event) => event[1]), ['created', 'rescheduled', 'cancelled']);
+    assert.equal(events[1][2].startTime, '10:00');
+    const rejected = await writeReminder('updatebarbershop', { id: reminderShop.id, name: 'Must roll back', bookings: { added: [{ scheduledDate, startTime: '12:00', lines: [] }, { scheduledDate, startTime: 'invalid', lines: [] }] } }, 'id', true);
+    assert.equal(rejected.errors[0].extensions.code, 'INVALID_BOOKING_TIME', JSON.stringify(rejected.errors));
+    assert.equal(events.length, 3, 'A valid child queued before its failing sibling must not notify');
+    assert.equal((await model('barbershop').findById(reminderShop.id)).name, reminderShop.name);
+    // A delivery failure happens after persistence and is reported without rejecting the mutation.
+    console.error = (...args) => { if (args[0] === '[reminderStub]') throw new Error('Synthetic reminder failure'); else if (args[0] === '[afterCommit]') failures.push(args); else originalError(...args); };
+    const committed = await writeReminder('addbooking', input('14:00'), 'id version');
+    assert.ok(await model('booking').findById(committed.id));
+    assert.equal(failures.length, 1);
+    assert.deepEqual(failures[0].slice(0, 3), ['[afterCommit]', 'booking', 'save']);
+    assert.equal(failures[0][3].message, 'Synthetic reminder failure');
+  } finally {
+    console.error = originalError;
+    if (previousEnabled === undefined) delete process.env.REMINDER_JOBS_ENABLED;
+    else process.env.REMINDER_JOBS_ENABLED = previousEnabled;
+  }
+  // The enabled stub must preserve stdout for MCP JSON-RPC messages.
+  const reminderMcp = await startStdioMcp({ MCP_BEARER: jwt.sign({ sub: user.id, roles: ['PLATFORM_ADMIN'] }, process.env.JWT_SECRET || 'dev-jwt-secret-change-in-production'), REMINDER_JOBS_ENABLED: 'true' });
+  assert.ok(reminderMcp.client, reminderMcp.stderr());
+  const protocolErrors = [];
+  reminderMcp.client.onerror = (error) => { protocolErrors.push(error); };
+  try {
+    const response = await reminderMcp.client.callTool({ name: 'addbooking', arguments: { input: {
+      barbershop: { id: reminderShop.id }, scheduledDate: new Date(Date.now() + 20 * 86400000).toISOString().slice(0, 10), startTime: '16:00', lines: [],
+    } } });
+    assert.ok(!response.isError, JSON.stringify(response));
+    assert.deepEqual(protocolErrors, [], 'Reminder diagnostics must not enter the JSON-RPC stream');
+    assert.match(reminderMcp.stderr(), /\[reminderStub\] created/);
+  } finally {
+    await reminderMcp.client.close();
+  }
+});

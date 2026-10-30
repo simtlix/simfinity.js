@@ -134,6 +134,33 @@ await check('nested create persists embedded objects, lists and referenced child
     assert.deepEqual(read.data.barbershop.services.map((s) => s.id).sort(), shop.services.map((s) => s.id).sort());
   }
 });
+await mutate('updatebarbershop', { id: shops[2].id, rejectionReason: 'Needs more detail' }, 'id', admin.accessToken);
+for (const [label, filter, expected] of [
+  ['IIN embedded city', 'AND:[{conditions:[{field:"address.city",operator:IIN,value:["cordoba","ROSARIO"]}]}]', [0, 1, 2]],
+  ['IS_NOT_EMPTY rejection reason', 'rejectionReason:{operator:IS_NOT_EMPTY}', [2]],
+  ['NONE expensive services', 'AND:[{NONE:[{path:"services",conditions:[{field:"price",operator:GTE,value:90}]}]}]', [0, 1]],
+  ['ANY conditions on the same service', 'AND:[{ANY:[{path:"services",conditions:[{field:"price",operator:GTE,value:30},{field:"durationMinutes",operator:LTE,value:45}]}]}]', [1]],
+]) {
+  await check(`shop operator: ${label}`, async () => {
+    const read = await execute(`{barbershops(${shopFilter},${filter},sort:{terms:[{field:"slug",order:ASC}]}){id} barbershops_aggregate(${shopFilter},${filter},aggregation:{groupId:"state",facts:[{operation:COUNT,factName:"total",path:"id"}]}){facts}}`, {}, admin.accessToken);
+    assert.deepEqual(read.data.barbershops.map(({ id }) => id), expected.map((index) => shops[index].id));
+    assert.equal(read.data.barbershops_aggregate.reduce((total, group) => total + group.facts.total, 0), expected.length);
+  });
+}
+await mutate('updatebarbershop', { id: shops[2].id, rejectionReason: null }, 'id', admin.accessToken);
+await check('open-on-day matches one business-hours row and requires an explicit open flag', async () => {
+  const created = await mutate('addbarbershop', {
+    name: `${prefix}-hours`, slug: `${prefix}-hours`, owner: { id: owner.user.id },
+    businessHours: [{ dayOfWeek: 1, isClosed: true }, { dayOfWeek: 2, isClosed: false }, { dayOfWeek: 3 }],
+  }, 'id', owner.accessToken);
+  await mutate('approve_barbershop', { id: created.id }, 'id', admin.accessToken);
+  for (const [day, expected] of [[1, []], [2, [created.id]], [3, []]]) {
+    const read = await execute(`{barbershops(id:{value:${literal(created.id)}},AND:[{ANY:[{path:"businessHours",conditions:[{field:"dayOfWeek",operator:EQ,value:${day}},{field:"isClosed",operator:EQ,value:false}]}]}]){id}}`);
+    assert.deepEqual(read.data.barbershops.map(({ id }) => id), expected);
+  }
+  const dotted = await execute(`{barbershops(id:{value:${literal(created.id)}},AND:[{conditions:[{field:"businessHours.dayOfWeek",operator:EQ,value:1},{field:"businessHours.isClosed",operator:EQ,value:false}]}]){id}}`);
+  assert.deepEqual(dotted.data.barbershops, [{ id: created.id }], 'Dotted terms can match different embedded rows');
+});
 const filters = [
   ['EQ numeric', 'price:{operator:EQ,value:20}', ['B']],
   ['NE numeric', 'price:{operator:NE,value:20}', ['A', 'C', 'D', 'E', 'F']],

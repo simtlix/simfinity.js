@@ -44,7 +44,7 @@ export default function AdminReviewsPage() {
         )
         // A boolean field takes a boolean value: both APIs reject the string 'true' (INVALID_FILTER_VALUE).
         .where('isReported', 'EQ', true)
-        .sort('createdAt', 'DESC')
+        .sort('createdAt', 'DESC').sort('id', 'ASC')
         .page(pagination.page, pagination.pageSize);
 
       if (search.trim()) {
@@ -56,14 +56,14 @@ export default function AdminReviewsPage() {
 
       try {
         let aggQuery = client
-          .aggregate('review')
-          .fact('count', 'total')
+          .aggregate<{ facts: { total: number } }>('review').groupBy('isReported')
+          .fact('COUNT', 'total', 'id')
           .where('isReported', 'EQ', true);
         if (search.trim()) {
           aggQuery = aggQuery.where('comment', 'ILIKE', search.trim());
         }
         const agg = await aggQuery.exec();
-        setTotal((agg as { total?: number })?.total ?? (results as unknown[]).length);
+        setTotal(agg.reduce((total, group) => total + group.facts.total, 0));
       } catch {
         setTotal((results as unknown[]).length);
       }

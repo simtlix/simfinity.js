@@ -43,6 +43,7 @@ export default function SearchPage() {
   const [error, setError] = useState<string | null>(null);
   const [showMap, setShowMap] = useState(false);
 
+  const [openDay, setOpenDay] = useState("");
   const [query, setQuery] = useState(searchParams.get("q") ?? "");
   const [mode, setMode] = useState<SearchMode>(
     (searchParams.get("mode") as SearchMode) || "nombre",
@@ -59,6 +60,13 @@ export default function SearchPage() {
           .fields("id name slug coverImageUrl averageRating reviewCount address { street number city state } latitude longitude")
           .where("state", "EQ", "APPROVED");
 
+        if (openDay !== "") {
+          baseQuery.filter({ ANY: [{ path: "businessHours", conditions: [
+            { field: "dayOfWeek", operator: "EQ", value: Number(openDay) },
+            { field: "isClosed", operator: "EQ", value: false },
+          ] }] });
+        }
+
         let results: BarbershopResult[];
 
         switch (m) {
@@ -68,7 +76,7 @@ export default function SearchPage() {
             break;
           }
           case "ciudad": {
-            const finder = q ? baseQuery.where("address.city", "ILIKE", q) : baseQuery;
+            const finder = q ? baseQuery.filter({ conditions: [{ field: "address.city", operator: "ILIKE", value: q }] }) : baseQuery;
             results = (await finder.exec()) as BarbershopResult[];
             break;
           }
@@ -105,7 +113,7 @@ export default function SearchPage() {
         setLoading(false);
       }
     },
-    [client, reset, t],
+    [client, openDay, reset, t],
   );
 
   useEffect(() => {
@@ -159,6 +167,19 @@ export default function SearchPage() {
           placeholder={t("searchPlaceholder", "¿Qué estás buscando hoy?")}
           searchLabel={t("searchButton", "BUSCAR")}
         />
+        <label className="mt-6 flex flex-col gap-2 text-sm text-on-surface-variant sm:max-w-xs">
+          {t("openOnDay", "Abierto el día")}
+          <select
+            value={openDay}
+            onChange={(event) => setOpenDay(event.target.value)}
+            className="rounded-lg border border-outline-variant/20 bg-surface-container-high px-4 py-3 text-on-surface"
+          >
+            <option value="">{t("anyDay", "Cualquier día")}</option>
+            {["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"].map((day, index) => (
+              <option key={index} value={String(index)}>{t(`weekday.${index}`, day)}</option>
+            ))}
+          </select>
+        </label>
       </section>
 
       {/* ── View Toggle ── */}

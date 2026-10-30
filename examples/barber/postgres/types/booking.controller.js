@@ -1,6 +1,7 @@
 import pg from 'pg';
 import * as simfinity from '@simtlix/simfinity-postgres';
 import { hasAnyRole } from '../auth/permissions.js';
+import { scheduleBookingReminder } from '../jobs/reminderStub.js';
 import { databaseSchema } from '../database.js';
 import { findAll } from './scopeHelpers.js';
 import { bundleServiceTotals, loadServicesById } from './bundle.controller.js';
@@ -269,6 +270,11 @@ export async function assertBookingSlotAvailable(booking, session, { excludeId, 
 }
 
 export const bookingController = {
+  onSaveCommitted: (record) => scheduleBookingReminder(record, 'created'),
+  onTransitionCommitted: (record, action) => {
+    if (action === 'reschedule') scheduleBookingReminder(record, 'rescheduled');
+    else if (action === 'cancelbyclient' || action === 'cancelbyshop') scheduleBookingReminder(record, 'cancelled');
+  },
   onUpdating: async (id, changes, session, context) => {
     dropServerOwnedChanges(changes);
     const { $unset = {}, ...set } = changes;

@@ -67,6 +67,16 @@ The accounts, passwords, addresses, and dataset are synthetic local demo fixture
 
 Business hours store JavaScript day numbers (`0` = Sunday). Earlier frontend builds labeled every weekday in the hours editor one day late, and hours saved with them are not migrated automatically: review and re-save them, or reset and re-seed the stack.
 
+## Reminder demonstration
+
+Set `REMINDER_JOBS_ENABLED=true` in the example root `.env` for Compose (recreate the backend), or in the backend environment for host development. Only the exact value `true` enables the log; diagnostics use stderr so MCP stdio retains a clean JSON-RPC stdout stream. After a booking commits, the stub logs `created`; `reschedule` logs `rescheduled`, and either cancellation action logs `cancelled`, with the booking ID, date and start time. Ordinary edits, completion and no-show actions produce no reminder. Rolled-back transactions, including a later failure in a nested write, emit nothing.
+
+The callback runs after commit and has no database session. A logging/delivery failure is reported through `configureAfterCommit` and does not undo the committed mutation. This is best-effort, process-local demonstration code: it sends no email or WhatsApp, schedules no durable job and cannot guarantee delivery if the process exits. A real delivery integration needs bounded I/O; use a transactional outbox and worker when delivery must survive process failure. Native writes bypass callbacks, and externally owned MongoDB transactions cannot be observed by these callbacks.
+
+## Search by opening day
+
+The public search combines name, city or location filters with an optional weekday. Its `ANY` frame requires `dayOfWeek` and `isClosed: false` on the same business-hours row; a shop closed Monday and open Tuesday therefore does not appear for Monday. API-created rows missing `isClosed` do not count as explicitly open. This searches the stored weekly schedule, not appointment availability or professional-specific hours. The editor always writes an explicit flag. The shared HTTP contract also exercises case-insensitive `IIN`, `IS_NOT_EMPTY`, and same-child `ANY`/`NONE` filters on both engines.
+
 ## Shop lifecycle and upgrading existing shops
 
 Every new shop starts in `PENDING_REVIEW`, whether created through onboarding, the admin page, GraphQL, MCP or the dataset loader. Both create pages use a single `addbarbershop` mutation; there is no second submission that can leave an incomplete draft. The owner dashboard shows the shop's state. Pending shops remain hidden from anonymous callers and clients until a platform admin approves them.

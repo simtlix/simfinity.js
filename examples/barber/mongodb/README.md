@@ -137,3 +137,7 @@ Every tool call checks the current token and its account. At startup, the proces
 During a session, an expired token without a refresh token, a failed renewal, or a suspended or deleted account fails the tool call with a JSON-RPC error that names the cause; the call never runs as anonymous. The stdio tools are the same as on HTTP `/mcp`. Diagnostics use stderr so stdout remains available for the MCP protocol.
 
 Stop or reset the example using the [project-specific Compose commands](../README.md#stop-or-reset-one-stack).
+
+## Current lifecycle examples
+
+New shops enter review in one create, while existing `DRAFT` shops retain their submission action. Bookings use observed versions to prevent stale edits; see the [upgrade instructions](../README.md#upgrading-an-existing-booking-database), especially the explicit PostgreSQL migration for existing databases. Optional [reminder logs](../README.md#reminder-demonstration) run only after the owning transaction commits and demonstrate best-effort delivery.
