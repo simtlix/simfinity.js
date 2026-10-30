@@ -43,3 +43,11 @@ describe('browser client metadata', () => {
     expect(() => new SimfinityClient('/graphql', { descriptor, descriptorEndpoint: '/metadata' })).toThrow(/exclusive|both/i);
   });
 });
+
+test.each(['MissingInput', 'String', 'bookInput'])('rejects invalid descriptor update input %s before replacing installed metadata', async (badInput) => {
+  const fixture = clientSchema(); let descriptor = fixture.descriptor;
+  const client = new SimfinityClient('/g', { descriptorEndpoint: '/metadata', fetch: async () => new Response(JSON.stringify(descriptor)) }); await client.init();
+  descriptor = structuredClone(descriptor); descriptor.types.book.inputs.update = badInput;
+  await expect(client.init()).rejects.toThrow(/input/i);
+  expect(client.getDescriptor().types.book.inputs.update).toBe('bookInputForUpdate');
+});

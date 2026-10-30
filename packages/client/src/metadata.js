@@ -74,6 +74,19 @@ export const normalizeDescriptor = (document) => {
       const root = ['get', 'list', 'aggregate'].includes(kind) ? 'query' : 'mutation';
       if (!Object.hasOwn(descriptor.operations[root], endpoint) || descriptor.operations[root][endpoint].type !== name) invalid(`invalid endpoint ${name}.${kind}`);
     }
+    if (type.inputs !== undefined && !record(type.inputs)) invalid(`invalid inputs for ${name}`);
+    for (const kind of ['add', 'update']) {
+      const inputName = type.inputs?.[kind];
+      if (inputName === undefined) continue;
+      if (typeof inputName !== 'string' || !Object.hasOwn(types, inputName) || types[inputName].kind !== 'input') invalid(`invalid input ${name}.${kind}: ${inputName}`);
+      const endpoint = type.endpoints?.[kind];
+      if (endpoint === undefined) continue; // Embedded/nested inputs need not have root endpoints.
+      const operation = descriptor.operations.mutation[endpoint];
+      const argument = operation?.args.find((arg) => arg.name === 'input');
+      if (!argument) invalid(`missing input operation ${name}.${kind}`);
+      let ref = reference(argument.type); while (ref.ofType) ref = ref.ofType;
+      if (ref.name !== inputName) invalid(`input ${name}.${kind} differs from its operation`);
+    }
   }
   return { descriptor, schema: { types: normalized, queryType: descriptor.roots.query ? { name: descriptor.roots.query } : null,
     mutationType: descriptor.roots.mutation ? { name: descriptor.roots.mutation } : null } };

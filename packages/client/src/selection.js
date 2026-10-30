@@ -37,16 +37,18 @@ export class SelectionTree {
         while (tokens[index] === '@') { index++; field.suffix += ` @${name()}`; if (tokens[index] === '(') field.suffix += balanced(); }
         if (tokens[index] === '{') { index++; read(field.selection, true); }
         const key = field.alias || field.name;
-        const previous = tree.nodes.get(key);
-        if (previous) {
-          if (previous.name !== field.name || previous.suffix !== field.suffix) throw new Error(`Conflicting selections for ${key}`);
-          for (const [child, value] of field.selection.nodes) previous.selection.nodes.set(child, value);
-        } else tree.nodes.set(key, field);
+        tree.mergeNode(key, field);
       }
       if (nested && tokens[index++] !== '}') throw new Error('Unclosed field selection');
     };
     read(this);
     if (index !== tokens.length) throw new Error('Unexpected closing selection brace');
+  }
+  mergeNode(key, field) {
+    const previous = this.nodes.get(key);
+    if (!previous) { this.nodes.set(key, field); return; }
+    if (previous.name !== field.name || previous.suffix !== field.suffix) throw new Error(`Conflicting selections for ${key}`);
+    for (const [child, value] of field.selection.nodes) previous.selection.mergeNode(child, value);
   }
   addNested(path, fields) {
     let tree = this;
@@ -61,7 +63,7 @@ export class SelectionTree {
   serialize(context, typeName, prefix = '') {
     const output = [];
     for (const field of this.nodes.values()) {
-      const key = field.alias || field.name; const path = prefix ? `${prefix}.${key}` : key;
+      const key = field.alias || field.name; const path = field.name.startsWith('...') ? prefix : prefix ? `${prefix}.${key}` : key;
       const info = context?.types.get(typeName)?.fields.find((f) => f.name === field.name);
       let suffix = field.suffix;
       if (context?.arguments.has(path)) {

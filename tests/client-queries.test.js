@@ -70,3 +70,29 @@ test('requires exact roots for ambiguous legacy list outputs', async () => {
   await expect(client.find('Item').exec()).rejects.toThrow(/plural|ambiguous|exact/i);
   expect(await client.query('first')).toEqual([{ name: 'first' }]);
 });
+
+test('merges repeated deep selections without losing previously requested fields', async () => {
+  const schema = buildSchema('type Address { city: String, zip: String } type Owner { address: Address } type Parent { owner: Owner } type Query { parents: [Parent] }');
+  schema.getQueryType().getFields().parents.resolve = () => [{ owner: { address: { city: 'Cordoba', zip: '5000' } } }];
+  const client = new SimfinityClient('/g', { introspection: 'standard', fetch: schemaFetch(schema) }); await client.init();
+  expect(await client.find('Parent').fields('owner { address { city } }').fields('owner { address { zip } }').exec()).toEqual([{ owner: { address: { city: 'Cordoba', zip: '5000' } } }]);
+});
+test('requires an exact root when singular reads are ambiguous under introspection', async () => {
+  const schema = buildSchema('type Item { id: ID, name: String } type Query { item(id: ID!): Item, alternate(id: ID!): Item }');
+  schema.getQueryType().getFields().item.resolve = (_, { id }) => ({ id, name: 'canonical' });
+  const client = new SimfinityClient('/g', { introspection: 'standard', fetch: schemaFetch(schema) }); await client.init();
+  await expect(client.getById('Item', 'opaque')).rejects.toThrow(/singular|ambiguous|exact/i);
+  expect(await client.query('item', { id: 'opaque' })).toEqual({ id: 'opaque', name: 'canonical' });
+});
+test('auto-selection avoids nested required-argument fields and arbitrary object fallbacks', async () => {
+  const schema = buildSchema('type Detail { value: String } type Profile { name(locale: String!): String, detail: Detail } type Parent { id: ID!, profile: Profile } type Query { parents: [Parent!]! }');
+  schema.getQueryType().getFields().parents.resolve = () => [{ id: 'p', profile: {} }];
+  const client = new SimfinityClient('/g', { introspection: 'standard', fetch: schemaFetch(schema) }); await client.init();
+  expect(await client.find('Parent').autoSelect().exec()).toMatchObject([{ id: 'p' }]);
+});
+test('auto-selection respects argument defaults in descriptor and introspection metadata', async () => {
+  const schema = buildSchema('type Parent { id: ID!, name(locale: String! = "es"): String } type Query { parents: [Parent!]! }');
+  schema.getQueryType().getFields().parents.resolve = () => [{ id: 'p', name: ({ locale }) => locale }];
+  const client = new SimfinityClient('/g', { introspection: 'standard', fetch: schemaFetch(schema) }); await client.init();
+  expect(await client.find('Parent').autoSelect().exec()).toEqual([{ id: 'p', name: 'es' }]);
+});

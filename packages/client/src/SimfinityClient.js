@@ -43,6 +43,8 @@ function isDateTimeScalar(name) {
     || n === 'isodate' || n === 'graphqldate' || n === 'graphqldatetime';
 }
 
+const canAutoSelect = (field) => !field.args?.some((arg) => arg.type.kind === 'NON_NULL' && !arg.hasDefault);
+
 function isScalarOrEnum(kind) {
   return kind === 'SCALAR' || kind === 'ENUM';
 }
@@ -423,12 +425,12 @@ export default class SimfinityClient {
           name: f.name,
           type: unwrapType(f.type),
           rawType: f.type,
-          args: (f.args || []).map(a => ({ name: a.name, type: a.type })),
+          args: (f.args || []).map(a => ({ ...a, hasDefault: a.hasDefault ?? (a.defaultValue != null) })),
           extensions: f.extensions || null,
           hasDefault: f.hasDefault ?? (f.defaultValue != null), defaultValue: f.defaultValue,
         })),
         enumValues: (type.enumValues || []).map(v => v.name),
-        baseScalar: type.baseScalar, possibleTypes: type.possibleTypes, interfaces: type.interfaces, isOneOf: type.isOneOf,
+        baseScalar: type.baseScalar, possibleTypes: type.possibleTypes?.map((value) => typeof value === 'string' ? value : value.name), interfaces: type.interfaces?.map((value) => typeof value === 'string' ? value : value.name), isOneOf: type.isOneOf,
       };
       this._types.set(type.name, typeInfo);
     }
@@ -443,7 +445,7 @@ export default class SimfinityClient {
       const queryInfo = {
         name: field.name,
         description: field.description,
-        args: (field.args || []).map(a => ({ name: a.name, type: a.type })),
+        args: (field.args || []).map(a => ({ ...a, hasDefault: a.hasDefault ?? (a.defaultValue != null) })),
         returnType,
         rawReturnType: field.type,
       };
@@ -466,6 +468,10 @@ export default class SimfinityClient {
         if (canonical.length === 1) this._typeNameToAggregate.set(typeName, `${selected.name}_aggregate`);
       } else this._typeNameToPlural.delete(typeName);
     }
+    for (const typeName of this._typeNameToSingular.keys()) {
+      const candidates = [...this._queries.values()].filter((query) => query.returnType.name === typeName && !query.returnType.isList && query.args.some((arg) => arg.name === 'id'));
+      if (candidates.length !== 1) this._typeNameToSingular.delete(typeName);
+    }
     this._queryNameToType = new Map();
     for (const [typeName, queryName] of this._typeNameToPlural) {
       this._queryNameToType.set(queryName, typeName);
@@ -486,7 +492,7 @@ export default class SimfinityClient {
       const mutationInfo = {
         name: field.name,
         description: field.description,
-        args: (field.args || []).map(a => ({ name: a.name, type: a.type })),
+        args: (field.args || []).map(a => ({ ...a, hasDefault: a.hasDefault ?? (a.defaultValue != null) })),
         returnType,
         rawReturnType: field.type,
         category: 'custom',
@@ -545,7 +551,7 @@ export default class SimfinityClient {
     const typeInfo = this._types.get(typeName);
     if (!typeInfo) return 'id';
     const scalars = typeInfo.fields
-      .filter(f => (f.type.kind === 'SCALAR' || f.type.kind === 'ENUM') && !f.args?.some((arg) => arg.type.kind === 'NON_NULL' && arg.defaultValue == null))
+      .filter(f => (f.type.kind === 'SCALAR' || f.type.kind === 'ENUM') && canAutoSelect(f))
       .map(f => f.name);
     return scalars.length > 0 ? scalars.join(' ') : 'id';
   }
@@ -907,7 +913,7 @@ export default class SimfinityClient {
     for (const field of typeInfo.fields) {
       const { name, type: unwrapped, rawType, extensions } = field;
 
-      if (isListType(rawType) || field.args?.some((arg) => arg.type.kind === 'NON_NULL' && arg.defaultValue == null)) continue;
+      if (isListType(rawType) || !canAutoSelect(field)) continue;
 
       if (isScalarOrEnum(unwrapped.kind)) {
         fieldSelections.push(name);
@@ -916,7 +922,7 @@ export default class SimfinityClient {
         fieldTypeByColumn[name] = unwrapped.name || unwrapped.kind || 'SCALAR';
       } else if (unwrapped.kind === 'OBJECT' && unwrapped.name) {
         const objType = this._types.get(unwrapped.name);
-        const objFields = objType?.fields || [];
+        const objFields = (objType?.fields || []).filter((candidate) => isScalarOrEnum(candidate.type.kind) && !candidate.type.isList && canAutoSelect(candidate));
         const objFieldNames = new Set(objFields.map(f => f.name));
         const isEmbedded = extensions?.relation?.embedded === true;
 
@@ -942,6 +948,7 @@ export default class SimfinityClient {
           else if (objFields[0]) subFields.add(objFields[0].name);
         }
 
+        if (subFields.size === 0) continue;
         const subSelection = [...subFields].join(' ');
         fieldSelections.push(`${name} { ${subSelection} }`);
         columns.push(name);
@@ -957,13 +964,13 @@ export default class SimfinityClient {
       }
     }
 
-    const hasId = typeInfo.fields.some(f => f.name === 'id');
+    const hasId = typeInfo.fields.some(f => f.name === 'id' && canAutoSelect(f));
     if (hasId && !fieldSelections.includes('id')) {
       fieldSelections.unshift('id');
     }
 
     return {
-      selection: fieldSelections.join('\n'),
+      selection: fieldSelections.join('\n') || '__typename',
       columns,
       sortFieldByColumn,
       fieldTypeByColumn,

@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'vitest';
+import { GraphQLEnumType, GraphQLID, GraphQLObjectType } from 'graphql';
+import { createRuntime } from '../packages/core/src/index.js';
+import { createOptimisticMemoryAdapter } from './helpers/optimistic-memory-adapter.js';
 import { buildClientDescriptor } from '../packages/descriptor/src/index.js';
 import SimfinityClient from '../packages/client/src/SimfinityClient.js';
 import { clientWriteSchema } from './helpers/client-writes.js';
@@ -68,4 +71,30 @@ test('transforms protected child deletes even when that child has no mutation ro
   expect(client.getDescriptor().operations.mutation.addentry.operation).toBe('add');
   expect(client.getDescriptor().types.ClientLine.endpoints?.delete).toBeUndefined();
   expect(client.transformCollectionDelta('ClientLine', { deleted: [{ id: 'opaque', version: 1 }] })).toEqual({ deleted: [{ id: 'opaque', version: 1 }] });
+});
+
+test('retains protected child identity and version without exposed child roots under introspection', async () => {
+  const fixture = clientWriteSchema(); const schema = fixture.runtime.createSchema(null, [fixture.Entry], []);
+  const client = new SimfinityClient('/g', { fetch: schemaFetch(schema) }); await client.init();
+  expect(client.transformCollectionDelta('ClientLine', { updated: [{ id: 'uuid', title: 'changed', version: 1 }] })).toEqual({ updated: [{ id: 'uuid', title: 'changed', version: 1 }] });
+  expect(() => client.transformCollectionDelta('ClientLine', { updated: [{ id: 'uuid', title: 'changed' }] })).toThrow(/version/i);
+});
+test('converts automatic unprotected nested deletion forms to scalar identities', async () => {
+  const fixture = clientWriteSchema(undefined, undefined, { protectedRecords: false });
+  const client = new SimfinityClient('/g', { descriptor: fixture.descriptor, fetch: schemaFetch(fixture.schema) }); await client.init();
+  const added = await client.add('ClientEntry', { name: 'p', lines: { added: [{ title: 'c' }] } }, 'id lines { id }');
+  const changed = await client.update('ClientEntry', added.id, { lines: { deleted: [{ id: added.lines[0].id, __status: 'deleted' }] } }, 'id lines { id }', { transform: true, includeCollections: true });
+  expect(changed.lines).toEqual([]);
+});
+test('preserveEmpty retains explicit blanks before numeric coercion at every depth', async () => {
+  const { client } = await setup();
+  expect(client.transformInput('ClientEntry', { detail: { count: '' }, numbers: ['', '2'], version: 1 }, { mode: 'update', preserveEmpty: true })).toEqual({ detail: { count: '' }, numbers: ['', 2], version: 1 });
+});
+test('does not numerically coerce enum members whose enum name resembles a validated scalar', async () => {
+  const runtime = createRuntime(createOptimisticMemoryAdapter());
+  const Priority = new GraphQLEnumType({ name: 'Priority_Int', values: { HIGH: {}, LOW: {} } });
+  const Item = new GraphQLObjectType({ name: 'EnumItem', fields: { id: { type: GraphQLID }, priority: { type: Priority } } });
+  runtime.connect(null, Item, 'item', 'items'); const schema = runtime.createSchema();
+  const client = new SimfinityClient('/g', { descriptor: buildClientDescriptor(schema), fetch: schemaFetch(schema) }); await client.init();
+  expect(await client.add('EnumItem', { priority: 'HIGH' }, 'priority', { transform: true })).toEqual({ priority: 'HIGH' });
 });

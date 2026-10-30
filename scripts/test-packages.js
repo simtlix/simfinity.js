@@ -2691,13 +2691,17 @@ type ClientInstance = InstanceType<typeof SimfinityClient>;
 const instance: ClientInstance = client;
 const group: FilterGroup = { ALL: [{ path: 'lines', conditions: [{ field: 'qty', operator: 'LTE', valuePath: '$parent.limit' }] }] };
 const builder = client.find('booking').filter(group).where('name', { operator: 'IS_NOT_EMPTY' }).joinCollection('lines', 'id').collectionArgs('lines', { pagination: { page: 1, size: 2 } });
-void builder.execWithMeta(); void instance.getFieldsOfType('booking'); void client.getAvailableTransitions('booking');
+void builder.execWithMeta(); void instance.getFieldsOfType('booking');
+void instance.getTypes().Named.possibleTypes?.map((name) => name.toLowerCase());
+void instance.getTypes().Person.interfaces?.map((name) => name.toLowerCase()); void client.getAvailableTransitions('booking');
 void client.transformCollectionDelta('line', { deleted: [{ id: 'opaque', version: 1 }, null] });
 void client.update('booking', 'id', { version: 1 }, 'id version', { transform: true });
 void client.delete('booking', 'id', 'id', { version: 1 });
 void client.transaction([{ addbooking: {} }]);
 void client.findView('upcoming', { date: '2026-10-30' });
 declare const descriptor: ClientDescriptorDocument; new SimfinityClient('/graphql', { descriptor });
+void descriptor.types.Named.possibleTypes; void descriptor.types.Person.stateMachine?.actions;
+void descriptor.types.Person.fields?.[0].rootInputUsage?.update;
 // @ts-expect-error A version is a number, never a string.
 client.delete('booking', 'id', 'id', { version: '1' });`,
   },
