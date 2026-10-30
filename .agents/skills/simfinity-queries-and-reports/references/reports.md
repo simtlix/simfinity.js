@@ -7,6 +7,27 @@
 | Calculate domain facts | One pure application policy reused by readers/writers | Must define currency, precision, rounding and effective date |
 | Avoid repeated expensive calculation | Materialized facts/read model | Needs ownership, consistency, revision and revocation rules |
 
+## Choose the read boundary
+
+| Read | Boundary |
+| --- | --- |
+| Stored-record list with client filters | Generated query and the type's scope |
+| Frequent stored-record predicate with typed params | Since 3.12.0, `registerView(name, { type, description, params, where })` |
+| Computed output on a stored record | Since 3.8.0, `extensions.virtual` and its resolver |
+| Non-record preview, external data or federated result | Since 3.10.0, `registerCustomQuery(name, description, inputModel, outputModel, callback)` |
+
+A view's `where({ params, context })` returns AND groups. Keep it free of database reads/context mutation; it narrows the base list, retains its `find` scope, and supplies neither ordering/pagination defaults nor an aggregate endpoint. Authorize the view's own root. Its predicate gets client-style target visibility, but author-supplied paths are not checked by client field-read/queryability rules. Preserve filter provenance in the base scope. A view cannot add unsupported operators. Legacy `@simtlix/simfinity-js-client` 1.1.0 may select the last registered list root: verify the client, or call an explicit document instead of assuming `find(type)` still names the canonical root.
+
+Virtual resolvers run after the record's scope, but their own native reads do not acquire other types' scopes or a transaction session. Batch per request when lists need them. Virtual output cannot be filtered, sorted or aggregated as stored data.
+
+A custom query's callback receives input/context, not a session. Root and output permissions apply, but its source reads require explicit visibility checks; it does not automatically run entity scopes/controllers. Do not expose ordinary stored CRUD through a parallel custom query or disguise a read as a retried mutation. See [named views](https://simtlix.github.io/simfinity.js/guide/queries.html#named-views) and [custom queries](https://simtlix.github.io/simfinity.js/guide/queries.html#custom-queries).
+
+## Limits that need an explicit alternative
+
+At the 3.18.0 baseline there is no generated aggregate filter such as “customers with more than three visible bookings”. ANY is existence, not COUNT; `_aggregate` returns summaries, not a general HAVING predicate for a list. A virtual count or named view does not change that boundary.
+
+For this requirement, calculate the authorized population and threshold before global ordering/count/pagination in a deliberate application report, or maintain a read model with the required freshness and visibility semantics. A global stored count is insufficient when child visibility varies by caller. Test hidden bookings, revocation and page boundaries. General arithmetic/date expressions, general NOT groups, relevance search and geographic distance also require a supported application implementation or a concrete capability proposal; do not invent filter syntax.
+
 ## Lists and generated aggregates
 
 Use all relevant scopes before query execution. Preserve caller conditions with a server AND. Filtering a fetched page can create short pages and wrong counts; sorting derived amounts after pagination cannot produce global amount ordering. Define a deterministic tie-breaker when stable pages matter.
@@ -25,7 +46,7 @@ query OrderTotals {
 
 Assumes an Order type with stored tenantId/total, an aggregate tenant scope and permission grants for the root, referenced paths and `QLTypeAggregationResult`. `facts` is JSON: do not select `facts { total }`. COUNT counts resulting rows, not non-null values of its path. Joins can multiply rows and therefore sums/counts. Test the metric's intended cardinality.
 
-Aggregate pagination occurs after grouping/sorting and does not supply a group count. Without pagination aggregate output is unbounded at 3.7.0. Generated list count lives in context and is not automatically an atomic snapshot with the page under concurrent writes. Where a count/page snapshot is required, design an application query/transaction that supplies it.
+Aggregate pagination occurs after grouping/sorting and does not supply a group count. Without pagination aggregate output is unbounded; choose a deliberate bound. Generated list count lives in context and is not automatically an atomic snapshot with the page under concurrent writes. Where a count/page snapshot is required, design an application query/transaction that supplies it.
 
 ## Calculations and materialized facts
 

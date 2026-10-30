@@ -11,7 +11,7 @@ The prompt is self-contained and can be used outside this repository. Project na
 
 ## Skills for application work
 
-For ongoing application work, the repository also maintains six focused skills for MongoDB and PostgreSQL. The copyable bootstrap prompt below starts with MongoDB; the skills inspect the application's selected engine and installed package version before choosing APIs. They were checked against 3.7.0 and must be reconciled with the version used by the application.
+For ongoing application work, the repository also maintains six focused skills for MongoDB and PostgreSQL. The copyable bootstrap prompt below starts with MongoDB; the skills inspect the application's selected engine and installed package version before choosing APIs. Their maintained reference is 3.18.0; reconcile each feature with the installed version and adapter capabilities. A private fork or local archive can differ from the release with the same version number.
 
 | Work | Skill |
 | --- | --- |
@@ -24,7 +24,9 @@ For ongoing application work, the repository also maintains six focused skills f
 
 Use the relevant skill directly, for example `$simfinity-access-control` when adding tenant isolation. Each directory contains `SKILL.md`, UI metadata and its own references. Copy the complete directory from a reviewed repository revision into the consumer project's skill location; other skills and the Simfinity checkout are optional. Keep its source revision recorded so updates can be reviewed. These skills are repository resources, not files installed by the runtime npm packages.
 
-The application-design skill includes a runnable order/customer/line example with separate MongoDB and PostgreSQL storage helpers. Its tests cover scoped reads and counts, authoritative totals after hooks, cross-tenant writes, foreign-child rollback and action authorization. A scope is not write permission, and a state machine is not user authorization. Native infrastructure operations remain supported with explicit transaction and access responsibilities.
+The application-design skill includes a runnable order/customer/line example with separate MongoDB and PostgreSQL storage helpers. Its tests cover scoped reads and counts, authoritative totals after hooks, cross-tenant writes, foreign-child rollback and action authorization. A scope is not write permission, and a state machine is not user authorization. Native infrastructure operations remain supported with explicit transaction and access responsibilities. The skills also cover current lifecycle helpers and opt-in transaction mutations, optimistic versions in nested inputs, committed callbacks versus durable outbox delivery, schema-owned client descriptors, and the limits of the independently versioned application linter.
+
+For maintenance or migration, start with the actual domain graph and prove a concrete limitation before proposing library work. Carry one representative slice through authentication, API, frontend and workers. The query skill separates filter capabilities, stored-field comparisons and reporting so each task loads only the relevant reference. Historical issue status is not evidence of the installed API.
 
 The [PR review skill](https://github.com/simtlix/simfinity.js/tree/master/.agents/skills/simfinity-pr-review) serves a different task: reviewing changes to the library itself.
 

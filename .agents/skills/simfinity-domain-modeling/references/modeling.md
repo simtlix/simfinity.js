@@ -7,7 +7,7 @@
 | Independent reference | Object field with `relation.connectionField`; input `{ id }`, stored ObjectId/UUID |
 | Referenced children | List field with `connectionField` identifying the child's stored parent link; input `{ added, updated, deleted }` |
 | Server-managed field | `readOnly: true`, populated by trusted hooks; still readable unless separately protected |
-| Computed read on a record | After 3.7.0: `extensions.virtual: true` with the field's own `resolve`; never stored, written, filtered or sorted, read after the type's scope. At 3.7.0 a `readOnly` field with its own resolver is still stored |
+| Computed read on a record | Since 3.8.0: `extensions.virtual: true` with the field's own `resolve`; never stored, written, filtered or sorted, read after the type's scope. At 3.7.0 a `readOnly` field with its own resolver is still stored |
 | Sensitive output | Permission rule or omit from the public type; `queryable: false` independently forbids filter/sort/group paths |
 | Invariant | GraphQL shape plus `extensions.validations`, controller for persisted/context-dependent checks; unique database constraint for concurrency |
 
@@ -19,10 +19,16 @@ Register once at startup, then build the schema. Create fresh type objects per r
 
 ## Inspect rather than infer
 
-Create inputs omit entity IDs and read-only fields; update inputs require the ID and have different requiredness. Referenced `added` items cannot choose IDs. Keep external identifiers/idempotency keys in separate fields. Omission preserves a value; explicit null clears a nullable value under the documented update contract. Do not force Mongo `_id` or stored nulls through adapter overrides.
+Create inputs omit entity IDs and read-only fields; update inputs require the ID and have different requiredness. Referenced `added` items cannot choose IDs. Keep external identifiers/idempotency keys in separate fields. Omission preserves a value; explicit null clears a nullable value under the documented update contract. A field originally declared non-null can ignore an update null rather than clear it; inspect the actual schema and test stored state before promising a UI clear action. Do not force Mongo `_id` or stored nulls through adapter overrides.
 
-`GraphQLNonNull` and validation are different. Built-in validation helpers return CREATE/UPDATE arrays; merge those arrays when combining helpers. A shallow spread can replace earlier validation. On partial update, `modelArgs` is not the whole record: session-bound checks must account for stored values and `$unset`.
+`GraphQLNonNull` and validation are different. Built-in validation helpers return CREATE/UPDATE arrays; merge those arrays when combining helpers. A shallow spread can replace earlier validation. Reuse validated scalar instances with their documented storage mapping; creating a same-named scalar does not reproduce its identity or normalization contract. On partial update, `modelArgs` is not the whole record: session-bound checks must account for stored values and `$unset`.
 
 GraphQL Int is signed 32-bit; design monetary/count fields for actual bounds. For portable enum ordering and states, prefer string internal values matching names. Do not assume MongoDB reference checks equal PostgreSQL foreign keys; Mongo transactional integrity is opt-in and native writes fall outside it.
+
+## Static checks and storage changes
+
+The optional `@simtlix/eslint-plugin-simfinity` 0.5.0 adds bounded model-field, relation/storage and schema checks to `recommended-3.8`; `advice-3.8` is separately opt-in. Preserve the app's lint configuration and package manager. The plugin is an independent development dependency, not one of the aligned runtime packages. These presets explicitly target 3.8.0, do not detect the installed runtime, and do not certify later features or authorization/transaction behavior. Unknown provenance or analysis limits can suppress diagnostics; a clean lint result is not proof of a correct model. See [application linting](https://simtlix.github.io/simfinity.js/guide/linting.html).
+
+`connectionField` is a single storage field name, not a dotted path. Verify the child's actual parent link for editable collections, scalar/storage compatibility and registered targets against the chosen engine. Moving a stored link or declaring a previously stored field virtual requires a data/schema migration; PostgreSQL initialization does not automatically alter existing tables. Validate a proposed migration against a disposable copy of the relevant data shape.
 
 Sources: [schema](https://simtlix.github.io/simfinity.js/guide/schema.html), [relationships](https://simtlix.github.io/simfinity.js/guide/relationships.html), [validation](https://simtlix.github.io/simfinity.js/guide/validation.html), [extensions](https://simtlix.github.io/simfinity.js/reference/extensions.html), [mutations](https://simtlix.github.io/simfinity.js/guide/mutations.html).
