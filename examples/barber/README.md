@@ -294,7 +294,7 @@ Any other error that reaches Express, on any route, answers JSON `{ "error": ...
 
 The example root [`.env.example`](.env.example) controls Compose host ports, bind address, public hostname, PostgreSQL password, JWT secrets, and [request rate limits](#request-limits). Ports bind to `127.0.0.1` by default. After changing ports or `PUBLIC_HOST`, rebuild the stack: Next.js embeds the browser's GraphQL URL at build time.
 
-For host development, use Node.js 24 and install each app independently with `npm ci` in its directory. Each backend's `.env.example` supplies its host connection and API settings; the frontend uses `.env.local`.
+For host development, use Node.js 24 and install each app independently with `npm ci` in its directory. In each backend, run `npm run lint`, `npm test` and `npm run test:security`. Lint uses `@simtlix/eslint-plugin-simfinity` 0.5.0 with `recommended-3.8` and the latest compatible ESLint 9 release; it checks statically recognizable Simfinity contracts and does not replace database or HTTP tests. CI runs it for both engines. Each backend's `.env.example` supplies its host connection and API settings; the frontend uses `.env.local`.
 
 - [MongoDB backend setup and commands](mongodb/README.md)
 - [PostgreSQL backend setup, native APIs, and schema export](postgres/README.md)

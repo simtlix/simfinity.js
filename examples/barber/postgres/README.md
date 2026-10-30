@@ -61,6 +61,8 @@ Run these from `examples/barber/postgres` after `npm ci`:
 | Command | Purpose |
 | --- | --- |
 | `npm start` / `npm run dev` | Start HTTP, or watch for backend source changes. |
+| `npm run lint` | Check static Simfinity contracts with the published ESLint plugin. |
+| `npm run test:security` | Audit the complete application lockfile, development tools included. |
 | `npm test` | Run unit, scope, ownership, and controller regressions. |
 | `npm run test:query-mutations` | Check filters, combined aggregates and nested mutations against a disposable HTTP API; see the [shared runbook](../README.md#validate-changes). |
 | `npm run test:http` | Run `../tests/http-contract.mjs` against the running, seeded API, including account suspension, uploads, MCP and review rules. |

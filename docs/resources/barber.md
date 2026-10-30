@@ -136,7 +136,9 @@ To inspect the PostgreSQL schema, run `npm run schema:export` from `examples/bar
 
 Use Node.js 24 for host development and install each app with its own `npm ci`. Backend `.env.example` files configure host database connections and API ports. The frontend uses `.env.local`; its `NEXT_PUBLIC_GRAPHQL_URL` must be browser-reachable and is embedded at build time.
 
-The [Barber workflow](https://github.com/simtlix/simfinity.js/blob/master/.github/workflows/barber.yml) runs independently from library CI. It validates backend units, frontend checks, HTTP/MCP behavior, and browser flows against both databases. Both backends check real transactions, derived domain values, and dataset loading/deletion; PostgreSQL adds storage, foreign-key, and frontend-query checks. Root library lint and Vitest discovery exclude example applications.
+The [Barber workflow](https://github.com/simtlix/simfinity.js/blob/master/.github/workflows/barber.yml) runs independently from library CI. It validates backend lint and units, frontend checks, HTTP/MCP behavior, and browser flows against both databases. Both backends check real transactions, derived domain values, and dataset loading/deletion; PostgreSQL adds storage, foreign-key, and frontend-query checks. Root library lint and Vitest discovery exclude example applications.
+
+Both backends run `npm run lint` with the published Simfinity ESLint plugin 0.5.0 and `recommended-3.8` preset. Its static checks complement the HTTP and database tests.
 
 Each application also runs `npm run test:security` against its complete lockfile, including development tools. Use the committed lockfiles with `npm ci`: the backends require GraphQL Yoga `^5.24.4` and include patched transitive dependencies. See the [dependency validation notes](https://github.com/simtlix/simfinity.js/blob/master/examples/barber/README.md#validate-changes) before updating them.
 
