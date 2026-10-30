@@ -1,0 +1,1380 @@
+import { normalizeDescriptor, introspectionQuery } from './metadata.js';
+
+function unwrapType(typeRef) {
+  let isList = false;
+  let isNonNull = false;
+  let current = typeRef;
+  while (current && (current.kind === 'NON_NULL' || current.kind === 'LIST')) {
+    if (current.kind === 'NON_NULL') isNonNull = true;
+    if (current.kind === 'LIST') isList = true;
+    current = current.ofType;
+  }
+  return { name: current?.name, kind: current?.kind, isList, isNonNull };
+}
+
+function getActualScalarType(name) {
+  if (!name) return null;
+  return name.includes('_') ? name.split('_').pop() || name : name;
+}
+
+function isNumericScalar(name) {
+  if (!name) return false;
+  const actual = getActualScalarType(name);
+  if (!actual) return false;
+  const n = actual.toLowerCase();
+  return n === 'int' || n === 'float' || n === 'idnumber';
+}
+
+function isBooleanScalar(name) {
+  if (!name) return false;
+  const actual = getActualScalarType(name);
+  if (!actual) return false;
+  return actual.toLowerCase() === 'boolean';
+}
+
+function isDateTimeScalar(name) {
+  if (!name) return false;
+  const actual = getActualScalarType(name);
+  if (!actual) return false;
+  const n = actual.toLowerCase();
+  return n === 'date' || n === 'datetime' || n === 'timestamp'
+    || n === 'isodate' || n === 'graphqldate' || n === 'graphqldatetime';
+}
+
+function isScalarOrEnum(kind) {
+  return kind === 'SCALAR' || kind === 'ENUM';
+}
+
+function isListType(rawType) {
+  let current = rawType;
+  while (current) {
+    if (current.kind === 'LIST') return true;
+    current = current.ofType || null;
+  }
+  return false;
+}
+
+function typeRefToString(typeRef) {
+  if (!typeRef) return '';
+  if (typeRef.kind === 'NON_NULL') return typeRefToString(typeRef.ofType) + '!';
+  if (typeRef.kind === 'LIST') return '[' + typeRefToString(typeRef.ofType) + ']';
+  return typeRef.name || '';
+}
+
+// ---------------------------------------------------------------------------
+// SelectionTree -- accumulates nested field selections and serializes them
+// into a GraphQL selection set string.
+// ---------------------------------------------------------------------------
+
+class SelectionTree {
+  constructor() {
+    this.scalars = new Set();
+    this.children = new Map();
+  }
+
+  addScalars(fieldNames) {
+    for (const name of fieldNames.trim().split(/\s+/)) {
+      if (name) this.scalars.add(name);
+    }
+  }
+
+  addSelection(selectionString) {
+    const tokens = selectionString.trim().split(/\s+/);
+    let i = 0;
+    while (i < tokens.length) {
+      const token = tokens[i];
+      if (token === '{' || token === '}') { i++; continue; }
+      if (i + 1 < tokens.length && tokens[i + 1] === '{') {
+        let depth = 1;
+        let j = i + 2;
+        while (j < tokens.length && depth > 0) {
+          if (tokens[j] === '{') depth++;
+          else if (tokens[j] === '}') depth--;
+          j++;
+        }
+        const inner = tokens.slice(i + 2, j - 1).join(' ');
+        if (!this.children.has(token)) {
+          this.children.set(token, new SelectionTree());
+        }
+        this.children.get(token).addSelection(inner);
+        i = j;
+      } else {
+        this.scalars.add(token);
+        i++;
+      }
+    }
+  }
+
+  addNested(dottedPath, fieldNames) {
+    const segments = dottedPath.split('.');
+    let node = this;
+    for (const segment of segments) {
+      if (!node.children.has(segment)) {
+        node.children.set(segment, new SelectionTree());
+      }
+      node = node.children.get(segment);
+    }
+    node.addScalars(fieldNames);
+  }
+
+  serialize() {
+    const parts = [...this.scalars];
+    for (const [name, child] of this.children) {
+      const childStr = child.serialize();
+      if (childStr) parts.push(`${name} { ${childStr} }`);
+    }
+    return parts.join(' ');
+  }
+
+  isEmpty() {
+    return this.scalars.size === 0 && this.children.size === 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// QueryBuilder -- chainable builder returned by SimfinityClient.find()
+// ---------------------------------------------------------------------------
+
+class QueryBuilder {
+  constructor(client, typeName) {
+    this._client = client;
+    this._typeName = typeName;
+    this._variables = {};
+    this._selectionTree = new SelectionTree();
+    this._sortTerms = [];
+    this._hasExplicitFields = false;
+  }
+
+  // -- Filtering -----------------------------------------------------------
+
+  where(field, operatorOrTerms, value, value2) {
+    if (Array.isArray(operatorOrTerms)) {
+      if (this._variables[field]?.terms) {
+        this._variables[field].terms.push(...operatorOrTerms);
+      } else {
+        this._variables[field] = { terms: operatorOrTerms };
+      }
+    } else {
+      const filter = { operator: operatorOrTerms, value };
+      if (value2 !== undefined) filter.value2 = value2;
+      this._variables[field] = filter;
+    }
+    return this;
+  }
+
+  or(groups) {
+    if (!Array.isArray(groups)) {
+      throw new Error('or() expects an array of QLFilterGroup objects');
+    }
+    if (this._variables.OR) {
+      this._variables.OR.push(...groups);
+    } else {
+      this._variables.OR = [...groups];
+    }
+    return this;
+  }
+
+  and(groups) {
+    if (!Array.isArray(groups)) {
+      throw new Error('and() expects an array of QLFilterGroup objects');
+    }
+    if (this._variables.AND) {
+      this._variables.AND.push(...groups);
+    } else {
+      this._variables.AND = [...groups];
+    }
+    return this;
+  }
+
+  // -- Relation Field Selection --------------------------------------------
+
+  joinCollection(path, fields, filter) {
+    this._selectionTree.addNested(path, fields);
+    if (filter) {
+      const rootField = path.split('.')[0];
+      if (this._variables[rootField]?.terms) {
+        this._variables[rootField].terms.push(...filter);
+      } else {
+        this._variables[rootField] = { terms: filter };
+      }
+    }
+    return this;
+  }
+
+  joinObject(path, fields) {
+    this._selectionTree.addNested(path, fields);
+    return this;
+  }
+
+  // -- Result Shaping ------------------------------------------------------
+
+  fields(selectionString) {
+    this._selectionTree.addSelection(selectionString);
+    this._hasExplicitFields = true;
+    return this;
+  }
+
+  page(page, size, count) {
+    const pagination = { page, size };
+    if (count !== undefined) pagination.count = count;
+    this._variables.pagination = pagination;
+    return this;
+  }
+
+  sort(field, order) {
+    this._sortTerms.push({ field, order });
+    this._variables.sort = { terms: this._sortTerms };
+    return this;
+  }
+
+  clearSort() {
+    this._sortTerms = [];
+    delete this._variables.sort;
+    return this;
+  }
+
+  autoSelect() {
+    const result = this._client.buildSelectionSet(this._typeName);
+    this._hasExplicitFields = true;
+    this._autoSelection = result.selection;
+    this._selectionMeta = result;
+    return this;
+  }
+
+  // -- Execution -----------------------------------------------------------
+
+  async exec() {
+    const queryInfo = this._client._findPluralQuery(this._typeName);
+    if (!queryInfo) {
+      throw new Error(`No plural query found for type '${this._typeName}'`);
+    }
+
+    if (!this._hasExplicitFields) {
+      const autoFields = this._client._getScalarFields(this._typeName);
+      this._selectionTree.addScalars(autoFields);
+    }
+
+    const selectionSet = this._autoSelection || this._selectionTree.serialize();
+    if (!selectionSet) {
+      throw new Error(`No fields to select for type '${this._typeName}'`);
+    }
+
+    const varDefs = [];
+    const variables = {};
+    const argMappings = [];
+
+    for (const [key, val] of Object.entries(this._variables)) {
+      const arg = queryInfo.args.find(a => a.name === key);
+      if (arg) {
+        varDefs.push(`$${key}: ${typeRefToString(arg.type)}`);
+        variables[key] = val;
+        argMappings.push(`${key}: $${key}`);
+      }
+    }
+
+    const varDefsStr = varDefs.length > 0 ? `(${varDefs.join(', ')})` : '';
+    const argsBlock = argMappings.length > 0 ? `(${argMappings.join(', ')})` : '';
+    const query = `query${varDefsStr} { ${queryInfo.name}${argsBlock} { ${selectionSet} } }`;
+
+    const response = await this._client._sendRequest(query, variables);
+    if (response.errors && !response.data?.[queryInfo.name]) {
+      const error = new Error(`GraphQL errors: ${JSON.stringify(response.errors)}`);
+      error.graphQLErrors = response.errors;
+      throw error;
+    }
+
+    const result = response.data[queryInfo.name];
+
+    if (response.extensions) {
+      result.__extensions = response.extensions;
+    }
+
+    return result;
+  }
+
+  async execWithMeta() {
+    const queryInfo = this._client._findPluralQuery(this._typeName);
+    if (!queryInfo) {
+      throw new Error(`No plural query found for type '${this._typeName}'`);
+    }
+
+    if (!this._hasExplicitFields) {
+      const autoFields = this._client._getScalarFields(this._typeName);
+      this._selectionTree.addScalars(autoFields);
+    }
+
+    const selectionSet = this._autoSelection || this._selectionTree.serialize();
+    if (!selectionSet) {
+      throw new Error(`No fields to select for type '${this._typeName}'`);
+    }
+
+    const varDefs = [];
+    const variables = {};
+    const argMappings = [];
+
+    for (const [key, val] of Object.entries(this._variables)) {
+      const arg = queryInfo.args.find(a => a.name === key);
+      if (arg) {
+        varDefs.push(`$${key}: ${typeRefToString(arg.type)}`);
+        variables[key] = val;
+        argMappings.push(`${key}: $${key}`);
+      }
+    }
+
+    const varDefsStr = varDefs.length > 0 ? `(${varDefs.join(', ')})` : '';
+    const argsBlock = argMappings.length > 0 ? `(${argMappings.join(', ')})` : '';
+    const query = `query${varDefsStr} { ${queryInfo.name}${argsBlock} { ${selectionSet} } }`;
+
+    const response = await this._client._sendRequest(query, variables);
+    if (response.errors && !response.data?.[queryInfo.name]) {
+      const error = new Error(`GraphQL errors: ${JSON.stringify(response.errors)}`);
+      error.graphQLErrors = response.errors;
+      throw error;
+    }
+    return {
+      data: response.data[queryInfo.name],
+      extensions: response.extensions || null,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// AggregateBuilder -- chainable builder returned by SimfinityClient.aggregate()
+// ---------------------------------------------------------------------------
+
+class AggregateBuilder {
+  constructor(client, typeName) {
+    this._client = client;
+    this._typeName = typeName;
+    this._groupId = null;
+    this._facts = [];
+    this._variables = {};
+    this._sortTerms = [];
+  }
+
+  groupBy(field) {
+    this._groupId = field;
+    return this;
+  }
+
+  fact(operation, factName, path) {
+    this._facts.push({ operation, factName, path });
+    return this;
+  }
+
+  where(field, operatorOrTerms, value, value2) {
+    if (Array.isArray(operatorOrTerms)) {
+      if (this._variables[field]?.terms) {
+        this._variables[field].terms.push(...operatorOrTerms);
+      } else {
+        this._variables[field] = { terms: operatorOrTerms };
+      }
+    } else {
+      const filter = { operator: operatorOrTerms, value };
+      if (value2 !== undefined) filter.value2 = value2;
+      this._variables[field] = filter;
+    }
+    return this;
+  }
+
+  or(groups) {
+    if (!Array.isArray(groups)) {
+      throw new Error('or() expects an array of QLFilterGroup objects');
+    }
+    if (this._variables.OR) {
+      this._variables.OR.push(...groups);
+    } else {
+      this._variables.OR = [...groups];
+    }
+    return this;
+  }
+
+  and(groups) {
+    if (!Array.isArray(groups)) {
+      throw new Error('and() expects an array of QLFilterGroup objects');
+    }
+    if (this._variables.AND) {
+      this._variables.AND.push(...groups);
+    } else {
+      this._variables.AND = [...groups];
+    }
+    return this;
+  }
+
+  page(page, size, count) {
+    const pagination = { page, size };
+    if (count !== undefined) pagination.count = count;
+    this._variables.pagination = pagination;
+    return this;
+  }
+
+  sort(field, order) {
+    this._sortTerms.push({ field, order });
+    this._variables.sort = { terms: this._sortTerms };
+    return this;
+  }
+
+  async exec() {
+    if (!this._groupId) {
+      throw new Error('groupBy() is required for aggregate queries');
+    }
+    if (this._facts.length === 0) {
+      throw new Error('At least one fact() is required for aggregate queries');
+    }
+
+    const queryInfo = this._client._findAggregateQuery(this._typeName);
+    if (!queryInfo) {
+      throw new Error(`No aggregate query found for type '${this._typeName}'`);
+    }
+
+    this._variables.aggregation = {
+      groupId: this._groupId,
+      facts: this._facts,
+    };
+
+    const varDefs = [];
+    const variables = {};
+    const argMappings = [];
+
+    for (const [key, val] of Object.entries(this._variables)) {
+      const arg = queryInfo.args.find(a => a.name === key);
+      if (arg) {
+        varDefs.push(`$${key}: ${typeRefToString(arg.type)}`);
+        variables[key] = val;
+        argMappings.push(`${key}: $${key}`);
+      }
+    }
+
+    const varDefsStr = varDefs.length > 0 ? `(${varDefs.join(', ')})` : '';
+    const argsBlock = argMappings.length > 0 ? `(${argMappings.join(', ')})` : '';
+    const query = `query${varDefsStr} { ${queryInfo.name}${argsBlock} { groupId facts } }`;
+
+    const response = await this._client._sendRequest(query, variables);
+    if (response.errors) {
+      const error = new Error(`GraphQL errors: ${JSON.stringify(response.errors)}`);
+      error.graphQLErrors = response.errors;
+      throw error;
+    }
+    return response.data[queryInfo.name];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SimfinityClient -- introspection-driven GraphQL client
+// ---------------------------------------------------------------------------
+
+export default class SimfinityClient {
+  /**
+   * @param {string} endpoint GraphQL HTTP endpoint URL
+   * @param {{ prepareHeaders?: (headers: Record<string, string>) => void }} [options]
+   *        Optional `prepareHeaders` runs before each request; mutate `headers` to add auth
+   *        (e.g. `headers['Authorization'] = 'Bearer …'`). Login is not part of this client —
+   *        perform auth in your app and set tokens inside this callback or a closure it sees.
+   */
+  constructor(endpoint, options = {}) {
+    if (options.descriptor !== undefined && options.descriptorEndpoint !== undefined) throw new Error('descriptor and descriptorEndpoint are mutually exclusive');
+    if (options.introspection !== undefined && !['extended', 'standard'].includes(options.introspection)) throw new Error('Invalid introspection mode');
+    this._options = options;
+    this._descriptor = null;
+    this._fetch = options.fetch || ((...args) => {
+      if (typeof globalThis.fetch !== 'function') throw new Error('SimfinityClient requires fetch or options.fetch');
+      return globalThis.fetch(...args);
+    });
+    this._endpoint = endpoint;
+    this._types = new Map();
+    this._queries = new Map();
+    this._mutations = new Map();
+    this._typeNameToPlural = new Map();
+    this._typeNameToSingular = new Map();
+    this._typeNameToAggregate = new Map();
+    this._queryNameToType = new Map();
+    this._initialized = false;
+    this._prepareHeaders =
+      typeof options.prepareHeaders === 'function' ? options.prepareHeaders : null;
+  }
+
+  // -- Initialization ------------------------------------------------------
+
+  async init() {
+    let descriptor = this._options.descriptor;
+    if (this._options.descriptorEndpoint !== undefined) {
+      const headers = {};
+      if (this._prepareHeaders) await this._prepareHeaders(headers);
+      const response = await this._fetch(this._options.descriptorEndpoint, { method: 'GET', headers });
+      if (!response.ok) throw new Error(`Descriptor HTTP request failed (${response.status})`);
+      descriptor = await response.json();
+    }
+    let schema;
+    if (descriptor !== undefined) {
+      const normalized = normalizeDescriptor(descriptor);
+      schema = normalized.schema; descriptor = normalized.descriptor;
+    } else {
+      const response = await this._sendRequest(introspectionQuery(this._options.introspection !== 'standard'));
+      if (response.errors) { const error = new Error(`Introspection failed: ${JSON.stringify(response.errors)}`); error.graphQLErrors = response.errors; throw error; }
+      schema = response.data?.__schema;
+      if (!schema || !Array.isArray(schema.types)) throw new Error('Invalid introspection response');
+    }
+    const draft = new SimfinityClient(this._endpoint);
+    draft._parseIntrospection(schema);
+    draft._descriptor = descriptor || null;
+    if (descriptor) draft._applyDescriptor(descriptor);
+    for (const key of ['_types', '_queries', '_mutations', '_typeNameToPlural', '_typeNameToSingular', '_typeNameToAggregate', '_queryNameToType', '_descriptor']) this[key] = draft[key];
+    this._initialized = true;
+  }
+
+  getDescriptor() { return this._descriptor; }
+
+  _applyDescriptor(descriptor) {
+    this._typeNameToPlural.clear(); this._typeNameToSingular.clear(); this._typeNameToAggregate.clear();
+    for (const [typeName, type] of Object.entries(descriptor.types)) {
+      for (const [kind, map] of [['list', this._typeNameToPlural], ['get', this._typeNameToSingular], ['aggregate', this._typeNameToAggregate]]) {
+        if (type.endpoints?.[kind]) map.set(typeName, type.endpoints[kind]);
+      }
+    }
+    for (const [root, registry] of [['query', this._queries], ['mutation', this._mutations]]) {
+      for (const [name, operation] of Object.entries(descriptor.operations[root])) {
+        Object.assign(registry.get(name), operation, { returnType: registry.get(name).returnType, args: registry.get(name).args,
+          category: operation.operation === 'transition' ? 'stateTransition' : operation.operation, typeName: operation.type });
+      }
+    }
+  }
+
+  _parseIntrospection(schema) {
+    const queryTypeName = schema.queryType?.name;
+    const mutationTypeName = schema.mutationType?.name;
+
+    this._buildTypesRegistry(schema.types);
+    this._buildQueriesRegistry(schema.types, queryTypeName);
+    this._buildMutationsRegistry(schema.types, mutationTypeName);
+  }
+
+  _buildTypesRegistry(types) {
+    for (const type of types) {
+      if (type.name.startsWith('__')) continue;
+      const validKinds = ['OBJECT', 'ENUM', 'SCALAR', 'INPUT_OBJECT', 'INTERFACE', 'UNION'];
+      if (!validKinds.includes(type.kind)) continue;
+
+      const typeInfo = {
+        name: type.name,
+        kind: type.kind,
+        fields: (type.fields || type.inputFields || []).map(f => ({
+          name: f.name,
+          type: unwrapType(f.type),
+          rawType: f.type,
+          args: (f.args || []).map(a => ({ name: a.name, type: a.type })),
+          extensions: f.extensions || null,
+          hasDefault: f.hasDefault ?? (f.defaultValue != null), defaultValue: f.defaultValue,
+        })),
+        enumValues: (type.enumValues || []).map(v => v.name),
+        baseScalar: type.baseScalar, possibleTypes: type.possibleTypes, interfaces: type.interfaces, isOneOf: type.isOneOf,
+      };
+      this._types.set(type.name, typeInfo);
+    }
+  }
+
+  _buildQueriesRegistry(types, queryTypeName) {
+    const queryType = types.find(t => t.name === queryTypeName);
+    if (!queryType?.fields) return;
+
+    for (const field of queryType.fields) {
+      const returnType = unwrapType(field.type);
+      const queryInfo = {
+        name: field.name,
+        description: field.description,
+        args: (field.args || []).map(a => ({ name: a.name, type: a.type })),
+        returnType,
+        rawReturnType: field.type,
+      };
+      this._queries.set(field.name, queryInfo);
+
+      if (!returnType.name) continue;
+      if (returnType.isList) {
+        this._typeNameToPlural.set(returnType.name, field.name);
+      } else if (queryInfo.args.some(a => a.name === 'id')) {
+        this._typeNameToSingular.set(returnType.name, field.name);
+      }
+    }
+
+    for (const [typeName, pluralName] of this._typeNameToPlural) {
+      const aggName = `${pluralName}_aggregate`;
+      if (this._queries.has(aggName)) {
+        this._typeNameToAggregate.set(typeName, aggName);
+      }
+    }
+
+    this._queryNameToType = new Map();
+    for (const [typeName, queryName] of this._typeNameToPlural) {
+      this._queryNameToType.set(queryName, typeName);
+    }
+    for (const [typeName, queryName] of this._typeNameToSingular) {
+      this._queryNameToType.set(queryName, typeName);
+    }
+  }
+
+  _buildMutationsRegistry(types, mutationTypeName) {
+    const mutationType = types.find(t => t.name === mutationTypeName);
+    if (!mutationType?.fields) return;
+
+    const knownTypeNames = [...this._typeNameToSingular.keys()];
+
+    for (const field of mutationType.fields) {
+      const returnType = unwrapType(field.type);
+      const mutationInfo = {
+        name: field.name,
+        description: field.description,
+        args: (field.args || []).map(a => ({ name: a.name, type: a.type })),
+        returnType,
+        rawReturnType: field.type,
+        category: 'custom',
+        typeName: returnType.name,
+      };
+
+      this._classifyMutation(mutationInfo, knownTypeNames);
+      this._mutations.set(field.name, mutationInfo);
+    }
+  }
+
+  _classifyMutation(mutationInfo, knownTypeNames) {
+    const name = mutationInfo.name;
+    for (const typeName of knownTypeNames) {
+      if (name === `add${typeName}`) {
+        Object.assign(mutationInfo, { category: 'add', typeName });
+        return;
+      }
+      if (name === `update${typeName}`) {
+        Object.assign(mutationInfo, { category: 'update', typeName });
+        return;
+      }
+      if (name === `delete${typeName}`) {
+        Object.assign(mutationInfo, { category: 'delete', typeName });
+        return;
+      }
+      if (name.endsWith(typeName)) {
+        let prefix = name.slice(0, -typeName.length);
+        if (prefix.endsWith('_')) prefix = prefix.slice(0, -1);
+        if (prefix) {
+          Object.assign(mutationInfo, {
+            category: 'stateTransition',
+            typeName,
+            action: prefix,
+          });
+          return;
+        }
+      }
+    }
+  }
+
+  // -- Field Auto-Selection ------------------------------------------------
+
+  _getScalarFields(typeName) {
+    const typeInfo = this._types.get(typeName);
+    if (!typeInfo) return 'id';
+    const scalars = typeInfo.fields
+      .filter(f => f.type.kind === 'SCALAR' || f.type.kind === 'ENUM')
+      .map(f => f.name);
+    return scalars.length > 0 ? scalars.join(' ') : 'id';
+  }
+
+  _resolveFields(typeName, fields) {
+    return fields || this._getScalarFields(typeName);
+  }
+
+  // -- Query Lookup --------------------------------------------------------
+
+  _findPluralQuery(typeName) {
+    const queryName = this._typeNameToPlural.get(typeName);
+    return queryName ? this._queries.get(queryName) : null;
+  }
+
+  _findSingularQuery(typeName) {
+    const queryName = this._typeNameToSingular.get(typeName);
+    return queryName ? this._queries.get(queryName) : null;
+  }
+
+  _findAggregateQuery(typeName) {
+    const queryName = this._typeNameToAggregate.get(typeName);
+    return queryName ? this._queries.get(queryName) : null;
+  }
+
+  // -- HTTP ----------------------------------------------------------------
+
+  async _sendRequest(query, variables) {
+    const body = { query };
+    if (variables && Object.keys(variables).length > 0) {
+      body.variables = variables;
+    }
+    const headers = { 'Content-Type': 'application/json' };
+    if (this._prepareHeaders) {
+      await this._prepareHeaders(headers);
+    }
+    const response = await this._fetch(this._endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+    return response.json();
+  }
+
+  // -- Query Methods -------------------------------------------------------
+
+  find(typeName) {
+    this._ensureInitialized();
+    return new QueryBuilder(this, typeName);
+  }
+
+  aggregate(typeName) {
+    this._ensureInitialized();
+    return new AggregateBuilder(this, typeName);
+  }
+
+  findByParent(typeName, connectionField, parentId) {
+    this._ensureInitialized();
+    const builder = new QueryBuilder(this, typeName);
+    builder.where(connectionField, [{ path: 'id', operator: 'EQ', value: parentId }]);
+    builder.sort('id', 'ASC');
+    return builder;
+  }
+
+  async search(typeName, searchTerm, options = {}) {
+    this._ensureInitialized();
+    const { page = 1, size = 10, displayField = null } = options;
+
+    let searchField = displayField;
+    if (!searchField) {
+      const typeInfo = this._types.get(typeName);
+      if (typeInfo?.fields) {
+        const nameField = typeInfo.fields.find(f => f.name === 'name');
+        if (nameField) {
+          searchField = 'name';
+        } else {
+          const firstScalar = typeInfo.fields.find(f =>
+            isScalarOrEnum(f.type.kind) && f.name !== 'id'
+          );
+          searchField = firstScalar?.name || 'id';
+        }
+      }
+    }
+
+    const typeInfo = this._types.get(typeName);
+    const fieldInfo = typeInfo?.fields.find(f => f.name === searchField);
+    const fieldTypeName = fieldInfo?.type?.name || 'String';
+
+    const isString = !isNumericScalar(fieldTypeName) && !isBooleanScalar(fieldTypeName);
+    const operator = isString ? 'LIKE' : 'EQ';
+
+    let castedTerm = searchTerm;
+    if (isNumericScalar(fieldTypeName)) {
+      const actualType = getActualScalarType(fieldTypeName);
+      if (actualType?.toLowerCase() === 'int') {
+        const parsed = parseInt(searchTerm, 10);
+        if (!isNaN(parsed)) castedTerm = parsed;
+      } else {
+        const parsed = parseFloat(searchTerm);
+        if (!isNaN(parsed)) castedTerm = parsed;
+      }
+    } else if (isBooleanScalar(fieldTypeName)) {
+      if (searchTerm.toLowerCase() === 'true') castedTerm = true;
+      else if (searchTerm.toLowerCase() === 'false') castedTerm = false;
+    }
+
+    const builder = this.find(typeName)
+      .fields(`id ${searchField}`)
+      .page(page, size, false)
+      .where(searchField, operator, castedTerm);
+
+    return builder.exec();
+  }
+
+  async getById(typeName, id, fields) {
+    this._ensureInitialized();
+    const queryInfo = this._findSingularQuery(typeName);
+    if (!queryInfo) {
+      throw new Error(`No singular query found for type '${typeName}'`);
+    }
+
+    const selectionSet = this._resolveFields(typeName, fields);
+    const idArg = queryInfo.args.find(a => a.name === 'id');
+    const idType = idArg ? typeRefToString(idArg.type) : 'ID!';
+
+    const query = `query($id: ${idType}) { ${queryInfo.name}(id: $id) { ${selectionSet} } }`;
+    const response = await this._sendRequest(query, { id });
+
+    if (response.errors && !response.data?.[queryInfo.name]) {
+      const error = new Error(`GraphQL errors: ${JSON.stringify(response.errors)}`);
+      error.graphQLErrors = response.errors;
+      throw error;
+    }
+    return response.data[queryInfo.name];
+  }
+
+  // -- CRUD Mutation Methods -----------------------------------------------
+
+  async add(typeName, input, fields, options = {}) {
+    this._ensureInitialized();
+    const transformedInput = options.transform
+      ? this.transformInput(typeName, input, { mode: 'create', ...options })
+      : input;
+    return this._executeMutation(`add${typeName}`, typeName, { input: transformedInput }, fields);
+  }
+
+  async update(typeName, id, input, fields, options = {}) {
+    this._ensureInitialized();
+    const transformedInput = options.transform
+      ? this.transformInput(typeName, input, { mode: 'update', ...options })
+      : input;
+    return this._executeMutation(
+      `update${typeName}`, typeName,
+      { input: { id, ...transformedInput } },
+      fields,
+    );
+  }
+
+  async delete(typeName, id, fields) {
+    this._ensureInitialized();
+    return this._executeMutation(`delete${typeName}`, typeName, { id }, fields);
+  }
+
+  // -- State Machine -------------------------------------------------------
+
+  async transition(typeName, action, id, inputOrFields, fields) {
+    this._ensureInitialized();
+    const mutationInfo = this._findTransitionMutation(typeName, action);
+    if (!mutationInfo) {
+      throw new Error(`No state machine transition '${action}' found for type '${typeName}'`);
+    }
+
+    let input, resolvedFields;
+    if (typeof inputOrFields === 'object' && inputOrFields !== null) {
+      input = inputOrFields;
+      resolvedFields = fields;
+    } else {
+      input = {};
+      resolvedFields = inputOrFields;
+    }
+
+    return this._executeMutation(
+      mutationInfo.name, typeName, { input: { id, ...input } }, resolvedFields,
+    );
+  }
+
+  _findTransitionMutation(typeName, action) {
+    for (const info of this._mutations.values()) {
+      if (info.category === 'stateTransition' && info.typeName === typeName && info.action === action) {
+        return info;
+      }
+    }
+    return null;
+  }
+
+  getStateMachineFields(typeName) {
+    this._ensureInitialized();
+    const typeInfo = this._types.get(typeName);
+    if (!typeInfo?.fields) return [];
+    return typeInfo.fields
+      .filter(f => f.extensions?.stateMachine === true)
+      .map(f => f.name);
+  }
+
+  getAvailableTransitions(typeName) {
+    this._ensureInitialized();
+    const transitions = [];
+    for (const info of this._mutations.values()) {
+      if (info.category === 'stateTransition' && info.typeName === typeName) {
+        transitions.push({
+          action: info.action,
+          mutationName: info.name,
+        });
+      }
+    }
+    return transitions;
+  }
+
+  // -- Custom Mutations ----------------------------------------------------
+
+  async customMutation(mutationName, args, fields) {
+    this._ensureInitialized();
+    const mutationInfo = this._mutations.get(mutationName);
+    if (!mutationInfo) {
+      throw new Error(`Mutation '${mutationName}' not found`);
+    }
+    return this._executeMutation(
+      mutationName,
+      mutationInfo.returnType.name,
+      args || {},
+      fields,
+    );
+  }
+
+  // -- Raw Execution -------------------------------------------------------
+
+  async execute(query, variables) {
+    return this._sendRequest(query, variables);
+  }
+
+  // -- Shared Mutation Executor --------------------------------------------
+
+  async _executeMutation(mutationName, typeName, providedArgs, fields) {
+    const mutationInfo = this._mutations.get(mutationName);
+    if (!mutationInfo) {
+      throw new Error(`Mutation '${mutationName}' not found`);
+    }
+
+    const selectionSet = this._resolveFields(typeName, fields);
+    const varDefs = [];
+    const variables = {};
+    const argMappings = [];
+
+    for (const arg of mutationInfo.args) {
+      if (providedArgs[arg.name] !== undefined) {
+        varDefs.push(`$${arg.name}: ${typeRefToString(arg.type)}`);
+        variables[arg.name] = providedArgs[arg.name];
+        argMappings.push(`${arg.name}: $${arg.name}`);
+      }
+    }
+
+    const varDefsStr = varDefs.length > 0 ? `(${varDefs.join(', ')})` : '';
+    const argsBlock = argMappings.length > 0 ? `(${argMappings.join(', ')})` : '';
+    const query = `mutation${varDefsStr} { ${mutationName}${argsBlock} { ${selectionSet} } }`;
+
+    const response = await this._sendRequest(query, variables);
+    if (response.errors) {
+      const error = new Error(`GraphQL errors: ${JSON.stringify(response.errors)}`);
+      error.graphQLErrors = response.errors;
+      throw error;
+    }
+    return response.data[mutationName];
+  }
+
+  // -- Schema Getters ------------------------------------------------------
+
+  getTypes() {
+    return Object.fromEntries(this._types);
+  }
+
+  getQueries() {
+    return Object.fromEntries(this._queries);
+  }
+
+  getMutations() {
+    return Object.fromEntries(this._mutations);
+  }
+
+  // -- Selection Set Building ------------------------------------------------
+
+  buildSelectionSet(typeName) {
+    this._ensureInitialized();
+    const typeInfo = this._types.get(typeName);
+    if (!typeInfo?.fields) {
+      return { selection: 'id', columns: ['id'], sortFieldByColumn: {}, fieldTypeByColumn: {} };
+    }
+
+    const columns = [];
+    const sortFieldByColumn = {};
+    const fieldTypeByColumn = {};
+    const fieldSelections = [];
+
+    for (const field of typeInfo.fields) {
+      const { name, type: unwrapped, rawType, extensions } = field;
+
+      if (isListType(rawType)) continue;
+
+      if (isScalarOrEnum(unwrapped.kind)) {
+        fieldSelections.push(name);
+        if (name !== 'id') columns.push(name);
+        sortFieldByColumn[name] = name;
+        fieldTypeByColumn[name] = unwrapped.name || unwrapped.kind || 'SCALAR';
+      } else if (unwrapped.kind === 'OBJECT' && unwrapped.name) {
+        const objType = this._types.get(unwrapped.name);
+        const objFields = objType?.fields || [];
+        const objFieldNames = new Set(objFields.map(f => f.name));
+        const isEmbedded = extensions?.relation?.embedded === true;
+
+        let chosenDisplay = null;
+        const extDisplay = extensions?.relation?.displayField;
+        if (extDisplay && objFieldNames.has(extDisplay)) {
+          chosenDisplay = extDisplay;
+        } else if (objFieldNames.has('name')) {
+          chosenDisplay = 'name';
+        } else {
+          const firstScalar = objFields.find(f =>
+            isScalarOrEnum(f.type.kind) && !f.type.isList
+          );
+          chosenDisplay = firstScalar?.name || null;
+        }
+
+        const subFields = new Set();
+        if (chosenDisplay) subFields.add(chosenDisplay);
+        if (!isEmbedded && objFieldNames.has('id')) subFields.add('id');
+        if (subFields.size === 0) {
+          if (objFieldNames.has('id') && !isEmbedded) subFields.add('id');
+          else if (objFieldNames.has('name')) subFields.add('name');
+          else if (objFields[0]) subFields.add(objFields[0].name);
+        }
+
+        const subSelection = [...subFields].join(' ');
+        fieldSelections.push(`${name} { ${subSelection} }`);
+        columns.push(name);
+
+        if (chosenDisplay) {
+          sortFieldByColumn[name] = `${name}.${chosenDisplay}`;
+          const displayFieldInfo = objFields.find(f => f.name === chosenDisplay);
+          fieldTypeByColumn[name] = displayFieldInfo?.type?.name || 'OBJECT';
+        } else {
+          sortFieldByColumn[name] = name;
+          fieldTypeByColumn[name] = 'OBJECT';
+        }
+      }
+    }
+
+    const hasId = typeInfo.fields.some(f => f.name === 'id');
+    if (hasId && !fieldSelections.includes('id')) {
+      fieldSelections.unshift('id');
+    }
+
+    return {
+      selection: fieldSelections.join('\n'),
+      columns,
+      sortFieldByColumn,
+      fieldTypeByColumn,
+    };
+  }
+
+  // -- Schema Metadata Access -----------------------------------------------
+
+  getFieldExtensions(typeName, fieldName) {
+    this._ensureInitialized();
+    const typeInfo = this._types.get(typeName);
+    if (!typeInfo) return null;
+    const field = typeInfo.fields.find(f => f.name === fieldName);
+    return field?.extensions || null;
+  }
+
+  getDisplayField(typeName, fieldName) {
+    this._ensureInitialized();
+    const ext = this.getFieldExtensions(typeName, fieldName);
+    const displayField = ext?.relation?.displayField;
+    if (displayField) return displayField;
+
+    const typeInfo = this._types.get(typeName);
+    const field = typeInfo?.fields.find(f => f.name === fieldName);
+    if (!field || field.type.kind !== 'OBJECT') return null;
+
+    const objectType = this._types.get(field.type.name);
+    if (!objectType?.fields) return null;
+
+    const objFieldNames = objectType.fields.map(f => f.name);
+    if (objFieldNames.includes('name')) return 'name';
+
+    const firstScalar = objectType.fields.find(f =>
+      isScalarOrEnum(f.type.kind) && !f.type.isList
+    );
+    return firstScalar?.name || null;
+  }
+
+  isEmbeddedField(typeName, fieldName) {
+    this._ensureInitialized();
+    const ext = this.getFieldExtensions(typeName, fieldName);
+    return ext?.relation?.embedded === true;
+  }
+
+  getConnectionField(typeName, fieldName) {
+    this._ensureInitialized();
+    const ext = this.getFieldExtensions(typeName, fieldName);
+    return ext?.relation?.connectionField || null;
+  }
+
+  isStateMachineField(typeName, fieldName) {
+    this._ensureInitialized();
+    const ext = this.getFieldExtensions(typeName, fieldName);
+    return ext?.stateMachine === true;
+  }
+
+  isReadOnlyField(typeName, fieldName) {
+    this._ensureInitialized();
+    const ext = this.getFieldExtensions(typeName, fieldName);
+    return ext?.readOnly === true;
+  }
+
+  getEnumValues(typeName) {
+    this._ensureInitialized();
+    const typeInfo = this._types.get(typeName);
+    if (!typeInfo || typeInfo.kind !== 'ENUM') return [];
+    return typeInfo.enumValues || [];
+  }
+
+  getFieldsOfType(typeName) {
+    this._ensureInitialized();
+    const typeInfo = this._types.get(typeName);
+    if (!typeInfo) return [];
+    return typeInfo.fields;
+  }
+
+  getDescriptionFieldType(typeName, descriptionField) {
+    this._ensureInitialized();
+    const typeInfo = this._types.get(typeName);
+    if (!typeInfo?.fields) return 'String';
+    const field = typeInfo.fields.find(f => f.name === descriptionField);
+    if (!field) return 'String';
+    return field.type.name || 'String';
+  }
+
+  // -- Entity & Query Name Resolution ----------------------------------------
+
+  getTypeNameForQuery(queryName) {
+    this._ensureInitialized();
+    const queryInfo = this._queries.get(queryName);
+    return queryInfo?.returnType?.name || null;
+  }
+
+  getPluralQueryName(typeName) {
+    this._ensureInitialized();
+    return this._typeNameToPlural.get(typeName) || null;
+  }
+
+  getSingularQueryName(typeName) {
+    this._ensureInitialized();
+    return this._typeNameToSingular.get(typeName) || null;
+  }
+
+  getListEntityNames() {
+    this._ensureInitialized();
+    const names = [];
+    for (const [queryName, queryInfo] of this._queries) {
+      if (queryInfo.returnType.isList && !queryName.endsWith('_aggregate')) {
+        names.push(queryName);
+      }
+    }
+    return names.sort();
+  }
+
+  getListEntityNamesOfType(typeName) {
+    this._ensureInitialized();
+    const names = [];
+    for (const [queryName, queryInfo] of this._queries) {
+      if (queryInfo.returnType.isList
+        && queryInfo.returnType.name === typeName
+        && !queryName.endsWith('_aggregate')) {
+        names.push(queryName);
+      }
+    }
+    return names.sort();
+  }
+
+  getQueryNamesForType(typeName) {
+    this._ensureInitialized();
+    return {
+      pluralQueryName: this._typeNameToPlural.get(typeName) || null,
+      singularQueryName: this._typeNameToSingular.get(typeName) || null,
+      aggregateQueryName: this._typeNameToAggregate.get(typeName) || null,
+    };
+  }
+
+  // -- Scalar Type Utilities -----------------------------------------------
+
+  getActualScalarType(scalarName) { return getActualScalarType(scalarName); }
+  isNumericScalar(scalarName) { return isNumericScalar(scalarName); }
+  isBooleanScalar(scalarName) { return isBooleanScalar(scalarName); }
+  isDateTimeScalar(scalarName) { return isDateTimeScalar(scalarName); }
+
+  // -- Mutation Input Transformation -----------------------------------------
+
+  transformInput(typeName, rawInput, options = {}) {
+    this._ensureInitialized();
+    const { skipFields = [], transientFields = [], mode = 'create' } = options;
+    const typeInfo = this._types.get(typeName);
+    if (!typeInfo) return { ...rawInput };
+
+    const transformed = {};
+
+    for (const field of typeInfo.fields) {
+      const { name, type: unwrapped, rawType, extensions } = field;
+
+      if (rawInput[name] === undefined) continue;
+      if (name === 'id') continue;
+      if (skipFields.includes(name) || transientFields.includes(name)) continue;
+      if (extensions?.stateMachine === true) continue;
+      if (extensions?.readOnly === true) continue;
+      if (isListType(rawType) && unwrapped.kind === 'OBJECT') continue;
+
+      let value = rawInput[name];
+
+      if (unwrapped.kind === 'OBJECT' && extensions?.relation?.embedded === true) {
+        value = this._transformEmbeddedInput(unwrapped.name, value, options);
+      } else if (unwrapped.kind === 'OBJECT' && !extensions?.relation?.embedded) {
+        value = this._cleanObjectFieldForMutation(value);
+      } else {
+        value = this._coerceScalarValue(value, unwrapped.name);
+      }
+
+      if (value !== undefined && value !== null && value !== '') {
+        transformed[name] = value;
+      }
+    }
+
+    return this._deepRemoveTypename(transformed);
+  }
+
+  _transformEmbeddedInput(objectTypeName, value, options = {}) {
+    if (!value || typeof value !== 'object') return value;
+    const typeInfo = this._types.get(objectTypeName);
+    if (!typeInfo?.fields) return value;
+
+    const cleaned = {};
+    for (const field of typeInfo.fields) {
+      const { name, type: unwrapped, extensions } = field;
+      if (value[name] === undefined) continue;
+      if (extensions?.readOnly === true) continue;
+
+      let fieldValue = value[name];
+      fieldValue = this._coerceScalarValue(fieldValue, unwrapped.name);
+
+      if (fieldValue !== undefined && fieldValue !== null && fieldValue !== '') {
+        cleaned[name] = fieldValue;
+      }
+    }
+    return Object.keys(cleaned).length > 0 ? cleaned : undefined;
+  }
+
+  _cleanObjectFieldForMutation(value) {
+    if (!value) return value;
+    if (typeof value === 'string') return { id: value };
+    if (typeof value === 'object' && value.id) return { id: value.id };
+    return value;
+  }
+
+  _coerceScalarValue(value, scalarTypeName) {
+    if (value === null || value === undefined) return value;
+
+    if (isNumericScalar(scalarTypeName) && typeof value === 'string') {
+      return Number(value);
+    }
+
+    if (isDateTimeScalar(scalarTypeName) && typeof value === 'string') {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        return `${value}T00:00:00.000Z`;
+      }
+    }
+
+    return value;
+  }
+
+  _deepRemoveTypename(obj) {
+    if (typeof obj !== 'object' || obj === null) return obj;
+    if (Array.isArray(obj)) return obj.map(item => this._deepRemoveTypename(item));
+
+    const cleaned = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (key === '__typename') continue;
+      cleaned[key] = this._deepRemoveTypename(value);
+    }
+    return cleaned;
+  }
+
+  // -- Collection Delta Mutations --------------------------------------------
+
+  transformCollectionDelta(collectionTypeName, delta, options = {}) {
+    this._ensureInitialized();
+    const { connectionField = null } = options;
+    const result = {};
+
+    if (delta.added && delta.added.length > 0) {
+      result.added = delta.added.map(item => {
+        let clean = { ...item };
+
+        delete clean.__status;
+        delete clean.__originalData;
+
+        if (connectionField && clean[connectionField] !== undefined) {
+          delete clean[connectionField];
+        }
+
+        if (clean.id && typeof clean.id === 'string' && clean.id.startsWith('temp_')) {
+          delete clean.id;
+        }
+
+        clean = this._cleanCollectionItem(collectionTypeName, clean);
+        clean = this._deepRemoveTypename(clean);
+        return clean;
+      });
+    }
+
+    if (delta.updated && delta.updated.length > 0) {
+      result.updated = delta.updated.map(item => {
+        let clean = { ...item };
+
+        delete clean.__status;
+        delete clean.__originalData;
+
+        if (connectionField && clean[connectionField] !== undefined) {
+          delete clean[connectionField];
+        }
+
+        clean = this._cleanCollectionItem(collectionTypeName, clean);
+        clean = this._deepRemoveTypename(clean);
+        return clean;
+      });
+    }
+
+    if (delta.deleted && delta.deleted.length > 0) {
+      result.deleted = delta.deleted.map(item => {
+        if (typeof item === 'string') return item;
+        if (typeof item === 'object' && item.id) return item.id;
+        return item;
+      });
+    }
+
+    return result;
+  }
+
+  _cleanCollectionItem(collectionTypeName, item) {
+    const typeInfo = this._types.get(collectionTypeName);
+    if (!typeInfo?.fields) return item;
+
+    const cleaned = { ...item };
+
+    for (const field of typeInfo.fields) {
+      const { name, type: unwrapped, rawType, extensions } = field;
+      if (cleaned[name] === undefined) continue;
+
+      if (extensions?.stateMachine === true) {
+        delete cleaned[name];
+        continue;
+      }
+
+      if (unwrapped.kind === 'OBJECT' && !extensions?.relation?.embedded) {
+        const val = cleaned[name];
+        if (val && typeof val === 'object' && 'id' in val) {
+          cleaned[name] = { id: val.id };
+        }
+        continue;
+      }
+
+      if (isNumericScalar(unwrapped.name) && typeof cleaned[name] === 'string') {
+        cleaned[name] = Number(cleaned[name]);
+      }
+      if (isDateTimeScalar(unwrapped.name) && typeof cleaned[name] === 'string') {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(cleaned[name])) {
+          cleaned[name] = `${cleaned[name]}T00:00:00.000Z`;
+        }
+      }
+    }
+
+    return cleaned;
+  }
+
+  // -- Guard ---------------------------------------------------------------
+
+  _ensureInitialized() {
+    if (!this._initialized) {
+      throw new Error('Client not initialized. Call init() first.');
+    }
+  }
+
+  // -- Static Helpers -------------------------------------------------------
+
+  static condition(field, operator, value, path) {
+    const cond = { field, operator, value };
+    if (path !== undefined) cond.path = path;
+    return { conditions: [cond] };
+  }
+}
