@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import { buildClientDescriptor } from '../packages/descriptor/src/index.js';
 import SimfinityClient from '../packages/client/src/SimfinityClient.js';
 import { clientWriteSchema } from './helpers/client-writes.js';
 import { clientSchema, schemaFetch } from './helpers/client-schema.js';
@@ -52,4 +53,19 @@ describe('client managed writes', () => {
     expect(JSON.parse(requests[0].body).variables.operations).toEqual(operations);
     await expect(client.transaction([{ updateentry: { id: result[0].id, version: 1, name: 'stale' } }])).rejects.toMatchObject({ graphQLErrors: [expect.objectContaining({ extensions: expect.objectContaining({ code: 'VERSION_CONFLICT', operationIndex: 0, operation: 'updateentry' }) })] });
   });
+});
+
+test('discovers legacy state actions when GraphQL type and endpoint names differ', async () => {
+  const fixture = clientWriteSchema();
+  const client = new SimfinityClient('/g', { fetch: schemaFetch(fixture.schema) }); await client.init();
+  const added = await client.add('ClientEntry', { name: 'legacy' }, 'id version');
+  expect(await client.transition('ClientEntry', 'close', added.id, { version: 1 }, 'state version')).toEqual({ state: 'CLOSED', version: 2 });
+});
+test('transforms protected child deletes even when that child has no mutation roots', async () => {
+  const fixture = clientWriteSchema();
+  const schema = fixture.runtime.createSchema(null, [fixture.Entry], []);
+  const client = new SimfinityClient('/g', { descriptor: buildClientDescriptor(schema) }); await client.init();
+  expect(client.getDescriptor().operations.mutation.addentry.operation).toBe('add');
+  expect(client.getDescriptor().types.ClientLine.endpoints?.delete).toBeUndefined();
+  expect(client.transformCollectionDelta('ClientLine', { deleted: [{ id: 'opaque', version: 1 }] })).toEqual({ deleted: [{ id: 'opaque', version: 1 }] });
 });

@@ -377,7 +377,7 @@ const log = (label, data) => {
       { OR: [
         SimfinityClient.condition('categories', 'EQ', 'Drama'),
         SimfinityClient.condition('categories', 'EQ', 'Comedy'),
-      ]},
+      ] },
     ])
     .fields('id name categories')
     .exec();

@@ -62,3 +62,11 @@ describe('client query construction', () => {
     expect(client.buildSelectionSet('book').selection).not.toContain('computed');
   });
 });
+
+test('requires exact roots for ambiguous legacy list outputs', async () => {
+  const schema = buildSchema('type Item { name: String } type Query { first: [Item], second: [Item] }');
+  schema.getQueryType().getFields().first.resolve = () => [{ name: 'first' }];
+  const client = new SimfinityClient('/g', { introspection: 'standard', fetch: schemaFetch(schema) }); await client.init();
+  await expect(client.find('Item').exec()).rejects.toThrow(/plural|ambiguous|exact/i);
+  expect(await client.query('first')).toEqual([{ name: 'first' }]);
+});

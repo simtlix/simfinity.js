@@ -16,20 +16,20 @@ export const cleanInputValue = (client, ref, value, options = {}, root = false) 
   }
   const type = client._types.get(ref.name);
   if (!type) throw new Error(`Unknown input type ${ref.name}`);
-  if (typeof value === 'string' && type.fields.some((f) => f.name === 'id')) value = { id: value };
-  if (typeof value !== 'object' || Array.isArray(value)) throw new Error(`Expected input object ${ref.name}`);
+  const input = typeof value === 'string' && type.fields.some((f) => f.name === 'id') ? { id: value } : value;
+  if (typeof input !== 'object' || Array.isArray(input)) throw new Error(`Expected input object ${ref.name}`);
   const protectedVersion = type.fields.find((f) => f.name === 'version' && leaf(f.rawType)?.name === 'RecordVersion');
-  if (protectedVersion) versionValue(value.version);
+  if (protectedVersion) versionValue(input.version);
   const output = {};
   for (const field of type.fields) {
     const name = field.name;
-    if (value[name] === undefined || options.skipFields?.includes(name) || options.transientFields?.includes(name)) continue;
+    if (input[name] === undefined || options.skipFields?.includes(name) || options.transientFields?.includes(name)) continue;
     if (root && name === 'id' && options.mode !== 'update') continue;
     if (name === '__typename' || name === '__status' || name === '__originalData') continue;
     const target = client._types.get(leaf(field.rawType)?.name);
     if (deltaType(target) && !options.includeCollections) continue;
     if (field.type.isList && field.type.kind === 'INPUT_OBJECT' && !deltaType(type) && !options.includeCollections) continue;
-    const cleaned = cleanInputValue(client, field.rawType, value[name], options);
+    const cleaned = cleanInputValue(client, field.rawType, input[name], options);
     if (present(cleaned, options)) output[name] = cleaned;
   }
   return output;
@@ -62,8 +62,7 @@ export const transformDelta = (client, typeName, delta, options = {}) => {
   if (delta.added?.length) result.added = delta.added.map((item) => clean(item, 'create'));
   if (delta.updated?.length) result.updated = delta.updated.map((item) => clean(item, 'update'));
   if (delta.deleted?.length) {
-    const name = client._mutationName(typeName, 'delete');
-    const protectedDelete = client._mutations.get(name)?.args.some((arg) => arg.name === 'version' && leaf(arg.type)?.name === 'RecordVersion');
+    const protectedDelete = client._types.get(typeName)?.fields.some((field) => field.name === 'version' && field.type.name === 'RecordVersion');
     result.deleted = delta.deleted.map((item) => {
       if (item === null) return null;
       if (!protectedDelete) return typeof item === 'object' ? item.id : item;

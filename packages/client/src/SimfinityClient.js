@@ -457,19 +457,14 @@ export default class SimfinityClient {
       }
     }
 
-    for (const [typeName, pluralName] of this._typeNameToPlural) {
-      const aggName = `${pluralName}_aggregate`;
-      if (this._queries.has(aggName)) {
-        this._typeNameToAggregate.set(typeName, aggName);
-      }
-    }
-
-    for (const query of this._queries.values()) {
-      if (!query.returnType.isList || query.args.some((a) => a.name === 'aggregation')) continue;
-      if (this._queries.has(`${query.name}_aggregate`)) {
-        this._typeNameToPlural.set(query.returnType.name, query.name);
-        this._typeNameToAggregate.set(query.returnType.name, `${query.name}_aggregate`);
-      }
+    for (const typeName of this._typeNameToPlural.keys()) {
+      const candidates = [...this._queries.values()].filter((query) => query.returnType.name === typeName && query.returnType.isList && !query.args.some((arg) => arg.name === 'aggregation'));
+      const canonical = candidates.filter((query) => this._queries.has(`${query.name}_aggregate`));
+      const selected = canonical.length === 1 ? canonical[0] : canonical.length === 0 && candidates.length === 1 ? candidates[0] : null;
+      if (selected) {
+        this._typeNameToPlural.set(typeName, selected.name);
+        if (canonical.length === 1) this._typeNameToAggregate.set(typeName, `${selected.name}_aggregate`);
+      } else this._typeNameToPlural.delete(typeName);
     }
     this._queryNameToType = new Map();
     for (const [typeName, queryName] of this._typeNameToPlural) {
@@ -511,6 +506,12 @@ export default class SimfinityClient {
       }
     }
     for (const typeName of knownTypeNames) {
+      const singular = this._typeNameToSingular.get(typeName);
+      const suffix = `_${singular}`;
+      if (mutationInfo.returnType.name === typeName && singular && name.endsWith(suffix)
+        && this._types.get(typeName)?.fields.some((field) => field.extensions?.stateMachine)) {
+        Object.assign(mutationInfo, { category: 'stateTransition', typeName, action: name.slice(0, -suffix.length) }); return;
+      }
       if (name === `add${typeName}`) {
         Object.assign(mutationInfo, { category: 'add', typeName });
         return;

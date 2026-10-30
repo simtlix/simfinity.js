@@ -2,6 +2,8 @@
 
 Introspection-driven GraphQL client for [simfinity-js](https://github.com/simtlix/simfinity.js) APIs. It discovers your schema at runtime via introspection and exposes a chainable query builder, CRUD helpers, aggregate queries, state-machine transitions, schema metadata access, mutation input transformation, and more — no code generation required.
 
+> The monorepo additions below are unreleased source. Its source version follows the aligned release set; wait for a verified client publication before upgrading registry dependencies.
+
 ## Installation
 
 ```bash
@@ -41,7 +43,7 @@ Creates a new client instance pointing at the given GraphQL endpoint.
 
 ### `client.init()`
 
-Runs an introspection query against the endpoint and builds internal registries of types, queries, and mutations — including Simfinity-specific field extensions (relation metadata, state machine flags, read-only markers). **Must be called before any other method.**
+By default, runs an extended introspection query against the endpoint and builds internal registries of types, queries, and mutations — including Simfinity-specific field extensions (relation metadata, state machine flags, read-only markers). **Must be called before any other method.**
 
 ### Schema Inspection
 
@@ -71,7 +73,7 @@ const results = await client.find('serie')
 
 #### `.where(field, operator, value [, value2])`
 
-Filter by a scalar field. Supported operators depend on the server schema (e.g. `EQ`, `NE`, `GT`, `LT`, `GTE`, `LTE`, `BETWEEN`, `LIKE`, `NIN`).
+Filter by a scalar field. Supported operators depend on the server schema (e.g. `EQ`, `NE`, `GT`, `LT`, `GTE`, `LTE`, `BTW`, `LIKE`, `NIN`).
 
 #### `.where(field, terms)`
 
@@ -493,3 +495,15 @@ GRAPHQL_ENDPOINT=http://localhost:3000/graphql npm run demo
 ## Source provenance
 
 Imported from simtlix/simfinity-js-client commit `32d9c5bf7264cd3ecddcd3441bffea3b21566cb0` (1.1.0), under its Apache-2.0 license.
+
+## Monorepo additions
+
+See the [JavaScript client guide](https://simtlix.github.io/simfinity.js/guide/client) for the complete current API and both-engine setup. The client remains dependency-free and browser compatible.
+
+- Constructor options add mutually exclusive `descriptor` and `descriptorEndpoint`, injected `fetch`, `introspection: 'extended' | 'standard'`, and asynchronous `prepareHeaders`. Descriptor mode never introspects; use it when the server disables introspection. `getDescriptor()` returns the loaded descriptor or null.
+- `query(name, args?, fields?)` executes exact query roots, including scalar and abstract outputs. `findView(name, params?)` returns a normal list builder, while `getViews(typeName?)` lists descriptor-classified views. Canonical lists are not replaced by views.
+- List and aggregate builders accept `.where(field, filterObject)` and `.filter(group)` for `valuePath`, `ANY`/`ALL`/`NONE` and `$parent`. Operators come from the schema, including text, emptiness, `CONTAINS_ALL` and `IIN`; the server still gates engine support. `collectionArgs(path, args)` applies variables to selected nested collections, separately from legacy parent filtering. Aliased paths use response names.
+- Transformed updates/actions preserve required managed versions. `delete(type, id, fields?, { version })` supplies the protected delete precondition. `transformInput` adds `preserveEmpty`, `includeCollections` and concrete `inputType` opt-ins. Collection delta transformation keeps `{ id, version }` for protected deletions and IDs for unprotected deletions.
+- `transaction(operations, fields?, { name }?)` sends one generated transaction mutation, preserving reference tokens and explicit versions. Descriptor mode discovers its root; introspection mode requires the exact configured name. Errors preserve all `graphQLErrors` extensions, including transaction positions. Writes are never retried by this client.
+
+The source version joins the seven-package monorepo release set, preserving the package name and existing valid 1.1 JavaScript calls. Before publication, configure the existing package's npm Trusted Publisher for this repository's Release Simfinity workflow. Moving source or aligning its version does not publish it.

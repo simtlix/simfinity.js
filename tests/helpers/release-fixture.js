@@ -5,6 +5,7 @@ export const writeReleaseFixture = (root) => {
   mkdirSync(root, { recursive: true });
   const items = [
     ['packages/mongodb', '@simtlix/simfinity-js', { '@simtlix/simfinity-core': '0.1.0', '@simtlix/simfinity-mcp': '0.1.0' }],
+    ['packages/client', '@simtlix/simfinity-js-client', {}],
     ['packages/core', '@simtlix/simfinity-core', {}],
     ['packages/sql', '@simtlix/simfinity-sql', { '@simtlix/simfinity-core': '0.1.0' }],
     ['packages/descriptor', '@simtlix/simfinity-descriptor', { '@simtlix/simfinity-core': '0.1.0' }],

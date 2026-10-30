@@ -3,9 +3,12 @@
   "version": "3.18.0",
   "description": "Introspection-driven GraphQL client for simfinity-js APIs",
   "type": "module",
-  "main": "src/SimfinityClient.js",
+  "main": "./src/SimfinityClient.js",
   "exports": {
-    ".": "./src/SimfinityClient.js"
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/SimfinityClient.js"
+    }
   },
   "scripts": {
     "demo": "node examples/demo.js"
@@ -32,5 +35,6 @@
     "types",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "types": "./types/index.d.ts"
 }

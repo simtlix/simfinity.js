@@ -9,7 +9,7 @@ import library from '../../package.json';
 
 # Compatibility and releases
 
-This documentation covers Simfinity.js **{{ library.version }}**, for **MongoDB and PostgreSQL**. All six packages are versioned and released together.
+This documentation covers Simfinity.js **{{ library.version }}**, for **MongoDB and PostgreSQL**. The seven source packages are versioned together; the JavaScript client integration is unreleased (see the [client guide](../guide/client)).
 
 ## Upgrade to 3.18.0
 

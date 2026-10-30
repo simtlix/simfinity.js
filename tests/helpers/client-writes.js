@@ -3,7 +3,7 @@ import { createRuntime } from '../../packages/core/src/index.js';
 import { buildClientDescriptor } from '../../packages/descriptor/src/index.js';
 import { createOptimisticMemoryAdapter } from './optimistic-memory-adapter.js';
 
-export const clientWriteSchema = (runtime = createRuntime(createOptimisticMemoryAdapter())) => {
+export const clientWriteSchema = (runtime = createRuntime(createOptimisticMemoryAdapter()), configure = () => {}) => {
   const State = new GraphQLEnumType({ name: 'ClientEntryState', values: { OPEN: { value: 'OPEN' }, CLOSED: { value: 'CLOSED' } } });
   const Detail = new GraphQLObjectType({ name: 'ClientDetail', fields: { text: { type: GraphQLString }, count: { type: GraphQLInt } } });
   const Entry = new GraphQLObjectType({ name: 'ClientEntry', extensions: { concurrency: { mode: 'optimistic' } }, fields: () => ({
@@ -19,6 +19,7 @@ export const clientWriteSchema = (runtime = createRuntime(createOptimisticMemory
   runtime.addNoEndpointType(Detail);
   runtime.connect(null, Entry, 'entry', 'entries', {}, null, { initialState: { name: 'OPEN', value: 'OPEN' }, actions: { close: { from: { name: 'OPEN', value: 'OPEN' }, to: { name: 'CLOSED', value: 'CLOSED' } } } });
   runtime.connect(null, Line, 'line', 'lines');
+  configure({ runtime, Entry, Line });
   const schema = runtime.createSchema(null, null, null, { transaction: { name: 'saveEntries', types: [Entry, Line] } });
   return { runtime, schema, descriptor: buildClientDescriptor(schema), Entry, Line };
 };

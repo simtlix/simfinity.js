@@ -23,6 +23,8 @@ export const schemaFetch = (schema, descriptor, requests = []) => async (url, op
   requests.push({ url, ...options });
   if (options.method === 'GET') return new Response(JSON.stringify(descriptor), { headers: { 'Content-Type': 'application/json' } });
   const { query, variables } = JSON.parse(options.body);
-  const result = await graphql({ schema, source: query, variableValues: variables, contextValue: {} });
+  const contextValue = {};
+  const result = await graphql({ schema, source: query, variableValues: variables, contextValue });
+  if (contextValue.count !== undefined) result.extensions = { ...result.extensions, count: contextValue.count };
   return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
 };
