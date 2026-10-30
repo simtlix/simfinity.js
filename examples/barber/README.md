@@ -4,6 +4,10 @@ Run the same barbershop booking app with either MongoDB or PostgreSQL. Both back
 
 These are independent, private npm applications in the Simfinity monorepo, each with its own manifest and lockfile. Both backends install released Simfinity runtime packages at exactly **3.19.0** from npm; the frontend pins the published GraphQL client to the same version. They are outside the `packages/*` workspaces and are not published with the libraries.
 
+Searches match text without regard to case, including accented letters, while `%` and `_` remain literal characters. The owner's unanswered-review filter includes empty replies. Administrators reject a shop and save its reason in one state transition.
+
+Dashboard totals use server aggregates. The booking calendar and the owner dashboard's chart/detail data load every page with a stable ID order, so they do not silently stop at 100 records. Separate pages are live reads, not an atomic snapshot under concurrent writes.
+
 ## Start with Docker
 
 Install Docker with Compose v2. Run the commands from `examples/barber`; a root `npm install` is not required for this flow.

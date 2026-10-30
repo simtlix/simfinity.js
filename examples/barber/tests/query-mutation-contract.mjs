@@ -248,12 +248,33 @@ await check('a shop that leaves REJECTED drops its rejection reason before it is
   const rejected = await mutate('addbarbershop', { name: `${prefix}-rejected`, slug: `${prefix}-rejected`, owner: { id: owner.user.id } }, 'id', owner.accessToken);
   const read = `query($id:ID!){ barbershop(id:$id){ state rejectionReason } }`;
   await mutate('submitforreview_barbershop', { id: rejected.id }, 'id', owner.accessToken);
-  await mutate('reject_barbershop', { id: rejected.id }, 'id', admin.accessToken);
-  await mutate('updatebarbershop', { id: rejected.id, rejectionReason: 'Missing business licence' }, 'id', admin.accessToken);
+  assert.deepEqual(await mutate('reject_barbershop', { id: rejected.id, rejectionReason: 'Missing business licence' }, 'state rejectionReason', admin.accessToken), { state: 'REJECTED', rejectionReason: 'Missing business licence' });
   assert.deepEqual((await execute(read, { id: rejected.id }, owner.accessToken)).data.barbershop, { state: 'REJECTED', rejectionReason: 'Missing business licence' });
   assert.deepEqual(await mutate('resubmit_barbershop', { id: rejected.id }, 'state rejectionReason', owner.accessToken), { state: 'PENDING_REVIEW', rejectionReason: null });
   await mutate('approve_barbershop', { id: rejected.id }, 'id', admin.accessToken);
   assert.deepEqual((await execute(read, { id: rejected.id })).data.barbershop, { state: 'APPROVED', rejectionReason: null });
+});
+await check('text searches ignore case and treat wildcards literally', async () => {
+  // Keep this service outside rootFilter so it does not change the operator fixtures.
+  const service = await mutate('addservice', { name: `${prefix} Corte Clásico 100%`, price: 5, durationMinutes: 15, barbershop: { id: shops[0].id } }, 'id', owner.accessToken);
+  for (const [operator, value, expected] of [
+    ['ILIKE', 'CORTE CLÁSICO', [service.id]],
+    ['ILIKE', '100%', [service.id]],
+    ['ILIKE', '10_%', []],
+    ['LIKE', 'CORTE', []],
+  ]) {
+    const result = await execute(`{services(id:{value:${literal(service.id)}},name:{operator:${operator},value:${literal(value)}}){id}}`, {}, admin.accessToken);
+    assert.deepEqual(result.data.services.map(({ id }) => id), expected);
+  }
+  await execute('mutation($id:ID!){deleteservice(id:$id){id}}', { id: service.id }, admin.accessToken);
+});
+await check('unanswered reviews include empty replies', async () => {
+  const reviewInput = { rating: 4, barbershop: { id: shops[0].id }, client: { id: client.user.id } };
+  const empty = await mutate('addreview', { ...reviewInput, reply: '' }, 'id', admin.accessToken);
+  const answered = await mutate('addreview', { ...reviewInput, reply: 'Gracias' }, 'id', admin.accessToken);
+  const query = (filter) => `{reviews(id:{operator:IN,value:${literal([empty.id, answered.id])}},reply:${filter}){id}}`;
+  assert.deepEqual((await execute(query('{operator:IS_EMPTY}'), {}, owner.accessToken)).data.reviews, [{ id: empty.id }]);
+  assert.deepEqual((await execute(query('{operator:EQ,value:null}'), {}, owner.accessToken)).data.reviews, []);
 });
 for (const [filter, code] of [
   ['price:{operator:IN,value:[null,10]}', 'INVALID_FILTER_VALUE'],

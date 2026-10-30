@@ -48,7 +48,7 @@ export default function AdminReviewsPage() {
         .page(pagination.page, pagination.pageSize);
 
       if (search.trim()) {
-        query = query.where('comment', 'LIKE', search.trim());
+        query = query.where('comment', 'ILIKE', search.trim());
       }
 
       const results = await query.exec();
@@ -60,7 +60,7 @@ export default function AdminReviewsPage() {
           .fact('count', 'total')
           .where('isReported', 'EQ', true);
         if (search.trim()) {
-          aggQuery = aggQuery.where('comment', 'LIKE', search.trim());
+          aggQuery = aggQuery.where('comment', 'ILIKE', search.trim());
         }
         const agg = await aggQuery.exec();
         setTotal((agg as { total?: number })?.total ?? (results as unknown[]).length);

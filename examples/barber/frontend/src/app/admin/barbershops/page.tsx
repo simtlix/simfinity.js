@@ -41,11 +41,11 @@ export default function AdminBarbershopsPage() {
       }
       if (search.trim()) {
         if (searchField === 'name') {
-          query = query.where('name', 'LIKE', search.trim());
+          query = query.where('name', 'ILIKE', search.trim());
         } else if (searchField === 'owner') {
-          query = query.where('owner', [{ path: 'name', operator: 'LIKE', value: search.trim() }]);
+          query = query.where('owner', [{ path: 'name', operator: 'ILIKE', value: search.trim() }]);
         } else if (searchField === 'city') {
-          query = query.where('address.city', 'LIKE', search.trim());
+          query = query.where('address.city', 'ILIKE', search.trim());
         }
       }
 
@@ -61,11 +61,11 @@ export default function AdminBarbershopsPage() {
         }
         if (search.trim()) {
           if (searchField === 'name') {
-            aggQuery = aggQuery.where('name', 'LIKE', search.trim());
+            aggQuery = aggQuery.where('name', 'ILIKE', search.trim());
           } else if (searchField === 'owner') {
-            aggQuery = aggQuery.where('owner', [{ path: 'name', operator: 'LIKE', value: search.trim() }]);
+            aggQuery = aggQuery.where('owner', [{ path: 'name', operator: 'ILIKE', value: search.trim() }]);
           } else if (searchField === 'city') {
-            aggQuery = aggQuery.where('address.city', 'LIKE', search.trim());
+            aggQuery = aggQuery.where('address.city', 'ILIKE', search.trim());
           }
         }
         const agg = await aggQuery.exec();

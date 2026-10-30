@@ -63,12 +63,12 @@ export default function SearchPage() {
 
         switch (m) {
           case "nombre": {
-            const finder = q ? baseQuery.where("name", "LIKE", q) : baseQuery;
+            const finder = q ? baseQuery.where("name", "ILIKE", q) : baseQuery;
             results = (await finder.exec()) as BarbershopResult[];
             break;
           }
           case "ciudad": {
-            const finder = q ? baseQuery.where("address.city", "LIKE", q) : baseQuery;
+            const finder = q ? baseQuery.where("address.city", "ILIKE", q) : baseQuery;
             results = (await finder.exec()) as BarbershopResult[];
             break;
           }
@@ -85,10 +85,10 @@ export default function SearchPage() {
               let finder = baseQuery
                 .where("latitude", "BTW", [lat - 0.09, lat + 0.09])
                 .where("longitude", "BTW", [lng - 0.09, lng + 0.09]);
-              if (q) finder = finder.where("name", "LIKE", q);
+              if (q) finder = finder.where("name", "ILIKE", q);
               results = (await finder.exec()) as BarbershopResult[];
             } else {
-              const finder = q ? baseQuery.where("name", "LIKE", q) : baseQuery;
+              const finder = q ? baseQuery.where("name", "ILIKE", q) : baseQuery;
               results = (await finder.exec()) as BarbershopResult[];
             }
             break;

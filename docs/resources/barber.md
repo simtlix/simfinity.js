@@ -66,6 +66,8 @@ Both APIs validate confirmed bookings on the server. A booking must fit the shop
 
 The booking page reschedules through `reschedule_booking`, a `CONFIRMED -> CONFIRMED` state action that checks the current state and new slot in the same transaction. If the shop cancels or completes the booking while the form is open, the action rejects and the page reports the state change. A slot rejection preserves the original booking. Professional hours narrow the shop's window only when both opening and closing times are set; partial rows still contribute closed days and breaks.
 
+Search boxes use case-insensitive literal text matching. Dashboard totals use server aggregates, and the booking calendar loads every page instead of stopping at 100 appointments. Admin rejection stores its reason in the same state transition; the owner's unanswered-review filter also finds empty replies.
+
 ## From the homepage to the running app
 
 The homepage's interactive example follows a simplified shop profile and its embedded opening hours. After seeding either stack, run this query in its GraphiQL endpoint to explore the complete app:

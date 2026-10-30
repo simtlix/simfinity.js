@@ -50,7 +50,7 @@ export default function ProfessionalsPage() {
         .page(page, pageSize);
 
       if (search.trim()) {
-        query = query.where('name', 'CONTAINS', search.trim());
+        query = query.where('name', 'ILIKE', search.trim());
       }
       if (filter === 'ACTIVE') {
         query = query.where('isActive', 'EQ', true);

@@ -104,8 +104,7 @@ export default function AdminBarbershopViewPage() {
     setRejectOpen(false);
     setActionLoading(true);
     try {
-      await client.transition('barbershop', 'reject', id);
-      await client.update('barbershop', id, { rejectionReason: reason });
+      await client.transition('barbershop', 'reject', id, { rejectionReason: reason });
       await fetchShop();
     } catch (err) {
       console.error('Reject failed:', err);
