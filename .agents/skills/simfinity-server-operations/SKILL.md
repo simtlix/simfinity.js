@@ -5,7 +5,7 @@ description: Use when invoking Simfinity from jobs, workers, webhooks or custom 
 
 # Execute server-side work through a supported boundary
 
-Check the installed version and engine, the caller's identity and whether a transaction already owns the work. The [execution guide](references/execution.md) describes the 3.18.0 paths and omissions; reconcile it with the installed source.
+Check the installed version and engine, the caller's identity and whether a transaction already owns the work. The [execution guide](references/execution.md) describes the 3.19.0 paths and omissions; reconcile it with the installed source.
 
 Outside an existing transaction, reuse generated operations through parsed/validated GraphQL and an authorized schema. Inside a hook/custom mutation, use its supplied session for lifecycle helpers and native reads/atomic primitives. Since 3.16.0, `updateObject()`, `deleteObject()` and `transitionObject()` complement `saveObject()`; they preserve lifecycle but omit GraphQL/root authorization and coercion. For independent generated writes from a client, consider the opt-in transaction mutation. A parent and its children usually fit one nested generated mutation.
 

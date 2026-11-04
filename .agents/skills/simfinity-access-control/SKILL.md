@@ -5,7 +5,7 @@ description: Use when implementing or diagnosing Simfinity application tenant is
 
 # Combine visibility and authorization
 
-Read the application's authentication and permission model, installed library version and actual schema. The maintained reference is 3.18.0; confirm installed-version and adapter behavior. Preserve existing grants and revocation semantics.
+Read the application's authentication and permission model, installed library version and actual schema. The maintained reference is 3.19.0; confirm installed-version and adapter behavior. Preserve existing grants and revocation semantics.
 
 Build a compact matrix of actor, operation, visible rows, readable fields and writable targets. Include generated relations, nested writes, state actions, custom operations and workers when present. Use the [access guide](references/access.md) to implement each boundary. A find scope alone is not an authorization policy.
 

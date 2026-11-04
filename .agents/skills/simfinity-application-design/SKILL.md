@@ -5,7 +5,7 @@ description: Use when designing a Simfinity application or module, reviewing an 
 
 # Design an application with Simfinity
 
-Start from the domain and the generated API's lifecycle. Read the application's instructions, installed package versions, lockfile resolutions and selected engine. The maintained reference is Simfinity 3.18.0; use the [capability checkpoints](references/capabilities.md) when assessing upgrades or an alleged missing API. Inspect the installed source or matching release documentation: private forks and local tarballs can differ from the release bearing their version number.
+Start from the domain and the generated API's lifecycle. Read the application's instructions, installed package versions, lockfile resolutions and selected engine. The maintained reference is Simfinity 3.19.0; use the [capability checkpoints](references/capabilities.md) when assessing upgrades or an alleged missing API. Inspect the installed source or matching release documentation: private forks and local tarballs can differ from the release bearing their version number.
 
 Identify actors, business entities, relationships, invariants and atomic operations from the existing brief/code. Ask only for missing decisions that affect the implementation. Separate infrastructure records such as receipts/leases from business entities. For a new model, propose a compact entity/relation diagram and access/operation table; for an approved model, update only what changes.
 

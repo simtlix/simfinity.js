@@ -5,7 +5,7 @@ description: Use when implementing Simfinity application lists, searches, counts
 
 # Query and report with explicit semantics
 
-Check the installed version, engine, actual relationships and access policy. The maintained reference is 3.18.0; generated input fields alone do not prove adapter support. Define the visible population, metric, ordering, pagination and freshness before choosing a path.
+Check the installed version, engine, actual relationships and access policy. The maintained reference is 3.19.0; generated input fields alone do not prove adapter support. Define the visible population, metric, ordering, pagination and freshness before choosing a path.
 
 Use only the references relevant to the task:
 

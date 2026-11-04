@@ -5,7 +5,7 @@ description: Use when implementing Simfinity application state transitions, vali
 
 # Implement business behavior in its lifecycle
 
-Inspect the installed version, entity model, existing write paths and invariants. The maintained reference is 3.18.0; verify the selected package's behavior and feature availability. Identify who may act, what persisted conditions must hold, what changes atomically and which external effects follow commit.
+Inspect the installed version, entity model, existing write paths and invariants. The maintained reference is 3.19.0; verify the selected package's behavior and feature availability. Identify who may act, what persisted conditions must hold, what changes atomically and which external effects follow commit.
 
 Use the [lifecycle guide](references/lifecycle.md) to choose validators, controllers, fixed state actions or an application command. Reuse pure domain policies from hooks; avoid duplicate business rules in each transport. Keep user-configurable/versioned workflows explicit when a fixed registered enum cannot represent them.
 

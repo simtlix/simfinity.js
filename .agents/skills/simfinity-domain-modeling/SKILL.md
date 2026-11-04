@@ -5,7 +5,7 @@ description: Use when defining or changing Simfinity application entities, Graph
 
 # Model the domain
 
-Inspect the installed Simfinity version, chosen engine and existing schema before editing. The maintained reference is 3.18.0; verify feature availability against installed source or matching release documentation. Preserve the application's approved domain and data.
+Inspect the installed Simfinity version, chosen engine and existing schema before editing. The maintained reference is 3.19.0; verify feature availability against installed source or matching release documentation. Preserve the application's approved domain and data.
 
 For each affected entity, identify identity, typed fields, nullability, server-owned values, sensitive data, relationships, lifecycle and exposed operations. Use the [modeling guide](references/modeling.md) for storage choices and input semantics. Keep the diagram and field/relationship table proportional to the change; reuse an existing model rather than requiring another design exercise.
 
