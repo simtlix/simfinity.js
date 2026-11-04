@@ -41,7 +41,7 @@ vi.mock('@simtlix/simfinity-js-client', () => ({
       if (type === 'barbershop') {
         // Slugs are unique, whoever can see the shop that holds one.
         if (store.shops.some((row) => row.slug === input.slug)) throw new Error('E11000 duplicate key error collection: barbershop index: slug_1');
-        const shop = { id: 'new-shop', slug: input.slug, state: 'DRAFT', owner: { id: input.owner.id }, services: [], professionals: [] };
+        const shop = { id: 'new-shop', slug: input.slug, state: 'PENDING_REVIEW', owner: { id: input.owner.id }, services: [], professionals: [] };
         store.shops.push(shop);
         return shop;
       }
@@ -97,7 +97,6 @@ describe('seed:demo', () => {
       ['add', 'barbershop', 'owner'],
       ['add', 'service', 'owner'],
       ['add', 'professional', 'owner'],
-      ['submitforreview', 'owner'],
       ['approve', 'admin'],
     ]);
     expect(console.log).toHaveBeenCalledWith('Demo ready: new-shop');

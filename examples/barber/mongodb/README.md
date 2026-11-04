@@ -1,6 +1,6 @@
 # Barber MongoDB backend
 
-An independent, private application using `@simtlix/simfinity-js@3.15.0`, Mongoose, Express, and GraphQL Yoga. It installs released packages from npm and is outside the monorepo's library workspaces. Use the [Barber quick start](../README.md) to run the complete Docker stack with the shared frontend.
+An independent, private application using `@simtlix/simfinity-js@3.19.0`, Mongoose, Express, and GraphQL Yoga. It installs released packages from npm and is outside the monorepo's library workspaces. Use the [Barber quick start](../README.md) to run the complete Docker stack with the shared frontend.
 
 ## Host development
 
@@ -60,6 +60,8 @@ Run these from `examples/barber/mongodb` after `npm ci`:
 | Command | Purpose |
 | --- | --- |
 | `npm start` / `npm run dev` | Start HTTP, or watch for backend source changes. |
+| `npm run lint` | Check static Simfinity contracts with the published ESLint plugin. |
+| `npm run test:security` | Audit the complete application lockfile, development tools included. |
 | `npm test` | Run backend unit and regression tests. |
 | `npm run test:query-mutations` | Check filters, combined aggregates and nested mutations against a disposable HTTP API; see the [shared runbook](../README.md#validate-changes). |
 | `npm run test:http` | Run `../tests/http-contract.mjs` against the running, seeded API, including account suspension, uploads, MCP and review rules. |
@@ -135,3 +137,7 @@ Every tool call checks the current token and its account. At startup, the proces
 During a session, an expired token without a refresh token, a failed renewal, or a suspended or deleted account fails the tool call with a JSON-RPC error that names the cause; the call never runs as anonymous. The stdio tools are the same as on HTTP `/mcp`. Diagnostics use stderr so stdout remains available for the MCP protocol.
 
 Stop or reset the example using the [project-specific Compose commands](../README.md#stop-or-reset-one-stack).
+
+## Current lifecycle examples
+
+New shops enter review in one create, while existing `DRAFT` shops retain their submission action. Bookings use observed versions to prevent stale edits; see the [upgrade instructions](../README.md#upgrading-an-existing-booking-database), especially the explicit PostgreSQL migration for existing databases. Optional [reminder logs](../README.md#reminder-demonstration) run only after the owning transaction commits and demonstrate best-effort delivery.

@@ -65,7 +65,7 @@ export default function AdminUsersPage() {
       let query = client
         .find('user')
         .fields('id name email phone role status avatarUrl')
-        .sort('name', 'ASC')
+        .sort('name', 'ASC').sort('id', 'ASC')
         .page(pagination.page, pagination.pageSize);
 
       if (roleFilter) query = query.where('role', 'EQ', roleFilter);
@@ -73,24 +73,24 @@ export default function AdminUsersPage() {
       const q = search.trim();
       if (q) {
         query = q.includes('@')
-          ? query.where('email', 'LIKE', q)
-          : query.where('name', 'LIKE', q);
+          ? query.where('email', 'ILIKE', q)
+          : query.where('name', 'ILIKE', q);
       }
 
       const results = await query.exec();
       setData(results as Record<string, unknown>[]);
 
       try {
-        let aggQuery = client.aggregate('user').fact('count', 'total');
+        let aggQuery = client.aggregate<{ facts: { total: number } }>('user').groupBy('role').fact('COUNT', 'total', 'id');
         if (roleFilter) aggQuery = aggQuery.where('role', 'EQ', roleFilter);
         if (statusFilter) aggQuery = aggQuery.where('status', 'EQ', statusFilter);
         if (q) {
           aggQuery = q.includes('@')
-            ? aggQuery.where('email', 'LIKE', q)
-            : aggQuery.where('name', 'LIKE', q);
+            ? aggQuery.where('email', 'ILIKE', q)
+            : aggQuery.where('name', 'ILIKE', q);
         }
         const agg = await aggQuery.exec();
-        setTotal((agg as { total?: number })?.total ?? (results as unknown[]).length);
+        setTotal(agg.reduce((total, group) => total + group.facts.total, 0));
       } catch {
         setTotal((results as unknown[]).length);
       }

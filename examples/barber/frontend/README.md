@@ -4,6 +4,8 @@ Shared Next.js 16 app for the MongoDB and PostgreSQL barber examples: public dis
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
+The client is installed from npm at exactly **3.19.0**, matching both Barber backends. Its bundled declarations replace `src/types/simfinity-js-client.d.ts`; booking queries use the package's result generics. The provider keeps extended introspection and JWT headers; no descriptor endpoint is configured.
+
 ## Overview
 
 - **Pages** under `src/app/` are hand-built routes that compose `src/components/shared/*` (forms, tables, layout, booking steps, maps, charts).
@@ -22,7 +24,7 @@ There is **no** `simfinitySetup/` folder, **no** `registerFormCustomization`, an
 | Primary UI | Tailwind CSS 4 | MD3-style tokens in `globals.css` / `@theme` |
 | Charts / maps | Recharts, Leaflet + react-leaflet | Dynamic import where needed |
 | Simfinity (runtime) | `src/lib/simfinity/` | `SimfinityClientProvider`, `I18nProvider`, hooks (mirrors former fe-components subset) |
-| GraphQL client API | `@simtlix/simfinity-js-client` | ^1.1.0 |
+| GraphQL client API | `@simtlix/simfinity-js-client` | 3.19.0 (exact, with bundled TypeScript declarations) |
 | Component dev | Storybook 10 | `@storybook/nextjs-vite` |
 | Tests | Vitest 4 (Storybook browser tests + `npm run test:unit`), Playwright | Unit tests for the class-merge, business-hours, booking-slot, booking-error and catalog helpers |
 
@@ -205,3 +207,5 @@ These tests delete what they create. The booking screenshot is written to `test-
 ## License
 
 Apache License 2.0 — see `LICENSE` in this folder.
+
+The owner onboarding and admin creation forms create shops directly in review. The owner dashboard displays their state. Booking edit, transition, cancellation and reschedule forms send their observed version and display conflicts instead of overwriting a newer change. The public search can require a weekday with an explicitly open business-hours row; it combines this with name, city and location searches. Playwright covers these flows on both backends, plus dashboard/calendar populations beyond 100 rows.

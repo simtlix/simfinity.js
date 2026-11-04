@@ -214,8 +214,7 @@ export default function AdminBarbershopCreatePage() {
         })),
         owner: { id: selectedOwnerId },
       };
-      const result = (await client.add('barbershop', payload)) as { id: string };
-      await client.transition('barbershop', 'submitforreview', result.id);
+      await client.add('barbershop', payload);
       router.push('/admin/barbershops');
     } catch (err) {
       setSaveError(

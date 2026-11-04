@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useSimfinityClient } from '@/lib/simfinity';
+import { fetchAllPages } from '@/lib/fetchAllPages';
 import { useBarbershop } from '@/lib/barbershopContext';
 import { useT } from '@/hooks/useT';
 import { KpiCard, DataTable, StatusChip } from '@/components/shared/data';
@@ -110,6 +111,7 @@ const BOOKING_FIELDS =
 
 export default function DashboardPage() {
   const t = useT('dashboard');
+  const stateLabel = useT('barbershop.state');
   const router = useRouter();
   const client = useSimfinityClient();
   const { selectedBarbershop, barbershops, loading: barbershopLoading } = useBarbershop();
@@ -136,35 +138,41 @@ export default function DashboardPage() {
 
     const shopFilter = [{ path: 'id', operator: 'EQ', value: selectedBarbershop.id }];
 
-    const [bookings, professionals, reviews, recentBookings] = await Promise.all([
+    const [bookings, professionals, reviews, recentBookings, bookingTotals] = await Promise.all([
       safe(
-        client
-          .find('booking')
+        fetchAllPages(async (page, size) => (await client
+          .find<Booking>('booking')
           .fields(BOOKING_FIELDS)
           .where('barbershop', shopFilter)
           .where('scheduledDate', 'GTE', dateFrom)
-          .exec(),
+          .sort('id', 'ASC')
+          .page(page, size)
+          .exec()) ?? []),
         [],
       ),
       safe(
-        client
+        fetchAllPages(async (page, size) => (await client
           .find('professional')
           .fields('id name bio')
           .where('barbershop', shopFilter)
-          .exec(),
+          .sort('id', 'ASC')
+          .page(page, size)
+          .exec()) ?? []),
         [],
       ),
       safe(
-        client
+        fetchAllPages(async (page, size) => (await client
           .find('review')
           .fields('id rating booking { professional { id } }')
           .where('barbershop', shopFilter)
-          .exec(),
+          .sort('id', 'ASC')
+          .page(page, size)
+          .exec()) ?? []),
         [],
       ),
       safe(
         client
-          .find('booking')
+          .find<Booking>('booking')
           .fields(BOOKING_FIELDS)
           .where('barbershop', shopFilter)
           .sort('scheduledDate', 'DESC')
@@ -172,14 +180,24 @@ export default function DashboardPage() {
           .exec(),
         [],
       ),
+      safe(
+        client.aggregate<{ groupId: string | null; facts: { total: number; revenue: number } }>('booking')
+          .groupBy('state')
+          .fact('COUNT', 'total', 'id')
+          .fact('SUM', 'revenue', 'totalPrice')
+          .where('barbershop', shopFilter)
+          .where('scheduledDate', 'GTE', dateFrom)
+          .exec(),
+        [],
+      ),
     ]);
 
-    const bookingList = bookings as Booking[];
-    const totalBookings = bookingList.length;
-    const totalRevenue = bookingList.reduce((s, b) => s + (b.totalPrice ?? 0), 0);
-    const cancelledCount = bookingList.filter(
-      (b) => b.state === 'CANCELLED_BY_CLIENT' || b.state === 'CANCELLED_BY_SHOP',
-    ).length;
+    const bookingList = bookings ?? [];
+    const totalBookings = bookingTotals.reduce((sum, group) => sum + (group.facts.total ?? 0), 0);
+    const totalRevenue = bookingTotals.reduce((sum, group) => sum + (group.facts.revenue ?? 0), 0);
+    const cancelledCount = bookingTotals.filter(
+      (group) => group.groupId === 'CANCELLED_BY_CLIENT' || group.groupId === 'CANCELLED_BY_SHOP',
+    ).reduce((sum, group) => sum + (group.facts.total ?? 0), 0);
     const cancelRate =
       totalBookings > 0 ? Math.round((cancelledCount / totalBookings) * 1000) / 10 : 0;
 
@@ -260,7 +278,7 @@ export default function DashboardPage() {
       cancelRate,
       avgRating,
       hasBarbershop: true,
-      recentBookings: recentBookings as Booking[],
+      recentBookings: recentBookings ?? [],
       professionals: profData,
       revenueByDay,
       bookingsByService,
@@ -365,6 +383,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="flex items-center gap-4">
+          {selectedBarbershop?.state && <StatusChip status={selectedBarbershop.state} label={stateLabel(selectedBarbershop.state, selectedBarbershop.state)} />}
           <PeriodToggle selected={period} onChange={setPeriod} />
         </div>
       </div>

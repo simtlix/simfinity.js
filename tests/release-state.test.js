@@ -150,11 +150,11 @@ describe('release freshness before publication and deployment', () => {
     const paths = [];
     const url = await registry((request, response) => {
       paths.push(decodeURIComponent(new URL(request.url, 'http://registry.test').pathname));
-      const version = paths.length === 6 ? '3.2.1' : '3.2.0';
+      const version = paths.length === 7 ? '3.2.1' : '3.2.0';
       response.end(JSON.stringify({ versions: { [version]: {} } }));
     });
     await expect(Promise.resolve().then(() => state.assertReleaseCurrent(root, '3.2.0', { registry: url }))).rejects.toThrow(/newer|supersed/i);
-    expect(new Set(paths).size).toBe(6);
+    expect(new Set(paths).size).toBe(7);
   });
 
   it('reads every packument uncached, past the registry CDN', async () => {
@@ -173,6 +173,7 @@ describe('release freshness before publication and deployment', () => {
       ['/%40simtlix%2Fsimfinity-descriptor', [['write', 'true']]],
       ['/%40simtlix%2Fsimfinity-postgres', [['write', 'true']]],
       ['/%40simtlix%2Fsimfinity-js', [['write', 'true']]],
+      ['/%40simtlix%2Fsimfinity-js-client', [['write', 'true']]],
     ]);
   });
 
@@ -201,7 +202,7 @@ describe('release freshness before publication and deployment', () => {
     const { root } = fixture();
     const url = await registry((request, response) => { response.statusCode = 404; response.end('{"error":"Not found"}'); });
     await expect(Promise.resolve().then(() => state.assertReleaseCurrent(root, '3.2.0', { registry: url })))
-      .rejects.toThrow('@simtlix/simfinity-core, @simtlix/simfinity-sql, @simtlix/simfinity-mcp, @simtlix/simfinity-descriptor, @simtlix/simfinity-postgres, @simtlix/simfinity-js are not on the registry; publish them once and configure their Trusted Publishers before releasing');
+      .rejects.toThrow('@simtlix/simfinity-core, @simtlix/simfinity-sql, @simtlix/simfinity-mcp, @simtlix/simfinity-descriptor, @simtlix/simfinity-postgres, @simtlix/simfinity-js, @simtlix/simfinity-js-client are not on the registry; publish them once and configure their Trusted Publishers before releasing');
   });
 
   it('still reports a newer published sibling when a release package returns 404', async () => {

@@ -13,6 +13,7 @@ const packages = [
   ['packages/descriptor', '@simtlix/simfinity-descriptor'],
   ['packages/postgres', '@simtlix/simfinity-postgres'],
   ['packages/mongodb', '@simtlix/simfinity-js'],
+  ['packages/client', '@simtlix/simfinity-js-client'],
 ];
 const names = new Set(packages.map(([, name]) => name));
 const dependencyGroups = ['dependencies', 'optionalDependencies', 'peerDependencies', 'devDependencies'];

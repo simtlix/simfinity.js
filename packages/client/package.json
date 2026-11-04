@@ -1,0 +1,40 @@
+{
+  "name": "@simtlix/simfinity-js-client",
+  "version": "3.19.0",
+  "description": "Introspection-driven GraphQL client for simfinity-js APIs",
+  "type": "module",
+  "main": "./src/SimfinityClient.js",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/SimfinityClient.js"
+    }
+  },
+  "scripts": {
+    "demo": "node examples/demo.js"
+  },
+  "keywords": [
+    "graphql",
+    "client",
+    "simfinity",
+    "introspection",
+    "query-builder"
+  ],
+  "author": "Multiscreen Technology Group - SimTLiX SRL",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/simtlix/simfinity.js",
+    "directory": "packages/client"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "files": [
+    "src",
+    "types",
+    "README.md",
+    "LICENSE"
+  ],
+  "types": "./types/index.d.ts"
+}

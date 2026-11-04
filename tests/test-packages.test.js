@@ -91,9 +91,9 @@ describe('test:packages archive source (#154)', () => {
   it('packs the working tree with the release packer when no manifest is given, ignoring a stray digest', () => {
     const { status, calls } = consumerCheck([], { SIMFINITY_RELEASE_MANIFEST_SHA256: '0'.repeat(64) });
     expect(status).toBe(1);
-    expect(calls).toHaveLength(7);
-    for (const call of calls.slice(0, 6)) expect(call).toMatch(/^pack --json --ignore-scripts --workspaces=false --pack-destination \S+\/release$/);
-    expect(calls[6]).toMatch(/^install --ignore-scripts .*\/release\/simtlix-simfinity-core-/);
+    expect(calls).toHaveLength(8);
+    for (const call of calls.slice(0, 7)) expect(call).toMatch(/^pack --json --ignore-scripts --workspaces=false --pack-destination \S+\/release$/);
+    expect(calls[7]).toMatch(/^install --ignore-scripts .*\/release\/simtlix-simfinity-core-/);
   }, 60000);
 
   it('rejects extra arguments before creating temporary files or running npm', () => {

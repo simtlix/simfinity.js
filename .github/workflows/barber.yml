@@ -80,6 +80,7 @@ jobs:
           npm ci --prefix ${{ matrix.database }}
           npm run test:security --prefix ${{ matrix.database }}
           npm test --prefix ${{ matrix.database }}
+          npm run lint --prefix ${{ matrix.database }}
       - name: Build and start the complete application
         run: docker compose -f compose.${{ matrix.database }}.yaml up --build -d --wait --wait-timeout 180
       - name: Seed synthetic demo accounts and catalog

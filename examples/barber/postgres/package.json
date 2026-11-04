@@ -19,15 +19,16 @@
     "test:dataset": "node integration/dataset.js",
     "test:http": "node ../tests/http-contract.mjs",
     "test:query-mutations": "node ../tests/query-mutation-contract.mjs",
-    "test:security": "npm audit"
+    "test:security": "npm audit",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@envelop/core": "^5.3.0",
     "@modelcontextprotocol/sdk": "^1.31.0",
-    "@simtlix/simfinity-core": "3.15.0",
-    "@simtlix/simfinity-js-client": "^1.1.0",
-    "@simtlix/simfinity-mcp": "3.15.0",
-    "@simtlix/simfinity-postgres": "3.15.0",
+    "@simtlix/simfinity-core": "3.19.0",
+    "@simtlix/simfinity-js-client": "3.19.0",
+    "@simtlix/simfinity-mcp": "3.19.0",
+    "@simtlix/simfinity-postgres": "3.19.0",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.2",
@@ -42,7 +43,9 @@
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
     "@types/jsonwebtoken": "^9.0.10",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "@simtlix/eslint-plugin-simfinity": "0.5.0",
+    "eslint": "^9.39.5"
   },
   "private": true,
   "engines": {

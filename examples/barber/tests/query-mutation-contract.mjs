@@ -45,7 +45,23 @@ const introspection = await execute('{ __type(name:"Mutation") { fields { name a
 const fields = introspection.data.__type.fields;
 const typeName = (type) => type.kind === 'NON_NULL' ? `${typeName(type.ofType)}!`
   : type.kind === 'LIST' ? `[${typeName(type.ofType)}]` : type.name;
+// Ordinary fixture writes read their current revision; conflict tests pass an explicit observed version.
+async function withVersion(id, input, token) {
+  const read = await request('query($id:ID!){booking(id:$id){version}}', { id }, token);
+  assert.equal(read.errors, undefined, JSON.stringify(read.errors));
+  assert.ok(read.data.booking, `Missing booking fixture ${id}`);
+  return { ...input, version: read.data.booking.version };
+}
+async function deleteRecord(name, id, token) {
+  const protectedBooking = name === 'deletebooking';
+  const variables = protectedBooking ? await withVersion(id, { id }, admin.accessToken) : { id };
+  return request(`mutation($id:ID!${protectedBooking ? ',$version:RecordVersion!' : ''}) { ${name}(id:$id${protectedBooking ? ',version:$version' : ''}) { id } }`, variables, token);
+}
 async function mutate(name, input, selection, token, rejected = false) {
+  if ((name === 'updatebooking' || name.endsWith('_booking')) && input.version == null) {
+    // Admin reads fixture metadata only; the mutation still runs as its original actor.
+    input = await withVersion(input.id, input, admin.accessToken);
+  }
   const field = fields.find((entry) => entry.name === name);
   assert.ok(field, name);
   const arg = field.args.find((entry) => entry.name === 'input');
@@ -66,6 +82,18 @@ const admin = await mutate('login', { email: 'admin@demo.com', password: 'demo12
 const owner = await mutate('registerOwner', { email: `${prefix}-owner@example.test`, name: 'Parity owner', password: 'demo1234' }, authSelection);
 const outsider = await mutate('registerOwner', { email: `${prefix}-outsider@example.test`, name: 'Other owner', password: 'demo1234' }, authSelection);
 const client = await mutate('register', { email: `${prefix}-client@example.test`, name: 'Parity client', password: 'demo1234' }, authSelection);
+for (const [label, actor] of [['owner', owner], ['admin', admin]]) {
+  await check(`a new ${label}-created shop starts in review and stays private`, async () => {
+    const slug = `${prefix}-onboarding-${label}`;
+    const created = await mutate('addbarbershop', { name: slug, slug, owner: { id: owner.user.id } }, 'id state', actor.accessToken);
+    assert.equal(created.state, 'PENDING_REVIEW');
+    const query = `query($id:ID!){barbershop(id:$id){id state} barbershops(slug:{value:${literal(slug)}}){id state}}`;
+    for (const token of [undefined, client.accessToken, outsider.accessToken]) {
+      assert.deepEqual((await execute(query, { id: created.id }, token)).data, { barbershop: null, barbershops: [] });
+    }
+    assert.deepEqual((await execute(query, { id: created.id }, owner.accessToken)).data, { barbershop: created, barbershops: [created] });
+  });
+}
 const fixture = [
   { key: 'A', price: 10, durationMinutes: 15, isActive: true, priceType: 'FIXED', description: null },
   { key: 'B', price: 20, durationMinutes: 30, isActive: true, priceType: 'FIXED', description: 'clip' },
@@ -86,7 +114,6 @@ for (const [index, keys, city, actor] of [[0, ['A', 'B', 'C'], 'Cordoba', owner]
   }, shopSelection, actor.accessToken);
   shops.push(shop);
   if (index < 2) {
-    await mutate('submitforreview_barbershop', { id: shop.id }, 'id state', actor.accessToken);
     await mutate('approve_barbershop', { id: shop.id }, 'id state', admin.accessToken);
   }
 }
@@ -106,6 +133,33 @@ await check('nested create persists embedded objects, lists and referenced child
     const read = await execute(`query($id:ID!){barbershop(id:$id){${shopSelection}}}`, { id: shop.id }, admin.accessToken);
     assert.deepEqual(read.data.barbershop.services.map((s) => s.id).sort(), shop.services.map((s) => s.id).sort());
   }
+});
+await mutate('updatebarbershop', { id: shops[2].id, rejectionReason: 'Needs more detail' }, 'id', admin.accessToken);
+for (const [label, filter, expected] of [
+  ['IIN embedded city', 'AND:[{conditions:[{field:"address.city",operator:IIN,value:["cordoba","ROSARIO"]}]}]', [0, 1, 2]],
+  ['IS_NOT_EMPTY rejection reason', 'rejectionReason:{operator:IS_NOT_EMPTY}', [2]],
+  ['NONE expensive services', 'AND:[{NONE:[{path:"services",conditions:[{field:"price",operator:GTE,value:90}]}]}]', [0, 1]],
+  ['ANY conditions on the same service', 'AND:[{ANY:[{path:"services",conditions:[{field:"price",operator:GTE,value:30},{field:"durationMinutes",operator:LTE,value:45}]}]}]', [1]],
+]) {
+  await check(`shop operator: ${label}`, async () => {
+    const read = await execute(`{barbershops(${shopFilter},${filter},sort:{terms:[{field:"slug",order:ASC}]}){id} barbershops_aggregate(${shopFilter},${filter},aggregation:{groupId:"state",facts:[{operation:COUNT,factName:"total",path:"id"}]}){facts}}`, {}, admin.accessToken);
+    assert.deepEqual(read.data.barbershops.map(({ id }) => id), expected.map((index) => shops[index].id));
+    assert.equal(read.data.barbershops_aggregate.reduce((total, group) => total + group.facts.total, 0), expected.length);
+  });
+}
+await mutate('updatebarbershop', { id: shops[2].id, rejectionReason: null }, 'id', admin.accessToken);
+await check('open-on-day matches one business-hours row and requires an explicit open flag', async () => {
+  const created = await mutate('addbarbershop', {
+    name: `${prefix}-hours`, slug: `${prefix}-hours`, owner: { id: owner.user.id },
+    businessHours: [{ dayOfWeek: 1, isClosed: true }, { dayOfWeek: 2, isClosed: false }, { dayOfWeek: 3 }],
+  }, 'id', owner.accessToken);
+  await mutate('approve_barbershop', { id: created.id }, 'id', admin.accessToken);
+  for (const [day, expected] of [[1, []], [2, [created.id]], [3, []]]) {
+    const read = await execute(`{barbershops(id:{value:${literal(created.id)}},AND:[{ANY:[{path:"businessHours",conditions:[{field:"dayOfWeek",operator:EQ,value:${day}},{field:"isClosed",operator:EQ,value:false}]}]}]){id}}`);
+    assert.deepEqual(read.data.barbershops.map(({ id }) => id), expected);
+  }
+  const dotted = await execute(`{barbershops(id:{value:${literal(created.id)}},AND:[{conditions:[{field:"businessHours.dayOfWeek",operator:EQ,value:1},{field:"businessHours.isClosed",operator:EQ,value:false}]}]){id}}`);
+  assert.deepEqual(dotted.data.barbershops, [{ id: created.id }], 'Dotted terms can match different embedded rows');
 });
 const filters = [
   ['EQ numeric', 'price:{operator:EQ,value:20}', ['B']],
@@ -221,39 +275,59 @@ await check('client ID scope intersects requested list and single-record IDs', a
   assert.deepEqual(read.data, { user: null, users: [] });
 });
 await check('public state scope intersects requested state in lists and aggregates', async () => {
-  const read = await execute(`{barbershops(${shopFilter},state:{value:"DRAFT"}){id} barbershops_aggregate(${shopFilter},state:{value:"DRAFT"},aggregation:{groupId:"state",facts:[{operation:COUNT,factName:"total",path:"id"}]}){groupId facts}}`);
+  const read = await execute(`{barbershops(${shopFilter},state:{value:"PENDING_REVIEW"}){id} barbershops_aggregate(${shopFilter},state:{value:"PENDING_REVIEW"},aggregation:{groupId:"state",facts:[{operation:COUNT,factName:"total",path:"id"}]}){groupId facts}}`);
   assert.deepEqual(read.data, { barbershops: [], barbershops_aggregate: [] });
 });
 // #53: owners see approved shops plus their own in any state, never another owner's unpublished shops.
 await check('owner shop scope hides other owners\' unpublished shops in lists, reads by ID and aggregates', async () => {
-  // shops[0] and shops[1] are the owner's APPROVED shops; shops[2] is the outsider's DRAFT shop.
+  // shops[0] and shops[1] are the owner's APPROVED shops; shops[2] is the outsider's PENDING_REVIEW shop.
   const slugs = (rows) => rows.map((row) => row.slug.slice(prefix.length + 1));
   const query = `query($id:ID!){ barbershop(id:$id){ id state } barbershops(${shopFilter},sort:{terms:[{field:"slug",order:ASC}]}){ slug }
-    drafts: barbershops(${shopFilter},state:{value:"DRAFT"}){ slug }
+    pending: barbershops(${shopFilter},state:{value:"PENDING_REVIEW"}){ slug }
     barbershops_aggregate(${shopFilter},aggregation:{groupId:"state",facts:[{operation:COUNT,factName:"total",path:"id"}]},sort:{terms:[{field:"groupId",order:ASC}]}){ groupId facts } }`;
   const asOwner = (await execute(query, { id: shops[2].id }, owner.accessToken)).data;
   assert.equal(asOwner.barbershop, null);
   assert.deepEqual(slugs(asOwner.barbershops), ['shop-0', 'shop-1']);
-  assert.deepEqual(asOwner.drafts, []);
+  assert.deepEqual(asOwner.pending, []);
   assert.deepEqual(asOwner.barbershops_aggregate, [{ groupId: 'APPROVED', facts: { total: 2 } }]);
-  // The outsider keeps its own draft and the public approved shops.
+  // The outsider keeps its own pending shop and the public approved shops.
   const asOutsider = (await execute(query, { id: shops[2].id }, outsider.accessToken)).data;
-  assert.deepEqual(asOutsider.barbershop, { id: shops[2].id, state: 'DRAFT' });
+  assert.deepEqual(asOutsider.barbershop, { id: shops[2].id, state: 'PENDING_REVIEW' });
   assert.deepEqual(slugs(asOutsider.barbershops), ['shop-0', 'shop-1', 'shop-2']);
-  assert.deepEqual(slugs(asOutsider.drafts), ['shop-2']);
-  assert.deepEqual(asOutsider.barbershops_aggregate, [{ groupId: 'APPROVED', facts: { total: 2 } }, { groupId: 'DRAFT', facts: { total: 1 } }]);
+  assert.deepEqual(slugs(asOutsider.pending), ['shop-2']);
+  assert.deepEqual(asOutsider.barbershops_aggregate, [{ groupId: 'APPROVED', facts: { total: 2 } }, { groupId: 'PENDING_REVIEW', facts: { total: 1 } }]);
 });
 await check('a shop that leaves REJECTED drops its rejection reason before it is public again', async () => {
   // Its slug stays outside shopFilter, so the shop counts of the other checks do not change.
   const rejected = await mutate('addbarbershop', { name: `${prefix}-rejected`, slug: `${prefix}-rejected`, owner: { id: owner.user.id } }, 'id', owner.accessToken);
   const read = `query($id:ID!){ barbershop(id:$id){ state rejectionReason } }`;
-  await mutate('submitforreview_barbershop', { id: rejected.id }, 'id', owner.accessToken);
-  await mutate('reject_barbershop', { id: rejected.id }, 'id', admin.accessToken);
-  await mutate('updatebarbershop', { id: rejected.id, rejectionReason: 'Missing business licence' }, 'id', admin.accessToken);
+  assert.deepEqual(await mutate('reject_barbershop', { id: rejected.id, rejectionReason: 'Missing business licence' }, 'state rejectionReason', admin.accessToken), { state: 'REJECTED', rejectionReason: 'Missing business licence' });
   assert.deepEqual((await execute(read, { id: rejected.id }, owner.accessToken)).data.barbershop, { state: 'REJECTED', rejectionReason: 'Missing business licence' });
   assert.deepEqual(await mutate('resubmit_barbershop', { id: rejected.id }, 'state rejectionReason', owner.accessToken), { state: 'PENDING_REVIEW', rejectionReason: null });
   await mutate('approve_barbershop', { id: rejected.id }, 'id', admin.accessToken);
   assert.deepEqual((await execute(read, { id: rejected.id })).data.barbershop, { state: 'APPROVED', rejectionReason: null });
+});
+await check('text searches ignore case and treat wildcards literally', async () => {
+  // Keep this service outside rootFilter so it does not change the operator fixtures.
+  const service = await mutate('addservice', { name: `${prefix} Corte Clásico 100%`, price: 5, durationMinutes: 15, barbershop: { id: shops[0].id } }, 'id', owner.accessToken);
+  for (const [operator, value, expected] of [
+    ['ILIKE', 'CORTE CLÁSICO', [service.id]],
+    ['ILIKE', '100%', [service.id]],
+    ['ILIKE', '10_%', []],
+    ['LIKE', 'CORTE', []],
+  ]) {
+    const result = await execute(`{services(id:{value:${literal(service.id)}},name:{operator:${operator},value:${literal(value)}}){id}}`, {}, admin.accessToken);
+    assert.deepEqual(result.data.services.map(({ id }) => id), expected);
+  }
+  await execute('mutation($id:ID!){deleteservice(id:$id){id}}', { id: service.id }, admin.accessToken);
+});
+await check('unanswered reviews include empty replies', async () => {
+  const reviewInput = { rating: 4, barbershop: { id: shops[0].id }, client: { id: client.user.id } };
+  const empty = await mutate('addreview', { ...reviewInput, reply: '' }, 'id', admin.accessToken);
+  const answered = await mutate('addreview', { ...reviewInput, reply: 'Gracias' }, 'id', admin.accessToken);
+  const query = (filter) => `{reviews(id:{operator:IN,value:${literal([empty.id, answered.id])}},reply:${filter}){id}}`;
+  assert.deepEqual((await execute(query('{operator:IS_EMPTY}'), {}, owner.accessToken)).data.reviews, [{ id: empty.id }]);
+  assert.deepEqual((await execute(query('{operator:EQ,value:null}'), {}, owner.accessToken)).data.reviews, []);
 });
 for (const [filter, code] of [
   ['price:{operator:IN,value:[null,10]}', 'INVALID_FILTER_VALUE'],
@@ -334,6 +408,55 @@ await check('nested booking create executes hooks and derives totals', async () 
   assert.equal(booking.totalPrice, 22);
   assert.equal(booking.endTime, '10:30');
   assert.deepEqual(await readBooking(), booking);
+});
+// Independent schedule, so concurrency assertions do not change the query/operator fixtures.
+const versionShop = await mutate('addbarbershop', { name: `${prefix}-versions`, slug: `${prefix}-versions`, owner: { id: owner.user.id } }, 'id', owner.accessToken);
+await mutate('approve_barbershop', { id: versionShop.id }, 'id', admin.accessToken);
+const versionFields = 'id version state scheduledDate startTime notes';
+const versionDate = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+const versionBooking = (startTime) => mutate('addbooking', { barbershop: { id: versionShop.id }, scheduledDate: versionDate, startTime, lines: [] }, versionFields, client.accessToken);
+const readVersionBooking = async (id) => (await execute(`query($id:ID!){booking(id:$id){${versionFields}}}`, { id }, owner.accessToken)).data.booking;
+await check('accepted booking writes advance the version by one', async () => {
+  const created = await versionBooking('07:00');
+  assert.equal(created.version, 1);
+  const edited = await mutate('updatebooking', { id: created.id, version: created.version, notes: 'Accepted' }, versionFields, owner.accessToken);
+  assert.equal(edited.version, 2);
+  const cancelled = await mutate('cancelbyclient_booking', { id: created.id, version: edited.version }, versionFields, client.accessToken);
+  assert.equal(cancelled.version, 3);
+  assert.deepEqual(await readVersionBooking(created.id), cancelled);
+});
+await check('a stale booking version is rejected and changes nothing', async () => {
+  const created = await versionBooking('08:00');
+  const saved = await mutate('updatebooking', { id: created.id, version: created.version, notes: 'Current' }, versionFields, owner.accessToken);
+  const rejected = await mutate('updatebooking', { id: created.id, version: saved.version - 1, startTime: '08:30', notes: 'Stale' }, versionFields, owner.accessToken, { code: 'VERSION_CONFLICT' });
+  assert.equal(rejected.errors[0].extensions.status, 409);
+  assert.deepEqual(await readVersionBooking(created.id), saved);
+});
+await check('an owner edit after a client reschedule conflicts', async () => {
+  const observed = await versionBooking('09:00');
+  const moved = await mutate('reschedule_booking', { id: observed.id, version: observed.version, startTime: '09:30' }, versionFields, client.accessToken);
+  assert.equal(moved.version, observed.version + 1);
+  const rejected = await mutate('updatebooking', { id: observed.id, version: observed.version, scheduledDate: observed.scheduledDate, startTime: observed.startTime, notes: 'Owner stale form' }, versionFields, owner.accessToken, { code: 'VERSION_CONFLICT' });
+  assert.equal(rejected.errors[0].extensions.status, 409);
+  assert.deepEqual(await readVersionBooking(observed.id), moved);
+});
+await check('nested booking writes require the observed child version and roll back their parent on conflict', async () => {
+  const created = await versionBooking('10:00');
+  await mutate('updatebarbershop', { id: versionShop.id, bookings: { updated: [{ id: created.id, version: created.version, notes: 'Nested' }] } }, 'id', owner.accessToken);
+  const saved = await readVersionBooking(created.id);
+  assert.equal(saved.version, created.version + 1);
+  const readParent = async () => (await execute('query($id:ID!){barbershop(id:$id){name}}', { id: versionShop.id }, owner.accessToken)).data.barbershop;
+  const before = await readParent();
+  for (const bookings of [
+    { updated: [{ id: created.id, version: created.version, notes: 'Stale nested' }] },
+    { deleted: [{ id: created.id, version: created.version }] },
+  ]) {
+    await mutate('updatebarbershop', { id: versionShop.id, name: 'Must roll back', bookings }, 'id', owner.accessToken, { code: 'VERSION_CONFLICT' });
+    assert.deepEqual(await readParent(), before);
+    assert.deepEqual(await readVersionBooking(created.id), saved);
+  }
+  await mutate('updatebarbershop', { id: versionShop.id, bookings: { deleted: [{ id: created.id, version: saved.version }] } }, 'id', owner.accessToken);
+  assert.equal(await readVersionBooking(created.id), null);
 });
 await check('omitted booking lines survive a partial update', async () => {
   await mutate('updatebooking', { id: booking.id, notes: 'Keep lines' }, 'id', owner.accessToken);
@@ -455,7 +578,7 @@ await check('clients cannot change or delete completed bookings', async () => {
   for (const input of [{ notes: 'Late note' }, { lines: [{ service: { id: services.A.id }, price: 0 }] }]) {
     await mutate('updatebooking', { id: done.id, ...input }, 'id', client.accessToken, { code: 'FORBIDDEN' });
   }
-  const removed = await request('mutation($id:ID!){deletebooking(id:$id){id}}', { id: done.id }, client.accessToken);
+  const removed = await deleteRecord('deletebooking', done.id, client.accessToken);
   assert.equal(removed.errors?.[0]?.extensions?.code, 'FORBIDDEN', JSON.stringify(removed));
   // The shop's owner still edits the record.
   assert.equal((await mutate('updatebooking', { id: done.id, notes: 'Paid in cash' }, 'notes', owner.accessToken)).notes, 'Paid in cash');
@@ -513,7 +636,7 @@ await check("a bundle's stored duration follows its services' durations, so it m
   assert.equal(await readTotal(bundle.id), database === 'postgresql' ? 30 : 10);
 });
 // Later checks see only the bookings they create.
-for (const id of derivedBookings) await request('mutation($id:ID!){deletebooking(id:$id){id}}', { id }, admin.accessToken);
+for (const id of derivedBookings) await deleteRecord('deletebooking', id, admin.accessToken);
 const report = {
   endpoint, database, requests,
   passed: results.filter((r) => r.passed).length, failed: results.filter((r) => !r.passed).length,

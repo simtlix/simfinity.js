@@ -202,21 +202,12 @@ async function gqlLogin(client, auth, email, password) {
     }
   }
 
-  // ── 4. Submit & approve barbershops ──
+  // ── 4. Approve newly created shops, already in PENDING_REVIEW ──
   console.log('\n--- Approving barbershops ---');
   const adminAuth = userMap['admin@demo.com'];
   for (const shop of barbershops) {
     const shopId = barbershopIds[shop.name];
     if (!shopId) continue;
-
-    const ownerAuth = userMap[shop.ownerEmail];
-    if (ownerAuth) {
-      auth.accessToken = ownerAuth.accessToken;
-      try {
-        await client.transition('barbershop', 'submitforreview', shopId, {}, 'id state');
-        console.log(`  Submitted: ${shop.name}`);
-      } catch (e) { console.log(`  Submit: ${e.message}`); }
-    }
 
     if (adminAuth) {
       auth.accessToken = adminAuth.accessToken;

@@ -195,12 +195,12 @@ export default function ReviewsPage() {
         .page(page, pageSize);
 
       if (search.trim()) {
-        query = query.where('comment', 'CONTAINS', search.trim());
+        query = query.where('comment', 'ILIKE', search.trim());
       }
       if (filter === '5STAR') {
         query = query.where('rating', 'EQ', 5);
       } else if (filter === 'UNREPLIED') {
-        query = query.where('reply', 'EQ', null);
+        query = query.where('reply', 'IS_EMPTY');
       }
 
       const result = await query.exec();

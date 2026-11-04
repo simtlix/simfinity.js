@@ -1,6 +1,6 @@
 # Barber PostgreSQL backend
 
-An independent, private application using the released `@simtlix/simfinity-postgres`, `@simtlix/simfinity-core`, and `@simtlix/simfinity-mcp` packages at exactly **3.15.0**. It uses Express, GraphQL Yoga, and `pg`, with no MongoDB or Mongoose runtime dependency. PostgreSQL delegates relational planning and runtime orchestration to `@simtlix/simfinity-sql`. This app retains the compatible PostgreSQL facade; the [SQL plugin guide](https://simtlix.github.io/simfinity.js/guide/sql-plugins.html) shows explicit plugin composition. It is outside the library workspaces and installs from npm without vendor archives.
+An independent, private application using the released `@simtlix/simfinity-postgres`, `@simtlix/simfinity-core`, and `@simtlix/simfinity-mcp` packages at exactly **3.19.0**. It uses Express, GraphQL Yoga, and `pg`, with no MongoDB or Mongoose runtime dependency. PostgreSQL delegates relational planning and runtime orchestration to `@simtlix/simfinity-sql`. This app retains the compatible PostgreSQL facade; the [SQL plugin guide](https://simtlix.github.io/simfinity.js/guide/sql-plugins.html) shows explicit plugin composition. It is outside the library workspaces and installs from npm without vendor archives.
 
 Use the [Barber quick start](../README.md) to run the complete Docker stack with the shared frontend.
 
@@ -61,6 +61,8 @@ Run these from `examples/barber/postgres` after `npm ci`:
 | Command | Purpose |
 | --- | --- |
 | `npm start` / `npm run dev` | Start HTTP, or watch for backend source changes. |
+| `npm run lint` | Check static Simfinity contracts with the published ESLint plugin. |
+| `npm run test:security` | Audit the complete application lockfile, development tools included. |
 | `npm test` | Run unit, scope, ownership, and controller regressions. |
 | `npm run test:query-mutations` | Check filters, combined aggregates and nested mutations against a disposable HTTP API; see the [shared runbook](../README.md#validate-changes). |
 | `npm run test:http` | Run `../tests/http-contract.mjs` against the running, seeded API, including account suspension, uploads, MCP and review rules. |
@@ -146,3 +148,7 @@ Every tool call checks the current token and its account. At startup, the proces
 During a session, an expired token without a refresh token, a failed renewal, or a suspended or deleted account fails the tool call with a JSON-RPC error that names the cause; the call never runs as anonymous. The stdio tools are the same as on HTTP `/mcp`. Diagnostics go to stderr, leaving stdout for MCP.
 
 Stop or reset this stack with the [project-specific Compose commands](../README.md#stop-or-reset-one-stack).
+
+## Current lifecycle examples
+
+New shops enter review in one create, while existing `DRAFT` shops retain their submission action. Bookings use observed versions to prevent stale edits; see the [upgrade instructions](../README.md#upgrading-an-existing-booking-database), especially the explicit PostgreSQL migration for existing databases. Optional [reminder logs](../README.md#reminder-demonstration) run only after the owning transaction commits and demonstrate best-effort delivery.

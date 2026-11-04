@@ -155,6 +155,7 @@ function BookingFlow() {
   const [availabilityVersion, setAvailabilityVersion] = useState(0);
   // A confirmed booking of this shop being rescheduled; the action rechecks its current state.
   const [rescheduleTarget, setRescheduleTarget] = useState<string | null>(null);
+  const [rescheduleVersion, setRescheduleVersion] = useState<number | null>(null);
   // The lines of that booking with the prices they were booked at; empty for a new booking.
   const [storedLines, setStoredLines] = useState<StoredLine[]>([]);
   const [slotsLoading, setSlotsLoading] = useState(false);
@@ -235,14 +236,17 @@ function BookingFlow() {
               const booking = (await client.getById(
                 "booking",
                 rescheduleId,
-                "id state barbershop { id } lines { service { id } bundle { id } price durationMinutes } professional { id }",
+                "id version state barbershop { id } lines { service { id } bundle { id } price durationMinutes } professional { id }",
               )) as Record<string, unknown> | null;
 
               if (!cancelled && booking) {
                 // Any other booking only prefills the form, and confirming books a new appointment.
                 const bookingShopId = (booking.barbershop as { id?: string } | null)?.id;
                 const moving = booking.state === "CONFIRMED" && bookingShopId != null && String(bookingShopId) === String(shop.id);
-                if (moving) setRescheduleTarget(String(booking.id));
+                if (moving) {
+                  setRescheduleTarget(String(booking.id));
+                  setRescheduleVersion(booking.version as number);
+                }
                 const lines = (booking.lines ?? []) as Record<string, unknown>[];
                 const refId = (line: Record<string, unknown>, field: "service" | "bundle") => {
                   const ref = line[field] as Record<string, unknown> | null;
@@ -541,7 +545,7 @@ function BookingFlow() {
             "booking",
             "reschedule",
             rescheduleTarget,
-            { ...payload, professional: proId ? { id: proId } : null },
+            { ...payload, version: rescheduleVersion, professional: proId ? { id: proId } : null },
             "id confirmationCode state",
           )
         : await client.add(
@@ -557,7 +561,7 @@ function BookingFlow() {
       const code = bookingErrorCode(error);
       const message = bookingErrorMessage(code, Boolean(rescheduleTarget));
       const reason = t(message.key, message.fallback);
-      setBookingError(rescheduleTarget && code !== "BAD_REQUEST" ? `${reason} ${t(ORIGINAL_KEPT.key, ORIGINAL_KEPT.fallback)}` : reason);
+      setBookingError(rescheduleTarget && code !== "BAD_REQUEST" && code !== "VERSION_CONFLICT" ? `${reason} ${t(ORIGINAL_KEPT.key, ORIGINAL_KEPT.fallback)}` : reason);
       setSubmitting(false);
       if (SLOT_ERROR_CODES.includes(code)) {
         setSelectedTime(null);
@@ -565,7 +569,7 @@ function BookingFlow() {
         setStep("time");
       }
     }
-  }, [barbershop, bookingLines, client, notes, rescheduleTarget, selectedDate, selectedProfessionalId, selectedTime, setStep, t]);
+  }, [barbershop, bookingLines, client, notes, rescheduleTarget, rescheduleVersion, selectedDate, selectedProfessionalId, selectedTime, setStep, t]);
 
   if (loading) {
     return (

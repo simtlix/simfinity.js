@@ -16,6 +16,8 @@ interface PlatformStats {
   recentActivity: { type: string; text: string; detail: string; time: string }[];
 }
 
+type TotalsGroup = { groupId: string | null; facts: { total?: number; revenue?: number } };
+
 function formatCurrency(n: number) {
   return `$${n.toLocaleString('es-AR', { minimumFractionDigits: 0 })}`;
 }
@@ -38,9 +40,9 @@ function useAdminDashboardData() {
 
     (async () => {
       const [barbershops, users, bookings, pendingBarbershopList] = await Promise.all([
-        safe(client.find('barbershop').fields('id state').exec(), []),
-        safe(client.find('user').fields('id').exec(), []),
-        safe(client.find('booking').fields('id totalPrice').exec(), []),
+        safe(client.aggregate<TotalsGroup>('barbershop').groupBy('state').fact('COUNT', 'total', 'id').exec(), []),
+        safe(client.aggregate<TotalsGroup>('user').groupBy('role').fact('COUNT', 'total', 'id').exec(), []),
+        safe(client.aggregate<TotalsGroup>('booking').groupBy('state').fact('SUM', 'revenue', 'totalPrice').exec(), []),
         safe(
           client
             .find('barbershop')
@@ -55,10 +57,8 @@ function useAdminDashboardData() {
 
       if (cancelled) return;
 
-      const bList = barbershops as { id: string; state?: string }[];
-      const bookingList = bookings as { id: string; totalPrice?: number }[];
-      const totalRevenue = bookingList.reduce((s, b) => s + (b.totalPrice ?? 0), 0);
-      const pendingCount = bList.filter((b) => b.state === 'PENDING_REVIEW').length;
+      const totalRevenue = bookings.reduce((sum, group) => sum + (group.facts.revenue ?? 0), 0);
+      const pendingCount = barbershops.find((group) => group.groupId === 'PENDING_REVIEW')?.facts.total ?? 0;
 
       const pending = (pendingBarbershopList as Record<string, unknown>[]).map((b) => ({
         id: String(b.id),
@@ -68,8 +68,8 @@ function useAdminDashboardData() {
       }));
 
       setData({
-        totalBarbershops: bList.filter((b) => b.state === 'APPROVED').length,
-        totalUsers: (users as unknown[]).length,
+        totalBarbershops: barbershops.find((group) => group.groupId === 'APPROVED')?.facts.total ?? 0,
+        totalUsers: users.reduce((sum, group) => sum + (group.facts.total ?? 0), 0),
         totalRevenue,
         pendingReviews: pendingCount,
         pendingBarbershops: pending,

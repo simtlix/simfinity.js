@@ -82,6 +82,7 @@ export default defineConfig({
         { text: 'Queries & filtering', link: '/guide/queries' },
         { text: 'Mutations', link: '/guide/mutations' },
         { text: 'Optimistic concurrency', link: '/guide/concurrency' },
+        { text: 'JavaScript client', link: '/guide/client' },
         { text: 'Validation', link: '/guide/validation' },
         { text: 'Controllers & hooks', link: '/guide/controllers' },
         { text: 'State machines', link: '/guide/state-machines' },
