@@ -13,6 +13,9 @@
     "eslint": "9.39.5",
     "typescript": "5.9.3"
   },
+  "overrides": {
+    "@typescript-eslint/typescript-estree": { "minimatch": "11.0.1" }
+  },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "test:consumer": "node tests/consumer.mjs",
