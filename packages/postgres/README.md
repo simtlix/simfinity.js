@@ -139,7 +139,8 @@ instead use an application access function. These functions are not facade/core
 exports. The descriptor does not evaluate dynamic permissions or serialize
 arbitrary validators.
 
-Legacy introspection stays enabled by default in 3.x. To opt out, import
+Legacy introspection (`__Field.extensions`) is deprecated in favour of the
+descriptor and stays enabled by default in 3.x. To opt out, import
 `configureIntrospection` from `@simtlix/simfinity-core/introspection` in a separate
 bootstrap module and call it with `{ fieldExtensions: false }` **before importing
 the runtime or facades**. That direct import requires core as a direct dependency

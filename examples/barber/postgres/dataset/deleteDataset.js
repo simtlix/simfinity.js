@@ -4,6 +4,8 @@ const ENDPOINT = process.env.GRAPHQL_ENDPOINT || 'http://localhost:4500/graphql'
 
 const auth = { accessToken: null };
 const client = new SimfinityClient(ENDPOINT, {
+  // Metadata comes from the server's descriptor; its introspection carries no Simfinity extensions.
+  descriptorEndpoint: new URL('graphql-metadata', ENDPOINT).href,
   prepareHeaders(headers) {
     if (auth.accessToken) headers['Authorization'] = `Bearer ${auth.accessToken}`;
   },

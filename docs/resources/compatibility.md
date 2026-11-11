@@ -44,6 +44,10 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22.12.0 or newer |
 
+## Deprecations
+
+- **`__Field.extensions` introspection metadata.** Deprecated in favour of the [client descriptor](../reference/client-descriptor), which servers can mount since 3.15.0 and `@simtlix/simfinity-js-client` reads since 3.19.0. Nothing changes at run time in 3.x: importing the runtime still installs the extension, no warning is logged, and `configureIntrospection({ fieldExtensions: false })` remains the opt-out. Move every client of a server to the descriptor before opting out; see the [migration boundary](../reference/client-descriptor#client-migration-boundary). 4.0 is planned to stop installing the extension by default ([#101](https://github.com/simtlix/simfinity.js/issues/101)).
+
 ## Upgrade to 3.17.0
 
 Version 3.17.0 adds nullable `valuePath: String` to `QLFilter`, `QLTypeFilter` and `QLFilterCondition`; this is not available in released 3.16.0. Existing valid literal filters retain their meaning. A trusted caller that previously supplied an ignored `valuePath` key now requests a validated comparison, and `value` plus non-null `valuePath` fails even when `value` is null. Null/undefined `valuePath` retains literal behavior. See [field comparisons](/guide/queries#compare-stored-fields).

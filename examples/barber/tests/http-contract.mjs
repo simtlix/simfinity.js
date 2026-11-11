@@ -25,6 +25,24 @@ const introspection = await request('{ __type(name:"Mutation") { fields { name a
 assert.equal(introspection.errors, undefined);
 const fields = introspection.data.__type.fields;
 const typeName = (type) => type.kind === 'NON_NULL' ? `${typeName(type.ofType)}!` : type.kind === 'LIST' ? `[${typeName(type.ofType)}]` : type.name;
+// Client metadata is the descriptor document on a sibling path; GraphQL introspection stays standard.
+{
+  const descriptorUrl = new URL('graphql-metadata', endpoint).href;
+  const response = await fetch(descriptorUrl);
+  assert.equal(response.status, 200, `Descriptor HTTP ${response.status}`);
+  const descriptor = await response.json();
+  assert.equal(descriptor.formatVersion, 1);
+  assert.equal(descriptor.types.booking.endpoints.list, 'bookings');
+  assert.equal(descriptor.operations.mutation.addbooking.type, 'booking');
+  const etag = response.headers.get('etag');
+  assert.ok(etag, 'The descriptor must carry an ETag');
+  assert.equal((await fetch(descriptorUrl, { headers: { 'if-none-match': etag } })).status, 304);
+  assert.equal((await fetch(descriptorUrl, { method: 'POST' })).status, 405);
+  const fieldType = await request('{ __type(name:"__Field") { fields { name } } }');
+  assert.equal(fieldType.errors, undefined, JSON.stringify(fieldType.errors));
+  assert.ok(!fieldType.data.__type.fields.some((field) => field.name === 'extensions'), 'The server must not patch __Field.extensions');
+  checks += 4;
+}
 // Ordinary fixture writes read their current revision; conflict tests pass an explicit observed version.
 async function withVersion(id, input, token) {
   const read = await request('query($id:ID!){booking(id:$id){version}}', { id }, token);

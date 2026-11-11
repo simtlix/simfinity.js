@@ -206,6 +206,10 @@ PostgreSQL generates indexes and real foreign keys from its storage description 
 
 ## Introspection metadata
 
+::: warning Deprecated
+`__Field.extensions` is deprecated in favour of the [client descriptor](./client-descriptor). It stays installed by default in every 3.x release, and clients that select it keep working. New clients should read the descriptor; 4.0 is planned to stop installing the extension by default. See the [migration boundary](./client-descriptor#client-migration-boundary).
+:::
+
 Simfinity extends GraphQL's `__Field` introspection type with `extensions`. Clients can inspect `readOnly`, `stateMachine`, and relation metadata:
 
 ```graphql
@@ -239,4 +243,4 @@ In a process that has imported Simfinity, passing a post-import schema's introsp
 
 ## Separate client descriptor
 
-Use [the client descriptor](./client-descriptor.md) to expose schema-owned JSON metadata without relying on `__Field.extensions`. It describes actual roots and input shapes, with virtual, relation and state hints. The 3.x legacy extension remains on by default. The public early opt-out must execute before runtime import, and clients that still query the extension require migration. Descriptor metadata does not serialize validators or evaluate per-caller auth rules.
+Use [the client descriptor](./client-descriptor.md) to expose schema-owned JSON metadata without relying on `__Field.extensions`. It describes actual roots and input shapes, with virtual, relation and state hints. The legacy extension is deprecated and remains on by default in 3.x. The public early opt-out must execute before runtime import, and clients that still query the extension require migration. Descriptor metadata does not serialize validators or evaluate per-caller auth rules.

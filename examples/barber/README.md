@@ -39,6 +39,7 @@ docker compose -f compose.postgres.yaml exec backend npm run seed:demo
 | --- | --- | --- |
 | Frontend | [localhost:4401](http://localhost:4401) | [localhost:4501](http://localhost:4501) |
 | GraphQL / GraphiQL | [localhost:4400/graphql](http://localhost:4400/graphql) | [localhost:4500/graphql](http://localhost:4500/graphql) |
+| Client descriptor | [localhost:4400/graphql-metadata](http://localhost:4400/graphql-metadata) | [localhost:4500/graphql-metadata](http://localhost:4500/graphql-metadata) |
 | Health | [localhost:4400/health](http://localhost:4400/health) | [localhost:4500/health](http://localhost:4500/health) |
 | MCP Streamable HTTP | `http://localhost:4400/mcp` | `http://localhost:4500/mcp` |
 | Database host port | `57417` | `55441` |
@@ -232,7 +233,7 @@ Each backend counts requests per minute, with a separate counter for each limit:
 
 | Requests | Default per minute | Counted by | Environment variable |
 | --- | --- | --- | --- |
-| `/graphql` | 300 | Client IP | `GRAPHQL_RATE_LIMIT_MAX` |
+| `/graphql` and `/graphql-metadata`, one shared counter | 300 | Client IP | `GRAPHQL_RATE_LIMIT_MAX` |
 | `/mcp` | 300 | Client IP | `MCP_RATE_LIMIT_MAX` |
 | `POST /api/uploads`, before authentication | 100 | Client IP | `UPLOAD_IP_RATE_LIMIT_MAX` |
 | `POST /api/uploads`, after authentication | 20 | Account | `UPLOAD_RATE_LIMIT_MAX` |
@@ -414,6 +415,12 @@ The upgrade from 3.8.0 to 3.15.0 keeps the published GraphQL client compatible w
 The upgrade from 3.15.0 to 3.18.0 needed no change to application code. The published GraphQL client receives the same introspection metadata; the only difference it sees is two more `QLOperator` values, `CONTAINS_ALL` and `IIN`, which the list and aggregate MCP tools also advertise. Existing filters, scopes and transactional controllers keep their results. The lifecycle helpers (`updateObject`, `deleteObject`, `transitionObject`), the opt-in generated `transaction` mutation, `valuePath` field comparisons and embedded object frames are available when explicitly used; this dependency upgrade does not adopt them. Review the [library upgrade notes](../../docs/resources/compatibility.md#upgrade-to-3-18-0) back to 3.16.0 when extending the example.
 
 The upgrade to 3.19.0 aligns both backends and `@simtlix/simfinity-js-client` on the same exact published version. The client replaces 1.1.0 and supplies its own TypeScript declarations, so the frontend removes the local ambient module shim and uses typed query results on the booking screens. Initialization continues to use extended introspection and the existing JWT `prepareHeaders` callback. The backends retain 3.18.0 runtime behavior; no database migration or descriptor endpoint is required. See the [client migration guide](../../docs/guide/client.md).
+
+With 3.19.0 on both sides, the example reads its client metadata from the [client descriptor](../../docs/reference/client-descriptor.md) instead of the deprecated `__Field.extensions` introspection field:
+
+- Each backend mounts `createClientDescriptorHandler` from `@simtlix/simfinity-descriptor` at `GET /graphql-metadata`, a sibling of `/graphql`, with `authorize: 'public'`: the descriptor says no more about the schema than this example's open introspection, and the auth plugin still decides every operation.
+- Each backend's `configure-simfinity.js` calls `configureIntrospection({ fieldExtensions: false })`, and `index.yoga.js` imports it first, before anything loads the runtime. `__Field` therefore has no `extensions` field, and a client that selects it fails to initialize. The MongoDB backend adds `@simtlix/simfinity-core` as a direct dependency for that import; the PostgreSQL backend already had it.
+- The frontend, `seed:demo` and the dataset scripts pass `descriptorEndpoint`, derived from the GraphQL URL, so `NEXT_PUBLIC_GRAPHQL_URL` and `GRAPHQL_ENDPOINT` remain the only settings. The GraphQL schema, the MCP tools and the stored data are unchanged.
 
 The upgrade from 3.7.0 to 3.8.0 moved the booking page's taken-times read from the `bookingAvailability` custom mutation to 3.8.0's virtual fields: the `busyRanges` field described in [booking rules](#booking-rules) and its `barbershop_busyRanges` MCP tool. The mutation, its `BookingAvailabilityInput` and its MCP tool are gone; the rest of the GraphQL schema, the other MCP tools, the stored data and the PostgreSQL tables are unchanged, so databases created by earlier versions start without a migration.
 

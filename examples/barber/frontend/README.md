@@ -4,7 +4,7 @@ Shared Next.js 16 app for the MongoDB and PostgreSQL barber examples: public dis
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-The client is installed from npm at exactly **3.19.0**, matching both Barber backends. Its bundled declarations replace `src/types/simfinity-js-client.d.ts`; booking queries use the package's result generics. The provider keeps extended introspection and JWT headers; no descriptor endpoint is configured.
+The client is installed from npm at exactly **3.19.0**, matching both Barber backends. Its bundled declarations replace `src/types/simfinity-js-client.d.ts`; booking queries use the package's result generics. The provider passes `descriptorEndpoint`, the backend's `/graphql-metadata` next to `NEXT_PUBLIC_GRAPHQL_URL`, so the client reads the [client descriptor](../../../docs/reference/client-descriptor.md) and makes no introspection request; it keeps the JWT headers.
 
 ## Overview
 
