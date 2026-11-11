@@ -288,8 +288,10 @@ choose `'public'`; neither choice evaluates dynamic GraphQL auth for each caller
 
 ## Disable the legacy extension explicitly
 
-The 3.x default remains unchanged: importing the runtime installs the shared
-`__Field.extensions` extension. Metadata-aware legacy clients keep working.
+`__Field.extensions` is deprecated in favour of the descriptor. The 3.x default
+remains unchanged: importing the runtime installs the shared extension, and
+metadata-aware legacy clients keep working. 4.0 is planned to stop installing it
+by default.
 To avoid installation, configure **before importing the runtime or a facade**.
 A direct import from `@simtlix/simfinity-core/introspection` requires core as a
 **direct dependency pinned to the facade's exact version**, including with pnpm
@@ -328,17 +330,25 @@ plugin and in-place resolver wrapping.
 
 ## Client migration boundary
 
-Serving the descriptor does not update existing clients. Clients that still
-select `__Field.extensions`, including the inspected simfinity-js-client 1.1.0
-and simfinity-web implementations, fail against an unpatched schema. Keep the
-3.x default until your clients read the descriptor or need no Simfinity metadata.
-The Barber examples retain their current configuration and dependencies.
+Serving the descriptor does not update existing clients. A client that still
+selects the deprecated `__Field.extensions` fails against an unpatched schema.
+Keep the 3.x default until every client of the server reads the descriptor or
+needs no Simfinity metadata:
+
+- **`@simtlix/simfinity-js-client`** reads a descriptor from 3.19.0, through
+  `descriptorEndpoint` or `descriptor`; see the [client guide](../guide/client).
+  With neither option it still selects the extension, and
+  `introspection: 'standard'` initializes it without Simfinity metadata. The 1.x
+  releases always select the extension.
+- **simfinity-web**, as inspected for 3.15.0, selects the extension.
+- **The Barber examples** show the migrated setup: both backends mount the
+  handler at `/graphql-metadata` and opt out of the extension, and the frontend
+  and the seed scripts pass `descriptorEndpoint`.
 
 A descriptor-aware reader fetches the explicitly configured metadata URL, checks
 `formatVersion`, and uses exact operation names and concrete input types. It must
-not fall back after 401/403. Updating simfinity-js-client/simfinity-web, preserving
-their getter shapes and agreeing on discovery/fallback behavior are separate
-client changes; no client release or universal automatic retry is implied here.
+not fall back after 401/403. There is no automatic URL discovery and no universal
+automatic retry.
 
 The generated filter inputs expose nullable `valuePath: String` on `QLFilter`, `QLTypeFilter` and `QLFilterCondition`. Descriptor traversal describes those actual input fields without a format-version change; their presence does not advertise adapter support. Check `queryFeatures.valuePath` at the server, and keep `value`/`valuePath` mutually exclusive at execution. Filter inputs remain ordinary input objects.
 

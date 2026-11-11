@@ -37,6 +37,7 @@ export function SimfinityClientProvider({
   React.useEffect(() => {
     let cancelled = false;
     const c = new SimfinityClient(endpoint, {
+      descriptorEndpoint: clientOptionsRef.current?.descriptorEndpoint,
       prepareHeaders(headers) {
         clientOptionsRef.current?.prepareHeaders?.(headers);
       },

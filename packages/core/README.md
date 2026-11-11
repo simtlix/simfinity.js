@@ -36,7 +36,7 @@ Registration and `createSchema()` validate `extensions.scope` (`INVALID_SCOPE`) 
 
 Generated and custom mutations run through `adapter.withTransaction`. Retried attempts receive fresh clones of GraphQL input objects, lists, and dates while enum values keep their identity. Custom queries run without a transaction: their callback receives `(input, context)` and opens one through the engine's API when it needs it. `createSchema()` takes an optional fourth argument, an options object whose key `includedCustomQueries` selects custom queries by name and whose key `transaction: { name?, types }` adds the generated transaction mutation; any other value or key throws `INVALID_SCHEMA_OPTIONS` (500) before `adapter.prepare()`. An invalid `transaction` option raises the same code, after the models are prepared when the field name or a derived type name collides with the built schema, or when no operation is left in it. A schema without mutation fields has no `Mutation` root. An adapter can define `stateValue` when its persisted enum representation differs from GraphQL enum names.
 
-Importing the runtime installs Simfinity's `__Field.extensions` introspection field once per GraphQL module instance; its `readOnly` flag reads `true` for virtual fields. Multiple runtimes and driver packages can be imported together without cloning schemas or duplicating introspection types.
+Importing the runtime installs Simfinity's deprecated `__Field.extensions` introspection field once per GraphQL module instance; its `readOnly` flag reads `true` for virtual fields. Multiple runtimes and driver packages can be imported together without cloning schemas or duplicating introspection types.
 
 ## Lifecycle helpers and the transaction mutation
 
@@ -76,7 +76,8 @@ instead use an application access function. These functions are not facade/core
 exports. The descriptor does not evaluate dynamic permissions or serialize
 arbitrary validators.
 
-Legacy introspection stays enabled by default in 3.x. To opt out, import
+Legacy introspection (`__Field.extensions`) is deprecated in favour of the
+descriptor and stays enabled by default in 3.x. To opt out, import
 `configureIntrospection` from `@simtlix/simfinity-core/introspection` in a separate
 bootstrap module and call it with `{ fieldExtensions: false }` **before importing
 the runtime or facades**. That direct import requires core as a direct dependency

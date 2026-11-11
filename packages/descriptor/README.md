@@ -25,9 +25,9 @@ schemas do not inherit ownership.
 
 Core remains dependency-free; structural HTTP declarations need no Node ambient
 types. Directly importing `@simtlix/simfinity-core/introspection` requires core as
-a direct dependency pinned to the facade's version. The 3.x introspection default
-remains enabled, and clients selecting `__Field.extensions` must migrate before
-using the early opt-out.
+a direct dependency pinned to the facade's version. `__Field.extensions` is
+deprecated in favour of this descriptor; its 3.x default remains enabled, and
+clients selecting it must migrate before using the early opt-out.
 
 Since 3.16.0, a generated transaction field is described with
 `operation: 'transaction'` and `type: null`, with its actual arguments, result

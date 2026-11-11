@@ -1,9 +1,12 @@
+// First, before anything loads the Simfinity runtime (see the module).
+import './configure-simfinity.js';
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { createYoga } from 'graphql-yoga';
 import * as simfinity from '@simtlix/simfinity-js';
 import { useErrorHandler } from '@envelop/core';
+import { createClientDescriptorHandler } from '@simtlix/simfinity-descriptor';
 import { schema, authPlugin, mcpOptions, initializeApplication } from './application.js';
 import { closeDatabase } from './database.js';
 import { resolveMcpUserContext, resolveUserContext } from './auth/context.js';
@@ -50,6 +53,15 @@ app.use('/api/uploads', uploads);
 
 app.use('/graphql', limiters.graphql, yoga);
 
+// Client metadata as one versioned JSON document (GET and HEAD), built once for this schema. It sits
+// on a sibling path, so the /graphql mount does not take it, and shares the GraphQL budget. It is
+// public, as this example's introspection is: it describes the schema, and the auth plugin still
+// decides every operation.
+app.all('/graphql-metadata', limiters.graphql, createClientDescriptorHandler(schema, {
+  authorize: 'public',
+  onError: (error) => console.error('[descriptor]', error),
+}));
+
 // MCP endpoint (Streamable HTTP) exposing the GraphQL operations as tools, except login, register,
 // registerOwner and refreshSession, which stay GraphQL-only (see mcpOptions in application.js).
 // Callers send the access token of a GraphQL login as `Authorization: Bearer`. The context factory
@@ -68,6 +80,7 @@ app.all('/mcp', limiters.mcp, express.json(), mcpBodyErrors, rejectJsonRpcBatch,
 const PORT = process.env.PORT || 4400;
 const server = app.listen(PORT, () => {
   console.log(`GraphQL endpoint: http://localhost:${PORT}/graphql`);
+  console.log(`Client descriptor: http://localhost:${PORT}/graphql-metadata`);
   console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
 });
 

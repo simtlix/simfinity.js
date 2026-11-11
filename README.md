@@ -265,7 +265,7 @@ console.log(descriptor.operations.query);
 app.all('/graphql-metadata', simfinity.createClientDescriptorHandler(schema, { authorize: 'public' }));
 ```
 
-The 3.x introspection default stays enabled. A new public `@simtlix/simfinity-core/introspection` subpath exports `configureIntrospection({ fieldExtensions: false })`, which requires core as a direct dependency pinned to the facade's exact version and must execute **before importing the runtime or facades** and never removes installed metadata. Current legacy metadata clients need migration before using the opt-out. See the [client descriptor reference](docs/reference/client-descriptor.md) for bootstrap ordering, protected HTTP access, format and composition limits.
+The `__Field.extensions` introspection metadata is deprecated in favour of the descriptor; its 3.x default stays enabled. A public `@simtlix/simfinity-core/introspection` subpath exports `configureIntrospection({ fieldExtensions: false })`, which requires core as a direct dependency pinned to the facade's exact version and must execute **before importing the runtime or facades** and never removes installed metadata. Current legacy metadata clients need migration before using the opt-out. See the [client descriptor reference](docs/reference/client-descriptor.md) for bootstrap ordering, protected HTTP access, format and composition limits.
 
 Importing Simfinity initializes its global `__Field.extensions` introspection field safely whether GraphQL's fields have already been materialized or a schema already exists. Repeated module evaluation with the same GraphQL peer reuses the existing extension field and metadata types. Application field metadata is preserved.
 

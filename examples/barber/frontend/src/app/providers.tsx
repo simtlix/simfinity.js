@@ -14,7 +14,12 @@ import { AuthProvider } from "@/lib/authContext";
 const GRAPHQL_URL =
   process.env.NEXT_PUBLIC_GRAPHQL_URL || "http://localhost:4400/graphql";
 
+// The backends serve the client descriptor next to GraphQL (…/graphql-metadata) and leave
+// introspection standard, so the client reads its field and operation metadata from there.
+const DESCRIPTOR_URL = new URL("graphql-metadata", GRAPHQL_URL).href;
+
 const simfinityClientOptions = {
+  descriptorEndpoint: DESCRIPTOR_URL,
   prepareHeaders(headers: Record<string, string>) {
     if (typeof window === "undefined") return;
     const token = localStorage.getItem("barberbooking_access_token");

@@ -33,7 +33,7 @@ await client.init();
 
 Supply `descriptor: document` instead of `descriptorEndpoint` for a descriptor already loaded by your application. These options are mutually exclusive. Descriptor mode makes no introspection request and works when GraphQL introspection is disabled. An explicit metadata URL receives the same header callback; choose its origin deliberately. There is no automatic URL discovery or silent fallback after a denial. `options.fetch` supplies an HTTP implementation when needed.
 
-With neither descriptor option, `init()` keeps the existing extended introspection mode. Set `introspection: 'standard'` when the server disables `__Field.extensions`; relation/state metadata unavailable through standard introspection stays unknown. Descriptors supply authoritative operation categories, canonical endpoints and relation/input hints. Unsupported descriptor format versions fail initialization; failed reinitialization leaves the preceding metadata intact. Metadata describes schema shape, not caller permissions or adapter capabilities.
+With neither descriptor option, `init()` keeps the existing extended introspection mode, which selects the deprecated `__Field.extensions`; prefer a descriptor. Set `introspection: 'standard'` when the server disables `__Field.extensions`; relation/state metadata unavailable through standard introspection stays unknown. Descriptors supply authoritative operation categories, canonical endpoints and relation/input hints. Unsupported descriptor format versions fail initialization; failed reinitialization leaves the preceding metadata intact. Metadata describes schema shape, not caller permissions or adapter capabilities.
 
 ## Queries and views
 

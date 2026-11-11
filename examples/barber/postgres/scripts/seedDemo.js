@@ -2,7 +2,11 @@ import SimfinityClient from '@simtlix/simfinity-js-client';
 
 const endpoint = process.env.GRAPHQL_ENDPOINT || 'http://localhost:4500/graphql';
 let token;
-const client = new SimfinityClient(endpoint, { prepareHeaders(headers) { if (token) headers.Authorization = `Bearer ${token}`; } });
+// Metadata comes from the server's descriptor; its introspection carries no Simfinity extensions.
+const client = new SimfinityClient(endpoint, {
+  descriptorEndpoint: new URL('graphql-metadata', endpoint).href,
+  prepareHeaders(headers) { if (token) headers.Authorization = `Bearer ${token}`; },
+});
 await client.init();
 async function auth(operation, email, name) {
   const input = { email, password: 'demo1234', ...(name ? { name } : {}) };
