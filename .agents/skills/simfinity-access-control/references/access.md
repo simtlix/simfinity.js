@@ -9,6 +9,10 @@
 | Valid source/destination state | State machine | Permission to invoke an action |
 | Server-owned input | `readOnly` | Hidden output or permission to filter it |
 
+## Persist and evaluate grants
+
+When the application owns authorization data, model memberships, roles and grants as registered Simfinity entities. Use typed references for their subjects and targets and expose only the administration operations the application needs. Resolve effective grants from authenticated identity and current authority records, or reuse the application’s established authority service. Feed the same policy into generated `scope` callbacks, the auth plugin’s operation and field rules, and session-bound write checks. Bootstrap authority with an explicit administrative or private service path so evaluating a grant does not recursively require the product permission it supplies.
+
 ## Scope all read paths
 
 ```javascript
@@ -34,7 +38,7 @@ Resolve authorized scope IDs once per request when appropriate, then intersect s
 
 Use `createAuthPlugin(permissions, { defaultPolicy: 'DENY' })` through Envelop or its documented schema hook. Map the real names `RootQueryType`, `Mutation`, output types and aggregate result fields. Exact rules replace wildcards; compose them when both conditions are required. A custom rule returning `undefined` grants access, so return an explicit boolean or throw on denial. Missing/malformed context must not fall through to an implicit grant.
 
-`isOwner` examines the resolver parent; a root mutation's parent is not its stored target. Load/check the target with the supplied session in a controller or command. Protect server-owned tenant/owner assignments and cross-tenant references. Nested children run their lifecycle and parent-link check, but not the child root mutation's permission rule: enforce required child permissions in controllers/middleware too.
+`isOwner` examines the resolver parent; a root mutation's parent is not its stored target. Load/check the target with the supplied session in a controller or command. Protect server-owned tenant/owner assignments and check that each referenced target is eligible for the relationship in the same transaction. Existence or readability alone can be insufficient. Nested children run their lifecycle and parent-link check, but not the child root mutation's permission rule: enforce required child permissions in controllers/middleware too.
 
 Read permissions also apply to filter/sort/aggregation paths. Path checks have no record parent, so parent-dependent rules can deny a field even when a particular returned record is readable. Design field permissions and scopes deliberately instead of silently granting paths.
 

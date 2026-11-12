@@ -6,7 +6,7 @@
 | Parent and dependent children change together | One generated mutation with nested `added`/`updated`/`deleted` | Child checks and parent totals, rollback |
 | Stored invariant or derived value | Validator or controller with the supplied session | Partial updates, all exposed write paths, concurrency |
 | Fixed entity lifecycle | Enum `state` and registered state machine | Source state and action authorization separately |
-| Configurable/versioned workflows | Application workflow types, policies and explicit transition command | Workflow revision, current state and atomic write |
+| Configurable/versioned workflows | Application workflow types and policy, with a typed update or distinct transition command | Workflow revision, current state and atomic write |
 | Worker reuses an operation | Validated in-process GraphQL with actor context | Auth plugin installed, no implicit enclosing transaction |
 | Several independent generated writes atomically | Since 3.16.0, opt-in transaction mutation; for a server command, registered mutation plus lifecycle helpers and its session | Root authorization versus helper omissions, shared rollback, explicit versions |
 | Counter, lock, lease, receipt or outbox | Native model/driver in application infrastructure | Conditional atomicity, supplied session, affected rows |
@@ -18,11 +18,17 @@
 
 The schema is the common interface; Mongoose documents, SQL sessions and driver errors remain backend-specific. Native access is supported and bypasses Simfinity's lifecycle. Localize it and explicitly supply the checks its operation needs. A blanket ban on native calls can lead to worse replacements: hand-called resolvers, per-operation adapter overrides, or pipeline rewriting.
 
+## First vertical slice
+
+Pick a representative business operation with a relationship, an invariant and an access rule. Write down the inputs, result, affected records and failure behavior. Register the types and scopes, inspect the generated schema, then execute one allowed and one denied operation on the chosen engine. Include the real client or worker when its input, authorization or retry contract determines the design. Use this evidence before standardizing a repository, dispatcher or custom transport across modules.
+
+For settings with one owner, one revision and the same access and retention rules, start with typed fields or an embedded value on that owner. Record a concrete requirement for a separate record, such as independently published revisions, personal preferences, shared ownership or separate write contention. Model application-managed memberships, roles and grants with the same domain criteria and connect those records to the access policy.
+
 ## Existing applications
 
-Inventory actual entry points, generated fields, models, hooks, permissions, sessions and dependencies. Demonstrate one operation end to end before proposing a migration. Retain working scopes and specialized infrastructure rather than assuming every wrapper is defective.
+For each operation in the slice, record the callers (HTTP, browser, integrations, jobs and seeds), current owner and collection, input/result/errors, access checks, transaction owner, revision precondition and effects. Record which wire contracts must survive and which consumers can change together. Use current documents and stored records as behavior fixtures. Treat text IDs, scalar maps and storage-only types as legacy representations to evaluate against the domain graph.
 
-Classify each deviation as supported usage, an application fix, a documentation gap, or a library capability proposal. Preserve encrypted/opaque payloads where their contract requires opacity; model the business facts that actually need relations, validation or queries. Per-project workflow definitions need not become one static enum.
+Preserve encrypted/opaque payloads where their contract requires opacity; model the business facts that actually need relations, validation or queries. Per-project workflow definitions need not become one static enum.
 
 If repository guards contradict documented native boundaries, identify the conflict and propose a focused rule correction within the authorized task; do not suppress checks or conceal native code inside an adapter. Migrate one aggregate/module at a time, preserving receipts, locks, permission revocation and data compatibility. Do not drop production data or silently replace MongoDB with PostgreSQL.
 
@@ -30,13 +36,15 @@ If repository guards contradict documented native boundaries, identify the confl
 
 Reconstruct each business operation as an entity graph with real ownership and lifecycle. Try one generated parent mutation with nested `added`/`updated`/`deleted`, including several levels, before assuming that a sequence of repository calls needs a new coordinator. Keep child permissions and authoritative values in reusable policies and controllers. Do not invent an aggregate parent merely to join unrelated writes: use the transaction mutation or an authorized custom command with helpers when that is the actual operation.
 
-For each remaining gap, record the installed package/source, smallest failing operation, guarantees required, existing mechanism tried and observed limitation. Separate missing application implementation, incompatible client assumptions, unsupported adapter capabilities and an actual library gap. Read the [capability checkpoints](capabilities.md); an old issue number or a historic audit is not current API evidence.
+For each exception, record the installed package source and engine, smallest operation tried, required guarantee, observed result, chosen boundary and test. Distinguish an application modeling or integration issue, a guidance error, dependency or private-extension incompatibility, and a limitation of the supported library/adapter. Read the [capability checkpoints](capabilities.md); an old issue number or a historic audit is not current API evidence.
 
 ## Migrate a vertical slice
 
 Choose one representative aggregate and carry it through schema, real authentication, scopes/controllers, API callers, frontend, workers and seeds. Share auth/scope functions, scalars and domain policies; avoid rebuilding a generic repository, dispatcher or business middleware layer around the generated lifecycle. Keep native counters, leases, receipts and outbox infrastructure where it supplies required atomicity.
 
 If the slice needs recovery from uncertain writes, bind a durable command receipt to actor/tenant, operation and input identity, and persist it with the business change. Recover by that same identity before retrying. Distinguish the revision that the command committed from a later current revision; the UI must reconcile a stale draft, not silently replace its expected version. Preserve draft state through recovery and discard responses from an earlier session/tenant. These mechanisms are application responsibilities, not guarantees of every Simfinity mutation.
+
+During coexistence, route the affected writes through one authoritative lifecycle and session, including old routes and jobs. Preserve IDs, revisions, null versus absence, errors, events and receipt identity where callers depend on them. Verify the old and new consumers on representative persisted data before activation. If rollback would restore old code over data or receipts written by the new owner, prove that those records are still readable and writable by the old path, or define the supported recovery procedure.
 
 Verify the slice through the real API and its browser/worker consumers, including denied nested writes, concurrent edits/revocation when promised, rollback and uncertain outcomes. Distinguish a schema smoke test, a working pilot, the full migration and a deployed application. Test a performance failure with the accumulated data that triggered it; isolated green tests alone do not demonstrate that it is fixed.
 

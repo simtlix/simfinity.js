@@ -6,7 +6,7 @@
 | Field and materialized-record validation | `extensions.validations` CREATE/UPDATE rules |
 | Current ownership, context-dependent invariant, server values | Controller using context and session |
 | Fixed transition graph | Registered enum state machine plus explicit action permissions |
-| Data-driven/versioned workflow | Application model/policy and an atomic transition command |
+| Data-driven/versioned workflow | Application model/policy and an atomic update or distinct transition command |
 | Audit, totals, outbox in the same transaction | Appropriate controller/custom mutation using its session |
 | Best-effort notification after a confirmed commit | Since 3.15.0, committed controller callback |
 | Durable email/webhook delivery | Worker processing an outbox stored with the business write |
@@ -26,11 +26,21 @@ const machine = {
 simfinity.connect(null, OrderType, 'order', 'orders', controller, null, machine);
 ```
 
-`OrderType.state` must be the enum field; use string internal values matching enum names for portable behavior. Managed state is excluded from ordinary add/update inputs. The generated action is `approve_order`, with the update input and one configured source/destination. Authorize that action explicitly; a valid source state does not grant permission.
+`OrderType.state` must be the enum field; use string internal values matching enum names for portable behavior. Managed state is excluded from ordinary add/update inputs. The generated action is `approve_order`, with the same input type as `updateorder` and one configured source/destination. For a protected order with `id: GraphQLID`, send the observed version:
+
+```graphql
+mutation ApproveOrder($id: ID!, $version: RecordVersion!) {
+  approve_order(input: { id: $id, version: $version }) { id state version }
+}
+```
+
+Grant the exact action separately. Its input can carry ordinary writable fields and nested changes. If an actor may approve but has narrower edit rights, enforce the permitted patch in action policy and the transactional lifecycle, including nested changes. Test the combined input as well as the bare action.
 
 The optional `action(input, session)` callback runs after the persisted source-state check and before the managed state update. It does not receive context. Use auth, `state_changed` middleware or controllers for actor-dependent policy, remembering ordinary root middleware runs before its transaction, while operation middleware inside the generated transaction mutation runs within that transaction and can repeat. The resulting update executes validators/controllers. Do not assume an ordinary update action key identifies a state transition.
 
-Do not rebuild schemas per request to encode each user's workflow. A configurable graph with revision IDs, drafts and migration rules is application data. Keep its transition rules and concurrency checks explicit; a registered command can be the entry point, but native writes need their own lifecycle checks. Since 3.13.0, protected writes require observed record versions. A parent version does not protect direct changes to children, authority records or shared resources. Since 3.16.0, use `transitionObject(typeName, actionName, input, session, context)` for a registered state action inside an authorized server command, or the opt-in transaction mutation for independent generated writes. Neither creates a configurable workflow engine. Confirm the installed version and follow [optimistic concurrency](https://simtlix.github.io/simfinity.js/guide/concurrency.html). Same-revision derived totals use MongoDB `updateOne` without version changes or PostgreSQL `{ session, version: false }`; do not perform another versioned write to a record that a later nested entry will update.
+Do not rebuild schemas per request to encode each user's workflow. A configurable graph with revision IDs, drafts and migration rules is application data. Keep its transition rules and concurrency checks explicit. Use a typed update with controller validation when it expresses the action, or a registered command when it owns a distinct operation. An entity can use fixed actions for archive/restore alongside a revisioned business workflow. Give their states and write policies separate fields when the two lifecycles are independent.
+
+Since 3.13.0, protected writes require observed record versions. A parent version does not protect direct changes to children, authority records or shared resources. Since 3.16.0, use `transitionObject(typeName, actionName, input, session, context)` for a registered state action inside an authorized server command, or the opt-in transaction mutation for independent generated writes. Neither creates a configurable workflow engine. Confirm the installed version and follow [optimistic concurrency](https://simtlix.github.io/simfinity.js/guide/concurrency.html). Same-revision derived totals use MongoDB `updateOne` without version changes or PostgreSQL `{ session, version: false }`; do not perform another versioned write to a record that a later nested entry will update.
 
 ## Hooks and nested work
 

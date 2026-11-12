@@ -33,7 +33,7 @@ Legacy introspection remains on by default. Its opt-out must be configured via `
 
 ## Browser client (since 3.19.0)
 
-Use the default export from `@simtlix/simfinity-js-client`. Its 3.19.0 release preserves valid 1.1 JavaScript calls and ships TypeScript declarations; remove duplicate local ambient declarations when adopting those types. Install the browser client in the frontend's own package/lockfile. It has no runtime dependencies and needs neither a server package nor the descriptor builder in the browser. A client upgrade does not upgrade its server or enable missing schema features.
+Use the default export from `@simtlix/simfinity-js-client`. Its 3.19.0 release preserves valid 1.1 JavaScript calls and ships TypeScript declarations; remove duplicate local ambient declarations when adopting those types. Install the browser client in the frontend's own package/lockfile. It has no runtime dependencies and needs neither a server package nor the descriptor builder in the browser. A client upgrade leaves server capabilities determined by the deployed schema and adapter. With existing consumers, use the client's documented `fetch` option to reuse application transport when it preserves session/CSRF headers, operation identity, cancellation, error mapping and command receipts as needed. Refresh cached metadata on schema or authorization-context changes when it is served by audience. Check metadata and operations against the same served schema.
 
 ```javascript
 import SimfinityClient from '@simtlix/simfinity-js-client';

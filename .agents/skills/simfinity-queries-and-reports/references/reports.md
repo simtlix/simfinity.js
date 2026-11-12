@@ -24,6 +24,10 @@ Virtual resolvers run after the record's scope, but their own native reads do no
 
 A custom query's callback receives input/context, not a session. Root and output permissions apply, but its source reads require explicit visibility checks; it does not automatically run entity scopes/controllers. Do not expose ordinary stored CRUD through a parallel custom query or disguise a read as a retried mutation. See [named views](https://simtlix.github.io/simfinity.js/guide/queries.html#named-views) and [custom queries](https://simtlix.github.io/simfinity.js/guide/queries.html#custom-queries).
 
+## Migrate existing search or saved filters
+
+Replay representative stored filters and sorts against the generated schema on the installed engine. Include dynamic attribute keys, related targets, field permissions, count and page boundaries. A user’s saved filter can remain application data and compile to generated arguments when its paths and operators are supported. A registered view supplies a fixed predicate with typed parameters. For runtime-defined attributes, compare typed stored values or an authorized application query with the existing behavior before replacing a dynamic map path or native pipeline.
+
 ## Limits that need an explicit alternative
 
 At the 3.19.0 baseline there is no generated aggregate filter such as “customers with more than three visible bookings”. ANY is existence, not COUNT; `_aggregate` returns summaries, not a general HAVING predicate for a list. A virtual count or named view does not change that boundary.
