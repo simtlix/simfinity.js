@@ -116,6 +116,8 @@ For protected writes, `VERSION_CONFLICT` and `VERSION_EXHAUSTED` roll back the o
 
 The optional [committed controller callbacks](./controllers#after-commit-callbacks) run only after a confirmed commit, once for each completed lifecycle operation in the successful attempt, serially and before returning. Their failures are reported independently and do not fail the write. A cleanup failure after commit retains its existing rejection behavior while the confirmed callbacks still run. Calls that borrow an application-owned native transaction do not dispatch these callbacks automatically; registered mutations and SQL's public `withTransaction()` are observed owners.
 
+Retried attempts receive fresh clones of GraphQL input objects, lists, and dates, while enum values keep their identity.
+
 ## Run several mutations in one transaction
 
 ::: info Available since 3.16.0
@@ -315,5 +317,7 @@ simfinity.registerMutation(
 ```
 
 Every write that must be atomic has to happen inside that transaction. It commits on its own, independently of the custom mutation's transaction, so work done after it commits is not rolled back when the custom mutation fails later. Calling `saveObject()` without a session also works, but each call is then atomic only by itself.
+
+`updateObject()`, `deleteObject()` and `transitionObject()` use the model's connection the same way as `saveObject()`.
 
 Continue with [validation](./validation) to reject invalid data and [authorization](./authorization) to control who can perform an operation.

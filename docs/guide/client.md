@@ -10,7 +10,7 @@ description: Browser and Node HTTP client with schema metadata, queries and mana
 :::
 
 ```sh
-npm install @simtlix/simfinity-js-client@3.19.0
+npm install @simtlix/simfinity-js-client
 ```
 
 The client runs in browsers and Node.js >=18.18.0 and uses HTTP without any dependency on a database driver or Simfinity server package. It retains the default `SimfinityClient` export and the existing 1.1 call signatures. TypeScript declarations ship in the package.

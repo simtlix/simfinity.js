@@ -78,7 +78,7 @@ Neither mode drops source data, alters existing columns, runs application data m
 
 ## Native Model and Session APIs
 
-`getModel(Type)` returns a `PostgresModel` with `findById`, `find`, `create`, `update`, and `delete`. Records are plain objects whose `id` and `_id` are the same UUID. Native methods do not provide Mongoose query chaining, `.lean()`, population, middleware, or aggregation pipelines. Native writes bypass GraphQL input coercion, scopes, authorization, validators, and controllers, and use storage names for reference fields.
+`getModel(Type)` returns a `PostgresModel` with `findById`, `find`, `create`, `update`, and `delete`. `find(args, { session })` accepts the generated list query's filters, sorting, and pagination. Records are plain objects whose `id` and `_id` are the same UUID. Native methods do not provide Mongoose query chaining, `.lean()`, population, middleware, or aggregation pipelines. Native writes bypass GraphQL input coercion, scopes, authorization, validators, and controllers, and use storage names for reference fields.
 
 Use the runtime creation pipeline when validators, controllers, nested-write orchestration, and one shared transaction matter. A direct `saveObject()` call skips GraphQL coercion, field authorization, query scope and the root record's global middleware. Nested collection children still run their type's middleware with the supplied context. So the programmatic caller must validate and authorize its own request boundary, and pass a context that its middleware accepts. Since 3.16.0, `updateObject()`, `deleteObject()` and `transitionObject()` run the update, delete and state action lifecycle the same way, on the same `postgres` instance and `withTransaction` session; see [update, delete and transition from code](./server-side-operations#update-delete-and-transition-from-code):
 
@@ -142,7 +142,7 @@ Read the [detailed PostgreSQL storage and compatibility reference](../postgresql
 MCP is a separate package so PostgreSQL and core do not install its SDK chain. Install both the MCP package and SDK only when the application exposes tools:
 
 ```sh
-npm install @simtlix/simfinity-mcp@3.12.0 \
+npm install @simtlix/simfinity-mcp \
   @modelcontextprotocol/sdk@^1.31.0
 ```
 

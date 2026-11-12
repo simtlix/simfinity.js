@@ -23,6 +23,7 @@
     "test:security": "npm audit"
   },
   "license": "Apache-2.0",
+  "homepage": "https://simtlix.github.io/simfinity.js/guide/linting.html",
   "repository": {
     "type": "git",
     "url": "https://github.com/simtlix/simfinity.js",

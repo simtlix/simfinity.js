@@ -1,5 +1,15 @@
 # @simtlix/eslint-plugin-simfinity
 
+[![npm version](https://img.shields.io/npm/v/@simtlix/eslint-plugin-simfinity.svg)](https://www.npmjs.com/package/@simtlix/eslint-plugin-simfinity)
+[![Node.js](https://img.shields.io/node/v/@simtlix/eslint-plugin-simfinity.svg)](https://nodejs.org/)
+[![License](https://img.shields.io/npm/l/@simtlix/eslint-plugin-simfinity.svg)](https://github.com/simtlix/simfinity.js/blob/master/LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-simtlix.github.io-2563eb.svg)](https://simtlix.github.io/simfinity.js/)
+
+**[Documentation](https://simtlix.github.io/simfinity.js/)** ·
+**[Linting guide](https://simtlix.github.io/simfinity.js/guide/linting.html)** ·
+**[Usage anti-patterns](https://simtlix.github.io/simfinity.js/guide/anti-patterns.html)** ·
+**[Releases](https://github.com/simtlix/simfinity.js/releases)**
+
 Optional editor/CI checks for **Simfinity 3.8.0**, shared by MongoDB and PostgreSQL.
 Version 0.5.0 provides fourteen error rules and one opt-in modeling advice rule.
 It does not execute application

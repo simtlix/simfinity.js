@@ -1,13 +1,26 @@
+[![Simfinity.js — Define once. Build beyond. GraphQL, MongoDB, PostgreSQL, and optional MCP.](https://raw.githubusercontent.com/simtlix/simfinity.js/master/.github/assets/readme-cover.png)](https://simtlix.github.io/simfinity.js/)
+
 # @simtlix/simfinity-js-client
 
-Introspection-driven GraphQL client for [simfinity-js](https://github.com/simtlix/simfinity.js) APIs. It discovers your schema at runtime via introspection and exposes a chainable query builder, CRUD helpers, aggregate queries, state-machine transitions, schema metadata access, mutation input transformation, and more — no code generation required.
+[![npm version](https://img.shields.io/npm/v/@simtlix/simfinity-js-client.svg)](https://www.npmjs.com/package/@simtlix/simfinity-js-client)
+[![Node.js](https://img.shields.io/node/v/@simtlix/simfinity-js-client.svg)](https://nodejs.org/)
+[![License](https://img.shields.io/npm/l/@simtlix/simfinity-js-client.svg)](https://github.com/simtlix/simfinity.js/blob/master/LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-simtlix.github.io-2563eb.svg)](https://simtlix.github.io/simfinity.js/)
+
+Introspection-driven GraphQL client for [Simfinity.js](https://simtlix.github.io/simfinity.js/) APIs. It discovers your schema at runtime via introspection and exposes a chainable query builder, CRUD helpers, aggregate queries, state-machine transitions, schema metadata access, mutation input transformation, and more — no code generation required.
 
 > Since 3.19.0, the client is maintained in the Simfinity monorepo and follows its aligned release version. Existing valid 1.1 JavaScript calls remain supported.
+
+**[Documentation](https://simtlix.github.io/simfinity.js/)** ·
+**[JavaScript client guide](https://simtlix.github.io/simfinity.js/guide/client.html)** ·
+**[Client descriptor](https://simtlix.github.io/simfinity.js/reference/client-descriptor.html)** ·
+**[Example app](https://simtlix.github.io/simfinity.js/resources/barber.html)** ·
+**[Releases](https://github.com/simtlix/simfinity.js/releases)**
 
 ## Installation
 
 ```bash
-npm install @simtlix/simfinity-js-client@3.19.0
+npm install @simtlix/simfinity-js-client
 ```
 
 ## Quick Start
@@ -482,7 +495,7 @@ client.getAvailableTransitions('season');
 
 ## Examples
 
-See [`examples/demo.js`](examples/demo.js) for a comprehensive walkthrough covering all features: schema discovery, filtering, joins, pagination, sorting, CRUD, state machine transitions, aggregates, raw queries, schema metadata, selection set building, entity resolution, input transformation, collection deltas, parent queries, FK search, and response extensions.
+See [`examples/demo.js`](https://github.com/simtlix/simfinity.js/blob/master/packages/client/examples/demo.js) for a comprehensive walkthrough covering all features: schema discovery, filtering, joins, pagination, sorting, CRUD, state machine transitions, aggregates, raw queries, schema metadata, selection set building, entity resolution, input transformation, collection deltas, parent queries, FK search, and response extensions.
 
 ```bash
 GRAPHQL_ENDPOINT=http://localhost:3000/graphql npm run demo
@@ -490,7 +503,7 @@ GRAPHQL_ENDPOINT=http://localhost:3000/graphql npm run demo
 
 ## License
 
-[Apache-2.0](LICENSE)
+[Apache-2.0](https://github.com/simtlix/simfinity.js/blob/master/LICENSE)
 
 ## Source provenance
 
@@ -498,7 +511,7 @@ Imported from simtlix/simfinity-js-client commit `32d9c5bf7264cd3ecddcd3441bffea
 
 ## Monorepo additions
 
-See the [JavaScript client guide](https://simtlix.github.io/simfinity.js/guide/client) for the complete current API and both-engine setup. The client remains dependency-free and browser compatible.
+See the [JavaScript client guide](https://simtlix.github.io/simfinity.js/guide/client.html) for the complete current API and both-engine setup. The client remains dependency-free and browser compatible.
 
 - Constructor options add mutually exclusive `descriptor` and `descriptorEndpoint`, injected `fetch`, `introspection: 'extended' | 'standard'`, and asynchronous `prepareHeaders`. Descriptor mode never introspects; use it when the server disables introspection. `getDescriptor()` returns the loaded descriptor or null.
 - `query(name, args?, fields?)` executes exact query roots, including scalar and abstract outputs. `findView(name, params?)` returns a normal list builder, while `getViews(typeName?)` lists descriptor-classified views. Canonical lists are not replaced by views.

@@ -36,6 +36,7 @@ Shared examples can import the selected instance from [your application’s runt
 | Set the maximum query page size and reference frames | [configureQueryLimits](#configurequerylimits) | Process-wide configuration |
 | Cap nested collection operations and transaction operations | [configureMutationLimits](#configuremutationlimits) | Process-wide configuration |
 | Report failures of committed controller callbacks | [configureAfterCommit](#configureaftercommit) | Per-runtime configuration |
+| Write a custom database adapter | [Custom database adapters](#custom-database-adapters) | Adapter contract for `createRuntime()` |
 | Index a PostgreSQL column for case-insensitive filters | [caseFoldExpression](#casefoldexpression) | SQL expression text |
 
 ## createMongoAdapter
@@ -356,6 +357,22 @@ Available since 3.16.0. They run the lifecycle of the generated update, delete a
 - **Limits.** `updateObject()` and `transitionObject()` check their nested entries against `maxNestedOperations` before the transaction starts, with the live limit (`null` is no limit), and items for a collection without a `connectionField` fail with `INVALID_MODEL` (500) before anything is written. Inside a transaction mutation they use the attempt's remaining joint budget. `saveObject()` keeps no limit outside a transaction mutation.
 - **Failures.** An update or transition of a missing ID throws `NOT_VALID_ID` (404), a stale version `VERSION_CONFLICT` (409), a transition from another state `BAD_REQUEST` (400), too many nested entries `NESTED_OPERATIONS_EXCEEDED` (400), and a present but invalid version `INVALID_VERSION` (400).
 
+## Custom database adapters
+
+For adapter authors. `createRuntime(adapter)` binds one adapter, which supplies model creation, identifiers, transactions, record reads and writes, queries, counts, aggregations, and inverse collection reads. The `DatabaseAdapter`, `Runtime`, controller, middleware, registration, and state-machine interfaces are exported in the TypeScript declarations of `@simtlix/simfinity-core`.
+
+An adapter can also define these optional members:
+
+| Member | Contract |
+| --- | --- |
+| `getByIds(model, ids, { context })` | Returns the records it finds in `getById` shape and any order. The runtime then batches generated single-reference reads per request and type, matching records by `castId`, splitting batches at `maxPageSize`, and reading an ID with `getById` when a batch read fails or when `castId` would normalize or reject it. A copy that overrides `getById` still inherits the base `getByIds` |
+| `findChildrenBatch(model, type, connectionField, parentIds, args, { context })`, `batchesChildren(model, type, connectionField)` | The batch form of `findChildren`, described under [batched collection reads](../guide/relationships#batched-collection-reads). Records should show their parent under the connection field, or not show one. Assign `undefined` to opt out: deleting the member does nothing for a class whose method is on the prototype |
+| `stateValue` | Define it when the persisted enum representation differs from GraphQL enum names |
+| `queryFeatures` | The filter operators and query capabilities the adapter compiles. `createRuntime()` reads it once. Unknown operators on actual filter predicates fail with `INVALID_FILTER_OPERATOR` (400) before the adapter is called. An adapter that receives the text operators must apply their rules: literal values, a `String` field or list, and `INVALID_FILTER_VALUE` (400) for a value that is not a string or contains U+0000 |
+| `writeFeatures` | Write capabilities such as `optimisticConcurrency`, with the contract in the [concurrency guide](../guide/concurrency#custom-operations-adapters-and-native-writers). `createRuntime()` snapshots and freezes the declaration |
+
+`describeModels([{ gqltype, endpoint }])` discovers the persistent entity graph from `GraphQLObjectType` definitions and `extensions.relation`; types registered with `endpoint: false` are still included when referenced. `createQueryPlan` and `resolveModelPath` turn Simfinity filter, sort, pagination, and aggregation inputs into a driver-neutral plan resolved against that metadata. See [SQL core and plugins](../guide/sql-plugins) for the relational runtime built on them.
+
 ## assertTransactionModels
 
 For adapter authors. `DatabaseAdapter.assertTransactionModels?(models)` is optional and required only to enable the `transaction` option of `createSchema()`: without it, `createSchema()` throws `TRANSACTION_UNSUPPORTED` (500, ``The database adapter does not support generated transactions``) when the option is set. Existing adapters keep working for every other API.
@@ -394,6 +411,8 @@ Neither core nor the database facades re-export the descriptor functions. Direct
 core imports require an exact matching core dependency. See the [descriptor
 reference](/reference/client-descriptor) for the 3.15.0 API and limits.
 
+`getRegistrations()` joins `getModel`, `getType` and `getInputType` for runtime inspection. The package root of `@simtlix/simfinity-core` also exports the GraphQL types `QLOperator`, `QLQuantifier`, `QLSort` and `QLValue`.
+
 ## PostgreSQL initialization and transactions
 
 ```javascript
@@ -410,6 +429,42 @@ await postgres.initializeDatabase({ mode: 'create' });
 `initializeDatabase({ mode: 'create' | 'validate' })` must be awaited after `createSchema()` and before operations are served. Create mode adds missing generated objects without altering incompatible existing objects; it locks no table when nothing is missing. Otherwise it locks the tables of roots whose keys it rebuilds, and its DDL locks the tables it changes and the existing tables that a new foreign key references. Validate mode performs no DDL. Both detect catalog drift and leave schema migrations to the operator. Other modes fail with `INVALID_INITIALIZATION_MODE` (400). After `preventCreatingCollection(true)`, a missing or false mode validates and every other mode except `validate` fails with `DATABASE_CREATION_DISABLED` (409) instead. A rejected request leaves readiness as it was; a ready instance keeps serving while it is initialized again, and any failure of the initialization started last makes operations fail with `DATABASE_NOT_INITIALIZED` (503) until a later one succeeds. `postgres.compileDatabaseSchema()` returns the instance's DDL for review or export without touching storage, and `postgres.describeDatabase()` its physical description. The caller owns `pool` and closes it with `await pool.end()`.
 
 `postgres.withTransaction(session, callback)` joins an active supplied PostgreSQL session or owns a new repeatable-read transaction when `session` is null. The callback receives a `PostgresSession` with `query()`, `inTransaction()`, and a native `client` valid for the callback lifetime. Confirmed serialization failures and deadlocks are retried up to five times for owned transactions, each retry after a random delay of less than 10, 20, 40, 80 and 160 ms. Errors the callback throws propagate unchanged, and PostgreSQL errors are mapped as described in [PostgreSQL database errors](/reference/errors#postgresql-database-errors). A statement that fails aborts an owned transaction, even when the callback catches its error, and the call then fails with `DATABASE_ERROR` (500); roll back to a savepoint to continue after an expected error. See the [PostgreSQL quick start](/guide/postgresql) for a complete server and native API example.
+
+### Module-level PostgreSQL functions
+
+A default module instance is available when a singleton facade is preferable. Configure it once, then use the named exports:
+
+```javascript
+import {
+  configure,
+  connect,
+  createSchema,
+  initializeDatabase,
+} from '@simtlix/simfinity-postgres';
+
+configure({ pool, schema: 'library' });
+connect(null, BookType, 'book', 'books');
+const schema = createSchema();
+await initializeDatabase({ mode: 'validate' });
+```
+
+### Low-level schema API
+
+The schema functions are also available independently of a runtime, to review or export the generated DDL:
+
+```javascript
+import {
+  compileDatabaseSchema,
+  describeDatabase,
+  initializeDatabase,
+} from '@simtlix/simfinity-postgres';
+
+const description = describeDatabase([{ gqltype: BookType }], { schema: 'library' });
+const statements = compileDatabaseSchema(description);
+await initializeDatabase(pool, description, { mode: 'validate' });
+```
+
+`describeDatabase(registrations, options)` takes the registrations as `{ gqltype }` objects. The low-level `initializeDatabase(pool, description, { mode })` creates or validates storage transactionally and never closes the pool.
 
 ### PostgreSQL options
 
