@@ -1,6 +1,6 @@
 {
   "name": "@simtlix/simfinity-postgres",
-  "version": "3.19.0",
+  "version": "3.19.1",
   "description": "PostgreSQL GraphQL runtime and schema generation with foreign keys for Simfinity",
   "type": "module",
   "main": "./src/index.js",
@@ -28,8 +28,8 @@
     "directory": "packages/postgres"
   },
   "dependencies": {
-    "@simtlix/simfinity-core": "3.19.0",
-    "@simtlix/simfinity-sql": "3.19.0",
+    "@simtlix/simfinity-core": "3.19.1",
+    "@simtlix/simfinity-sql": "3.19.1",
     "pg": "^8.16.3"
   },
   "peerDependencies": {

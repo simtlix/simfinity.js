@@ -1,6 +1,6 @@
 {
   "name": "@simtlix/simfinity-descriptor",
-  "version": "3.19.0",
+  "version": "3.19.1",
   "description": "Schema-owned client metadata and an explicitly authorized HTTP endpoint for Simfinity",
   "type": "module",
   "main": "./src/index.js",
@@ -28,7 +28,7 @@
     "directory": "packages/descriptor"
   },
   "dependencies": {
-    "@simtlix/simfinity-core": "3.19.0"
+    "@simtlix/simfinity-core": "3.19.1"
   },
   "peerDependencies": {
     "graphql": "^16.11.0"
