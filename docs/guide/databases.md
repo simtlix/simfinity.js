@@ -1,6 +1,6 @@
 ---
 title: Choose a database
-description: MongoDB and PostgreSQL editions of Simfinity, shared GraphQL APIs, storage differences, and downloadable v3.11.0 starters.
+description: MongoDB and PostgreSQL editions of Simfinity, shared GraphQL APIs, storage differences, and downloadable v3.19.1 starters.
 ---
 
 # Choose a database
@@ -54,19 +54,19 @@ The optional [MongoDB transactional reference integrity](./mongodb-integrity) mo
 
 ## Download the starters
 
-[Download both v3.11.0 starters](/releases/simfinity-3.11.0-starters.zip). Extract the ZIP and choose one application:
+[Download both v3.19.1 starters](/releases/simfinity-3.19.1-starters.zip). Extract the ZIP and choose one application:
 
 ::: code-group
 
 ```sh [MongoDB]
-cd simfinity-3.11.0-starters/mongodb
+cd simfinity-3.19.1-starters/mongodb
 npm install
 # Configure MongoDB using the MongoDB quick start.
 npm start
 ```
 
 ```sh [PostgreSQL]
-cd simfinity-3.11.0-starters/postgres
+cd simfinity-3.19.1-starters/postgres
 npm install
 # Set DATABASE_URL using the PostgreSQL quick start.
 npm start
@@ -74,19 +74,19 @@ npm start
 
 :::
 
-These starters require Node.js 22.15.0 or newer and pin all Simfinity packages to 3.11.0 on npm. Upgrade all their Simfinity dependencies together to 3.15.0 before using named views, optimistic concurrency, collection frames, committed controller callbacks or client descriptors. Their manifests override `@graphql-tools/utils` to the patched `^12.0.1` range for Yoga; retain that override when copying the starter setup. Both manifests declare `@simtlix/simfinity-core` directly for shared helpers. MongoDB keeps reference integrity off by default; enable the [transactional adapter](./mongodb-integrity) when needed. PostgreSQL installs neither Mongoose nor MCP by default. For an existing application, review the [upgrade notes](../resources/compatibility#upgrade-to-3-15-0) before updating its dependencies.
+These starters require Node.js 22.15.0 or newer and pin all Simfinity packages to 3.19.1 on npm. Their manifests override `@graphql-tools/utils` to the patched `^12.0.1` range for Yoga; retain that override when copying the starter setup. Both manifests declare `@simtlix/simfinity-core` directly for shared helpers. MongoDB keeps reference integrity off by default; enable the [transactional adapter](./mongodb-integrity) when needed. PostgreSQL installs neither Mongoose nor MCP by default. For an existing application, review the [upgrade notes](../resources/compatibility) before updating its dependencies.
 
 The MongoDB example uses embedded seasons. The PostgreSQL example uses a one-to-many relation to demonstrate real generated FKs. That example choice accounts for their different nested inputs; both adapters support both relationship shapes. Use the operation shown in the corresponding quick start.
 
 ### Verify the download
 
-Download the [ZIP SHA-256 checksum](/releases/simfinity-3.11.0-starters.zip.sha256.txt) beside the ZIP and check it before extraction:
+Download the [ZIP SHA-256 checksum](/releases/simfinity-3.19.1-starters.zip.sha256.txt) beside the ZIP and check it before extraction:
 
 ```sh
-shasum -a 256 -c simfinity-3.11.0-starters.zip.sha256.txt
+shasum -a 256 -c simfinity-3.19.1-starters.zip.sha256.txt
 ```
 
-The [v3.15.0 GitHub release](https://github.com/simtlix/simfinity.js/releases/tag/v3.15.0) contains the tagged source, package archives and integrity manifest. Keep installed Simfinity packages at the same version.
+The [v3.19.1 GitHub release](https://github.com/simtlix/simfinity.js/releases/tag/v3.19.1) contains the tagged source, package archives and integrity manifest. Keep installed Simfinity packages at the same version.
 
 ## Runtime setup for shared examples
 
@@ -117,6 +117,8 @@ The MongoDB facade registers its models on your application's default Mongoose i
 The quick starts include their connection and runtime setup inline. When splitting them into modules, move that setup into `runtime.js`, keep schema registration in `schema.js`, and export `schema` only after initialization. Helper-only imports such as validators, scalars, errors, and auth come directly from `@simtlix/simfinity-core`; MCP functions come from `@simtlix/simfinity-mcp`.
 
 ## Earlier downloads
+
+The [v3.11.0 starters](/releases/simfinity-3.11.0-starters.zip) ([checksum](/releases/simfinity-3.11.0-starters.zip.sha256.txt)) remain available with their original dependency pins.
 
 The [v3.8.0 starters](/releases/simfinity-3.8.0-starters.zip) ([checksum](/releases/simfinity-3.8.0-starters.zip.sha256.txt)) remain available with their original dependency pins.
 

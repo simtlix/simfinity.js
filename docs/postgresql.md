@@ -13,7 +13,7 @@ The intended backend choice is permanent application configuration. There is no 
 
 ## Packages and local setup
 
-Use the [v3.11.0 starters](guide/databases.md#download-the-starters) and run `npm install` in the `postgres` folder. For library development, `npm ci` at the repository root installs the workspaces. Packages are distributed together:
+Use the [v3.19.1 starters](guide/databases.md#download-the-starters) and run `npm install` in the `postgres` folder. For library development, `npm ci` at the repository root installs the workspaces. Packages are distributed together:
 
 | Package | Current exports and dependencies |
 | --- | --- |

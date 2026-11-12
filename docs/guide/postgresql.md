@@ -13,10 +13,10 @@ Version 3.3.0 also exposes a [driver-free SQL core and PostgreSQL plugin](./sql-
 
 ## Download and install
 
-[Download the v3.11.0 starters](/releases/simfinity-3.11.0-starters.zip), extract them, and install the PostgreSQL application from npm:
+[Download the v3.19.1 starters](/releases/simfinity-3.19.1-starters.zip), extract them, and install the PostgreSQL application from npm:
 
 ```sh
-cd simfinity-3.11.0-starters/postgres
+cd simfinity-3.19.1-starters/postgres
 npm install
 ```
 
