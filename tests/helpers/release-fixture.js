@@ -29,3 +29,18 @@ export const writeReleaseFixture = (root) => {
   writeFileSync(join(root, 'package-lock.json'), `${JSON.stringify(lock, null, 2)}\n`.replaceAll('\n', '\r\n'));
   return root;
 };
+
+/** Starter sources for a release fixture; the manifests still pin the previous release. */
+export const writeStarterFixture = (root) => {
+  const write = (path, contents) => {
+    mkdirSync(join(root, path, '..'), { recursive: true });
+    writeFileSync(join(root, path), contents);
+  };
+  const manifest = (name, dependencies) => `${JSON.stringify({ name, private: true, type: 'module', dependencies }, null, 2)}\n`;
+  write('docs/starters/package.mongodb.json', manifest('mongodb-starter', { '@simtlix/simfinity-core': '0.1.0', '@simtlix/simfinity-js': '0.1.0', graphql: '^16.11.0' }));
+  write('docs/starters/package.postgres.json', manifest('postgresql-starter', { '@simtlix/simfinity-postgres': '0.1.0', '@simtlix/simfinity-sql': '0.1.0', pg: '^8.16.3' }));
+  write('docs/starters/README.md', '# Simfinity {{version}} starters\n\nRelease: https://example.test/releases/tag/v{{version}}\n');
+  for (const name of ['schema.js', 'server.js', 'mcp.js']) write(`docs/public/starter/${name}`, `export const file = '${name}';\n`);
+  write('docs/examples/postgresql-server.js', 'export const file = \'postgresql-server.js\';\n');
+  return root;
+};

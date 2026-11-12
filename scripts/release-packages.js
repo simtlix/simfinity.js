@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertStarters, starterChanges } from './build-starters.js';
 import { isEntryPoint } from './cli.js';
 
 // Dependencies precede every consumer in both archive manifests and publication.
@@ -44,6 +45,9 @@ const readInputs = (root) => {
   return { rootManifest, entries, lock };
 };
 const runtimeInternal = (manifest) => Object.fromEntries(Object.entries({ ...manifest.dependencies, ...manifest.optionalDependencies }).filter(([name]) => names.has(name)));
+// The site's download links name the release, so the starters are part of it. A source
+// tree without them, such as a test fixture, has nothing to align.
+const hasStarters = (root) => existsSync(join(root, 'docs/starters'));
 const updateInternal = (dependencies, version) => {
   for (const name of Object.keys(dependencies || {})) if (names.has(name)) dependencies[name] = version;
 };
@@ -78,10 +82,14 @@ export const readRelease = (root) => {
     }
     precedingPackages.add(name);
   }
+  if (hasStarters(root)) assertStarters(root, version);
   return { version, packages: entries.map(({ directory, name, manifest }) => ({ directory, name, version, dependencies: manifest.dependencies || {} })) };
 };
 
-/** Update every package and internal lock entry without installing or contacting a registry. */
+/**
+ * Update every package and internal lock entry and rebuild the downloadable starters,
+ * without installing or contacting a registry.
+ */
 export const setReleaseVersion = (root, version) => {
   assertVersion(version);
   const { rootManifest, entries, lock } = readInputs(root);
@@ -112,15 +120,21 @@ export const setReleaseVersion = (root, version) => {
   changes.set(join(root, 'package-lock.json'), lock);
   const info = join(root, 'packages/descriptor/src/package-info.js');
   if (existsSync(info)) changes.set(info, packageInfoSource(version));
-  const originals = new Map([...changes.keys()].map((path) => [path, readFileSync(path, 'utf8')]));
+  if (hasStarters(root)) for (const [path, contents] of starterChanges(root, version)) changes.set(path, contents);
+  // A release adds its starter archive, so a path may not exist yet: null means remove on rollback.
+  const originals = new Map([...changes.keys()].map((path) => [path, existsSync(path) ? readFileSync(path) : null]));
   try {
     for (const [path, value] of changes) {
-      const newline = originals.get(path).includes('\r\n') ? '\r\n' : '\n';
-      writeFileSync(path, typeof value === 'string' ? value : `${JSON.stringify(value, null, 2)}\n`.replaceAll('\n', newline));
+      const newline = originals.get(path)?.includes('\r\n') ? '\r\n' : '\n';
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, typeof value === 'string' || Buffer.isBuffer(value) ? value : `${JSON.stringify(value, null, 2)}\n`.replaceAll('\n', newline));
     }
     return readRelease(root);
   } catch (error) {
-    for (const [path, original] of originals) writeFileSync(path, original);
+    for (const [path, original] of originals) {
+      if (original === null) rmSync(path, { force: true });
+      else writeFileSync(path, original);
+    }
     throw error;
   }
 };
