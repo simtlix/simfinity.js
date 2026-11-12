@@ -32,21 +32,21 @@ Version 3.3.0 also exposes a [driver-free SQL core and PostgreSQL plugin](./sql-
 
 ## Install from npm
 
-Both adapters are released at **v3.15.0**. Choose one package in your application:
+Both adapters are released together under the same version. Choose one package in your application:
 
 ::: code-group
 
 ```sh [MongoDB]
-npm install @simtlix/simfinity-js@3.16.0 graphql@^16.11.0 mongoose@^8.24.2
+npm install @simtlix/simfinity-js graphql@^16.11.0 mongoose@^8.24.2
 ```
 
 ```sh [PostgreSQL]
-npm install @simtlix/simfinity-postgres@3.16.0 graphql@^16.11.0 pg@^8.16.3
+npm install @simtlix/simfinity-postgres graphql@^16.11.0 pg@^8.16.3
 ```
 
 :::
 
-Shared core dependencies install automatically. Add `@simtlix/simfinity-mcp@3.16.0` only when your PostgreSQL application exposes MCP tools; transport factories also require `@modelcontextprotocol/sdk`. See the [MCP guide](./mcp).
+Shared core dependencies install automatically. `graphql`, and `mongoose` on MongoDB, are peer dependencies: Simfinity uses your application's copies, and npm reports an out-of-range version as a peer conflict instead of installing a second copy. Add `@simtlix/simfinity-mcp`, at the same version, only when your PostgreSQL application exposes MCP tools; transport factories also require `@modelcontextprotocol/sdk`. See the [MCP guide](./mcp).
 
 <span id="download-the-preview"></span>
 
@@ -136,7 +136,7 @@ The [v3.5.2 starters](/releases/simfinity-3.5.2-starters.zip) ([checksum](/relea
 
 The [v3.3.0 starters](/releases/simfinity-3.3.0-starters.zip) ([checksum](/releases/simfinity-3.3.0-starters.zip.sha256.txt)) and [v3.2.0 starters](/releases/simfinity-3.2.0-starters.zip) ([checksum](/releases/simfinity-3.2.0-starters.zip.sha256.txt)) remain available as historical snapshots with their original dependency pins. New applications should use the current starters above.
 
-For an application using the published 3.0.1 MongoDB release, the [original MongoDB starter](/simfinity-series-starter.zip) remains available. It pins `@simtlix/simfinity-js` to `3.0.1` and supports the MongoDB quick start's operations. The wider API reference documents v3.15.0 and may include APIs or fixes absent from 3.0.1.
+For an application using the published 3.0.1 MongoDB release, the [original MongoDB starter](/simfinity-series-starter.zip) remains available. It pins `@simtlix/simfinity-js` to `3.0.1` and supports the MongoDB quick start's operations. The wider API reference documents the current release and may include APIs or fixes absent from 3.0.1.
 
 Check [compatibility and releases](../resources/compatibility) before upgrading an existing application. The [Series Sample Project](https://github.com/simtlix/series-sample) is a separate MongoDB application; it is not a PostgreSQL starter.
 

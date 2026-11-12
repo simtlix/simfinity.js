@@ -21,6 +21,7 @@
     "node": ">=18.18.0"
   },
   "license": "Apache-2.0",
+  "homepage": "https://simtlix.github.io/simfinity.js/guide/postgresql.html",
   "repository": {
     "type": "git",
     "url": "https://github.com/simtlix/simfinity.js",

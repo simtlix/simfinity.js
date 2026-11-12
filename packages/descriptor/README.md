@@ -1,40 +1,74 @@
+[![Simfinity.js — Define once. Build beyond. GraphQL, MongoDB, PostgreSQL, and optional MCP.](https://raw.githubusercontent.com/simtlix/simfinity.js/master/.github/assets/readme-cover.png)](https://simtlix.github.io/simfinity.js/)
+
 # @simtlix/simfinity-descriptor
 
-Optional schema-owned JSON client metadata for Simfinity. Depends on the exact
-matching version of `@simtlix/simfinity-core`; supports both database facades.
-Available since 3.15.0. Install it
-as a direct application dependency at the version of your Simfinity runtime.
+[![npm version](https://img.shields.io/npm/v/@simtlix/simfinity-descriptor.svg)](https://www.npmjs.com/package/@simtlix/simfinity-descriptor)
+[![Node.js](https://img.shields.io/node/v/@simtlix/simfinity-descriptor.svg)](https://nodejs.org/)
+[![License](https://img.shields.io/npm/l/@simtlix/simfinity-descriptor.svg)](https://github.com/simtlix/simfinity.js/blob/master/LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-simtlix.github.io-2563eb.svg)](https://simtlix.github.io/simfinity.js/)
+
+**Client metadata for a [Simfinity.js](https://simtlix.github.io/simfinity.js/) schema, as JSON, with an explicitly authorized HTTP endpoint to serve it.** A descriptor is immutable JSON metadata for the exact schema that `createSchema()` returned. It is built without querying a database and can be served even when introspection queries are disabled. It is optional and works with both database packages.
+
+**[Documentation](https://simtlix.github.io/simfinity.js/)** ·
+**[Client descriptor reference](https://simtlix.github.io/simfinity.js/reference/client-descriptor.html)** ·
+**[JavaScript client](https://simtlix.github.io/simfinity.js/guide/client.html)** ·
+**[Releases](https://github.com/simtlix/simfinity.js/releases)**
+
+## Install
+
+```sh
+npm install @simtlix/simfinity-descriptor
+```
+
+Install it as a direct dependency at the same version as your Simfinity database package. It requires Node.js 18.18 or later and `graphql@^16.11.0`.
+
+## Quick start
 
 ```javascript
 import { buildClientDescriptor, createClientDescriptorHandler } from '@simtlix/simfinity-descriptor';
+
 const descriptor = buildClientDescriptor(schema);
 app.all('/graphql-metadata', createClientDescriptorHandler(schema, { authorize: 'public' }));
 ```
 
-The application supplies its exact `createSchema()` result and explicitly chooses
-public access or an authorization function. Importing this package does not patch
-GraphQL introspection. See the [client descriptor guide](https://simtlix.github.io/simfinity.js/reference/client-descriptor.html)
-for gated access, root input hints, early opt-out and client migration limits.
+- Pass the exact schema returned by `createSchema()`. Clones and composed schemas do not inherit ownership.
+- Choose access explicitly: `authorize: 'public'` or your own authorization function.
+- Finish your declarations before the first build. Create a new schema and handler when the metadata changes.
 
-`rootInputUsage` reports whether a field is required or optional in the actual
-generated root add/update input. Nested collection inputs can omit the inverse
-reference supplied by their parent. Descriptors do not serialize arbitrary
-validators or determine dynamic permissions. Finish declarations before the first
-build; create a new schema and handler for metadata changes. Clones and composed
-schemas do not inherit ownership.
+Importing this package does not patch GraphQL introspection. A descriptor does not evaluate dynamic permissions or serialize arbitrary validators.
 
-Core remains dependency-free; structural HTTP declarations need no Node ambient
-types. Directly importing `@simtlix/simfinity-core/introspection` requires core as
-a direct dependency pinned to the facade's version. `__Field.extensions` is
-deprecated in favour of this descriptor; its 3.x default remains enabled, and
-clients selecting it must migrate before using the early opt-out.
+The [`@simtlix/simfinity-js-client`](https://www.npmjs.com/package/@simtlix/simfinity-js-client) package reads this endpoint through its `descriptorEndpoint` option.
 
-Since 3.16.0, a generated transaction field is described with
-`operation: 'transaction'` and `type: null`, with its actual arguments, result
-type and reachable `@oneOf` input. Format version 1 is unchanged; clients that
-handle operation kinds exhaustively must accept `transaction`. User-registered
-mutations retain `customMutation`.
+## Documentation
 
-The descriptor also traverses the generated nullable `valuePath: String` field on `QLFilter`, `QLTypeFilter` and `QLFilterCondition` with format version 1 unchanged. This describes input shape, not adapter capabilities; `value`/`valuePath` mutual exclusion and `queryFeatures.valuePath` support are runtime validation rules.
+| I want to… | Read |
+| --- | --- |
+| Build a descriptor for the schema I serve | [Build for the schema you serve](https://simtlix.github.io/simfinity.js/reference/client-descriptor.html#build-for-the-schema-you-serve) |
+| Know every field of the JSON | [Format version 1](https://simtlix.github.io/simfinity.js/reference/client-descriptor.html#format-version-1) |
+| Protect the endpoint | [Mount the HTTP handler](https://simtlix.github.io/simfinity.js/reference/client-descriptor.html#mount-the-http-handler) |
+| Turn off the deprecated `__Field.extensions` introspection field | [Disable the legacy extension explicitly](https://simtlix.github.io/simfinity.js/reference/client-descriptor.html#disable-the-legacy-extension-explicitly) |
+| Migrate a client from introspection | [Client migration boundary](https://simtlix.github.io/simfinity.js/reference/client-descriptor.html#client-migration-boundary) |
+| Use it from the JavaScript client | [Initialize with a descriptor](https://simtlix.github.io/simfinity.js/guide/client.html#initialize-with-a-descriptor) |
 
-The 3.18.0 embedded-frame extension reuses those input shapes and format version 1. `$parent` is a value-path string validated against structural containment at execution. Input presence does not advertise `queryFeatures.elementFrames`, and embedded selection fields gain no arguments.
+## Packages
+
+All Simfinity packages are released together under the same version. Keep the ones you install aligned. The ESLint plugin has its own version.
+
+| Package | Use it for |
+| --- | --- |
+| [`@simtlix/simfinity-js`](https://www.npmjs.com/package/@simtlix/simfinity-js) | MongoDB/Mongoose applications |
+| [`@simtlix/simfinity-postgres`](https://www.npmjs.com/package/@simtlix/simfinity-postgres) | PostgreSQL 15+ applications, with real tables and foreign keys |
+| [`@simtlix/simfinity-mcp`](https://www.npmjs.com/package/@simtlix/simfinity-mcp) | MCP tools and transports for any Simfinity schema |
+| [`@simtlix/simfinity-js-client`](https://www.npmjs.com/package/@simtlix/simfinity-js-client) | JavaScript client for Simfinity APIs |
+| **`@simtlix/simfinity-descriptor`** | Client metadata endpoint for a schema (this package) |
+| [`@simtlix/simfinity-core`](https://www.npmjs.com/package/@simtlix/simfinity-core) | Shared GraphQL runtime, installed automatically |
+| [`@simtlix/simfinity-sql`](https://www.npmjs.com/package/@simtlix/simfinity-sql) | Relational runtime and database plugin contract |
+| [`@simtlix/eslint-plugin-simfinity`](https://www.npmjs.com/package/@simtlix/eslint-plugin-simfinity) | Optional lint rules for Simfinity applications |
+
+## Contributing
+
+Source, issues and the contribution guide live in the [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js) monorepo, under `packages/descriptor`. See [Contributing](https://simtlix.github.io/simfinity.js/resources/contributing.html).
+
+## License
+
+[Apache-2.0](https://github.com/simtlix/simfinity.js/blob/master/LICENSE)

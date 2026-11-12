@@ -1,12 +1,43 @@
+[![Simfinity.js — Define once. Build beyond. GraphQL, MongoDB, PostgreSQL, and optional MCP.](https://raw.githubusercontent.com/simtlix/simfinity.js/master/.github/assets/readme-cover.png)](https://simtlix.github.io/simfinity.js/)
+
 # @simtlix/simfinity-mcp
 
-Database-independent MCP tool generation and transports for Simfinity GraphQL schemas. It requires GraphQL 16 and Node.js 18.18 or later.
+[![npm version](https://img.shields.io/npm/v/@simtlix/simfinity-mcp.svg)](https://www.npmjs.com/package/@simtlix/simfinity-mcp)
+[![Node.js](https://img.shields.io/node/v/@simtlix/simfinity-mcp.svg)](https://nodejs.org/)
+[![License](https://img.shields.io/npm/l/@simtlix/simfinity-mcp.svg)](https://github.com/simtlix/simfinity.js/blob/master/LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-simtlix.github.io-2563eb.svg)](https://simtlix.github.io/simfinity.js/)
 
-All Simfinity packages are released together. Install from npm and keep their versions aligned. Source: [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js).
+**MCP tools for AI agents, generated from a [Simfinity.js](https://simtlix.github.io/simfinity.js/) GraphQL schema.** Each root query and mutation of the schema becomes a tool with a generated input schema and description. Tools run through GraphQL, so your authorization, scopes and validation still apply. It is database-independent and works with MongoDB and PostgreSQL schemas alike.
 
-Named views are read-only list tools titled by their name.
+**[Documentation](https://simtlix.github.io/simfinity.js/)** ·
+**[MCP guide](https://simtlix.github.io/simfinity.js/guide/mcp.html)** ·
+**[MCP API reference](https://simtlix.github.io/simfinity.js/reference/mcp.html)** ·
+**[Example app](https://simtlix.github.io/simfinity.js/resources/barber.html)** ·
+**[Releases](https://github.com/simtlix/simfinity.js/releases)**
 
-Tool generation and execution use only GraphQL:
+## Install
+
+```sh
+npm install @simtlix/simfinity-mcp graphql@^16.11.0
+```
+
+Add the MCP SDK when you use a server or transport helper:
+
+```sh
+npm install @modelcontextprotocol/sdk@^1.31.0
+```
+
+| Requirement | Version |
+| --- | --- |
+| Node.js | 18.18 or later, ES modules |
+| `graphql` (peer) | `^16.11.0` |
+| `@modelcontextprotocol/sdk` (optional peer) | `^1.31.0`, for `createMCPServer`, `startStdioMCPServer` and `createHTTPMCPHandler` |
+
+`@simtlix/simfinity-js` already re-exports these helpers. Install this package directly with PostgreSQL, or when you want the MCP layer on its own.
+
+## Quick start
+
+Generate the tools from any schema returned by `createSchema()` and call them directly. This needs no SDK:
 
 ```javascript
 import { generateMCPTools } from '@simtlix/simfinity-mcp';
@@ -15,11 +46,16 @@ const { tools, callTool } = generateMCPTools(schema);
 const result = await callTool(tools[0].name, {});
 ```
 
-Install the optional MCP SDK when constructing a server or transport:
+Tool inputs accept the same filters as the GraphQL API, including quantifiers over collections:
 
-```sh
-npm install @simtlix/simfinity-mcp@3.16.0 @modelcontextprotocol/sdk@^1.31.0
+```javascript
+const result = await callTool('series', {
+  seasons: { quantifier: 'NONE', terms: [{ path: 'year', operator: 'LT', value: 2000 }] },
+  pagination: { page: 1, size: 10, count: true },
+});
 ```
+
+Serve them over MCP with the SDK installed:
 
 ```javascript
 import { createMCPServer } from '@simtlix/simfinity-mcp';
@@ -29,23 +65,40 @@ const server = await createMCPServer(schema);
 await server.close();
 ```
 
-List and aggregate input schemas include the recursive `QLQuantifiedGroup`, `QLQuantifier` (`ANY`, `ALL`, `NONE`), `QLFilterGroup.ANY/ALL/NONE`, and `QLTypeFilterExpression.quantifier` on every runtime. Their descriptions explain paths relative to each element, same-element correlation and visibility. Explicit quantified calls require `queryFeatures.quantifiers: true` on the database adapter, as both bundled adapters declare; an undeclared adapter returns `UNSUPPORTED_QUERY` before reads. An adapter enabling `quantifiers` must also declare `referenceEmptiness: true`. The SDK remains optional for generation and execution.
+## Documentation
 
-```javascript
-const result = await callTool('series', {
-  seasons: { quantifier: 'NONE', terms: [{ path: 'year', operator: 'LT', value: 2000 }] },
-  pagination: { page: 1, size: 10, count: true },
-});
-```
+| I want to… | Read |
+| --- | --- |
+| Generate tools and inspect what was created | [Generate and inspect tools](https://simtlix.github.io/simfinity.js/guide/mcp.html#generate-and-inspect-tools) |
+| Expose custom queries and named views | [Custom query tools](https://simtlix.github.io/simfinity.js/guide/mcp.html#custom-query-tools), [named view tools](https://simtlix.github.io/simfinity.js/guide/mcp.html#named-view-tools) |
+| Run a local stdio server | [Start a stdio server](https://simtlix.github.io/simfinity.js/guide/mcp.html#start-a-stdio-server) |
+| Mount an HTTP endpoint next to GraphQL | [Serve Streamable HTTP](https://simtlix.github.io/simfinity.js/guide/mcp.html#serve-streamable-http) |
+| Keep authorization in force | [Preserve authorization](https://simtlix.github.io/simfinity.js/guide/mcp.html#preserve-authorization) |
+| Run several writes atomically | [Transaction tool](https://simtlix.github.io/simfinity.js/guide/mcp.html#transaction-tool) |
+| Select, rename or override tools | [Generation options](https://simtlix.github.io/simfinity.js/reference/mcp.html#generation-options), [tool overrides](https://simtlix.github.io/simfinity.js/reference/mcp.html#tool-overrides) |
+| Bound page sizes and results | [Limits](https://simtlix.github.io/simfinity.js/reference/mcp.html#limits) |
+| Wrap every tool call | [Tool middleware](https://simtlix.github.io/simfinity.js/reference/mcp.html#tool-middleware) |
+| Handle results and error codes | [Results and errors](https://simtlix.github.io/simfinity.js/reference/mcp.html#results-and-errors) |
 
-On a declaring adapter, a collection filter path returns each record once, including pages and counts. Terms on the same collection prefix in one group must match the same child; separate groups may match different children. `ANY` needs a matching visible element, `ALL` needs every visible element to match, and `NONE` needs no visible element to match. `ALL` and `NONE` hold with no visible elements; with no conditions, `ANY` tests presence, `NONE` tests absence and `ALL` is always true. A client's target `find` scope decides visibility. Quantified paths may end at a collection or single reference; nest groups to cross another collection. Use `AND: [{ ANY: [{ path: 'seasons', conditions: [{ field: 'year', operator: 'GTE', value: 2020 }] }] }]` for the explicit group form in list or aggregate tools. Collection paths used by aggregate `groupId` or facts still expand rows; shorthand filters on those prefixes select joined rows, while explicit groups retain per-record meaning. See the [MCP reference](https://simtlix.github.io/simfinity.js/reference/mcp) for examples and limits.
+## Packages
 
-Generated tools select the virtual fields (`extensions.virtual`) that have no required arguments, but below any list position (the records of a list tool, and the items of a nested collection or embedded list in any tool) only those whose `mcp` option is `'select'`, because the resolver runs once per record. A virtual field with a required argument gets its own read tool, `<byIdQuery>_<field>` (for example `barbershop_busyRanges`), which takes the record's `id` and the field's arguments; `mcp: false` turns it off.
+All Simfinity packages are released together under the same version. Keep the ones you install aligned. The ESLint plugin has its own version.
 
-Since 3.16.0, `transactionTools: true` publishes a schema's generated `transaction` mutation (core's `transaction` schema option) as one destructive, non-idempotent tool that applies several generated writes together or not at all. It is off by default, and without it MCP never publishes that field or any mutation shaped like it. A schema rebuilt from introspection needs `getIntrospectionQuery({ oneOf: true })` with descriptions, and a server that enables the field exposes it as a custom tool to an earlier MCP release, so upgrade MCP first. See the [MCP guide](https://simtlix.github.io/simfinity.js/guide/mcp.html#transaction-tool).
+| Package | Use it for |
+| --- | --- |
+| [`@simtlix/simfinity-js`](https://www.npmjs.com/package/@simtlix/simfinity-js) | MongoDB/Mongoose applications |
+| [`@simtlix/simfinity-postgres`](https://www.npmjs.com/package/@simtlix/simfinity-postgres) | PostgreSQL 15+ applications, with real tables and foreign keys |
+| **`@simtlix/simfinity-mcp`** | MCP tools and transports for any Simfinity schema (this package) |
+| [`@simtlix/simfinity-js-client`](https://www.npmjs.com/package/@simtlix/simfinity-js-client) | JavaScript client for Simfinity APIs |
+| [`@simtlix/simfinity-descriptor`](https://www.npmjs.com/package/@simtlix/simfinity-descriptor) | Client metadata endpoint for a schema |
+| [`@simtlix/simfinity-core`](https://www.npmjs.com/package/@simtlix/simfinity-core) | Shared GraphQL runtime, installed automatically |
+| [`@simtlix/simfinity-sql`](https://www.npmjs.com/package/@simtlix/simfinity-sql) | Relational runtime and database plugin contract |
+| [`@simtlix/eslint-plugin-simfinity`](https://www.npmjs.com/package/@simtlix/eslint-plugin-simfinity) | Optional lint rules for Simfinity applications |
 
-The package works with schemas produced by either `@simtlix/simfinity-js` or `@simtlix/simfinity-postgres`, including the `createSQL` composition API. `generateMCPTools` needs no SDK. Server and transport constructors report `MCP_SDK_NOT_INSTALLED` when the optional SDK is unavailable.
+## Contributing
 
-Generated list, counted-page and aggregate tools expose nullable `valuePath` in `QLFilter`, `QLTypeFilter` and `QLFilterCondition`, including SDL/remote execution. For example, `{ stock: { operator: "LTE", valuePath: "reorderLevel" } }` compares stored fields on a server declaring `queryFeatures.valuePath: true`. It is mutually exclusive with supplied `value`, including null, and both supplied produce the shared runtime `INVALID_FILTER_VALUE`. Filter inputs stay ordinary objects rather than `@oneOf`; `valuePath: null` preserves literal behavior. Tool descriptions explain relative origins and [supported operators, null/list semantics and visibility](https://simtlix.github.io/simfinity.js/guide/queries.html#compare-stored-fields).
+Source, issues and the contribution guide live in the [simtlix/simfinity.js](https://github.com/simtlix/simfinity.js) monorepo, under `packages/mcp`. See [Contributing](https://simtlix.github.io/simfinity.js/resources/contributing.html).
 
-Version 3.18.0 adds `queryFeatures.elementFrames: true` for embedded object `ANY`/`ALL`/`NONE` and structural `$parent` operands. It requires `quantifiers`, `referenceEmptiness` and `valuePath`, all true. Missing/null lists and null items contribute no elements; `ALL` and `NONE` are true without elements. Parent traversal includes single embedded containers and stops at entity boundaries. Filters preserve selected arrays and outer row cardinality. See [the syntax and examples](https://simtlix.github.io/simfinity.js/guide/queries.html#embedded-object-lists-and-parent); versions through 3.17.0 do not support this extension.
+## License
+
+[Apache-2.0](https://github.com/simtlix/simfinity.js/blob/master/LICENSE)

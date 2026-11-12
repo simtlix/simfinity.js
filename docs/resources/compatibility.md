@@ -44,6 +44,8 @@ Follow [installation and downloads](../guide/databases#install-from-npm) or read
 | MCP tool generation | Opt-in `@simtlix/simfinity-mcp`; the SDK is needed for MCP transports |
 | Documentation development | Node.js 22.12.0 or newer |
 
+Mongoose 8.24.2 or later within version 8 is required to exclude the update-casting prototype-pollution vulnerability. Existing applications should update Mongoose and their dependency lockfile, then run `npm audit`; upgrading Simfinity does not refresh every transitive dependency already locked by the application.
+
 ## Deprecations
 
 - **`__Field.extensions` introspection metadata.** Deprecated in favour of the [client descriptor](../reference/client-descriptor), which servers can mount since 3.15.0 and `@simtlix/simfinity-js-client` reads since 3.19.0. Nothing changes at run time in 3.x: importing the runtime still installs the extension, no warning is logged, and `configureIntrospection({ fieldExtensions: false })` remains the opt-out. Move every client of a server to the descriptor before opting out; see the [migration boundary](../reference/client-descriptor#client-migration-boundary). 4.0 is planned to stop installing the extension by default ([#101](https://github.com/simtlix/simfinity.js/issues/101)).
@@ -761,6 +763,8 @@ See [what gets generated](../guide/schema#what-gets-generated) and [introspectio
   - In CommonJS-format files (a `package.json` without `"type": "module"`, or `.cts` files) compiled with `module` `node16`, or `nodenext` before TypeScript 5.8, these imports now report TS1479, as the package root already does. Use `module: nodenext` with TypeScript 5.8 or later, or ESM.
   - A `declare module '@simtlix/simfinity-js/src/...'` shim keeps taking precedence over the shipped declarations; remove it to use them.
   - In 3.5.9 to 3.6.0, a module that combines `export *` from `@simtlix/simfinity-mcp` or `@simtlix/simfinity-js/src/mcp.js` with `export *` from a module that exports core's `EnvelopSchemaPlugin` reports TS2308 for `EnvelopSchemaPlugin`, because `@simtlix/simfinity-mcp` declares its own interface of that name. Such modules are the core root, `/auth`, `/plugins`, the SQL or PostgreSQL root, `src/auth/index.js` or `src/plugins.js`, and the `@simtlix/simfinity-js` root when the MCP module (`@simtlix/simfinity-mcp` or `src/mcp.js`) comes first. Re-export one of them explicitly, for example `export type { EnvelopSchemaPlugin } from '@simtlix/simfinity-core/plugins';`. Version 3.7.0 removes the conflict ([notes](#typescript-envelopschemaplugin)); the explicit re-export keeps compiling and can be removed.
+
+For tooling that locates the MongoDB package, use `require.resolve('@simtlix/simfinity-js/package.json')` or the package root without a trailing slash. Directory specifiers ending in `/` were not valid ESM imports and are not supported by the export map, including in `require.resolve`; use explicit filenames such as `src/auth/index.js`.
 
 ## Upgrade to 3.5.8
 
