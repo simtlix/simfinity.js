@@ -123,7 +123,9 @@ node scripts/release-packages.js version 3.4.1
 node scripts/release-packages.js check
 ```
 
-Choose the next patch, minor or major version according to the changes. Commit the private root manifest, workspace lockfile and all seven package manifests together. The helper keeps exact internal dependencies aligned. Merge the reviewed changes into `master`, then choose one of these release actions:
+Choose the next patch, minor or major version according to the changes. Commit the private root manifest, workspace lockfile and all seven package manifests together. The helper keeps exact internal dependencies aligned.
+
+The same command rebuilds the [downloadable starters](../guide/databases#download-the-starters): it pins `docs/starters/package.*.json` to the new version and writes `docs/public/releases/simfinity-X.Y.Z-starters.zip` with its SHA-256 file. Commit those files in the same pull request. The site builds its download links from the version, so `check`, the tests and the release's packing job fail when the starters do not match it. After changing a starter source without changing the version, run `node scripts/build-starters.js`. Merge the reviewed changes into `master`, then choose one of these release actions:
 
 - Push the corresponding tag on the pull request's merge commit, for example `git tag -a v3.4.1 <merge-commit> -m v3.4.1` followed by `git push origin v3.4.1`. The workflow publishes the packages and creates the GitHub release with generated notes.
 - Open **Releases → Draft a new release**, choose or create the matching tag on that `master` merge commit, and click **Publish release**. The workflow publishes the packages and adds verified archives to that release, preserving your title and notes.

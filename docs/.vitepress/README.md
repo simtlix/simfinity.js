@@ -77,12 +77,17 @@ Before submitting changes, build the site, verify search, navigation, code copyi
 
 ## Maintaining starter downloads
 
-The npm-based ZIP uses `docs/starters/package.*.json`, `docs/starters/README.md`, and the same server sources rendered by the quick starts. When updating the release, align the starter package versions and README, then rebuild:
+The npm-based ZIP uses `docs/starters/package.*.json`, `docs/starters/README.md`, and the same server sources rendered by the quick starts. `node scripts/release-packages.js version X.Y.Z` rebuilds it with the release. After changing a starter source without changing the version, rebuild it yourself:
 
 ```sh
-python3 docs/scripts/build-starters.py
+node scripts/build-starters.js
+node scripts/build-starters.js --check
 ```
 
-The builder checks Simfinity dependency versions against the root package and writes a deterministic ZIP plus SHA-256 checksum under `docs/public/releases/`. Commit both artifacts with the source changes. Verify clean registry installs and real quick-start operations for both databases after npm publication, then deploy Pages.
+The builder pins the Simfinity dependencies of both manifests to the root package version and writes the ZIP plus its SHA-256 checksum under `docs/public/releases/`. Entries are stored without compression, so the archive has the same bytes on every machine. `docs/starters/README.md` is a template: write the release as `{{version}}`. Commit the manifests and both artifacts with the source changes. `release-packages.js check`, `tests/build-starters.test.js` and the release's packing job refuse starters that differ from a rebuild.
+
+Pages name the current kit through the `$starters` global defined in `theme/index.ts` (`version`, `directory`, `zip`, `checksum`, `checksumFile`, `release`), in links such as `<a :href="$starters.zip">` and in `sh-vue` code blocks, so no guide states the version by hand. Earlier archives stay under `docs/public/releases/`; list one under "Earlier downloads" in `guide/databases.md` when it should remain advertised.
+
+A clean registry install needs the version on npm, so verify the installs and the real quick-start operations for both databases after publication.
 
 The original MongoDB 3.0.1 starter and the earlier 3.2.0 preview archive kit remain unchanged as historical downloads. `docs/scripts/build-preview.py` rebuilds that archived snapshot only from the verified archives in its manifest and the frozen PostgreSQL server in `docs/preview/postgresql-server.js`; it is not the current release builder. The docs workflow publishes the site only. The `release.yml` coordinator validates the existing release tag, calls the reusable package workflow and then deploys this site. See the contribution guide for OIDC setup, version preparation and recovery.

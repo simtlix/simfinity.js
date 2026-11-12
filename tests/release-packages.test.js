@@ -238,7 +238,7 @@ describe('workspace release preparation', () => {
   it('runs the pack CLI with the tracked-file check and the verify CLI with the manifest digest (#28)', () => {
     const root = committedFixture();
     mkdirSync(join(root, 'scripts'));
-    for (const file of ['release-packages.js', 'cli.js']) copyFileSync(fileURLToPath(new URL(`../scripts/${file}`, import.meta.url)), join(root, 'scripts', file));
+    for (const file of ['release-packages.js', 'build-starters.js', 'cli.js']) copyFileSync(fileURLToPath(new URL(`../scripts/${file}`, import.meta.url)), join(root, 'scripts', file));
     writeFileSync(join(root, 'scripts/package.json'), '{ "type": "module" }\n');
     const script = join(root, 'scripts/release-packages.js');
     const inherited = { ...process.env };
