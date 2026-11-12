@@ -136,6 +136,10 @@ routine coding choices. Update the model when I provide corrections.
 
 4. IMPLEMENT THE AGREED APPLICATION
 
+Start with one representative generated write and scoped read, including a
+related record, a business invariant and a denied case. Prove that slice
+before repeating the design across modules.
+
 Use a small maintainable structure: configuration/database initialization,
 GraphQL types and registration, controllers where needed, and a server entry
 point. Add environment examples without secrets, appropriate ignore rules,
@@ -176,15 +180,17 @@ Apply these Simfinity contracts:
 - Authentication must populate trusted request context. When the application
   owns membership, role or grant records, model them with Simfinity and use
   the current grants in native scopes, auth rules and transactional write checks.
-  Install authorization explicitly when required, with deliberate defaults.
+  Install the selected runtime facade's auth.createAuthPlugin through Yoga
+  with defaultPolicy: 'DENY' and grant each intended operation explicitly.
   Do not implement fake identity headers as production authentication. If
   credentials or provider configuration are missing, keep protected access
   denied and report the gap.
 - Controller hooks run inside transactions. Pass the supplied session to
   related database work. onSaved/onUpdated are not after-commit notifications.
   Use after-commit callbacks for best-effort external effects; see
-  docs/guide/controllers.md#after-commit-callbacks. Keep a transactional outbox
-  and worker when delivery must survive a process failure.
+  https://simtlix.github.io/simfinity.js/guide/controllers.html#after-commit-callbacks.
+  Keep a transactional outbox and worker when delivery must survive a process
+  failure.
 - simfinity.use middleware is pre-execution: code after await next() still
   precedes database execution. Do not use it for after-save behavior.
 
@@ -203,10 +209,6 @@ For a reusable extension, consult:
 https://simtlix.github.io/simfinity.js/guide/plugin-authoring.html
 
 5. VERIFY THE RUNNING APPLICATION
-
-Prove one representative generated write and scoped read, including a related
-record, a business invariant and a denied case, before repeating the design
-across modules.
 
 Check schema validation and actual generated operation/input names. Start the
 application and execute representative operations through its real endpoint.

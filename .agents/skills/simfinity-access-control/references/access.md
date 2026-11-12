@@ -36,7 +36,7 @@ Resolve authorized scope IDs once per request when appropriate, then intersect s
 
 ## Authorize operations and writes
 
-Use `createAuthPlugin(permissions, { defaultPolicy: 'DENY' })` through Envelop or its documented schema hook. Map the real names `RootQueryType`, `Mutation`, output types and aggregate result fields. Exact rules replace wildcards; compose them when both conditions are required. A custom rule returning `undefined` grants access, so return an explicit boolean or throw on denial. Missing/malformed context must not fall through to an implicit grant.
+Use `auth.createAuthPlugin(permissions, { defaultPolicy: 'DENY' })` through Envelop or its documented schema hook. Import `auth` from the facade that created the runtime, or from the same core installation when using `createRuntime` directly. Map the real names `RootQueryType`, `Mutation`, output types and aggregate result fields. Exact rules replace wildcards; compose them when both conditions are required. A custom rule returning `undefined` grants access, so return an explicit boolean or throw on denial. Missing/malformed context must not fall through to an implicit grant.
 
 `isOwner` examines the resolver parent; a root mutation's parent is not its stored target. Load/check the target with the supplied session in a controller or command. Protect server-owned tenant/owner assignments and check that each referenced target is eligible for the relationship in the same transaction. Existence or readability alone can be insufficient. Nested children run their lifecycle and parent-link check, but not the child root mutation's permission rule: enforce required child permissions in controllers/middleware too.
 
@@ -46,7 +46,7 @@ Workers executing graphql-js need auth wrappers installed on that schema, explic
 
 ## New execution boundaries
 
-Since 3.16.0, the opt-in transaction mutation authorizes its own root and each enclosed generated root operation; it retains the nested-child authorization boundary described above. Grant the transaction field deliberately, retain per-operation rules, and test a denied later operation rolls back earlier writes. Hiding a child root is not a substitute for checking child policy inside nested writes.
+Since 3.16.0, the opt-in transaction mutation supports checks on its root and each enclosed generated operation. Use the auth plugin from the runtime’s release. A plugin that predates transaction support can protect the transaction root while leaving enclosed operations without their root rules. Grant the transaction field deliberately, retain per-operation and nested-child checks, and test a denied later operation rolls back earlier writes. Hiding a child root is not a substitute for checking child policy inside nested writes.
 
 `saveObject`, `updateObject`, `deleteObject` and `transitionObject` are lifecycle helpers, not authorization boundaries: they skip root/field GraphQL checks and the record's own global middleware, and can target registered types absent from the exposed schema. Put reusable business authorization in controllers/command policies, pass context, and explicitly authorize the caller. Do not treat a helper or native read as a scoped GraphQL execution.
 
