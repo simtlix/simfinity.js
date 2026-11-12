@@ -26,7 +26,7 @@ Use the relevant skill directly, for example `$simfinity-access-control` when ad
 
 The application-design skill includes a runnable order/customer/line example with separate MongoDB and PostgreSQL storage helpers. Its tests cover scoped reads and counts, authoritative totals after hooks, cross-tenant writes, foreign-child rollback and action authorization. A scope is not write permission, and a state machine is not user authorization. Native infrastructure operations remain supported with explicit transaction and access responsibilities. The skills also cover current lifecycle helpers and opt-in transaction mutations, optimistic versions in nested inputs, committed callbacks versus durable outbox delivery, schema-owned client descriptors, the 3.19 browser client and its form transformations, and the limits of the independently versioned application linter.
 
-For maintenance or migration, start with the actual domain graph and prove a concrete limitation before proposing library work. Carry one representative slice through authentication, API, frontend and workers. The query skill separates filter capabilities, stored-field comparisons and reporting so each task loads only the relevant reference. Historical issue status is not evidence of the installed API.
+For maintenance or migration, start with the actual domain graph and prove a concrete limitation before proposing library work. Carry one representative slice through authentication, API, frontend and workers. Record who owns writes and transactions during cutover and verify the contracts existing consumers rely on. The query skill separates filter capabilities, stored-field comparisons and reporting so each task loads only the relevant reference. Historical issue status is not evidence of the installed API.
 
 The [PR review skill](https://github.com/simtlix/simfinity.js/tree/master/.agents/skills/simfinity-pr-review) serves a different task: reviewing changes to the library itself.
 
@@ -122,9 +122,10 @@ Show the diagram in the conversation as well. If the client cannot render
 Mermaid, provide a readable relationship list alongside the saved diagram.
 Keep the diagram, tables, and proposed implementation consistent.
 
-Prefer embedded values for data owned and stored with a parent. Use references
-for independent records. Explain tradeoffs using my actual entities. For a
-many-to-many relationship, model explicit association records when appropriate;
+Prefer typed fields or embedded values for data that shares its owner's access,
+revision and lifecycle, including settings. Use references for independent
+records. Explain tradeoffs using my actual entities. For a many-to-many
+relationship, model explicit association records when appropriate;
 do not assume a list automatically creates a supported many-to-many relation.
 
 Ask me to confirm or correct this concrete model before implementing domain
@@ -134,6 +135,10 @@ through implementation and verification without repeated confirmations for
 routine coding choices. Update the model when I provide corrections.
 
 4. IMPLEMENT THE AGREED APPLICATION
+
+Start with one representative generated write and scoped read, including a
+related record, a business invariant and a denied case. Prove that slice
+before repeating the design across modules.
 
 Use a small maintainable structure: configuration/database initialization,
 GraphQL types and registration, controllers where needed, and a server entry
@@ -150,8 +155,8 @@ Apply these Simfinity contracts:
   connectionField metadata. Use fields thunks for circular references.
 - Register connected entities with connect(null, Type, singular, plural, ...).
   Register supporting types with addNoEndpointType when appropriate.
-- Register types once at startup and call createSchema after registration.
-  Registries are module-level; do not rebuild/register on each request.
+- Register types once in the runtime at startup and call createSchema after
+  registration. Reuse that schema for requests.
 - Pass the generated schema directly to GraphQL Yoga. Do not apply mapSchema
   or graphql-middleware's applyMiddleware to a Simfinity schema.
 - Inspect the actual generated schema for operation and input names. For
@@ -160,22 +165,32 @@ Apply these Simfinity contracts:
 - Referenced object inputs use an ID object; referenced collection writes use
   added/updated/deleted input groups. Embedded lists use arrays. Verify the
   exact generated shape before writing examples or clients.
-- Use validators, controllers, and custom mutations for actual business rules.
-  Use extensions.readOnly for server-managed input fields, and populate them
-  from trusted server logic. Do not claim GraphQL input metadata protects
-  direct database or programmatic access.
+- Use scalars and validators for input and controllers for stored invariants.
+  Use extensions.readOnly for stored fields managed by server logic and
+  extensions.virtual for computed output that has no stored value. Check
+  virtual field support in the installed release.
+- Use a registered enum state machine for fixed lifecycle actions. Inspect
+  and authorize each generated action separately, including writable fields
+  and nested changes it accepts. For distinct business commands, try the
+  documented generated and lifecycle operations before registering a custom
+  mutation.
 - Query scopes restrict reads, including generated non-embedded relationships;
   they do not authorize mutations. Enforce write permissions and tenant/owner
   checks for root, nested, and custom operations separately.
-- Authentication must populate trusted request context. Install authorization
-  explicitly when required, with deliberate defaults. Do not implement fake
-  identity headers as production authentication. If credentials or provider
-  configuration are missing, keep protected access denied and report the gap.
+- Authentication must populate trusted request context. When the application
+  owns membership, role or grant records, model them with Simfinity and use
+  the current grants in native scopes, auth rules and transactional write checks.
+  Install the selected runtime facade's auth.createAuthPlugin through Yoga
+  with defaultPolicy: 'DENY' and grant each intended operation explicitly.
+  Do not implement fake identity headers as production authentication. If
+  credentials or provider configuration are missing, keep protected access
+  denied and report the gap.
 - Controller hooks run inside transactions. Pass the supplied session to
   related database work. onSaved/onUpdated are not after-commit notifications.
   Use after-commit callbacks for best-effort external effects; see
-  docs/guide/controllers.md#after-commit-callbacks. Keep a transactional outbox
-  and worker when delivery must survive a process failure.
+  https://simtlix.github.io/simfinity.js/guide/controllers.html#after-commit-callbacks.
+  Keep a transactional outbox and worker when delivery must survive a process
+  failure.
 - simfinity.use middleware is pre-execution: code after await next() still
   precedes database execution. Do not use it for after-save behavior.
 

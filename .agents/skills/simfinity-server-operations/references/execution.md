@@ -13,10 +13,10 @@
 
 ```javascript
 import { execute, parse, validate } from 'graphql';
-import { createAuthPlugin } from '@simtlix/simfinity-core/auth';
+import { auth } from '@simtlix/simfinity-postgres';
 
-// schema and permissions come from application startup.
-createAuthPlugin(permissions, { defaultPolicy: 'DENY' }).onSchemaChange({ schema });
+// Use the facade that created the runtime. Schema and permissions come from startup.
+auth.createAuthPlugin(permissions, { defaultPolicy: 'DENY' }).onSchemaChange({ schema });
 const document = parse('mutation Rename($input: OrderInputForUpdate!) { updateorder(input: $input) { id } }');
 const errors = validate(schema, document);
 if (errors.length) throw errors[0];
