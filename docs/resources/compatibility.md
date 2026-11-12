@@ -11,6 +11,10 @@ import library from '../../package.json';
 
 This documentation covers Simfinity.js **{{ library.version }}**, for **MongoDB and PostgreSQL**. All seven packages, including the JavaScript client, are versioned together (see the [client guide](../guide/client)).
 
+## Upgrade to 3.19.1
+
+Version 3.19.1 changes documentation and package metadata only. The npm READMEs of the seven packages are now short landing pages that link to this site, and each package's `homepage` points here. Contract detail that only those READMEs stated moved to the guides and the [API reference](../reference/api#custom-database-adapters). No runtime code, types or exports change, so upgrading from 3.19.0 needs no steps.
+
 ## Upgrade to 3.19.0
 
 The JavaScript client moves from its separate 1.x repository into the aligned monorepo release set as `@simtlix/simfinity-js-client@3.19.0`. Its default import and existing valid 1.1 calls remain supported. It adds schema descriptors, exact roots and views, current filter and collection-field arguments, concrete mutation inputs, managed versions, transactions and browser-compatible TypeScript declarations. The other six packages retain their 3.18.0 runtime behavior. See the [client guide](../guide/client) for initialization and migration. Existing applications update their own dependency and run their own checks. Barber pins both backends and the client to 3.19.0, consumes the bundled client declarations and keeps extended introspection.
